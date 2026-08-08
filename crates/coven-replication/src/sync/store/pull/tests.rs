@@ -444,7 +444,7 @@ impl EffectiveAccessFixture {
             .create_circle("0000000001000-0000-owner", "Effective Access")
             .await
             .expect("create effective-access Circle");
-        let owner_storage = coven_storage::CloudSyncStorage::new(
+        let owner_storage = coven_storage::CloudSyncConnection::new(
             home.clone(),
             coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),

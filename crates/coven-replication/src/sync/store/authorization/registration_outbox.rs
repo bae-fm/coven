@@ -6,15 +6,18 @@ use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 pub(crate) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
 }
 
 impl<'storage> RegistrationOutbox<'storage> {
-    pub(crate) fn new(database: StoreDatabase, storage: &'storage dyn SyncStorage) -> Self {
+    pub(crate) fn new(
+        database: StoreDatabase,
+        storage: &'storage dyn CloudSyncObjectStorage,
+    ) -> Self {
         Self { database, storage }
     }
 

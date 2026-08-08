@@ -40,7 +40,7 @@ pub enum RotationPendingState {
 /// adoption, or a local fact together with a peer fact. Durable database
 /// transitions and this in-memory copy move together at operation boundaries.
 ///
-/// Shared (behind one `Arc`, via `CloudSyncStorage::shared_pending_rotation`)
+/// Shared (behind one `Arc`, via `CloudSyncConnection::shared_pending_rotation`)
 /// across every path that seals data for the cloud — changesets, heads, blobs,
 /// tombstones, snapshots — so a rotation this device can't adopt blocks all of
 /// them the same way, not just the removal call that discovered it. This is the

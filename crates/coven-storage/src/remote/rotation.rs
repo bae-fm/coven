@@ -2,7 +2,7 @@ use super::*;
 
 pub struct PendingRotation(std::sync::RwLock<Option<RotationGate>>);
 
-pub trait CloudRotationAccess: Send + Sync {
+pub trait CloudSyncRotationStateAccess: Send + Sync {
     fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
     fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
     fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
@@ -135,7 +135,7 @@ impl PendingRotation {
     }
 }
 
-impl CloudRotationAccess for PendingRotation {
+impl CloudSyncRotationStateAccess for PendingRotation {
     fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
         PendingRotation::mark_candidate(self, generation, mutation)
     }

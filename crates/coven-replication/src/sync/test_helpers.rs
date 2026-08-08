@@ -12,7 +12,7 @@ use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
 #[cfg(test)]
 use coven_protocol::store_commit::ObjectHash;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// The synthetic store's schema and `Database` constructors, which the database
 /// layer owns and its own tests open directly.
@@ -161,7 +161,7 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
 
 pub struct TestStore {
     home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
-    storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+    storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     pub root: coven_protocol::store_commit::StoreRootRef,
     signer: UserKeypair,
     founder: TestDevice,
@@ -330,14 +330,14 @@ mod test_device {
         store: std::sync::Arc<crate::sync::store::Store>,
         store_dir: TestStoreDir,
         pub device_id: String,
-        storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+        storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
         identity: UserKeypair,
     }
 
     impl TestDevice {
         pub async fn create(
             db: &Database,
-            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
@@ -354,7 +354,7 @@ mod test_device {
         pub async fn create_with_database(
             database: coven_database::StoreDatabase,
             store_dir: TestStoreDir,
-            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
@@ -380,7 +380,7 @@ mod test_device {
         pub async fn open_with_database(
             database: coven_database::StoreDatabase,
             store_dir: TestStoreDir,
-            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
@@ -405,7 +405,7 @@ mod test_device {
 
         pub async fn load(
             db: &Database,
-            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
             Self::load_with_database(
@@ -419,7 +419,7 @@ mod test_device {
 
         pub async fn load_with_database(
             database: coven_database::StoreDatabase,
-            storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             identity: UserKeypair,
             store_dir: TestStoreDir,
         ) -> Result<Self, crate::sync::store::StoreError> {
@@ -724,7 +724,7 @@ mod test_device {
 
         pub async fn complete_revoke_rotation_adoption_for_test(
             &self,
-            pending_rotation: &dyn coven_storage::CloudRotationAccess,
+            pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
             adopted_generation: u64,
         ) -> Result<(), crate::sync::store::InviteError> {
             self.store
@@ -1055,8 +1055,8 @@ mod test_device {
             public_key_hex: &str,
             encryption: &coven_keys::encryption::EncryptionService,
             master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-            cipher: &dyn coven_storage::CloudCipherAccess,
-            pending_rotation: &dyn coven_storage::CloudRotationAccess,
+            cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
+            pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         ) -> Result<String, crate::sync::store::MembershipOpsError> {
             self.store
                 .remove_member(
@@ -1759,7 +1759,8 @@ mod test_device {
                 self.storage.clone(),
                 interceptor,
             ));
-            let store_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = storage.clone();
+            let store_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+                storage.clone();
             let store = std::sync::Arc::new(self.store.with_test_storage(store_storage));
             self.run_cycle_with_storage(store, storage, clock, master_keys, store_dir, observer)
                 .await
@@ -1775,7 +1776,7 @@ mod test_device {
             observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
-            S: crate::sync::cycle::SyncCycleStorage + 'static,
+            S: crate::sync::cycle::CloudSyncCycleConnection + 'static,
         {
             let local_blob_access = crate::sync::test_owner_graph::local_blob_access(
                 self.db.clone(),
@@ -2575,7 +2576,7 @@ impl TestStore {
     pub async fn open_store_with_storage(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn coven_storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -2588,7 +2589,7 @@ impl TestStore {
     pub async fn open_founder_store_with_storage(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn coven_storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: StoreDir,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(database, storage, store_dir, &self.signer)
@@ -2667,7 +2668,7 @@ impl TestStore {
     pub async fn pull_with_storage_for_test(
         &self,
         database: &Database,
-        storage: Arc<dyn coven_storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: &StoreDir,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
@@ -2831,11 +2832,11 @@ impl TestStore {
     fn storage_for_device(
         &self,
         identity: UserKeypair,
-    ) -> Result<std::sync::Arc<coven_storage::CloudSyncStorage>, String> {
+    ) -> Result<std::sync::Arc<coven_storage::CloudSyncConnection>, String> {
         if identity.public_key() == self.signer.public_key() {
             return Ok(self.storage.clone());
         }
-        coven_storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncConnection::new(
             self.home.clone(),
             self.storage.cipher_snapshot(),
             self.storage.blob_path_scheme(),
@@ -2955,7 +2956,7 @@ impl TestStore {
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         let storage = std::sync::Arc::new(
-            coven_storage::CloudSyncStorage::new(
+            coven_storage::CloudSyncConnection::new(
                 home.clone(),
                 cipher,
                 blob_paths,
@@ -2992,8 +2993,8 @@ impl TestStore {
         coven_keys::keys::public_key_hex(&self.signer)
     }
 
-    /// The storage handle tests hand to code that takes a [`SyncStorage`].
-    pub fn storage(&self) -> std::sync::Arc<coven_storage::CloudSyncStorage> {
+    /// The storage handle tests hand to code that takes a [`CloudSyncObjectStorage`].
+    pub fn storage(&self) -> std::sync::Arc<coven_storage::CloudSyncConnection> {
         self.storage.clone()
     }
 
@@ -3911,9 +3912,10 @@ impl TestStore {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
         Box::pin(async move {
             let observer = self.founder.clone();
-            let provider_binding = coven_storage::SyncStorage::provider_binding(&*self.storage)
-                .await
-                .map_err(|error| error.to_string())?;
+            let provider_binding =
+                coven_storage::CloudSyncObjectStorage::provider_binding(&*self.storage)
+                    .await
+                    .map_err(|error| error.to_string())?;
             let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
                 &provider_binding.store
             else {
@@ -3934,18 +3936,19 @@ impl TestStore {
                     .clone()
                     .with_provider_binding(peer_binding),
             );
-            let peer_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = std::sync::Arc::new(
-                coven_storage::CloudSyncStorage::new(
-                    peer_home.clone(),
-                    coven_storage::CloudCipher::Encrypted(
-                        coven_keys::encryption::EncryptionService::from_key([42; 32]),
-                    ),
-                    coven_storage::BlobPathScheme::Hashed,
-                    "cross-principal-test-store",
-                    identity.clone(),
-                )
-                .map_err(|error| error.to_string())?,
-            );
+            let peer_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+                std::sync::Arc::new(
+                    coven_storage::CloudSyncConnection::new(
+                        peer_home.clone(),
+                        coven_storage::CloudCipher::Encrypted(
+                            coven_keys::encryption::EncryptionService::from_key([42; 32]),
+                        ),
+                        coven_storage::BlobPathScheme::Hashed,
+                        "cross-principal-test-store",
+                        identity.clone(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
             let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
             let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
                 pending_dir.path().join("pending-device-join.sqlite"),
@@ -4277,7 +4280,7 @@ pub enum ProviderObjectExistsInterception {
     DeleteAndReportAbsent,
 }
 
-/// Test-side observation of a [`SyncStorage`] call.
+/// Test-side observation of a [`CloudSyncObjectStorage`] call.
 ///
 /// Every hook runs before the wrapped storage does the work, and returning `Err`
 /// fails the call without reaching it. All hooks default to doing nothing, so an
@@ -4419,7 +4422,7 @@ where
     }
 }
 
-/// A [`SyncStorage`] that forwards every call to `inner`, giving `interceptor`
+/// A [`CloudSyncObjectStorage`] that forwards every call to `inner`, giving `interceptor`
 /// its chance first.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct InterceptedStorage<S, I: StorageInterceptor>
@@ -4431,10 +4434,10 @@ where
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<S, I> coven_storage::CloudCipherAccess for InterceptedStorage<S, I>
+impl<S, I> coven_storage::CloudSyncCipherStateAccess for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: coven_storage::CloudCipherAccess,
+    S::Target: coven_storage::CloudSyncCipherStateAccess,
     I: StorageInterceptor,
 {
     fn snapshot(&self) -> coven_storage::CloudCipher {
@@ -4451,10 +4454,10 @@ where
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<S, I> coven_storage::CloudRotationAccess for InterceptedStorage<S, I>
+impl<S, I> coven_storage::CloudSyncRotationStateAccess for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: coven_storage::CloudRotationAccess,
+    S::Target: coven_storage::CloudSyncRotationStateAccess,
     I: StorageInterceptor,
 {
     fn mark_candidate(
@@ -4508,10 +4511,10 @@ where
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<S, I> crate::sync::cycle::SyncCycleStorage for InterceptedStorage<S, I>
+impl<S, I> crate::sync::cycle::CloudSyncCycleConnection for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: crate::sync::cycle::SyncCycleStorage,
+    S::Target: crate::sync::cycle::CloudSyncCycleConnection,
     I: StorageInterceptor,
 {
 }
@@ -4532,10 +4535,10 @@ where
 
 #[cfg(any(test, feature = "test-utils"))]
 #[async_trait::async_trait]
-impl<S, I> coven_storage::SyncStorage for InterceptedStorage<S, I>
+impl<S, I> coven_storage::CloudSyncObjectStorage for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: coven_storage::SyncStorage,
+    S::Target: coven_storage::CloudSyncObjectStorage,
     I: StorageInterceptor,
 {
     fn blob_path_scheme(&self) -> coven_storage::BlobPathScheme {

@@ -21,7 +21,8 @@ use super::store::HeldStorePosition;
 use super::store::{AuthorizedWriterOperation, Store};
 use coven_protocol::objects::RotationPending;
 use coven_storage::{
-    BlobPathScheme, CloudCipherAccess, CloudRotationAccess, CloudSyncStorage, SyncStorage,
+    BlobPathScheme, CloudSyncCipherStateAccess, CloudSyncConnection, CloudSyncObjectStorage,
+    CloudSyncRotationStateAccess,
 };
 
 /// Result of a single sync cycle.
@@ -182,8 +183,8 @@ struct CompletedPullCycle {
 struct AuthorizedSyncCycle<'cycle, 'store> {
     device_id: &'cycle str,
     clock: &'cycle dyn coven_foundation::clock::Clock,
-    cipher: &'cycle dyn CloudCipherAccess,
-    pending_rotation: &'cycle dyn CloudRotationAccess,
+    cipher: &'cycle dyn CloudSyncCipherStateAccess,
+    pending_rotation: &'cycle dyn CloudSyncRotationStateAccess,
     master_keys: Option<&'cycle dyn coven_keys::keys::MasterKeyCustody>,
     routing_encryption: Option<&'cycle coven_keys::encryption::EncryptionService>,
     local_blob_access: &'cycle super::store::blob::LocalStoreBlobAccess,
@@ -454,7 +455,7 @@ pub enum InitSyncError {
 }
 
 /// Establish the storage representation and signed owner anchor over an
-/// already-built [`CloudSyncStorage`], returning the only runnable sync session.
+/// already-built [`CloudSyncConnection`], returning the only runnable sync session.
 #[derive(Debug, Clone)]
 pub enum StoreInitialization {
     CreateStore,
@@ -467,12 +468,12 @@ pub enum StoreInitialization {
 ///
 /// Transport, at-rest protection, and pending key rotation come from one object
 /// so callers cannot assemble a cycle from unrelated storage sessions.
-pub(crate) trait SyncCycleStorage:
-    SyncStorage + CloudCipherAccess + CloudRotationAccess
+pub(crate) trait CloudSyncCycleConnection:
+    CloudSyncObjectStorage + CloudSyncCipherStateAccess + CloudSyncRotationStateAccess
 {
 }
 
-impl SyncCycleStorage for CloudSyncStorage {}
+impl CloudSyncCycleConnection for CloudSyncConnection {}
 
 /// A sync session whose local and cloud representation has been validated
 /// before Store creation or opening can perform protocol work.
@@ -480,7 +481,7 @@ pub struct PreparedSyncComponents {
     database: coven_database::StoreDatabase,
     store_dir: StoreDir,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
-    storage: std::sync::Arc<CloudSyncStorage>,
+    storage: std::sync::Arc<CloudSyncConnection>,
     identity: coven_keys::keys::UserKeypair,
     initialization: StoreInitialization,
     store_id: String,
@@ -492,7 +493,7 @@ impl PreparedSyncComponents {
         database: coven_database::StoreDatabase,
         store_dir: StoreDir,
         local_blob_access: super::store::blob::LocalStoreBlobAccess,
-        storage: impl Into<std::sync::Arc<CloudSyncStorage>>,
+        storage: impl Into<std::sync::Arc<CloudSyncConnection>>,
         identity: coven_keys::keys::UserKeypair,
         initialization: StoreInitialization,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
@@ -546,8 +547,9 @@ impl PreparedSyncComponents {
     }
 
     pub async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
-        let storage: std::sync::Arc<dyn SyncCycleStorage> = self.storage;
-        let store_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = storage.clone();
+        let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = self.storage;
+        let store_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+            storage.clone();
         let initialized = match self.initialization {
             StoreInitialization::CreateStore => {
                 Store::create(
@@ -603,7 +605,7 @@ pub struct SyncComponents {
     store: std::sync::Arc<Store>,
     database: coven_database::StoreDatabase,
     local_blob_access: super::store::blob::LocalStoreBlobAccess,
-    storage: std::sync::Arc<dyn SyncCycleStorage>,
+    storage: std::sync::Arc<dyn CloudSyncCycleConnection>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
     /// other's.
@@ -1124,9 +1126,9 @@ impl SyncComponents {
         device_id: String,
     ) -> Self
     where
-        S: SyncCycleStorage + 'static,
+        S: CloudSyncCycleConnection + 'static,
     {
-        let storage: std::sync::Arc<dyn SyncCycleStorage> = storage;
+        let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = storage;
         Self {
             store,
             database,
@@ -1149,9 +1151,10 @@ impl SyncComponents {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn uses_storage_for_test(
         &self,
-        expected: &std::sync::Arc<dyn coven_storage::SyncStorage>,
+        expected: &std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     ) -> bool {
-        let actual: std::sync::Arc<dyn coven_storage::SyncStorage> = self.storage.clone();
+        let actual: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+            self.storage.clone();
         std::sync::Arc::ptr_eq(&actual, expected)
     }
 
@@ -1179,6 +1182,10 @@ impl SyncComponents {
         encryption: coven_keys::encryption::EncryptionService,
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, coven_keys::keys::KeyError> {
-        CloudCipherAccess::adopt_key_rotation(self.storage.as_ref(), &encryption, master_keys)
+        CloudSyncCipherStateAccess::adopt_key_rotation(
+            self.storage.as_ref(),
+            &encryption,
+            master_keys,
+        )
     }
 }

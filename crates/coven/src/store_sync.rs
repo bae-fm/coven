@@ -24,7 +24,7 @@ use coven_storage::cloud::setup::StorageSetupError;
 use coven_storage::cloud::CloudHome;
 #[cfg(test)]
 use coven_storage::BlobChunking;
-use coven_storage::{BlobPathScheme, CloudSyncStorage, SyncStorage};
+use coven_storage::{BlobPathScheme, CloudSyncConnection, CloudSyncObjectStorage};
 
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
@@ -69,7 +69,7 @@ enum SyncConnection {
     WithCloud {
         sync: Arc<SyncLoopHandle>,
         #[cfg(test)]
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         driver: SyncDriver,
     },
 }
@@ -138,7 +138,7 @@ impl StoreSync {
 
     async fn initialize_components(
         &self,
-        storage: Arc<CloudSyncStorage>,
+        storage: Arc<CloudSyncConnection>,
         routing_encryption: Option<EncryptionService>,
     ) -> Result<SyncComponents, SyncError> {
         let initialization = match self.database.local_store_root_ref().await? {

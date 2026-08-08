@@ -45,8 +45,8 @@ use coven_database::{OutboxEntry, OutboxOperation};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::blob::locator::StoredBlobRef;
 use coven_protocol::objects::StorageError;
-use coven_storage::SyncStorage;
-use coven_storage::{CloudCipherAccess, CloudRotationAccess};
+use coven_storage::CloudSyncObjectStorage;
+use coven_storage::{CloudSyncCipherStateAccess, CloudSyncRotationStateAccess};
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.
@@ -104,9 +104,9 @@ enum ExistingTombstone {
 /// and retry recording.
 pub(crate) struct TombstoneDrain<'a> {
     db: &'a coven_database::StoreDatabase,
-    storage: &'a dyn SyncStorage,
-    cipher: &'a dyn CloudCipherAccess,
-    pending_rotation: &'a dyn CloudRotationAccess,
+    storage: &'a dyn CloudSyncObjectStorage,
+    cipher: &'a dyn CloudSyncCipherStateAccess,
+    pending_rotation: &'a dyn CloudSyncRotationStateAccess,
     store_id: &'a str,
     keypair: &'a UserKeypair,
     clock: &'a dyn coven_foundation::clock::Clock,
@@ -285,9 +285,9 @@ impl<'a> TombstoneDrain<'a> {
     /// Bind every dependency used by one deletion-drain pass.
     pub(crate) fn new(
         db: &'a coven_database::StoreDatabase,
-        storage: &'a dyn SyncStorage,
-        cipher: &'a dyn CloudCipherAccess,
-        pending_rotation: &'a dyn CloudRotationAccess,
+        storage: &'a dyn CloudSyncObjectStorage,
+        cipher: &'a dyn CloudSyncCipherStateAccess,
+        pending_rotation: &'a dyn CloudSyncRotationStateAccess,
         store_id: &'a str,
         keypair: &'a UserKeypair,
         clock: &'a dyn coven_foundation::clock::Clock,

@@ -5,8 +5,8 @@ use tracing::{debug, warn};
 impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_tombstones(
         &self,
-        cipher: &dyn CloudCipherAccess,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        cipher: &dyn CloudSyncCipherStateAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
@@ -34,7 +34,7 @@ impl AuthorizedWriterOperation<'_> {
     /// unauthorized, foreign-Store, and within-grace objects remain non-actionable.
     pub(crate) async fn gc_tombstones(
         &self,
-        cipher: &dyn CloudCipherAccess,
+        cipher: &dyn CloudSyncCipherStateAccess,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();

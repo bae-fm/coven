@@ -19,7 +19,7 @@ mod test_support;
 
 pub(crate) struct AuthorizedStoreHistory<'storage> {
     database: StoreDatabase,
-    storage: &'storage Arc<dyn SyncStorage>,
+    storage: &'storage Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     history_verifier: MergeHistoryVerifier<'storage>,

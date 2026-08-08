@@ -7,7 +7,7 @@ use coven_protocol::store_commit::{commit_semantic_prefix, package_semantic_pref
 
 pub(super) struct PreparedWriteFixture {
     home: InMemoryCloudHome,
-    storage: Arc<CloudSyncStorage>,
+    storage: Arc<CloudSyncConnection>,
     db: Database,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
@@ -227,7 +227,7 @@ impl PreparedWriteFixture {
             let home = InMemoryCloudHome::new();
             let keypair = UserKeypair::generate();
             let storage = Arc::new(
-                CloudSyncStorage::new(
+                CloudSyncConnection::new(
                     Arc::new(home.clone()),
                     CloudCipher::Plaintext,
                     BlobPathScheme::Plain,

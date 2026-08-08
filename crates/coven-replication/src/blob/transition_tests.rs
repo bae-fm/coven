@@ -37,7 +37,7 @@ use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance, RowBlo
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 use coven_storage::cloud::CloudHome;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 fn exact_cache_path(store_dir: &StoreDir, reference: &RowBlobRef) -> PathBuf {
     let stored = reference.stored().expect("Remote row has exact storage");

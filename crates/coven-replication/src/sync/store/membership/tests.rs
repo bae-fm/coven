@@ -11,8 +11,8 @@ use coven_protocol::membership::{
 };
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain};
-use coven_storage::SyncStorage;
-use coven_storage::{CloudCipher, CloudCipherAccess};
+use coven_storage::CloudSyncObjectStorage;
+use coven_storage::{CloudCipher, CloudSyncCipherStateAccess};
 use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
@@ -371,7 +371,7 @@ async fn complete_chain_still_validates() {
 async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomically() {
     let fixture = MergeFixture::new("store-membership-conflict-boundary").await;
     let storage = Arc::new(
-        coven_storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncConnection::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             coven_storage::BlobPathScheme::Hashed,
@@ -432,7 +432,7 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
 async fn store_membership_reads_require_the_installed_owner_anchor() {
     let fixture = MergeFixture::new("store-membership-owner-anchor").await;
     let storage = Arc::new(
-        coven_storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncConnection::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             coven_storage::BlobPathScheme::Hashed,
@@ -473,7 +473,7 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
 async fn store_membership_reads_reject_tampered_founder_state() {
     let fixture = MergeFixture::new("store-membership-founder-state").await;
     let storage = Arc::new(
-        coven_storage::CloudSyncStorage::new(
+        coven_storage::CloudSyncConnection::new(
             fixture.home.clone(),
             CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
             coven_storage::BlobPathScheme::Hashed,

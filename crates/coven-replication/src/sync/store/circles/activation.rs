@@ -20,7 +20,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreRootRef, StreamActivation, StreamActivationId, VerifiedStoreBatchCommit,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 mod metadata;
 mod roster;
@@ -46,7 +46,7 @@ use coven_protocol::circle_activation::{
 
 pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
     database: &'operation StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history:
         &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
@@ -54,7 +54,7 @@ pub(crate) struct CircleActivationVerifier<'operation, 'storage> {
 impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,

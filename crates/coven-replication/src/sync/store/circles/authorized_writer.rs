@@ -22,7 +22,7 @@ mod writer_test_support;
 pub(crate) struct AuthorizedCircleWriter<'writer, 'storage> {
     writer: &'writer mut AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
-    storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
+    storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: coven_protocol::store_commit::StoreRootRef,
     membership: coven_protocol::membership::MembershipChain,
@@ -34,7 +34,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
     pub(crate) fn from_parts(
         writer: &'writer mut AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
-        storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
+        storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: coven_protocol::store_commit::StoreRootRef,
         membership: coven_protocol::membership::MembershipChain,

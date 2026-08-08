@@ -28,7 +28,7 @@ use super::OwnerPromotionError;
 pub(crate) struct AuthorizedOwnerPromotion<'operation, 'storage> {
     writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
-    storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
+    storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
     root: coven_protocol::store_commit::StoreRootRef,
     membership: coven_protocol::membership::MembershipChain,
 }
@@ -74,7 +74,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut crate::sync::store::AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
-        storage: std::sync::Arc<dyn coven_storage::SyncStorage>,
+        storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
         root: coven_protocol::store_commit::StoreRootRef,
         membership: coven_protocol::membership::MembershipChain,
     ) -> Self {

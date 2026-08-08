@@ -10,7 +10,7 @@ pub struct CloudCipherState {
 /// Read-only access to a session cipher snapshot. Production storage implements
 /// this with [`CloudCipherState`], whose mode cannot change. The test-utils
 /// implementation for a raw lock exists only for injected engine tests.
-pub trait CloudCipherAccess: Send + Sync {
+pub trait CloudSyncCipherStateAccess: Send + Sync {
     fn snapshot(&self) -> CloudCipher;
     fn merge_key_rotation(
         &self,
@@ -94,7 +94,7 @@ impl CloudCipherState {
     }
 }
 
-impl CloudCipherAccess for CloudCipherState {
+impl CloudSyncCipherStateAccess for CloudCipherState {
     fn snapshot(&self) -> CloudCipher {
         CloudCipherState::snapshot(self)
     }
@@ -108,7 +108,7 @@ impl CloudCipherAccess for CloudCipherState {
     }
 }
 
-impl<T: CloudCipherAccess + ?Sized> CloudCipherAccess for Arc<T> {
+impl<T: CloudSyncCipherStateAccess + ?Sized> CloudSyncCipherStateAccess for Arc<T> {
     fn snapshot(&self) -> CloudCipher {
         (**self).snapshot()
     }
@@ -146,7 +146,7 @@ fn merge_into(
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl CloudCipherAccess for RwLock<CloudCipher> {
+impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
     fn snapshot(&self) -> CloudCipher {
         self.read().unwrap().clone()
     }

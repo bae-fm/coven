@@ -47,7 +47,7 @@ impl StoreSync {
     pub(super) fn install_cloud(
         &self,
         sync: Arc<SyncLoopHandle>,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         driver: SyncDriver,
     ) {
         self.blob_access.install_connected(storage.clone());
@@ -112,7 +112,7 @@ impl StoreSync {
     pub(super) async fn build_connection(
         &self,
         config: Config,
-        storage: Option<Arc<CloudSyncStorage>>,
+        storage: Option<Arc<CloudSyncConnection>>,
     ) -> Result<(), SyncError> {
         let Some(storage) = storage else {
             self.install_without_cloud();
@@ -126,7 +126,7 @@ impl StoreSync {
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
-        let storage: Arc<dyn SyncStorage> = storage;
+        let storage: Arc<dyn CloudSyncObjectStorage> = storage;
         let sync = self.build_sync(components, config, routing_encryption);
         if let Err(error) = sync.start() {
             self.blob_access.clear_connection();
@@ -208,7 +208,7 @@ impl StoreSync {
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
-        let storage: Arc<dyn SyncStorage> = storage;
+        let storage: Arc<dyn CloudSyncObjectStorage> = storage;
         let sync = self.build_sync(components, config, routing_encryption);
         if matches!(&driver, SyncDriver::Loop) {
             if let Err(error) = sync.start() {

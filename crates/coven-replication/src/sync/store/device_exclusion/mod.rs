@@ -23,7 +23,7 @@ use coven_protocol::store_commit::{
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreDeviceExclusionResult {
@@ -188,14 +188,14 @@ pub(crate) async fn stage_uploaded_proposal_for_test(
 pub(crate) struct AuthorizedDeviceExclusion<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
 }
 
 impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     ) -> Self {
         Self {
             writer,

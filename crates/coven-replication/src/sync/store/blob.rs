@@ -6,7 +6,7 @@ use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
 use coven_protocol::store_commit::StoreRootRef;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use coven_database::StoreDatabase;
 
@@ -475,12 +475,12 @@ impl LocalStoreBlobAccess {
 
 #[derive(Clone)]
 enum RemoteBlobStorage<'storage> {
-    Borrowed(&'storage dyn SyncStorage),
-    Shared(std::sync::Arc<dyn SyncStorage>),
+    Borrowed(&'storage dyn CloudSyncObjectStorage),
+    Shared(std::sync::Arc<dyn CloudSyncObjectStorage>),
 }
 
 impl RemoteBlobStorage<'_> {
-    fn as_ref(&self) -> &dyn SyncStorage {
+    fn as_ref(&self) -> &dyn CloudSyncObjectStorage {
         match self {
             Self::Borrowed(storage) => *storage,
             Self::Shared(storage) => storage.as_ref(),
@@ -507,7 +507,10 @@ pub struct CurrentRemoteBlobSource {
 }
 
 impl CurrentRemoteBlobSource {
-    pub fn current(database: StoreDatabase, storage: std::sync::Arc<dyn SyncStorage>) -> Self {
+    pub fn current(
+        database: StoreDatabase,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
+    ) -> Self {
         Self {
             inner: RemoteBlobSourceInner {
                 database,
@@ -548,7 +551,7 @@ pub(crate) struct RemoteBlobSource<'storage> {
 impl<'storage> RemoteBlobSource<'storage> {
     pub(super) fn authorized(
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         root: StoreRootRef,
     ) -> Self {
         Self {

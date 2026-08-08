@@ -21,7 +21,7 @@ use coven_protocol::membership::{MemberRole, MembershipChain, MembershipCoord};
 use coven_protocol::store_commit::StoreDeviceHead;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::CloudHome;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 /// The synthetic test db opens with a single migration, so its
 /// [`coven_database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
@@ -29,7 +29,7 @@ const SCHEMA_VERSION: u32 = 1;
 use crate::sync::test_helpers::*;
 use coven_protocol::objects::ProtocolObjectDomain;
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 fn exact_cache_path(
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -79,7 +79,7 @@ trait PullTestDatabaseOps {
     async fn pull_exact_store_into(
         &self,
         source: &coven_database::Database,
-        storage: &Arc<CloudSyncStorage>,
+        storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> (
@@ -151,7 +151,7 @@ impl PullTestDatabaseOps for coven_database::Database {
     async fn pull_exact_store_into(
         &self,
         source: &coven_database::Database,
-        storage: &Arc<CloudSyncStorage>,
+        storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> (
@@ -359,7 +359,7 @@ impl TestStoreStorage for TestStore {
 }
 
 #[async_trait]
-impl TestStoreStorage for std::sync::Arc<CloudSyncStorage> {
+impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
     async fn store_for_test_publish(
         &self,
         db: &coven_database::Database,
@@ -551,9 +551,9 @@ fn cloud_test_storage(
     blob_paths: BlobPathScheme,
     store_id: &str,
     keypair: UserKeypair,
-) -> std::sync::Arc<CloudSyncStorage> {
+) -> std::sync::Arc<CloudSyncConnection> {
     std::sync::Arc::new(
-        CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
+        CloudSyncConnection::new(home, cipher, blob_paths, store_id, keypair)
             .expect("test cloud storage supports immutable copies"),
     )
 }
@@ -719,7 +719,7 @@ fn missing_exact_membership_authority_positions(
 fn plain_cloud_test_store() -> (
     InMemoryCloudHome,
     UserKeypair,
-    std::sync::Arc<CloudSyncStorage>,
+    std::sync::Arc<CloudSyncConnection>,
 ) {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
@@ -3742,7 +3742,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .open_into(&db2)
         .await
         .expect("open exact Store before failed lazy verification");
-    let failing: Arc<dyn SyncStorage> =
+    let failing: Arc<dyn CloudSyncObjectStorage> =
         Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
             storage.storage(),
             FaultingStorage::blob(),
@@ -4470,7 +4470,7 @@ fn readable_photo_decl() -> BlobDecl {
 /// `cloud_path` (`photos/n1/cover-p1cover.jpg`), not the content-addressed shard, and a
 /// second device with the same declaration pulls it from that readable key and
 /// recovers the bytes. This is the changeset-push / changeset-pull half of the blob
-/// path, end to end over a real `CloudSyncStorage` in `BlobPathScheme::Plain`.
+/// path, end to end over a real `CloudSyncConnection` in `BlobPathScheme::Plain`.
 #[tokio::test]
 async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let keypair = UserKeypair::generate();
@@ -5222,7 +5222,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     );
 }
 
-/// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
+/// Full encrypted blob round-trip through `CloudSyncConnection` (encrypted) over a
 /// shared `CloudHome`. Device A publishes a note plus its cover photo via the real
 /// Store write preparation; the blob lands ciphertext at rest. Device B — a fresh DB
 /// with its own asset directory but the same store key — pulls, downloads the

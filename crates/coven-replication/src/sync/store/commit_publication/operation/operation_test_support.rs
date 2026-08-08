@@ -73,7 +73,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         timestamp: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipOpsError,
@@ -90,7 +90,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn complete_revoke_rotation_adoption_for_test(
         &self,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
     ) -> Result<(), crate::sync::store::membership::InviteError> {
         self.complete_revoke_rotation_adoption(pending_rotation, adopted_generation)

@@ -1,11 +1,11 @@
 use coven_protocol::objects::{PreparedExactObject, ProtocolObjectDomain, StoreObjectError};
 use coven_protocol::store_commit::StoreDeviceRegistration;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use super::StoreRegistrationError;
 
 pub(super) fn prepare_registration_object(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     registration: &StoreDeviceRegistration,
     slot: coven_protocol::objects::ObjectSlot,
 ) -> Result<PreparedExactObject, StoreRegistrationError> {

@@ -16,7 +16,7 @@ use coven_protocol::store_commit::{
 };
 use coven_protocol::write::WriteId;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
@@ -38,7 +38,7 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
     let signer = UserKeypair::generate();
     let home = InMemoryCloudHome::new();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,

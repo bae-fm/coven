@@ -12,7 +12,7 @@ use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{ack_slot_prefix, CommitFrontier, StoreAck, SuccessorLink};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,7 +36,7 @@ pub enum StoreAckError {
 pub(crate) struct AuthorizedAcknowledgements<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
-    storage: Arc<dyn SyncStorage>,
+    storage: Arc<dyn CloudSyncObjectStorage>,
     local_writer: Arc<LocalStoreWriter>,
 }
 
@@ -44,7 +44,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         local_writer: Arc<LocalStoreWriter>,
     ) -> Self {
         Self {

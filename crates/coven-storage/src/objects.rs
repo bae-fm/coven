@@ -1,6 +1,6 @@
 //! Exact-reference access to Store protocol objects.
 
-use super::SyncStorage;
+use super::CloudSyncObjectStorage;
 use coven_protocol::membership::{MembershipEntry, MembershipEntryRef};
 use coven_protocol::objects::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
@@ -33,7 +33,7 @@ where
 }
 
 pub async fn prepare_membership_entry(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     store_root_hash: ObjectHash,
     entry: &MembershipEntry,
 ) -> Result<(PreparedExactObject, MembershipEntryRef), StoreObjectError> {

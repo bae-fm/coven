@@ -157,9 +157,9 @@ impl LocalStoreWriter {
     pub(crate) async fn drain_tombstones(
         &self,
         database: &coven_database::StoreDatabase,
-        storage: &dyn coven_storage::SyncStorage,
-        cipher: &dyn coven_storage::CloudCipherAccess,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        storage: &dyn coven_storage::CloudSyncObjectStorage,
+        cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         store_id: &str,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {

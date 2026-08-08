@@ -100,18 +100,18 @@ use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
 use coven_protocol::objects::StorageError;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// Closed cloud access for one exact Remote blob. Store code resolves the
 /// authority; the cache only reads bytes with the supplied protection.
 pub(crate) struct RemoteBlobAccess<'a> {
-    storage: &'a dyn SyncStorage,
+    storage: &'a dyn CloudSyncObjectStorage,
     protection: coven_protocol::objects::BlobSpoolProtection,
 }
 
 impl<'a> RemoteBlobAccess<'a> {
     pub(crate) fn new(
-        storage: &'a dyn SyncStorage,
+        storage: &'a dyn CloudSyncObjectStorage,
         protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Self {
         Self {
@@ -150,7 +150,7 @@ pub enum BlobCacheError {
     /// refused before any path is built (the same gate the pull runs).
     Path(PathTokenError),
     /// A cloud read failed: the blob isn't in the cloud, or the backend errored
-    /// (surfaced from the exact blob operations on `SyncStorage`).
+    /// (surfaced from the exact blob operations on `CloudSyncObjectStorage`).
     Storage(StorageError),
     /// A Remote blob's bytes were needed from the cloud but no cloud home is
     /// connected, so there is no storage to fetch them from. A home-less store

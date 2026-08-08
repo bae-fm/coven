@@ -18,7 +18,7 @@ pub(crate) struct SnapshotHistoryConstruction;
 pub struct AuthorizedWriterOperation<'storage> {
     database: StoreDatabase,
     history: AuthorizedStoreHistory<'storage>,
-    storage: &'storage Arc<dyn SyncStorage>,
+    storage: &'storage Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     writer: Arc<LocalStoreWriter>,
@@ -29,7 +29,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn from_parts(
         database: StoreDatabase,
         history: AuthorizedStoreHistory<'storage>,
-        storage: &'storage Arc<dyn SyncStorage>,
+        storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         writer: Arc<LocalStoreWriter>,

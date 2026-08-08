@@ -16,12 +16,12 @@ use coven_protocol::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     commit_semantic_prefix, head_slot_prefix, StoreBatchCommit, StoreDeviceRegistration,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 use std::collections::BTreeSet;
 
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
@@ -31,7 +31,7 @@ pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
 impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(
         database: StoreDatabase,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,

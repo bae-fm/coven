@@ -3144,7 +3144,7 @@ struct SilentParticipantCircle {
     silent: UserKeypair,
     silent_device_id: coven_protocol::store_commit::StoreDeviceId,
     silent_db: Database,
-    silent_storage: Arc<coven_storage::CloudSyncStorage>,
+    silent_storage: Arc<coven_storage::CloudSyncConnection>,
     prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 

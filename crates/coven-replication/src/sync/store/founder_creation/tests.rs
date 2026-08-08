@@ -6,7 +6,7 @@ use crate::sync::test_helpers::{
 };
 use coven_database::Database;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)
@@ -17,7 +17,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -59,7 +59,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
         let storage = Arc::new(
-            CloudSyncStorage::new(
+            CloudSyncConnection::new(
                 Arc::new(home.clone()),
                 CloudCipher::Plaintext,
                 BlobPathScheme::Plain,
@@ -122,7 +122,7 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -187,7 +187,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -266,7 +266,7 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -321,7 +321,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home),
             CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key(
                 [41; 32],

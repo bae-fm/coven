@@ -25,7 +25,7 @@ use coven_protocol::store_commit::{
     DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 mod authorized_join;
 mod cleanup;

@@ -1,20 +1,20 @@
 use crate::sync::store::authorization::history::{cleanup, retained};
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 use coven_database::StoreDatabase;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// The reads and history compositions the Circle subsystem performs, over the
 /// four capabilities they need.
 pub(crate) struct VerifiedCircleHistory<'operation, 'storage> {
     database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {

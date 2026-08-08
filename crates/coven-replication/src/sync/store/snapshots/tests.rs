@@ -6,7 +6,7 @@ use super::*;
 use coven_database::Database;
 use coven_database::StoreDatabase;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 fn open(path: &Path, device_id: &str) -> Database {
     Database::open(
@@ -25,9 +25,9 @@ fn store_database(database: &Database) -> StoreDatabase {
     StoreDatabase::new(database)
 }
 
-fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncStorage> {
+fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
     Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -40,7 +40,7 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncStora
 
 async fn initialize(
     db: &Database,
-    storage: &Arc<CloudSyncStorage>,
+    storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> crate::sync::test_helpers::TestDevice {
     crate::sync::test_helpers::TestDevice::create(

@@ -189,7 +189,7 @@ bucket sees the actual files instead of ciphertext.
   to read the bucket by name (e.g. inspect it in the storage console).
 
 The one choice drives two mechanisms together, the at-rest cipher and the
-blob-path scheme, both held by a `CloudSyncStorage`:
+blob-path scheme, both held by a `CloudSyncConnection`:
 
 - `CloudCipher::Encrypted(key)` (opaque) seals every object under the store key
   (the behavior described everywhere above); `CloudCipher::Plaintext` (browsable)

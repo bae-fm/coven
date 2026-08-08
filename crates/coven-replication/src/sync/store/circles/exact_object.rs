@@ -1,9 +1,9 @@
 use super::error::CircleOperationError;
 use coven_protocol::objects::{ExactObjectRef, ProtocolObjectContext};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 pub(crate) async fn read_exact_circle_object(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     context: &ProtocolObjectContext,
     object: &ExactObjectRef,
     semantic_prefix: &str,

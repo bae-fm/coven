@@ -6,7 +6,7 @@ use coven_protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
     CommitFrontier, ObjectHash, SnapshotImageRef, StoreRootRef,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 use tracing::warn;
 
 use super::{coverage_dominates, SnapshotCut, SnapshotError};
@@ -16,7 +16,7 @@ use coven_database::{verify_circle_bootstrap_image, CreatedSnapshot};
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
     database: coven_database::StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     root: StoreRootRef,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
@@ -24,7 +24,7 @@ pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
 
 pub(crate) struct CircleSnapshotReader<'operation, 'storage> {
     database: &'operation coven_database::StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history:
         &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
@@ -41,7 +41,7 @@ impl CircleBootstrapBlobVerification for CircleSnapshotWriter<'_, '_> {
 impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation coven_database::StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,
@@ -490,7 +490,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
         database: coven_database::StoreDatabase,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         root: StoreRootRef,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,

@@ -26,7 +26,7 @@ use registration_outbox::RegistrationOutbox;
 #[doc(hidden)]
 pub struct Store {
     database: StoreDatabase,
-    storage: Arc<dyn SyncStorage>,
+    storage: Arc<dyn CloudSyncObjectStorage>,
     store_dir: StoreDir,
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     identity: UserKeypair,
@@ -163,7 +163,7 @@ impl Store {
 
     pub(crate) async fn create(
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: StoreDir,
         founder_timestamp: &str,
         identity: &UserKeypair,
@@ -185,7 +185,7 @@ impl Store {
 
     pub(crate) async fn open(
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: StoreDir,
         expected_root: &StoreRootRef,
         identity: &UserKeypair,
@@ -226,7 +226,7 @@ impl Store {
     #[doc(hidden)]
     pub async fn load(
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: StoreDir,
         identity: UserKeypair,
     ) -> Result<Self, StoreError> {
@@ -254,7 +254,7 @@ impl Store {
 
     fn new(
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: StoreDir,
         identity: UserKeypair,
         device_id: Option<String>,
@@ -733,8 +733,8 @@ impl Store {
         public_key_hex: &str,
         encryption: &coven_keys::encryption::EncryptionService,
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-        cipher: &dyn coven_storage::CloudCipherAccess,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
         let mut authorization = self.authorize_writer().await.map_err(|error| {
             membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(

@@ -8,7 +8,7 @@ use coven_database::Migration;
 use coven_database::{Database, SnapshotDatabaseImage};
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -123,7 +123,7 @@ pub struct PreparedSnapshotBootstrap<'storage> {
     db_hash: String,
     history_verifier:
         crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
-    storage: &'storage std::sync::Arc<dyn SyncStorage>,
+    storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
     founder_registration: coven_protocol::objects::VerifiedObject<
         coven_protocol::store_commit::StoreDeviceRegistration,
     >,
@@ -151,7 +151,7 @@ impl std::fmt::Debug for PreparedSnapshotBootstrap<'_> {
 impl<'storage> PreparedSnapshotBootstrap<'storage> {
     /// Authenticate and stage one snapshot image as installation authority.
     pub async fn prepare(
-        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
         mut history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,

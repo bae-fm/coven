@@ -61,7 +61,7 @@ impl StoreBlobAccess {
                 ResolvedBlobAccess::Local(self.local.clone())
             } else {
                 let storage = cloud_storage.open(&config, None, None).await?;
-                let storage: Arc<dyn coven_storage::SyncStorage> = Arc::new(storage);
+                let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> = Arc::new(storage);
                 ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
                     self.local.clone(),
                     CurrentRemoteBlobSource::current(self.database.clone(), storage),
@@ -92,7 +92,10 @@ impl StoreBlobAccess {
             .map(|resolved| resolved.access.clone())
     }
 
-    pub(crate) fn install_connected(&self, storage: Arc<dyn coven_storage::SyncStorage>) {
+    pub(crate) fn install_connected(
+        &self,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
+    ) {
         let access = ResolvedBlobAccess::Remote(RemoteStoreBlobAccess::new(
             self.local.clone(),
             CurrentRemoteBlobSource::current(self.database.clone(), storage),

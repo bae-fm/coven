@@ -7,7 +7,7 @@ use coven_keys::keys::{
     MasterKeyError, RoutingEncryptionError, StoreKeys, UserKeypair,
 };
 use coven_storage::cloud::CloudHome;
-use coven_storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 pub(crate) struct EstablishedStoreIdentity {
     keypair: UserKeypair,
@@ -23,7 +23,7 @@ impl EstablishedStoreIdentity {
         database: coven_database::StoreDatabase,
         store_dir: coven_foundation::store_dir::StoreDir,
         local_blob_access: coven_replication::sync::store::blob::LocalStoreBlobAccess,
-        storage: Arc<CloudSyncStorage>,
+        storage: Arc<CloudSyncConnection>,
         initialization: coven_replication::sync::cycle::StoreInitialization,
         routing_encryption: Option<EncryptionService>,
     ) -> Result<
@@ -47,7 +47,7 @@ impl EstablishedStoreIdentity {
     pub(crate) async fn load_store(
         &self,
         database: coven_database::StoreDatabase,
-        storage: Arc<dyn coven_storage::SyncStorage>,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<coven_replication::sync::Store, coven_replication::sync::store::StoreError> {
         coven_replication::sync::Store::load(database, storage, store_dir, self.keypair.clone())
@@ -185,13 +185,13 @@ impl StoreSecurity {
         home: Arc<dyn CloudHome>,
         cipher: Option<CloudCipher>,
         blob_chunking: BlobChunking,
-    ) -> Result<CloudSyncStorage, coven_storage::cloud::setup::StorageSetupError> {
+    ) -> Result<CloudSyncConnection, coven_storage::cloud::setup::StorageSetupError> {
         let cipher = match cipher {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config)?,
         };
         let identity = self.established_identity()?;
-        Ok(CloudSyncStorage::new(
+        Ok(CloudSyncConnection::new(
             home,
             cipher,
             BlobPathScheme::for_storage(config.cloud_home.storage),

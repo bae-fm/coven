@@ -9,12 +9,12 @@ use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::blob::{Provenance, RowBlobAuthority};
 use coven_protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 #[doc(hidden)]
 pub struct HostWriteBlobStaging {
     runtime: tokio::runtime::Handle,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     store_root: coven_protocol::store_commit::StoreRootRef,
     store_dir: StoreDir,
 }
@@ -22,7 +22,7 @@ pub struct HostWriteBlobStaging {
 impl HostWriteBlobStaging {
     pub(super) fn new(
         runtime: tokio::runtime::Handle,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         store_root: coven_protocol::store_commit::StoreRootRef,
         store_dir: StoreDir,
     ) -> Self {

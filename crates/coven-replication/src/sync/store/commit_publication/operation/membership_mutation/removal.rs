@@ -19,7 +19,7 @@ pub(crate) struct AuthorizedMembershipRevocation<'operation, 'storage, 'input> {
     store_id: &'input str,
     timestamp: &'input str,
     current_encryption: &'input EncryptionService,
-    pending_rotation: &'input dyn cloud_storage::CloudRotationAccess,
+    pending_rotation: &'input dyn cloud_storage::CloudSyncRotationStateAccess,
     _permit: coven_database::store::MembershipMutationPermit,
 }
 
@@ -43,7 +43,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         store_id: &'input str,
         timestamp: &'input str,
         current_encryption: &'input EncryptionService,
-        pending_rotation: &'input dyn cloud_storage::CloudRotationAccess,
+        pending_rotation: &'input dyn cloud_storage::CloudSyncRotationStateAccess,
     ) -> Self {
         let permit = operation.membership_mutation_permit().await;
         Self {

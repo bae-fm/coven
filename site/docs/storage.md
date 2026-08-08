@@ -23,7 +23,7 @@ not a mutable global head.
 <text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a member's wrapped key</text>
 <line class="arr" x1="330" y1="60" x2="330" y2="74" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="78" width="500" height="40" rx="9"/>
-<text class="lbl s11" x="330" y="96" text-anchor="middle">CloudSyncStorage</text>
+<text class="lbl s11" x="330" y="96" text-anchor="middle">CloudSyncConnection</text>
 <text class="sub" x="330" y="110" text-anchor="middle">seals and opens · maps concepts to flat keys</text>
 <line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
 <rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
@@ -330,7 +330,7 @@ Encryption stays out of the providers so that all five share one at-rest
 implementation instead of five slightly different ones. `CloudHome` deals
 only in raw bytes. The at-rest protection and the key layout
 live one level up, in
-`CloudSyncStorage`,
+`CloudSyncConnection`,
 which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
 and owns the mapping from Store protocol objects, blob ids, and wrapped member
 keys to the flat keys the trait stores. Both how it seals (the

@@ -14,7 +14,7 @@ pub(crate) use nonactivation::MergeConflictResolutionAuthorization;
 pub(crate) use nonactivation::TerminalNonactivationCandidate;
 
 use coven_database::StoreDatabase;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
 
@@ -23,14 +23,14 @@ use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier
 /// heads live in, and the verifier that authenticates them.
 pub(crate) struct MergeConflictHistory<'operation, 'storage> {
     database: &'operation StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> MergeConflictHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {

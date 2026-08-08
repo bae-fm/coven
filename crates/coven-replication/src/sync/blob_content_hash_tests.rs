@@ -8,7 +8,7 @@ use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
 use coven_storage::cloud::ExactSlotStorage;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 const BLOB_ID: &str = "blobxxxx";
 const STORE_KEY: [u8; 32] = [42; 32];

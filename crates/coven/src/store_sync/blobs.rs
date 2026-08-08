@@ -27,7 +27,7 @@ impl StoreSync {
             .identity_public_key()
             .map_err(|error| StorageError::Storage(format!("read this store's identity: {error}")))?
             .map(hex::encode);
-        CloudSyncStorage::blob_key(
+        CloudSyncConnection::blob_key(
             scheme,
             &blob.namespace,
             uploader.as_deref(),

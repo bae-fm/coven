@@ -1,5 +1,5 @@
 use coven_protocol::store_commit::StoreRootRef;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use super::pull::StorePullError;
 use crate::sync::store::commit_verification::commit::StoreCommitVerifier;
@@ -32,7 +32,7 @@ impl HistoryConstructionAuthority {
 
     pub async fn open_pinned<'storage>(
         self,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         root: &StoreRootRef,
     ) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
         let object =
@@ -46,7 +46,7 @@ impl HistoryConstructionAuthority {
 
     pub(super) async fn bind_verified<'storage>(
         self,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         root: VerifiedStoreRoot,
     ) -> Result<MergeHistoryVerifier<'storage>, StorePullError> {
         let commit_verifier = StoreCommitVerifier::from_verified_root(self, storage, root.clone());

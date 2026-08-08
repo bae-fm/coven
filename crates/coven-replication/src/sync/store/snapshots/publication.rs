@@ -2,7 +2,7 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use super::{remove_snapshot_spool, SnapshotError};
 
@@ -13,14 +13,14 @@ use super::{remove_snapshot_spool, SnapshotError};
 /// using the same Store database.
 pub(crate) struct AuthorizedSnapshotPublication<'operation> {
     database: &'operation coven_database::StoreDatabase,
-    storage: &'operation dyn SyncStorage,
+    storage: &'operation dyn CloudSyncObjectStorage,
     _permit: coven_database::SnapshotPublicationPermit,
 }
 
 impl<'operation> AuthorizedSnapshotPublication<'operation> {
     pub(crate) async fn begin(
         database: &'operation coven_database::StoreDatabase,
-        storage: &'operation dyn SyncStorage,
+        storage: &'operation dyn CloudSyncObjectStorage,
     ) -> Self {
         let permit = database.snapshot_publication_permit().await;
         Self {

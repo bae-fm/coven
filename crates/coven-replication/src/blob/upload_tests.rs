@@ -22,7 +22,7 @@ use coven_storage::cloud::{
     CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
     RevokeOutcome, UploadProgress,
 };
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 const T0: &str = "2024-06-01T00:00:00Z";
 const ROOT_ID: &str = "upload-root";
@@ -261,7 +261,7 @@ struct UploadFixture {
     db: Database,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
-    storage: Arc<CloudSyncStorage>,
+    storage: Arc<CloudSyncConnection>,
     home: Arc<InstrumentedHome>,
 }
 
@@ -291,7 +291,7 @@ impl UploadFixture {
         .expect("open upload database");
         let owner = UserKeypair::generate();
         let storage = Arc::new(
-            CloudSyncStorage::new(
+            CloudSyncConnection::new(
                 home.clone(),
                 CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
                 BlobPathScheme::Hashed,

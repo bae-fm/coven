@@ -3,7 +3,7 @@ use super::cipher::*;
 use super::*;
 
 #[async_trait]
-impl SyncStorage for CloudSyncStorage {
+impl CloudSyncObjectStorage for CloudSyncConnection {
     fn blob_path_scheme(&self) -> BlobPathScheme {
         self.blob_path_scheme()
     }
@@ -655,7 +655,7 @@ impl SyncStorage for CloudSyncStorage {
 /// Reading a stored blob body into an unpublished sibling is a step of this
 /// adapter's own verified download, not a capability the storage surface
 /// offers: every caller reaches it through `stage_verified_blob_plaintext`.
-impl CloudSyncStorage {
+impl CloudSyncConnection {
     async fn stage_exact_blob_download(
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,

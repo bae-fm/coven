@@ -31,7 +31,7 @@ use coven_protocol::store_commit::{
     StoreSnapshotRef,
 };
 use coven_storage::run_blocking_object_verification;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod membership;
@@ -95,7 +95,7 @@ impl DeviceStateResolver<'_> {
 }
 
 pub(crate) struct StoreCommitVerifier<'a> {
-    storage: &'a dyn SyncStorage,
+    storage: &'a dyn CloudSyncObjectStorage,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
 }
@@ -231,7 +231,7 @@ impl<'a> StoreCommitVerifier<'a> {
 
     pub(crate) fn from_verified_root(
         _authority: crate::sync::store::authorization::HistoryConstructionAuthority,
-        storage: &'a dyn SyncStorage,
+        storage: &'a dyn CloudSyncObjectStorage,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     ) -> Self {
         Self {

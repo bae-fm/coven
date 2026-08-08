@@ -22,7 +22,7 @@ use coven_protocol::store_commit::StoreRootRef;
 
 pub(crate) struct FounderStoreCreation<'operation> {
     database: StoreDatabase,
-    storage: Arc<dyn SyncStorage>,
+    storage: Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'operation StoreDir,
     blob_cache: crate::sync::store::blob::StoreBlobCache,
     founder_timestamp: &'operation str,
@@ -91,7 +91,7 @@ fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority
 impl<'operation> FounderStoreCreation<'operation> {
     pub(crate) async fn begin(
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'operation StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         founder_timestamp: &'operation str,
@@ -116,7 +116,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let storage = self.storage.as_ref();
         let founder_timestamp = self.founder_timestamp;
         let signer = self.identity;
-        let binding = coven_storage::SyncStorage::provider_binding(storage)
+        let binding = coven_storage::CloudSyncObjectStorage::provider_binding(storage)
             .await
             .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
         let probes =

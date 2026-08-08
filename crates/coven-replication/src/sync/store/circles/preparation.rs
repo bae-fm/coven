@@ -25,7 +25,7 @@ use coven_protocol::store_commit::{
     CircleMetadataObjectRef, GrantStreamAnchor, ObjectHash, StoreCommitCoord, StoreCommitOrder,
     StoreOperationMembershipAuthority, StreamActivation, StreamAnchorDomain, SuccessorLink,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 async fn snapshot_image_bytes(
     snapshot: &coven_database::CreatedSnapshot,
@@ -42,7 +42,7 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     database: StoreDatabase,
     membership: coven_protocol::membership::MembershipChain,
     root: coven_protocol::store_commit::StoreRootRef,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage coven_foundation::store_dir::StoreDir,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -1084,7 +1084,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         database: StoreDatabase,
         membership: coven_protocol::membership::MembershipChain,
         root: coven_protocol::store_commit::StoreRootRef,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,

@@ -28,7 +28,7 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::BlobDecl;
-use coven_storage::{CloudCipher, PendingRotation, SyncStorage};
+use coven_storage::{CloudCipher, CloudSyncObjectStorage, PendingRotation};
 
 const T0: &str = "2024-06-01T00:00:00Z";
 
@@ -76,7 +76,7 @@ impl<'a> TombstoneCollector<'a> {
     async fn load(
         database: StoreDatabase,
         fixture: &TestStore,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         cipher: &'a RwLock<CloudCipher>,
         identity: &UserKeypair,
     ) -> Result<Self, String> {
@@ -100,7 +100,7 @@ impl<'a> TombstoneCollector<'a> {
     async fn for_founder_with_storage(
         database: StoreDatabase,
         fixture: &TestStore,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         cipher: &'a RwLock<CloudCipher>,
     ) -> Result<Self, String> {
         let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -191,8 +191,8 @@ struct CancelTombstoneOnExists {
 /// clock it reads deletion times from vary between tests.
 async fn drain_at(
     store_database: &StoreDatabase,
-    storage: &dyn coven_storage::SyncStorage,
-    cipher: &dyn coven_storage::CloudCipherAccess,
+    storage: &dyn coven_storage::CloudSyncObjectStorage,
+    cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
     keypair: &UserKeypair,
     clock: &dyn coven_foundation::clock::Clock,
 ) -> Result<usize, String> {

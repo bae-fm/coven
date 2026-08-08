@@ -2,7 +2,7 @@ use super::*;
 
 impl Store {
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn with_test_storage(&self, storage: Arc<dyn SyncStorage>) -> Self {
+    pub(crate) fn with_test_storage(&self, storage: Arc<dyn CloudSyncObjectStorage>) -> Self {
         Self::new(
             self.database.clone(),
             storage,
@@ -204,7 +204,7 @@ impl Store {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn complete_revoke_rotation_adoption_for_test(
         &self,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
     ) -> Result<(), membership::InviteError> {
         self.authorize_writer()

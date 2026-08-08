@@ -13,7 +13,7 @@ use coven_keys::keys::{
 use coven_storage::cloud::setup::StorageSetupError;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 struct NoImmutableCopyHome;
 
@@ -487,7 +487,7 @@ async fn foreign_founder_installs_no_connection() {
     let home = Arc::new(InMemoryCloudHome::new());
     let attacker = coven_keys::keys::UserKeypair::generate();
     let attacker_storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             home.clone(),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,

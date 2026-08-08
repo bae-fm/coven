@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// five capabilities they need.
 pub(crate) struct PullHistory<'operation, 'storage> {
     database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
     blob_source: &'operation RemoteBlobSource<'storage>,
     blob_cache: &'operation StoreBlobCache,
@@ -19,7 +19,7 @@ pub(crate) struct PullHistory<'operation, 'storage> {
 impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
         blob_source: &'operation RemoteBlobSource<'storage>,
         blob_cache: &'operation StoreBlobCache,

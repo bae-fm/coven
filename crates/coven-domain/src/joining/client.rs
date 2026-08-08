@@ -25,7 +25,7 @@ use coven_replication::sync::store::{
 };
 use coven_storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use coven_storage::join_code::InviteCode;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 /// Why joining or restoring a store failed. Both are the same operation —
 /// bootstrap a store from the cloud — differing only in their entry data (an
@@ -350,7 +350,7 @@ pub struct DeviceJoinClient {
 }
 
 struct DeviceJoinStorage {
-    storage: Arc<dyn coven_storage::SyncStorage>,
+    storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
     keyring: MasterKeyring,
 }
 
@@ -417,7 +417,7 @@ impl DeviceJoinClient {
     ) -> Result<coven_replication::sync::DeviceProviderAccessRequest, BootstrapError> {
         self.require_offer(&offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage: Arc<dyn coven_storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
@@ -440,7 +440,7 @@ impl DeviceJoinClient {
         &self,
         abandonment: coven_replication::sync::DeviceJoinAbandonment,
     ) -> Result<coven_replication::sync::DeviceJoinAbandonment, BootstrapError> {
-        let storage: Arc<dyn coven_storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let mut observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
@@ -473,7 +473,7 @@ impl DeviceJoinClient {
         cancellation: coven_replication::sync::DeviceJoinCancellation,
     ) -> Result<coven_replication::sync::JoinerJoinTerminal, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
-        let storage: Arc<dyn coven_storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
@@ -500,7 +500,7 @@ impl DeviceJoinClient {
                 return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
             }
             _ => {
-                let storage: Arc<dyn coven_storage::SyncStorage> =
+                let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
                     Arc::new(self.transport_storage().await?);
                 let mut observation =
                     coven_replication::sync::store::PendingDeviceJoinObservation::open(
@@ -543,7 +543,7 @@ impl DeviceJoinClient {
         let offer = &approval.request.offer;
         self.require_offer(offer)?;
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage: Arc<dyn coven_storage::SyncStorage> =
+        let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
             Arc::new(self.transport_storage().await?);
         let pending = self.open_pending_journal()?;
         let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
@@ -793,7 +793,7 @@ impl DeviceJoinClient {
     /// through this: the transport's objects carry their own per-attempt seal,
     /// so they need no store key — which is what lets a joiner publish its
     /// access request before it has unwrapped the store keyring at all.
-    pub(crate) async fn transport_storage(&self) -> Result<CloudSyncStorage, BootstrapError> {
+    pub(crate) async fn transport_storage(&self) -> Result<CloudSyncConnection, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
         self.plaintext_storage(cloud, &signer)
@@ -803,8 +803,8 @@ impl DeviceJoinClient {
         &self,
         home: Arc<dyn CloudHome>,
         signer: &UserKeypair,
-    ) -> Result<CloudSyncStorage, BootstrapError> {
-        Ok(CloudSyncStorage::new(
+    ) -> Result<CloudSyncConnection, BootstrapError> {
+        Ok(CloudSyncConnection::new(
             home,
             CloudCipher::Plaintext,
             BlobPathScheme::for_storage(HomeStorage::Opaque),
@@ -860,7 +860,7 @@ impl DeviceJoinClient {
             BootstrapError::Provider("provider has no exact-slot adapter".to_string())
         })?;
         let keyring = MasterKeyring::from(encryption.clone());
-        let storage = CloudSyncStorage::new(
+        let storage = CloudSyncConnection::new(
             cloud,
             CloudCipher::Encrypted(encryption),
             BlobPathScheme::for_storage(HomeStorage::Opaque),

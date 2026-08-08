@@ -256,8 +256,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
-        cipher: &dyn coven_storage::CloudCipherAccess,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
         let timestamp = self.database.stamp();
         let new_key = self
@@ -286,7 +286,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         public_key_hex: &str,
         timestamp: &str,
         current_encryption: &coven_keys::encryption::EncryptionService,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
         crate::sync::store::membership::MembershipOpsError,
@@ -311,7 +311,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(super) async fn complete_revoke_rotation_adoption(
         &self,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
     ) -> Result<(), crate::sync::store::membership::InviteError> {
         let _mutation = self.database.membership_mutation_permit().await;

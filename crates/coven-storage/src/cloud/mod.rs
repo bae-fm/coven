@@ -2,7 +2,7 @@
 //!
 //! Each backend (S3, R2, B2, etc.) implements `CloudHome` -- 8 methods for
 //! raw bytes in/out. No encryption, no path layout knowledge, no sync
-//! semantics. Higher-level concerns live in `CloudSyncStorage` which wraps any
+//! semantics. Higher-level concerns live in `CloudSyncConnection` which wraps any
 //! `dyn CloudHome` and applies the path layout and at-rest protection.
 
 // Pure helpers that S3-compatible backends share.

@@ -12,7 +12,7 @@ pub struct PendingDeviceJoinAuthority<'storage> {
 #[doc(hidden)]
 pub struct PendingDeviceJoinObservation<'storage> {
     journal: PendingJoinJournal,
-    storage: &'storage std::sync::Arc<dyn SyncStorage>,
+    storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
     history_verifier:
         crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<'storage>,
 }
@@ -500,7 +500,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
 impl<'storage> PendingDeviceJoinObservation<'storage> {
     pub async fn open(
         pending: &DeviceJoinJournalDatabase,
-        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
         root: &coven_protocol::store_commit::StoreRootRef,
         attempt_id: DeviceJoinAttemptId,
     ) -> Result<Self, crate::sync::store::StorePullError> {
@@ -513,7 +513,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
 
     pub(crate) fn new(
         pending: &DeviceJoinJournalDatabase,
-        storage: &'storage std::sync::Arc<dyn SyncStorage>,
+        storage: &'storage std::sync::Arc<dyn CloudSyncObjectStorage>,
         history_verifier: crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier<
             'storage,
         >,

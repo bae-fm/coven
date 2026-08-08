@@ -7,7 +7,7 @@ use coven_storage::cloud::setup::StorageSetupError;
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::cloud::CloudHome;
 use coven_storage::cloud::CloudHomeFactory;
-use coven_storage::{BlobChunking, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobChunking, CloudCipher, CloudSyncConnection};
 
 #[derive(Clone)]
 pub(crate) struct StoreCloudStorage {
@@ -40,7 +40,7 @@ impl StoreCloudStorage {
         config: &Config,
         cipher: Option<CloudCipher>,
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
-    ) -> Result<CloudSyncStorage, StorageSetupError> {
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
         self.admit(config, cloudkit_ops)?.open(cipher).await
     }
 
@@ -79,7 +79,7 @@ impl StoreCloudStorage {
         config: &Config,
         cipher: Option<CloudCipher>,
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
-    ) -> Result<CloudSyncStorage, StorageSetupError> {
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
         let home = self
             .cloud_homes
             .create(
@@ -98,7 +98,7 @@ impl StoreCloudStorage {
         config: &Config,
         home: Arc<dyn CloudHome>,
         cipher: Option<CloudCipher>,
-    ) -> Result<CloudSyncStorage, StorageSetupError> {
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
         self.security
             .open_cloud_storage(config, home, cipher, self.blob_chunking)
     }
@@ -114,7 +114,7 @@ impl AdmittedStoreCloudConfig<'_, '_> {
     pub(crate) async fn open(
         self,
         cipher: Option<CloudCipher>,
-    ) -> Result<CloudSyncStorage, StorageSetupError> {
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
         self.storage
             .open_admitted_config(self.config, cipher, self.cloudkit_ops)
             .await
@@ -133,7 +133,7 @@ impl AdmittedStoreCloudHome<'_, '_> {
     pub(crate) fn open(
         self,
         cipher: Option<CloudCipher>,
-    ) -> Result<CloudSyncStorage, StorageSetupError> {
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
         self.storage
             .open_admitted_home(self.config, self.home, cipher)
     }

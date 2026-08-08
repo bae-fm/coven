@@ -27,7 +27,7 @@ use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier, ObjectHash,
     SnapshotImageRef, SnapshotMeta, SnapshotSuccessorLink, StoreHistoryCut, StoreSnapshotState,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
 
 pub(crate) struct SnapshotCut {
@@ -50,7 +50,7 @@ impl StoreSnapshotCut {
 pub(crate) struct AuthorizedSnapshots<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
-    storage: Arc<dyn SyncStorage>,
+    storage: Arc<dyn CloudSyncObjectStorage>,
     store_dir: &'storage StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: Arc<LocalStoreWriter>,
@@ -61,7 +61,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         local_writer: Arc<LocalStoreWriter>,

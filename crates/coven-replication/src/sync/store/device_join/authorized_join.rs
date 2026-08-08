@@ -20,7 +20,7 @@ pub(crate) type AuthorizedProviderAdministratorJoin<'operation, 'storage> =
 pub(crate) struct AuthorizedJoin<'operation, 'storage, Authority = OwnerJoinAuthority> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     root: StoreRootRef,
     protocol_root: StoreProtocolRoot,
     verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
@@ -33,7 +33,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
     pub(crate) fn from_parts(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         root: StoreRootRef,
         protocol_root: StoreProtocolRoot,
         verified_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,

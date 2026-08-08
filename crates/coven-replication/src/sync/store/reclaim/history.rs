@@ -3,7 +3,7 @@ use coven_protocol::store_commit::{
     CommitFrontier, StoreBatchCommitRef, StoreDeviceHead, StoreDeviceHeadRef,
     StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use crate::sync::store::acknowledgements::StoreAckError;
 use crate::sync::store::commit_verification::merge_history::MergeHistoryVerifier;
@@ -15,7 +15,7 @@ use crate::sync::store::snapshots as snapshot;
 /// authenticates them.
 pub(crate) struct ReclaimHistory<'operation, 'storage> {
     database: &'operation StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
@@ -39,7 +39,7 @@ pub(crate) struct SelectedCircleSnapshot {
 impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {

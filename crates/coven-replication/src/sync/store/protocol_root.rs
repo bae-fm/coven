@@ -5,7 +5,7 @@ use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ObjectHash, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreProtocolRootError {
@@ -30,7 +30,7 @@ pub(crate) struct VerifiedStoreRoot {
 impl VerifiedStoreRoot {
     pub(super) async fn open(
         database: &coven_database::StoreDatabase,
-        storage: &dyn SyncStorage,
+        storage: &dyn CloudSyncObjectStorage,
         expected: &StoreRootRef,
     ) -> Result<Self, StoreProtocolRootError> {
         let object =
@@ -104,7 +104,7 @@ impl VerifiedStoreRoot {
 }
 
 pub(super) async fn load_pinned_store_protocol_root(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     expected: &StoreRootRef,
 ) -> Result<coven_protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -136,7 +136,7 @@ pub(super) async fn load_pinned_store_protocol_root(
 }
 
 pub(super) async fn load_exact_store_protocol_root(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     expected: &StoreRootRef,
     expected_sync_routing_hash: ObjectHash,
 ) -> Result<coven_protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {

@@ -7,7 +7,7 @@ use crate::sync::store::merge_conflict::{
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_database::Database;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 #[test]
 fn store_sequence_exhaustion_fails_instead_of_reusing_the_last_sequence() {

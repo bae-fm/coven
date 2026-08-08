@@ -296,7 +296,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 /// left behind, then delete the objects that candidate staged.
 pub(crate) async fn cleanup_circle_operation_candidate<'storage>(
     database: &StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     history: &mut MergeHistoryVerifier<'storage>,
     operation_id: &coven_protocol::circle::CircleOperationId,
 ) -> Result<(), crate::sync::store::pull::StorePullError> {

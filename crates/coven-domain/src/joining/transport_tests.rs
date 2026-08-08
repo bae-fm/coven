@@ -45,7 +45,7 @@ struct TransportFixture {
     owner_test_store: std::sync::Arc<TestStore>,
     /// The owner store's storage handle, retained so borrowing transports can
     /// point into it.
-    owner_storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
+    owner_storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     owner_store_dir: coven_foundation::store_dir::StoreDir,
     home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
@@ -168,9 +168,10 @@ impl TransportFixture {
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
-        let provider_binding = coven_storage::SyncStorage::provider_binding(&*store.storage())
-            .await
-            .expect("load owner provider binding");
+        let provider_binding =
+            coven_storage::CloudSyncObjectStorage::provider_binding(&*store.storage())
+                .await
+                .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
             Some(principal) => Arc::new(home.as_ref().clone().with_provider_binding(
                 coven_protocol::ResolvedProviderBinding {

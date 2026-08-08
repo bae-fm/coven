@@ -21,14 +21,14 @@ pub(crate) struct OpenedCirclePackage {
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
     database: &'operation StoreDatabase,
-    storage: &'storage dyn coven_storage::SyncStorage,
+    storage: &'storage dyn coven_storage::CloudSyncObjectStorage,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
 impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     pub(crate) fn new(
         database: &'operation StoreDatabase,
-        storage: &'storage dyn coven_storage::SyncStorage,
+        storage: &'storage dyn coven_storage::CloudSyncObjectStorage,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {

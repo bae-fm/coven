@@ -1404,7 +1404,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         )
         .await
         .expect("stage source blob");
-        let writer = coven_storage::CloudSyncStorage::new(
+        let writer = coven_storage::CloudSyncConnection::new(
             home,
             coven_storage::CloudCipher::Encrypted(
                 coven_keys::encryption::EncryptionService::from_key([42; 32]),

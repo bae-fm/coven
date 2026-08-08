@@ -919,7 +919,10 @@ impl SyncLoopHandle {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn uses_storage_for_test(&self, expected: &Arc<dyn coven_storage::SyncStorage>) -> bool {
+    pub fn uses_storage_for_test(
+        &self,
+        expected: &Arc<dyn coven_storage::CloudSyncObjectStorage>,
+    ) -> bool {
         self.inner.components.uses_storage_for_test(expected)
     }
 

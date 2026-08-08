@@ -34,7 +34,7 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
 use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// The prefix every transport slot's logical key starts with.
 const TRANSPORT_ROOT: &str = "store-v1/device-join-transport";
@@ -430,7 +430,7 @@ impl DeviceJoinRoles {
 
 /// One attempt's slot namespace, bound to the roles this device plays in it.
 pub struct DeviceJoinTransport<'a> {
-    storage: &'a dyn SyncStorage,
+    storage: &'a dyn CloudSyncObjectStorage,
     params: &'a DeviceJoinTransportParams,
     store_root_hash: ObjectHash,
     seal: EncryptionService,
@@ -442,7 +442,7 @@ impl<'a> DeviceJoinTransport<'a> {
     /// roles this device plays. It may publish only the kinds those roles
     /// produce; it may read every kind.
     pub fn open(
-        storage: &'a dyn SyncStorage,
+        storage: &'a dyn CloudSyncObjectStorage,
         bundle: &'a DeviceJoinOfferBundle,
         roles: DeviceJoinRoles,
     ) -> Result<Self, DeviceJoinTransportError> {

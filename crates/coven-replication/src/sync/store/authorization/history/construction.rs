@@ -7,7 +7,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
 
     pub(crate) fn new(
         database: StoreDatabase,
-        storage: &'storage Arc<dyn SyncStorage>,
+        storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
@@ -288,7 +288,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) fn from_pending_device_join(
         _authority: crate::sync::store::device_join::PendingDeviceJoinHistoryConstruction,
         database: StoreDatabase,
-        storage: &'storage Arc<dyn SyncStorage>,
+        storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,
@@ -309,7 +309,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) fn from_snapshot(
         _authority: crate::sync::store::commit_publication::SnapshotHistoryConstruction,
         database: StoreDatabase,
-        storage: &'storage Arc<dyn SyncStorage>,
+        storage: &'storage Arc<dyn CloudSyncObjectStorage>,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         blob_cache: crate::sync::store::blob::StoreBlobCache,
         history_verifier: MergeHistoryVerifier<'storage>,

@@ -16,7 +16,7 @@ use coven_protocol::remote_object::{
 use coven_protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 use crate::sync::store::membership::InviteError;
 
@@ -441,14 +441,14 @@ impl MembershipMutationProgress {
 
 pub(super) struct MutationPersistence {
     database: StoreDatabase,
-    storage: std::sync::Arc<dyn SyncStorage>,
+    storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
     intent_hash: ObjectHash,
 }
 
 impl MutationPersistence {
     pub(super) fn new(
         database: StoreDatabase,
-        storage: std::sync::Arc<dyn SyncStorage>,
+        storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
         intent_hash: ObjectHash,
     ) -> MutationPersistence {
         MutationPersistence {

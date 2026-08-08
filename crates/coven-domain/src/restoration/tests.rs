@@ -38,8 +38,8 @@ use coven_storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObj
 use coven_storage::restore_code::{
     decode_restore_code, encode_restore_code, RestoreCode, RESTORE_CODE_VERSION,
 };
-use coven_storage::SyncStorage;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::CloudSyncObjectStorage;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 struct RestoreCloudKitOps {
     records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
@@ -835,7 +835,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key.clone()));
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
     let owner_storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             cloud.clone(),
             cipher.clone(),
             blob_paths,
@@ -1096,7 +1096,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     );
     let owner = UserKeypair::generate();
     let owner_storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             cloud.clone(),
             CloudCipher::Plaintext,
             BlobPathScheme::for_storage(HomeStorage::Browsable),
@@ -1176,7 +1176,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let owner_keypair = UserKeypair::generate();
 
         let owner_storage = Arc::new(
-            CloudSyncStorage::new(
+            CloudSyncConnection::new(
                 Arc::new(cloud.clone()) as Arc<dyn coven_storage::cloud::CloudHome>,
                 cipher.clone(),
                 blob_paths,
@@ -1328,7 +1328,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         .expect("open B db");
 
         // B's first real sync cycle, with no local changes of its own.
-        let joiner_storage = CloudSyncStorage::new(
+        let joiner_storage = CloudSyncConnection::new(
             Arc::new(
                 coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
                     cloudkit_ops,
@@ -1515,7 +1515,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let owner_keypair = UserKeypair::generate();
 
         let owner_storage = Arc::new(
-            CloudSyncStorage::new(
+            CloudSyncConnection::new(
                 cloud.clone(),
                 cipher.clone(),
                 blob_paths,
@@ -1562,7 +1562,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         )
         .await
         .expect("stage owner blob");
-        let cycle_storage = CloudSyncStorage::new(
+        let cycle_storage = CloudSyncConnection::new(
             cloud.clone(),
             cipher.clone(),
             blob_paths,
@@ -1759,7 +1759,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
          WHERE id = 'photo1'",
             )
             .await;
-        let restored_storage = CloudSyncStorage::new(
+        let restored_storage = CloudSyncConnection::new(
             cloud,
             cipher,
             blob_paths,

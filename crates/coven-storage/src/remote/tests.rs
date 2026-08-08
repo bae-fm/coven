@@ -141,12 +141,12 @@ async fn publish_sealed_blob(
     plaintext: &[u8],
     chunking: BlobChunking,
 ) -> (
-    CloudSyncStorage,
+    CloudSyncConnection,
     coven_protocol::blob::locator::StoredBlobRef,
     EncryptionService,
     tempfile::TempDir,
 ) {
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
         BlobPathScheme::Hashed,
@@ -297,7 +297,7 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
 async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
     let home = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -760,7 +760,7 @@ async fn the_fetch_window_splits_requests_without_changing_the_bytes() {
 async fn circle_blob_spool_uses_the_supplied_audience_key() {
     let home = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
         BlobPathScheme::Hashed,
@@ -823,7 +823,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
 async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
     let home = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
         BlobPathScheme::Hashed,
@@ -876,7 +876,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
 async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
     let home = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
         BlobPathScheme::Hashed,
@@ -949,7 +949,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
 async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
     let home = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
         BlobPathScheme::Hashed,
@@ -1021,7 +1021,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
 #[tokio::test]
 async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1064,7 +1064,7 @@ async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
 #[tokio::test]
 async fn protocol_publication_verifies_local_bytes_without_a_provider_body_read() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1099,7 +1099,7 @@ async fn protocol_publication_verifies_local_bytes_without_a_provider_body_read(
 #[tokio::test]
 async fn protocol_publication_refuses_local_semantic_mismatch_before_upload() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1160,7 +1160,7 @@ async fn blob_publication_uses_the_spool_without_a_provider_body_read() {
 
 #[test]
 fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1186,7 +1186,7 @@ fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
 #[tokio::test]
 async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home.clone()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1226,7 +1226,7 @@ async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
 #[tokio::test]
 async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -1257,7 +1257,7 @@ async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read()
 #[tokio::test]
 async fn protocol_object_read_rejects_domain_and_path_substitution() {
     let home = InMemoryCloudHome::new();
-    let storage = CloudSyncStorage::new(
+    let storage = CloudSyncConnection::new(
         Arc::new(home),
         CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
         BlobPathScheme::Hashed,
@@ -1333,7 +1333,7 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
 #[tokio::test]
 async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_not() {
     let home = Arc::new(InMemoryCloudHome::new());
-    let writer = CloudSyncStorage::new(
+    let writer = CloudSyncConnection::new(
         home.clone(),
         CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
         BlobPathScheme::Hashed,
@@ -1341,7 +1341,7 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         UserKeypair::generate(),
     )
     .expect("writer storage");
-    let stale_reader = CloudSyncStorage::new(
+    let stale_reader = CloudSyncConnection::new(
         home,
         CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32])),
         BlobPathScheme::Hashed,

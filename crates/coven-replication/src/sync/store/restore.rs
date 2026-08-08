@@ -35,7 +35,7 @@ pub(crate) use history::RestoreHistory;
 pub struct RestoringStore<'storage> {
     history: AuthorizedStoreHistory<'storage>,
     database: StoreDatabase,
-    storage: &'storage dyn SyncStorage,
+    storage: &'storage dyn CloudSyncObjectStorage,
     root: StoreRootRef,
     protocol: StoreProtocolRoot,
     membership: coven_protocol::membership::MembershipChain,

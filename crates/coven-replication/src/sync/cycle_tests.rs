@@ -25,8 +25,8 @@ use coven_protocol::blob::{CacheFill, Provenance};
 use coven_protocol::store_commit::SnapshotMeta;
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 use coven_storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
-use coven_storage::SyncStorage;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::CloudSyncObjectStorage;
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 const T0: &str = "2024-01-01T00:00:00Z";
 
@@ -97,8 +97,8 @@ fn cycle_cloud_storage(
     blob_paths: BlobPathScheme,
     store_id: &str,
     keypair: UserKeypair,
-) -> CloudSyncStorage {
-    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
+) -> CloudSyncConnection {
+    CloudSyncConnection::new(home, cipher, blob_paths, store_id, keypair)
         .expect("test cloud storage supports immutable copies")
 }
 
@@ -869,7 +869,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .bind_store_device(owner_db, owner)
             .await
             .expect("bind owner Store");
-        let owner_binding = coven_storage::SyncStorage::provider_binding(&*storage.storage())
+        let owner_binding = coven_storage::CloudSyncObjectStorage::provider_binding(&*storage.storage())
             .await
             .expect("resolve owner provider binding");
         let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
@@ -886,8 +886,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
                     },
                 },
             }));
-        let peer_storage: std::sync::Arc<dyn coven_storage::SyncStorage> = std::sync::Arc::new(
-            coven_storage::CloudSyncStorage::new(
+        let peer_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> = std::sync::Arc::new(
+            coven_storage::CloudSyncConnection::new(
                 peer_home.clone(),
                 coven_storage::CloudCipher::Encrypted(
                     coven_keys::encryption::EncryptionService::from_key([42; 32]),
@@ -2519,7 +2519,7 @@ use async_trait::async_trait;
 
 use coven_protocol::objects::StorageError;
 
-/// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
+/// A [`CloudSyncObjectStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
 /// INSERT through the same `Database` the cycle holds, once, before delegating
 /// the immutable package read to the inner mock.
@@ -5770,7 +5770,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let db = open();
     let store_database = coven_database::StoreDatabase::new(&db);
     let (_blob_temp, store_dir) = temp_store_dir();
-    let storage = coven_storage::CloudSyncStorage::new(
+    let storage = coven_storage::CloudSyncConnection::new(
         Arc::new(home.clone()),
         coven_storage::CloudCipher::Encrypted(encryption.clone()),
         coven_storage::BlobPathScheme::Hashed,
@@ -5807,7 +5807,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     drop(db);
 
     let reopened = open();
-    let storage = coven_storage::CloudSyncStorage::new(
+    let storage = coven_storage::CloudSyncConnection::new(
         Arc::new(home),
         coven_storage::CloudCipher::Encrypted(encryption),
         coven_storage::BlobPathScheme::Hashed,

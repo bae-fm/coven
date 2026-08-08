@@ -12,7 +12,7 @@ use coven_protocol::objects::{
 };
 
 #[async_trait]
-pub trait SyncStorage: Send + Sync {
+pub trait CloudSyncObjectStorage: Send + Sync {
     /// Return the cloud home's fixed blob path representation.
     fn blob_path_scheme(&self) -> crate::BlobPathScheme;
 
@@ -235,9 +235,9 @@ pub trait SyncStorage: Send + Sync {
 }
 
 #[async_trait]
-impl<T> SyncStorage for std::sync::Arc<T>
+impl<T> CloudSyncObjectStorage for std::sync::Arc<T>
 where
-    T: SyncStorage + ?Sized,
+    T: CloudSyncObjectStorage + ?Sized,
 {
     fn blob_path_scheme(&self) -> crate::BlobPathScheme {
         (**self).blob_path_scheme()

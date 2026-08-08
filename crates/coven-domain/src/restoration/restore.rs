@@ -23,7 +23,7 @@ use coven_replication::sync::store::{
 };
 use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use coven_storage::oauth::OAuthTokens;
-use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 /// Cloud provider source for restore: the join info a restore code carries
 /// plus the extras it can't (`RestoreCode` omits OAuth tokens because they
@@ -281,13 +281,14 @@ pub async fn restore_from_cloud(
         let cloud_home = source.open_cloud_home(&store_keys, clock.clone()).await?;
         let join_info = &source.join_info;
 
-        let storage: Arc<dyn coven_storage::SyncStorage> = Arc::new(CloudSyncStorage::new(
-            cloud_home,
-            cipher.clone(),
-            blob_paths,
-            store_id.to_string(),
-            keypair.clone(),
-        )?);
+        let storage: Arc<dyn coven_storage::CloudSyncObjectStorage> =
+            Arc::new(CloudSyncConnection::new(
+                cloud_home,
+                cipher.clone(),
+                blob_paths,
+                store_id.to_string(),
+                keypair.clone(),
+            )?);
 
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own

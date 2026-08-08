@@ -5,7 +5,7 @@ use super::*;
 /// drain that fails partway leaves the remaining objects named as cleanup
 /// targets for the operation that retries it.
 pub(crate) async fn delete_candidate_cleanup_targets<E>(
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
     database: &StoreDatabase,
     targets: impl IntoIterator<Item = coven_database::CandidateCleanupObject>,
 ) -> Result<(), E>

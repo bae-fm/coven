@@ -4,8 +4,8 @@ use coven_keys::keys::UserKeypair;
 
 use super::cycle::SyncCycleFailure;
 use coven_protocol::store_commit::StoreProtocolRoot;
-use coven_storage::SyncStorage;
-use coven_storage::{BlobPathScheme, CloudCipherAccess};
+use coven_storage::CloudSyncObjectStorage;
+use coven_storage::{BlobPathScheme, CloudSyncCipherStateAccess};
 
 pub(crate) mod acknowledgements;
 pub(crate) mod authorization;

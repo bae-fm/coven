@@ -19,7 +19,7 @@ const CAPABILITY_TYPES: &[&str] = &[
     "CircleEpochAccess",
     "ClockRef",
     "CloudHome",
-    "CloudSyncStorage",
+    "CloudSyncConnection",
     "Database",
     "DeviceIdentityCustody",
     "EncryptionService",
@@ -30,7 +30,7 @@ const CAPABILITY_TYPES: &[&str] = &[
     "StoreDatabase",
     "StoreDir",
     "StoreKeys",
-    "SyncStorage",
+    "CloudSyncObjectStorage",
 ];
 
 // Directory identity is fixed when an owner graph is composed. Runtime owners

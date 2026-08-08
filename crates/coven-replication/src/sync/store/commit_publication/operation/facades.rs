@@ -354,8 +354,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     pub(crate) async fn refresh_authorization_state(
         &self,
-        cipher: &dyn coven_storage::CloudCipherAccess,
-        pending_rotation: &dyn coven_storage::CloudRotationAccess,
+        cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
+        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {

@@ -19,7 +19,7 @@ use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 pub(crate) use history::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -84,7 +84,7 @@ use candidates::*;
 pub(crate) struct AuthorizedReclaim<'operation, 'storage> {
     writer: &'operation mut AuthorizedWriterOperation<'storage>,
     database: StoreDatabase,
-    storage: Arc<dyn SyncStorage>,
+    storage: Arc<dyn CloudSyncObjectStorage>,
     root: StoreRootRef,
     membership: coven_protocol::membership::MembershipChain,
 }
@@ -93,7 +93,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     pub(crate) fn new(
         writer: &'operation mut AuthorizedWriterOperation<'storage>,
         database: StoreDatabase,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         root: StoreRootRef,
         membership: coven_protocol::membership::MembershipChain,
     ) -> Self {
@@ -673,7 +673,7 @@ mod tests;
 
 pub(crate) async fn create_reclaim_exact_objects(
     object: &coven_database::DurableStoreReclaimObject,
-    storage: &dyn SyncStorage,
+    storage: &dyn CloudSyncObjectStorage,
 ) -> Result<(), StoreReclaimJournalError> {
     match object {
         coven_database::DurableStoreReclaimObject::Authorization {

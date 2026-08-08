@@ -19,7 +19,7 @@ use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_protocol::synced_schema::SyncedTable;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.

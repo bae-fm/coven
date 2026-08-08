@@ -1,4 +1,4 @@
-//! `SyncStorage` implementation backed by any `CloudHome`.
+//! `CloudSyncObjectStorage` implementation backed by any `CloudHome`.
 //!
 //! Handles the cloud home path layout (where keys, heads, images, etc. live)
 //! and how objects are protected at rest. The underlying `CloudHome` only deals
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
-use super::SyncStorage;
+use super::CloudSyncObjectStorage;
 use crate::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
 use coven_keys::encryption::{
     EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
@@ -38,8 +38,8 @@ mod storage_impl;
 pub use blob_io::open_sealed_blob;
 pub use blob_io::BlobChunking;
 pub use blob_io::{BlobPathScheme, BlobRangeReader};
-pub use cipher::{cloud_aad_context, CloudCipherAccess, CloudCipherState};
-pub use rotation::{CloudRotationAccess, PendingRotation};
+pub use cipher::{cloud_aad_context, CloudCipherState, CloudSyncCipherStateAccess};
+pub use rotation::{CloudSyncRotationStateAccess, PendingRotation};
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the store key (the default); a `Plaintext` home stores
@@ -50,9 +50,9 @@ pub enum CloudCipher {
     Plaintext,
 }
 
-/// `SyncStorage` that delegates raw I/O to a `CloudHome` and handles the path
+/// `CloudSyncObjectStorage` that delegates raw I/O to a `CloudHome` and handles the path
 /// layout and the at-rest protection (its [`CloudCipher`]).
-pub struct CloudSyncStorage {
+pub struct CloudSyncConnection {
     home: Arc<dyn CloudHome>,
     /// `Arc` (not `Box`) because a ranged read hands a clone to the
     /// [`BlobRangeReader`] it opens — the reader holds this client for the life
@@ -79,7 +79,7 @@ pub struct CloudSyncStorage {
     keypair: UserKeypair,
 }
 
-impl CloudSyncStorage {
+impl CloudSyncConnection {
     pub fn new(
         home: Arc<dyn CloudHome>,
         cipher: CloudCipher,
@@ -89,16 +89,16 @@ impl CloudSyncStorage {
     ) -> Result<Self, crate::cloud::CloudHomeError> {
         let exact = home.clone().exact_slot_storage().ok_or_else(|| {
             crate::cloud::CloudHomeError::Configuration(
-                "CloudSyncStorage requires exact-slot storage".to_string(),
+                "CloudSyncConnection requires exact-slot storage".to_string(),
             )
         })?;
         let exact_probe_peer = home.clone().exact_slot_storage().ok_or_else(|| {
             crate::cloud::CloudHomeError::Configuration(
-                "CloudSyncStorage requires a second exact-slot probe client".to_string(),
+                "CloudSyncConnection requires a second exact-slot probe client".to_string(),
             )
         })?;
         let provider_probes = ProviderProbeStorage::new(exact.clone(), exact_probe_peer);
-        Ok(CloudSyncStorage {
+        Ok(CloudSyncConnection {
             home,
             exact,
             provider_probes,
@@ -317,7 +317,10 @@ impl CloudSyncStorage {
             ))
             .unwrap()
         };
-        let provider = SyncStorage::provider_binding(self).await.unwrap().device;
+        let provider = CloudSyncObjectStorage::provider_binding(self)
+            .await
+            .unwrap()
+            .device;
         let registration = StoreDeviceRegistration::signed(
             root,
             StoreDeviceRegistrationOrigin::Founder {
@@ -372,7 +375,7 @@ impl CloudSyncStorage {
         encryption: &EncryptionService,
         custody: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, coven_keys::keys::KeyError> {
-        CloudCipherAccess::adopt_key_rotation(self, encryption, custody)
+        CloudSyncCipherStateAccess::adopt_key_rotation(self, encryption, custody)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -391,7 +394,7 @@ impl CloudSyncStorage {
     }
 }
 
-impl CloudCipherAccess for CloudSyncStorage {
+impl CloudSyncCipherStateAccess for CloudSyncConnection {
     fn snapshot(&self) -> CloudCipher {
         self.cipher.snapshot()
     }
@@ -405,7 +408,7 @@ impl CloudCipherAccess for CloudSyncStorage {
     }
 }
 
-impl CloudRotationAccess for CloudSyncStorage {
+impl CloudSyncRotationStateAccess for CloudSyncConnection {
     fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
         self.pending_rotation.mark_candidate(generation, mutation)
     }

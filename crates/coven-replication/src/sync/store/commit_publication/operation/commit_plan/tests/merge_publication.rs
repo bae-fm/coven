@@ -625,7 +625,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let home = InMemoryCloudHome::new();
         let keypair = UserKeypair::generate();
         let storage = Arc::new(
-            CloudSyncStorage::new(
+            CloudSyncConnection::new(
                 Arc::new(home),
                 CloudCipher::Plaintext,
                 BlobPathScheme::Plain,
@@ -710,7 +710,7 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,
@@ -765,7 +765,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = Arc::new(
-        CloudSyncStorage::new(
+        CloudSyncConnection::new(
             Arc::new(home),
             CloudCipher::Plaintext,
             BlobPathScheme::Plain,

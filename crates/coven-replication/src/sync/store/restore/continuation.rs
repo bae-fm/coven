@@ -38,7 +38,7 @@ impl<'storage> RestoringStore<'storage> {
     pub(crate) fn from_parts(
         history: AuthorizedStoreHistory<'storage>,
         database: StoreDatabase,
-        storage: &'storage dyn SyncStorage,
+        storage: &'storage dyn CloudSyncObjectStorage,
         root: StoreRootRef,
         protocol: StoreProtocolRoot,
         membership: coven_protocol::membership::MembershipChain,

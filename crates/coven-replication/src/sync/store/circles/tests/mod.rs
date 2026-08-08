@@ -27,7 +27,7 @@ use coven_protocol::store_commit::{
     StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StreamActivation,
 };
 use coven_storage::cloud::CloudHome;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 async fn create_test_store_in_its_own_task(
     db: &Database,
@@ -185,8 +185,8 @@ fn circle_test_cloud_storage(
     home: &Arc<coven_storage::InMemoryCloudHome>,
     store_id: &str,
     identity: &UserKeypair,
-) -> coven_storage::CloudSyncStorage {
-    coven_storage::CloudSyncStorage::new(
+) -> coven_storage::CloudSyncConnection {
+    coven_storage::CloudSyncConnection::new(
         home.clone(),
         coven_storage::CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
         coven_storage::BlobPathScheme::Hashed,

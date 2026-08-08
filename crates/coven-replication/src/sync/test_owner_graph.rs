@@ -6,7 +6,7 @@ use crate::sync::store::blob::{
 };
 use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
-use coven_storage::SyncStorage;
+use coven_storage::CloudSyncObjectStorage;
 
 #[derive(Clone)]
 pub struct TestOwnerGraph {
@@ -162,7 +162,7 @@ impl TestOwnerGraph {
     #[allow(clippy::too_many_arguments)]
     pub async fn make_local(
         &self,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         observer: Option<Arc<dyn coven_protocol::blob::BlobTransitionObserver>>,
         root_table: &str,
@@ -175,7 +175,10 @@ impl TestOwnerGraph {
             .await
     }
 
-    fn remote_blob_access(&self, storage: Arc<dyn SyncStorage>) -> RemoteStoreBlobAccess {
+    fn remote_blob_access(
+        &self,
+        storage: Arc<dyn CloudSyncObjectStorage>,
+    ) -> RemoteStoreBlobAccess {
         RemoteStoreBlobAccess::new(
             self.local_access.clone(),
             CurrentRemoteBlobSource::current(self.database.clone(), storage),
@@ -184,7 +187,7 @@ impl TestOwnerGraph {
 
     pub async fn read_blob(
         &self,
-        storage: Option<Arc<dyn SyncStorage>>,
+        storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
         match storage {
@@ -195,7 +198,7 @@ impl TestOwnerGraph {
 
     pub async fn open_blob_stream(
         &self,
-        storage: Option<Arc<dyn SyncStorage>>,
+        storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<crate::sync::BlobStream, crate::sync::BlobCacheError> {
         match storage {
@@ -210,7 +213,7 @@ impl TestOwnerGraph {
 
     pub async fn read_blob_range(
         &self,
-        storage: Option<Arc<dyn SyncStorage>>,
+        storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         reference: &coven_protocol::blob::RowBlobRef,
         offset: u64,
         len: u64,
@@ -223,7 +226,7 @@ impl TestOwnerGraph {
 
     pub async fn materialize_blob(
         &self,
-        storage: Option<Arc<dyn SyncStorage>>,
+        storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<(), crate::sync::BlobCacheError> {
         match storage {
@@ -238,7 +241,7 @@ impl TestOwnerGraph {
 
     pub async fn pin_blobs(
         &self,
-        storage: Option<Arc<dyn SyncStorage>>,
+        storage: Option<Arc<dyn CloudSyncObjectStorage>>,
         references: &[coven_protocol::blob::RowBlobRef],
     ) -> Result<(), crate::sync::BlobCacheError> {
         match storage {
@@ -249,7 +252,7 @@ impl TestOwnerGraph {
 
     pub fn connected_blob_transitions(
         &self,
-        storage: Arc<dyn SyncStorage>,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         observer: Option<Arc<dyn coven_protocol::blob::BlobTransitionObserver>>,
     ) -> ConnectedBlobTransitions {
@@ -269,7 +272,7 @@ impl TestOwnerGraph {
 
     pub async fn prepare_sync(
         &self,
-        storage: impl Into<std::sync::Arc<coven_storage::CloudSyncStorage>>,
+        storage: impl Into<std::sync::Arc<coven_storage::CloudSyncConnection>>,
         identity: coven_keys::keys::UserKeypair,
     ) -> Result<crate::sync::cycle::SyncComponents, String> {
         let expected_store_root = self
