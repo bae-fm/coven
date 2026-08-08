@@ -74,7 +74,6 @@ impl StoreDatabase {
                 if record.identity.domain == expected_domain
                     && record.identity.semantic_hash == ObjectHash::digest(&expected_bytes)
                     && record.identity.object == *retained.object()
-                    && record.bytes.canonical_semantic_bytes() == expected_bytes
                     && !matches!(
                         record.bytes.stored(),
                         coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }

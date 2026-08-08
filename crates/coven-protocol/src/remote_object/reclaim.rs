@@ -82,21 +82,12 @@ impl RemoteObjectRecord {
         let Self::SharedLiveSet(record) = self else {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         };
-        let package = crate::audience_package::AudiencePackage::parse(
-            record.bytes.canonical_semantic_bytes(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
         let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
-        let expected_size = u64::try_from(record.bytes.canonical_semantic_bytes().len())
-            .map_err(|_| RemoteObjectRecordError::InvalidReclaim)?;
         if !matches!(
             &record.identity.domain,
             SharedLiveSetObjectDomain::StorePackage { reference } if reference == target
         ) || record.identity.semantic_hash != target.content_hash
             || record.identity.object != target.object
-            || package.candidate_family() != target.candidate_family
-            || package.schema_version() != target.schema_version
-            || expected_size != target.changeset_size
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }
@@ -130,21 +121,12 @@ impl RemoteObjectRecord {
         let Self::SharedLiveSet(record) = self else {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         };
-        let package = crate::audience_package::AudiencePackage::parse(
-            record.bytes.canonical_semantic_bytes(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
         let expected_owner = SharedObjectOwner::StoreCommit(activation.clone());
-        let expected_size = u64::try_from(record.bytes.canonical_semantic_bytes().len())
-            .map_err(|_| RemoteObjectRecordError::InvalidReclaim)?;
         if !matches!(
             &record.identity.domain,
             SharedLiveSetObjectDomain::CirclePackage { reference } if reference == target
         ) || record.identity.semantic_hash != target.package.content_hash
             || record.identity.object != target.package.object
-            || package.candidate_family() != target.package.candidate_family
-            || package.schema_version() != target.package.schema_version
-            || expected_size != target.package.changeset_size
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }

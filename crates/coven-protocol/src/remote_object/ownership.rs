@@ -210,7 +210,6 @@ impl RemoteObjectRecord {
         if &record.identity.domain != domain
             || record.identity.semantic_hash != ObjectHash::digest(&canonical_semantic_bytes)
             || record.identity.object != *domain.package_object()?
-            || record.bytes.canonical_semantic_bytes() != canonical_semantic_bytes
             || record.bytes.stored().object() != domain.package_object()?
             || matches!(
                 record.bytes.stored(),
