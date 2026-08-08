@@ -487,14 +487,10 @@ impl RetainedMergeMaterializationCache {
                             crate::payload_spool::read_payload_blocking(store_dir, hash)
                                 .map_err(|error| DbError::Message(error.to_string()))
                         };
-                        let semantic = read(semantic_hash)?;
-                        remote.validate_payload(&semantic).map_err(|error| {
-                            DbError::context(
-                                format!("retained Merge membership {kind} {object_id} payload"),
-                                error,
-                            )
-                        })?;
-                        Ok(MembershipAuthorityBytes::new(semantic, read(stored_hash)?))
+                        Ok(MembershipAuthorityBytes::new(
+                            read(semantic_hash)?,
+                            read(stored_hash)?,
+                        ))
                     };
                     let family = materialization.commit().candidate_family();
                     let owner = materialization.commit_ref();

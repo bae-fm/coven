@@ -37,10 +37,10 @@ impl RemoteObjectRecord {
     /// record is filed under, and that its ownership state holds together.
     ///
     /// Byte agreement is [`Self::validate_payload`]'s job, and it is checked
-    /// where bytes enter — construction, and every spool read — rather than on
-    /// every load. Identity and payload cannot drift apart afterwards: neither
-    /// hash mutates across transitions, and the two domain changes that do
-    /// happen re-wrap the same reference.
+    /// where bytes arrive from outside this device's own durable state, rather
+    /// than on every load. Identity and payload cannot drift apart afterwards:
+    /// neither hash mutates across transitions, and the two domain changes that
+    /// do happen re-wrap the same reference.
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         self.validate_payload_placement()?;
         match self {
@@ -150,10 +150,12 @@ impl RemoteObjectRecord {
     /// domain parse, its signature verifications, and its agreement with the
     /// reference.
     ///
-    /// Called where the bytes enter: at construction, and after every spool
-    /// read, before the bytes are used. A record loaded from its row does not
-    /// run this, because the file is named for the digest of its own contents
-    /// and the record's identity fixed that digest when it was built.
+    /// Called where bytes enter from somewhere this device does not already
+    /// trust: a constructor handed the payload, a pull that parsed it off the
+    /// wire. Reading back this device's own durable state does not run it —
+    /// neither loading the row nor reading the spool file the row names, which
+    /// is named for the digest of its own contents and was fixed by this
+    /// record's identity when it was built.
     pub fn validate_payload(
         &self,
         canonical_semantic_bytes: &[u8],

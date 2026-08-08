@@ -63,14 +63,7 @@ impl PreparedAudiencePackage {
         };
         let semantic_bytes = read(semantic_hash)?;
         let stored_bytes = read(stored_hash)?;
-        let prepared = Self::new(remote_object_id, semantic_bytes, stored_bytes, object)?;
-        // The spool is content-keyed, so the bytes match the hashes that named
-        // them; what this checks is that those bytes are the package the
-        // record's reference describes — the ingestion check for a spool read.
-        remote
-            .validate_payload(prepared.semantic_bytes())
-            .map_err(|error| DbError::context("prepared package payload", error))?;
-        Ok(prepared)
+        Self::new(remote_object_id, semantic_bytes, stored_bytes, object)
     }
 
     pub fn new(

@@ -3,12 +3,13 @@ use super::*;
 use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
 
-/// The plaintext one record names, read from the spool and checked against the
-/// identity that named it.
+/// The plaintext one record names, read from the spool.
 ///
-/// A record loaded from its row no longer re-verifies its payload, so the check
-/// happens here — at the point the bytes enter, which is what makes reading them
-/// safe without paying for it on every load.
+/// The file is named for the digest of its own contents and the record's
+/// identity fixed that digest when it was built, so a read of this device's own
+/// durable state hands the bytes back as they are — the same trust the rows
+/// beside them get. Verification belongs where untrusted bytes arrive and where
+/// bytes leave for a remote, not on a local read.
 fn spooled_semantic_payload(
     records: StoreRecords<'_>,
     remote: &coven_protocol::remote_object::RemoteObjectRecord,
@@ -20,16 +21,9 @@ fn spooled_semantic_payload(
             remote.object_id()
         )));
     };
-    let bytes = records
+    records
         .payload(hash)
-        .map_err(|error| DbError::Message(error.to_string()))?;
-    remote.validate_payload(&bytes).map_err(|error| {
-        DbError::context(
-            format!("remote object {} payload", remote.object_id()),
-            error,
-        )
-    })?;
-    Ok(bytes)
+        .map_err(|error| DbError::Message(error.to_string()))
 }
 
 impl StoreDatabase {
