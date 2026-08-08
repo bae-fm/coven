@@ -248,7 +248,7 @@ impl RetainedMergeMaterializationCache {
     ) -> Result<rusqlite::Connection, DbError> {
         let baseline =
             StoreDatabase::generation_zero_replay_baseline_on(StoreRecords::new(live, store_dir))?;
-        let replay = baseline.open_image()?;
+        let replay = baseline.open_image(store_dir)?;
         replay
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;

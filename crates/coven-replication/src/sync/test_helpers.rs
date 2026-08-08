@@ -87,6 +87,26 @@ impl MasterKeyCustody for TestCustody {
     }
 }
 
+/// Copy the payload files one store directory holds into another.
+///
+/// A store is a directory, not a file: rows name payload files beside the
+/// database, so a test that copies the database with `VACUUM INTO` and opens the
+/// copy has to bring those files along, exactly as a device carries its whole
+/// store directory rather than one file out of it.
+pub fn copy_payload_spool(
+    from: &coven_foundation::store_dir::StoreDir,
+    to: &coven_foundation::store_dir::StoreDir,
+) {
+    let source = from.payload_spool_dir();
+    let destination = to.payload_spool_dir();
+    std::fs::create_dir_all(&destination).expect("create the copied payload spool directory");
+    for entry in std::fs::read_dir(&source).expect("read the payload spool being copied") {
+        let entry = entry.expect("payload spool entry");
+        std::fs::copy(entry.path(), destination.join(entry.file_name()))
+            .expect("copy one payload into the copied store directory");
+    }
+}
+
 /// Hex-encoded ed25519 public key, as membership entries and the wrapped-key
 /// store identify a member.
 pub fn pubkey_hex(kp: &UserKeypair) -> String {

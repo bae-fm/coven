@@ -357,6 +357,13 @@ fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommit
     cut.frontier().covers(&covered)
 }
 
+/// The database image a replay starts from, and the authority that says which
+/// history it covers.
+///
+/// The image itself is a payload file — `image_hash` names it in the spool, as
+/// `authority_hash` on the row names the authority's canonical bytes. The row
+/// holds the facts; a multi-megabyte database image inside a SQLite column is
+/// the shape this campaign takes out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedReplayBaseline {
     pub generation: u64,
@@ -364,7 +371,6 @@ pub struct RetainedReplayBaseline {
     pub schema_version: u32,
     pub routing_hash: ObjectHash,
     pub image_hash: ObjectHash,
-    pub image_bytes: Vec<u8>,
     pub authority: RetainedReplayAuthority,
 }
 
@@ -381,8 +387,7 @@ impl RetainedReplayBaseline {
             exact_cut: CommitFrontier(Default::default()),
             schema_version,
             routing_hash,
-            image_hash: ObjectHash::digest(&image_bytes),
-            image_bytes,
+            image_hash: install_image(source, &image_bytes)?,
             authority: RetainedReplayAuthority::Genesis(authority),
         };
         baseline.validate_image(source.store_dir())?;
@@ -402,8 +407,7 @@ impl RetainedReplayBaseline {
             exact_cut: authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
-            image_hash: ObjectHash::digest(&image_bytes),
-            image_bytes,
+            image_hash: install_image(source, &image_bytes)?,
             authority: RetainedReplayAuthority::StableSnapshot(authority),
         };
         baseline.validate_image(source.store_dir())?;
@@ -415,22 +419,29 @@ impl RetainedReplayBaseline {
             .map_err(|error| DbError::context("serialize retained replay authority", error))
     }
 
-    pub fn open_image(&self) -> Result<Connection, DbError> {
-        open_image(&self.image_bytes)
+    /// A private copy of the baseline image, opened from the payload file
+    /// `image_hash` names. Replays write into what they open — installing
+    /// bootstrap tables, applying materializations — so this deserializes the
+    /// file into memory rather than opening it in place.
+    pub fn open_image(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<Connection, DbError> {
+        let image = crate::payload_spool::read_payload_blocking(store_dir, self.image_hash)
+            .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))?;
+        open_image(&image)
     }
 
     pub fn validate_image(
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
-        if self.generation != GENERATION_ZERO
-            || self.image_hash != ObjectHash::digest(&self.image_bytes)
-        {
+        if self.generation != GENERATION_ZERO {
             return Err(DbError::Message(
                 "generation-zero retained replay baseline metadata is inconsistent".to_string(),
             ));
         }
-        let image = open_image(&self.image_bytes)?;
+        let image = self.open_image(store_dir)?;
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {
@@ -565,6 +576,16 @@ impl RetainedReplayBaseline {
 fn open_image(image: &[u8]) -> Result<Connection, DbError> {
     crate::open_database_image(image)
         .map_err(|error| DbError::context("open retained replay database image", error))
+}
+
+/// Put a freshly projected image in the spool and return the hash naming it.
+/// The file lands before the row that references it, so a baseline row never
+/// names an image that is not there; an image whose insert never commits is
+/// inert content-keyed garbage.
+fn install_image(source: StoreRecords<'_>, image: &[u8]) -> Result<ObjectHash, DbError> {
+    source
+        .install_payload(image)
+        .map_err(|error| DbError::Message(format!("install retained replay image: {error}")))
 }
 
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose

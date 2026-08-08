@@ -178,9 +178,15 @@ fn retained_replay_baseline_has_one_closed_active_row() {
         conn.execute(
             "INSERT INTO retained_replay_baselines
                  (singleton, generation, exact_cut, schema_version,
-                  routing_hash, image_hash, image_bytes, authority_bytes)
-                 VALUES (?1, ?2, '{}', 1, ?3, ?4, x'01', x'01')",
-            rusqlite::params![singleton, generation, "a".repeat(64), "b".repeat(64)],
+                  routing_hash, image_hash, authority_hash)
+                 VALUES (?1, ?2, '{}', 1, ?3, ?4, ?5)",
+            rusqlite::params![
+                singleton,
+                generation,
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64)
+            ],
         )
     };
 

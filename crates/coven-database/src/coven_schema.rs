@@ -29,8 +29,7 @@ macro_rules! coven_tables {
     schema_version INTEGER NOT NULL CHECK (schema_version >= 0),
     routing_hash TEXT NOT NULL CHECK (length(routing_hash) = 64),
     image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
-    image_bytes BLOB NOT NULL CHECK (length(image_bytes) > 0),
-    authority_bytes BLOB NOT NULL CHECK (length(authority_bytes) > 0)
+    authority_hash TEXT NOT NULL CHECK (length(authority_hash) = 64)
 "
         );
         $visit!(

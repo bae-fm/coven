@@ -336,6 +336,10 @@ pub fn release_payload_owner_on(conn: &Connection, owner_key: &str) -> Result<()
     set_payload_owner_claims_on(conn, owner_key, &BTreeSet::new())
 }
 
+/// The owner key naming the single retained replay baseline row's claim on the
+/// two payloads it names: its database image and its canonical authority bytes.
+pub const RETAINED_REPLAY_BASELINE_OWNER_KEY: &str = "retained-replay-baseline";
+
 /// The owner key naming one Circle operation's claim on its prepared objects.
 pub fn circle_operation_owner_key(operation_id: &str) -> String {
     format!("circle-operation:{operation_id}")

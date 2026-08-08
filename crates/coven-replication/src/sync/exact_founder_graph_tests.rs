@@ -195,3 +195,105 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
         .validate_image(db.store_dir_for_test())
         .expect("validate replay image");
 }
+
+/// The baseline's database image and authority are payload files its row names,
+/// not columns it carries: the row claims both hashes, the files hold exactly
+/// those bytes, and a baseline whose image file is gone fails to load instead of
+/// producing an image from anywhere else.
+#[tokio::test]
+async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
+    let db = open_test_db();
+    TestStore::create(
+        &db,
+        "retained-replay-payloads",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let database = coven_database::StoreDatabase::new(&db);
+    let store_dir = db.store_dir_for_test().clone();
+    let baseline = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("Store creation installs a retained replay baseline");
+    let authority_bytes = baseline
+        .canonical_authority_bytes()
+        .expect("canonical authority bytes");
+    let authority_hash = coven_protocol::store_commit::ObjectHash::digest(&authority_bytes);
+
+    let claimed = database
+        .payload_owner_claims(coven_database::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY)
+        .await
+        .expect("read baseline payload claims");
+    let mut expected = vec![baseline.image_hash, authority_hash];
+    expected.sort();
+    assert_eq!(claimed, expected);
+
+    let image_path = store_dir.payload_spool_path(baseline.image_hash);
+    let image_bytes = std::fs::read(&image_path).expect("read image payload");
+    assert_eq!(
+        coven_protocol::store_commit::ObjectHash::digest(&image_bytes),
+        baseline.image_hash
+    );
+    assert_eq!(
+        std::fs::read(store_dir.payload_spool_path(authority_hash))
+            .expect("read authority payload"),
+        authority_bytes
+    );
+
+    std::fs::remove_file(&image_path).expect("remove image payload");
+    let error = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect_err("a baseline whose image payload is gone must not load");
+    assert!(
+        error.to_string().contains("absent from the spool"),
+        "{error}"
+    );
+
+    std::fs::write(&image_path, &image_bytes).expect("restore image payload");
+    database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("baseline loads again once its image payload is back");
+}
+
+/// Replacing the baseline's authority replaces its claim set: the superseded
+/// authority payload is the last thing naming its bytes, so it is owed a
+/// deletion, while the image the row keeps naming is not.
+#[tokio::test]
+async fn replacing_the_replay_authority_owes_the_superseded_payload_a_deletion() {
+    let db = open_test_db();
+    TestStore::create(
+        &db,
+        "retained-replay-authority-swap",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let database = coven_database::StoreDatabase::new(&db);
+    let baseline = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("Store creation installs a retained replay baseline");
+    let superseded = coven_protocol::store_commit::ObjectHash::digest(
+        &baseline
+            .canonical_authority_bytes()
+            .expect("canonical authority bytes"),
+    );
+
+    database
+        .replace_generation_zero_replay_authority_for_test(b"{\"kind\":\"other\"}".to_vec())
+        .await
+        .expect("replace retained replay authority");
+
+    assert_eq!(
+        database
+            .owed_payload_spool_cleanup()
+            .await
+            .expect("read owed payload cleanup"),
+        vec![superseded]
+    );
+}

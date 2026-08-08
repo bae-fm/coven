@@ -2233,6 +2233,10 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         })
         .await
         .expect("copy the locally-authored retained input");
+    crate::sync::test_helpers::copy_payload_spool(
+        source.store_dir_for_test(),
+        &coven_foundation::store_dir::StoreDir::new(target_dir.path()),
+    );
     let target = coven_database::Database::open(
         &target_path,
         test_synced_tables(),

@@ -373,8 +373,7 @@ struct StoredGenerationZeroReplayBaseline {
     schema_version: i64,
     routing_hash: String,
     image_hash: String,
-    image_bytes: Vec<u8>,
-    authority_bytes: Vec<u8>,
+    authority_hash: String,
 }
 
 pub fn load_generation_zero_replay_baseline_on(
@@ -384,7 +383,7 @@ pub fn load_generation_zero_replay_baseline_on(
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn
         .query_row(
             "SELECT generation, exact_cut, schema_version,
-                    routing_hash, image_hash, image_bytes, authority_bytes
+                    routing_hash, image_hash, authority_hash
              FROM retained_replay_baselines WHERE singleton = 1",
             [],
             |row| {
@@ -394,8 +393,7 @@ pub fn load_generation_zero_replay_baseline_on(
                     schema_version: row.get(2)?,
                     routing_hash: row.get(3)?,
                     image_hash: row.get(4)?,
-                    image_bytes: row.get(5)?,
-                    authority_bytes: row.get(6)?,
+                    authority_hash: row.get(5)?,
                 })
             },
         )
@@ -410,14 +408,21 @@ pub fn load_generation_zero_replay_baseline_on(
         .map_err(|_| DbError::Message("retained replay schema version exceeds u32".to_string()))?;
     let parsed_exact_cut: CommitFrontier = serde_json::from_str(&stored.exact_cut)
         .map_err(|error| DbError::context("retained replay exact cut", error))?;
-    let authority: RetainedReplayAuthority = serde_json::from_slice(&stored.authority_bytes)
+    let authority_hash = stored
+        .authority_hash
+        .parse()
+        .map_err(|error| DbError::context("retained replay authority hash", error))?;
+    let authority_bytes = records
+        .payload(authority_hash)
+        .map_err(|error| DbError::Message(format!("read retained replay authority: {error}")))?;
+    let authority: RetainedReplayAuthority = serde_json::from_slice(&authority_bytes)
         .map_err(|error| DbError::context("retained replay authority", error))?;
     if serde_json::to_string(&parsed_exact_cut)
         .map_err(|error| DbError::context("serialize retained replay exact cut", error))?
         != stored.exact_cut
         || serde_json::to_vec(&authority)
             .map_err(|error| DbError::context("serialize retained replay authority", error))?
-            != stored.authority_bytes
+            != authority_bytes
     {
         return Err(DbError::Message(
             "retained replay baseline metadata is not canonical".to_string(),
@@ -435,12 +440,11 @@ pub fn load_generation_zero_replay_baseline_on(
             .image_hash
             .parse()
             .map_err(|error| DbError::context("retained replay image hash", error))?,
-        image_bytes: stored.image_bytes,
         authority,
     };
     baseline.validate_image(records.store_dir())?;
     validate_replay_authority_on(conn, &baseline)?;
-    let image = baseline.open_image()?;
+    let image = baseline.open_image(records.store_dir())?;
     let routing = load_coven_metadata(&image)?;
     if routing.hash() != baseline.routing_hash {
         return Err(DbError::Message(
@@ -490,11 +494,14 @@ pub(crate) fn insert_retained_replay_baseline_on(
 ) -> Result<(), DbError> {
     let conn = records.conn();
     validate_replay_authority_on(conn, baseline)?;
+    let authority_hash = records
+        .install_payload(&baseline.canonical_authority_bytes()?)
+        .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
     conn.execute(
         "INSERT INTO retained_replay_baselines
          (singleton, generation, exact_cut, schema_version,
-          routing_hash, image_hash, image_bytes, authority_bytes)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          routing_hash, image_hash, authority_hash)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             i64::try_from(baseline.generation).map_err(|_| {
                 DbError::Message("retained replay generation exceeds SQLite INTEGER".to_string())
@@ -505,11 +512,15 @@ pub(crate) fn insert_retained_replay_baseline_on(
             i64::from(baseline.schema_version),
             baseline.routing_hash.to_string(),
             baseline.image_hash.to_string(),
-            &baseline.image_bytes,
-            baseline.canonical_authority_bytes()?,
+            authority_hash.to_string(),
         ],
     )
     .map_err(DbError::from)?;
+    crate::payload_spool::set_payload_owner_claims_on(
+        conn,
+        crate::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+        &std::collections::BTreeSet::from([baseline.image_hash, authority_hash]),
+    )?;
     let installed = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
         DbError::Message("installed retained replay baseline is absent".to_string())
     })?;
