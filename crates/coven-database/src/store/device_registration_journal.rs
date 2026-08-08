@@ -29,13 +29,11 @@ impl LocalRegistrationRecord {
     ) -> Result<Self, DbError> {
         let reference = StoreDeviceRegistrationRef::from_registration(
             &registration.value,
-            registration.object.clone(),
+            registration.prepared.reference().clone(),
         );
         if registration.value.to_bytes() != registration.bytes
-            || registration.object != *registration.prepared.reference()
             || initial_ack.value.to_bytes() != initial_ack.bytes
-            || initial_ack.object != *initial_ack.prepared.reference()
-            || initial_ack_ref.object != initial_ack.object
+            || &initial_ack_ref.object != initial_ack.prepared.reference()
             || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
             || initial_ack_ref.registration != reference
             || initial_ack_ref.sequence != initial_ack.value.sequence
@@ -561,7 +559,6 @@ impl StoreDatabase {
                             initial_ack: ExactProtocolObject {
                                 value: initial_ack_value,
                                 bytes: ack_bytes,
-                                object: initial_ack_prepared.reference().clone(),
                                 prepared: initial_ack_prepared,
                             },
                             state: serde_json::from_str(&state).map_err(|error| {
@@ -586,7 +583,7 @@ impl StoreDatabase {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let registration_ref = StoreDeviceRegistrationRef::from_registration(
                     &registration.value,
-                    registration.object.clone(),
+                    registration.prepared.reference().clone(),
                 );
                 if registration_ref.object != *registration.prepared.reference()
                     || initial_ack.object != *initial_ack_object.prepared.reference()

@@ -79,7 +79,6 @@ impl<'storage> RegistrationOutbox<'storage> {
                     coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: outbound.registration_bytes,
-                        object: outbound.prepared.reference().clone(),
                         prepared: outbound.prepared,
                     },
                     outbound.initial_ack_ref,

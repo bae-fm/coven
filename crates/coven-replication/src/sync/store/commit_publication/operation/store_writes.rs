@@ -80,7 +80,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 storage
                     .verify_readback(
                         &commit_context,
-                        &batch.commit.object,
+                        batch.commit.prepared.reference(),
                         &commit_prefix,
                         &batch.commit.bytes,
                     )
@@ -113,7 +113,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .observe_occupied_merge_head(
                             head,
                             commit,
-                            batch.head.object.slot(),
+                            batch.head.prepared.reference().slot(),
                             &head_prefix,
                         )
                         .await?;
@@ -180,12 +180,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .observe_occupied_merge_head(
                         head,
                         commit,
-                        batch.head.object.slot(),
+                        batch.head.prepared.reference().slot(),
                         &head_prefix,
                     )
                     .await?;
                 if observation.winner() != head
-                    || observation.winner_prepared().reference() != &batch.head.object
+                    || observation.winner_prepared().reference() != batch.head.prepared.reference()
                 {
                     return Err(StoreError::InvalidOutbound(
                         "prepared head exact readback differs from its signed bytes".to_string(),
@@ -204,7 +204,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 database
                     .mark_store_head_uploaded(StoreDeviceHeadRef {
                         head_hash: head.head_hash(),
-                        object: batch.head.object.clone(),
+                        object: batch.head.prepared.reference().clone(),
                     })
                     .await?;
                 #[cfg(any(test, feature = "test-utils"))]

@@ -310,7 +310,7 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
         .expect("read retained snapshot outbox")
         .expect("snapshot remains staged");
     assert!(home
-        .get(pending.image.object.slot().logical_key())
+        .get(pending.image.prepared.reference().slot().logical_key())
         .is_some());
     assert!(home
         .get(pending.reference.object.slot().logical_key())
@@ -345,7 +345,7 @@ async fn occupied_snapshot_image_slot_blocks_metadata_and_completion() {
         .await
         .expect("read snapshot outbox")
         .expect("snapshot remains staged");
-    let image_slot = pending.image.object.slot().clone();
+    let image_slot = pending.image.prepared.reference().slot().clone();
     home.insert_exact_object(image_slot.logical_key(), b"competing image".to_vec());
 
     assert!(device.resume_snapshot_publication().await.is_err());

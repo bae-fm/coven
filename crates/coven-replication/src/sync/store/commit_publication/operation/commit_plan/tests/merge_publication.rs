@@ -439,8 +439,8 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         .await
         .expect("persist Merge abandonment"));
     let authority = fixture.prepared_write().await;
-    let authority_commit = authority.commit.object.clone();
-    let authority_head = authority.head.object.clone();
+    let authority_commit = authority.commit.prepared.reference().clone();
+    let authority_head = authority.head.prepared.reference().clone();
     let winner = fixture.publish_competing_merge_head().await;
 
     assert_eq!(

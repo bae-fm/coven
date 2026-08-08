@@ -175,9 +175,7 @@ impl<'storage> RestoringStore<'storage> {
                 &registration,
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            if initial_ack != durable.initial_ack.value
-                || durable.initial_ack.object != *durable.initial_ack.prepared.reference()
-            {
+            if initial_ack != durable.initial_ack.value {
                 return Err(StoreRegistrationError::Invalid(
                     "staged Owner recovery acknowledgement differs from its exact authority".into(),
                 ));
@@ -200,13 +198,11 @@ impl<'storage> RestoringStore<'storage> {
                     &durable.initial_ack.bytes,
                 )
                 .await?;
-            let registration_object = durable.prepared.reference().clone();
             PreparedRecoveryReadiness {
                 registration: RecoveryProtocolObject::from_remote_state(
                     coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes: durable.registration_bytes,
-                        object: registration_object,
                         prepared: durable.prepared,
                     },
                     registration_ref,

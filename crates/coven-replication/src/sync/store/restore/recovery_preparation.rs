@@ -90,12 +90,10 @@ impl<'storage> RestoringStore<'storage> {
                     &registration,
                     prepared.reference().clone(),
                 );
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: registration,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -111,12 +109,10 @@ impl<'storage> RestoringStore<'storage> {
                     &expected,
                     prepared.reference().clone(),
                 );
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: expected,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -202,12 +198,10 @@ impl<'storage> RestoringStore<'storage> {
                             .into(),
                     ));
                 }
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -254,12 +248,10 @@ impl<'storage> RestoringStore<'storage> {
                     ack_hash: ack.ack_hash(),
                     object: prepared.reference().clone(),
                 };
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: ack,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -322,12 +314,10 @@ impl<'storage> RestoringStore<'storage> {
                         "existing Owner recovery node differs from its exact authority".into(),
                     ));
                 }
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Existing {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -372,12 +362,10 @@ impl<'storage> RestoringStore<'storage> {
                     node_hash: node.node_hash(),
                     object: prepared.reference().clone(),
                 };
-                let object = prepared.reference().clone();
                 Ok(RecoveryProtocolObject::Prepared {
                     exact: coven_protocol::objects::ExactProtocolObject {
                         value: node,
                         bytes,
-                        object,
                         prepared,
                     },
                     reference,
@@ -510,14 +498,12 @@ impl<'storage> RestoringStore<'storage> {
                 coven_protocol::objects::ExactProtocolObject {
                     value: registration.value().clone(),
                     bytes: registration_bytes,
-                    object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 initial_ack_ref,
                 coven_protocol::objects::ExactProtocolObject {
                     value: initial_ack.value,
                     bytes: initial_ack_bytes,
-                    object: initial_ack_prepared.reference().clone(),
                     prepared: initial_ack_prepared,
                 },
                 registration.activation().clone(),

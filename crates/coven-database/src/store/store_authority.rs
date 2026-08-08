@@ -336,11 +336,11 @@ impl StoreDatabase {
             let root = coven_protocol::store_commit::StoreRootRef {
                 store_root_id: graph.root.value.descriptor.store_root_id(),
                 store_root_hash: graph.root.value.object_hash(),
-                object: graph.root.object.clone(),
+                object: graph.root.prepared.reference().clone(),
             };
             let registration = StoreDeviceRegistrationRef::from_registration(
                 &graph.registration.value,
-                graph.registration.object.clone(),
+                graph.registration.prepared.reference().clone(),
             );
             if root != expected_root
                 || registration != expected_registration

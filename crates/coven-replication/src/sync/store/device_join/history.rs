@@ -361,14 +361,12 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                 coven_database::ExactProtocolObject {
                     value: expected_registration.clone(),
                     bytes: expected_registration.to_bytes(),
-                    object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 initial_ack_ref,
                 coven_database::ExactProtocolObject {
                     value: initial_ack.clone(),
                     bytes: initial_ack.to_bytes(),
-                    object: ack_prepared.reference().clone(),
                     prepared: ack_prepared,
                 },
             ))

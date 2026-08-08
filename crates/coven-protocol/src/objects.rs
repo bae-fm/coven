@@ -532,13 +532,19 @@ pub fn verify_membership_head_reference(
     Ok(())
 }
 
-/// One loaded protocol object: its typed value, exact bytes, reference, and
-/// prepared upload representation.
+/// One loaded protocol object: its typed value, its canonical plaintext, and
+/// the bytes that go to storage.
+///
+/// `bytes` and `prepared` are not the same thing wherever the object is
+/// encrypted — a snapshot image uploads its ciphertext through `prepared` and
+/// compares its plaintext through `bytes` on readback — so both stay. The
+/// object's reference lives on `prepared` alone; a separate copy beside it was
+/// always assigned from `prepared.reference()` and only gave the two a way to
+/// disagree.
 #[derive(Debug, Clone)]
 pub struct ExactProtocolObject<T> {
     pub value: T,
     pub bytes: Vec<u8>,
-    pub object: ExactObjectRef,
     pub prepared: PreparedExactObject,
 }
 

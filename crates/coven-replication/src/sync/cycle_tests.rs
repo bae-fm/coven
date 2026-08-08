@@ -1959,7 +1959,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
     let coven_database::DurableFounderMembership { head, .. } = graph.membership;
     storage
         .storage()
-        .delete_protocol_object(&head.object)
+        .delete_protocol_object(head.prepared.reference())
         .await
         .expect("delete exact founder head");
     assert!(

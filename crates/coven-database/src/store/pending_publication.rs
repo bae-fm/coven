@@ -262,13 +262,11 @@ impl StoreDatabase {
                         commit: ExactProtocolObject {
                             value: commit_value,
                             bytes: commit.semantic_bytes().to_vec(),
-                            object: commit.prepared().reference().clone(),
                             prepared: commit.prepared().clone(),
                         },
                         head: ExactProtocolObject {
                             value: head_value,
                             bytes: head.semantic_bytes().to_vec(),
-                            object: head.prepared().reference().clone(),
                             prepared: head.prepared().clone(),
                         },
                     })

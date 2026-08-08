@@ -1144,7 +1144,7 @@ async fn run_excluded_author_candidate_cleanup_case(
             .exact_objects()
             .cloned()
             .collect::<Vec<_>>();
-    let candidate_head = candidate.head.object.clone();
+    let candidate_head = candidate.head.prepared.reference().clone();
     let candidate_head_context = ProtocolObjectContext::signed_plaintext(
         store.root.store_root_hash,
         ProtocolObjectDomain::StoreHead,

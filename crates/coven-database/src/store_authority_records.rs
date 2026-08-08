@@ -17,10 +17,7 @@ impl DurableFounderGraph {
     pub fn validate(&self) -> Result<(), DbError> {
         let root = StoreProtocolRoot::parse(&self.root.bytes)
             .map_err(|error| DbError::context("founder Store root", error))?;
-        if root != self.root.value
-            || root.object_hash() != self.root.value.object_hash()
-            || self.root.object != *self.root.prepared.reference()
-        {
+        if root != self.root.value || root.object_hash() != self.root.value.object_hash() {
             return Err(DbError::Message(
                 "founder Store root differs from its prepared exact object".to_string(),
             ));
@@ -28,7 +25,7 @@ impl DurableFounderGraph {
         let root_ref = coven_protocol::store_commit::StoreRootRef {
             store_root_id: root.descriptor.store_root_id(),
             store_root_hash: root.object_hash(),
-            object: self.root.object.clone(),
+            object: self.root.prepared.reference().clone(),
         };
         let registration = StoreDeviceRegistration::parse_at(
             &self.registration.bytes,
@@ -37,9 +34,9 @@ impl DurableFounderGraph {
         )
         .map_err(|error| DbError::context("founder Store registration", error))?;
         if registration != self.registration.value
-            || self.registration.object != *self.registration.prepared.reference()
             || registration.author_pubkey != root.descriptor.founder_pubkey
-            || self.registration.object.slot() != &root.descriptor.founder_registration
+            || self.registration.prepared.reference().slot()
+                != &root.descriptor.founder_registration
             || registration.provider != root.descriptor.founder_provider_admin.provider
             || !matches!(
                 registration.origin,
@@ -52,7 +49,7 @@ impl DurableFounderGraph {
         }
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration,
-            self.registration.object.clone(),
+            self.registration.prepared.reference().clone(),
         );
         let initial_ack = StoreAck::parse_at(
             &self.initial_ack.bytes,
@@ -64,8 +61,7 @@ impl DurableFounderGraph {
         if initial_ack != self.initial_ack.value
             || self.initial_ack_ref.registration != registration_ref
             || self.initial_ack_ref.sequence != 1
-            || self.initial_ack_ref.object != self.initial_ack.object
-            || self.initial_ack.object != *self.initial_ack.prepared.reference()
+            || &self.initial_ack_ref.object != self.initial_ack.prepared.reference()
             || initial_ack.successor.predecessor.is_some()
             || initial_ack.registration != registration_ref
             || !initial_ack.store_cut.0.is_empty()
@@ -87,8 +83,7 @@ impl DurableFounderGraph {
                     .validate_merge_founder_entry(&parsed_entry)
                     .is_err()
                 || entry_ref.coord != parsed_entry.coord()
-                || entry_ref.object != entry.object
-                || entry.object != *entry.prepared.reference()
+                || &entry_ref.object != entry.prepared.reference()
             {
                 return Err(DbError::Message(
                     "founder membership entry differs from its root or exact reference".to_string(),
@@ -114,9 +109,8 @@ impl DurableFounderGraph {
                 || parsed_head.entry_coord() != parsed_entry.coord()
                 || head_ref.coord != parsed_entry.coord()
                 || head_ref.head_hash != parsed_head.head_hash()
-                || head_ref.object != head.object
-                || head.object != *head.prepared.reference()
-                || head.object.slot() != &first_slot
+                || &head_ref.object != head.prepared.reference()
+                || head.prepared.reference().slot() != &first_slot
                 || parsed_head.body.successor.activation
                     != coven_protocol::store_commit::StreamActivation::grant_authorized(
                         root_ref.store_root_hash,
@@ -177,14 +171,12 @@ impl DurableFounderMembershipJournal {
             entry: ExactProtocolObject {
                 value: entry_value,
                 bytes: self.entry_bytes,
-                object: self.entry_prepared.reference().clone(),
                 prepared: self.entry_prepared,
             },
             entry_ref: self.entry_ref,
             head: ExactProtocolObject {
                 value: head_value,
                 bytes: self.head_bytes,
-                object: self.head_prepared.reference().clone(),
                 prepared: self.head_prepared,
             },
             head_ref: self.head_ref,
@@ -779,19 +771,16 @@ pub fn load_local_store_founder_graph_on(
         root: ExactProtocolObject {
             value: root_value,
             bytes: root_bytes,
-            object: root_prepared.reference().clone(),
             prepared: root_prepared,
         },
         registration: ExactProtocolObject {
             value: registration_value,
             bytes: registration_bytes,
-            object: registration_prepared.reference().clone(),
             prepared: registration_prepared,
         },
         initial_ack: ExactProtocolObject {
             value: initial_ack_value,
             bytes: initial_ack_bytes,
-            object: initial_ack_prepared.reference().clone(),
             prepared: initial_ack_prepared,
         },
         initial_ack_ref,

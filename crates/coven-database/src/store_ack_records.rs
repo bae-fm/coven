@@ -197,7 +197,6 @@ pub(crate) fn load_outbound_circle_acks_on(
             ack: ExactProtocolObject {
                 value,
                 bytes,
-                object: prepared.reference().clone(),
                 prepared,
             },
         });
@@ -298,7 +297,6 @@ pub(crate) fn load_outbound_store_ack_on(
             ack: ExactProtocolObject {
                 value,
                 bytes,
-                object: prepared.reference().clone(),
                 prepared,
             },
             circle_acknowledgements: load_outbound_circle_acks_on(conn)?,

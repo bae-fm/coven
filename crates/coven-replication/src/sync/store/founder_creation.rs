@@ -670,14 +670,12 @@ impl<'operation> FounderStoreCreation<'operation> {
                 entry: coven_protocol::objects::ExactProtocolObject {
                     value: founder,
                     bytes: founder_bytes,
-                    object: entry_prepared.reference().clone(),
                     prepared: entry_prepared,
                 },
                 entry_ref,
                 head: coven_protocol::objects::ExactProtocolObject {
                     value: head_value,
                     bytes: head_bytes,
-                    object: head_prepared.reference().clone(),
                     prepared: head_prepared,
                 },
                 head_ref,
@@ -687,19 +685,16 @@ impl<'operation> FounderStoreCreation<'operation> {
             root: coven_protocol::objects::ExactProtocolObject {
                 value: root_value,
                 bytes: root_bytes,
-                object: root_prepared.reference().clone(),
                 prepared: root_prepared,
             },
             registration: coven_protocol::objects::ExactProtocolObject {
                 value: registration_value,
                 bytes: registration_bytes,
-                object: registration_prepared.reference().clone(),
                 prepared: registration_prepared,
             },
             initial_ack: coven_protocol::objects::ExactProtocolObject {
                 value: initial_ack_value,
                 bytes: initial_ack_bytes,
-                object: initial_ack_prepared.reference().clone(),
                 prepared: initial_ack_prepared,
             },
             initial_ack_ref,
@@ -713,13 +708,13 @@ impl<'operation> FounderStoreCreation<'operation> {
         graph: &coven_database::DurableFounderGraph,
     ) -> Result<(), String> {
         let mut objects = vec![
-            graph.membership.head.object.clone(),
-            graph.membership.entry.object.clone(),
+            graph.membership.head.prepared.reference().clone(),
+            graph.membership.entry.prepared.reference().clone(),
         ];
         objects.extend([
-            graph.initial_ack.object.clone(),
-            graph.registration.object.clone(),
-            graph.root.object.clone(),
+            graph.initial_ack.prepared.reference().clone(),
+            graph.registration.prepared.reference().clone(),
+            graph.root.prepared.reference().clone(),
         ]);
         let mut failures = Vec::new();
         for object in objects {
@@ -813,7 +808,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let root = StoreRootRef {
             store_root_id: graph.root.value.descriptor.store_root_id(),
             store_root_hash: graph.root.value.object_hash(),
-            object: graph.root.object.clone(),
+            object: graph.root.prepared.reference().clone(),
         };
         if graph.initial_ack.value.last_sync != founder_timestamp {
             return Err(StoreProtocolRootError::Database(
@@ -839,7 +834,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         }
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &graph.registration.value,
-            graph.registration.object.clone(),
+            graph.registration.prepared.reference().clone(),
         );
         storage_access
             .create_protocol_object(&graph.root.prepared)

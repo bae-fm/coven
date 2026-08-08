@@ -960,8 +960,10 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .create_protocol_object(&prepared)
                 .await
                 .expect("publish exact membership registration object");
-            let object = prepared.reference().clone();
-            let reference = StoreDeviceRegistrationRef::from_registration(&registration, object);
+            let reference = StoreDeviceRegistrationRef::from_registration(
+                &registration,
+                prepared.reference().clone(),
+            );
             let device_signer = registration
                 .device_signer(signer)
                 .expect("derive exact membership device signer");
@@ -1077,7 +1079,6 @@ impl<'storage> ExactMembershipChain<'storage> {
             .create_protocol_object(&prepared)
             .await
             .expect("publish exact membership head");
-        let object = prepared.reference().clone();
         chain
             .add_entry(entry)
             .expect("extend exact membership test chain");
@@ -1085,7 +1086,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             .activate_head_ref(MembershipHeadRef {
                 coord,
                 head_hash: head.head_hash(),
-                object,
+                object: prepared.reference().clone(),
             })
             .expect("activate exact membership test head");
     }

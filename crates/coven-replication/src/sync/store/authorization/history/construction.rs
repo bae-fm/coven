@@ -202,14 +202,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 coven_protocol::objects::ExactProtocolObject {
                     value: founder.value,
                     bytes: registration_bytes,
-                    object: registration_prepared.reference().clone(),
                     prepared: registration_prepared,
                 },
                 ack_ref,
                 coven_protocol::objects::ExactProtocolObject {
                     value: ack,
                     bytes: ack_bytes,
-                    object: ack_prepared.reference().clone(),
                     prepared: ack_prepared,
                 },
             )

@@ -348,7 +348,7 @@ impl PreparedStoreOperationCommit {
                 "prepared acknowledgement operation has no exact acknowledgement ref".to_string(),
             )
         })?;
-        if reference.object != acknowledgement.object
+        if &reference.object != acknowledgement.prepared.reference()
             || reference.ack_hash != acknowledgement.value.ack_hash()
             || acknowledgement.value.to_bytes() != acknowledgement.bytes
         {
@@ -376,7 +376,7 @@ impl PreparedStoreOperationCommit {
             .commit
             .circle_acknowledgements()
             .iter()
-            .find(|reference| reference.object == acknowledgement.object)
+            .find(|reference| &reference.object == acknowledgement.prepared.reference())
             .ok_or_else(|| {
                 PreparedCommitError(
                     "prepared activation does not name its Circle acknowledgement object"

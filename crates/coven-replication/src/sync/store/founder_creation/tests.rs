@@ -85,12 +85,12 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
         .expect("stage exact founder graph");
         let graph = staged.graph.clone();
         let mut exact_objects = vec![
-            graph.root.object.clone(),
-            graph.registration.object.clone(),
-            graph.initial_ack.object.clone(),
+            graph.root.prepared.reference().clone(),
+            graph.registration.prepared.reference().clone(),
+            graph.initial_ack.prepared.reference().clone(),
         ];
-        exact_objects.push(graph.membership.entry.object.clone());
-        exact_objects.push(graph.membership.head.object.clone());
+        exact_objects.push(graph.membership.entry.prepared.reference().clone());
+        exact_objects.push(graph.membership.head.prepared.reference().clone());
         home.fail_exact_create_before_call(failing_create);
 
         assert!(
@@ -292,11 +292,18 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
     .expect("stage exact founder graph");
     let competing = b"different Store root occupant".to_vec();
     home.insert_exact_object(
-        staged.graph.root.object.slot().logical_key(),
+        staged.graph.root.prepared.reference().slot().logical_key(),
         competing.clone(),
     );
 
-    let root_slot = staged.graph.root.object.slot().logical_key().to_string();
+    let root_slot = staged
+        .graph
+        .root
+        .prepared
+        .reference()
+        .slot()
+        .logical_key()
+        .to_string();
     assert!(
         staged.publish().await.is_err(),
         "different root occupant must prevent Store creation"

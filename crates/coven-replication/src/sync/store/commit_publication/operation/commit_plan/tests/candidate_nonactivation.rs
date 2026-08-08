@@ -5,7 +5,7 @@ use coven_protocol::store_commit::StoreBatchCommitDeletionTarget;
 async fn merge_nonactivation_requires_exact_candidate_and_winner_bindings() {
     let fixture = PreparedWriteFixture::prepare().await;
     let batch = fixture.prepared_write().await;
-    assert!(!fixture.contains_exact_object(&batch.commit.object));
+    assert!(!fixture.contains_exact_object(batch.commit.prepared.reference()));
     fixture.publish_competing_merge_head().await;
     let observation = match fixture
         .observe_excluded_candidate_head(&batch)

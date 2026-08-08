@@ -182,7 +182,7 @@ impl PreparedWriteFixture {
             .observe_excluded_candidate_head_for_test(
                 &batch.head.value,
                 &batch.commit.value,
-                &batch.head.object,
+                batch.head.prepared.reference(),
             )
             .await
     }
@@ -288,7 +288,7 @@ impl PreparedWriteFixture {
                 write_id: batch.commit.value.write_id.clone(),
                 commit_ref,
                 package_object,
-                head_object: batch.head.object.clone(),
+                head_object: batch.head.prepared.reference().clone(),
             }
         })
         .await
