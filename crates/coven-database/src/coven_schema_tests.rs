@@ -88,20 +88,31 @@ fn active_and_protocol_inert_object_identities_are_disjoint() {
     );
 }
 
+/// An operation's three parts are stored apart because they change at
+/// different times: `prepared` is written once, `phase` on transitions, and one
+/// `circle_operation_uploads` row per completed step. Each fact lives in
+/// exactly one of the three, so no write has to keep two copies agreeing.
 #[test]
-fn circle_operation_journal_has_one_progress_representation() {
+fn circle_operation_journal_stores_each_part_where_it_changes() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");
-    let mut statement = conn
-        .prepare("PRAGMA table_info(circle_operations)")
-        .expect("prepare circle_operations table_info");
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("query circle_operations columns")
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .expect("read circle_operations columns");
+    let columns = |table: &str| {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table_info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read columns")
+    };
 
-    assert_eq!(columns, ["operation_id", "circle_id", "payload"]);
+    assert_eq!(
+        columns("circle_operations"),
+        ["operation_id", "circle_id", "prepared", "phase"]
+    );
+    assert_eq!(
+        columns("circle_operation_uploads"),
+        ["operation_id", "step"]
+    );
 }
 
 #[test]
@@ -228,16 +239,16 @@ fn circle_operation_journal_allows_one_pending_operation_per_circle() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute(
-        "INSERT INTO circle_operations (operation_id, circle_id, payload)
-             VALUES ('operation-a', 'circle-a', x'7b7d')",
+        "INSERT INTO circle_operations (operation_id, circle_id, prepared, phase)
+             VALUES ('operation-a', 'circle-a', x'7b7d', '\"ready\"')",
         [],
     )
     .expect("insert first pending Circle operation");
 
     let error = conn
         .execute(
-            "INSERT INTO circle_operations (operation_id, circle_id, payload)
-                 VALUES ('operation-b', 'circle-a', x'7b7d')",
+            "INSERT INTO circle_operations (operation_id, circle_id, prepared, phase)
+                 VALUES ('operation-b', 'circle-a', x'7b7d', '\"ready\"')",
             [],
         )
         .expect_err("a Circle cannot have a second pending operation");

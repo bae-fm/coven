@@ -114,13 +114,9 @@ impl StoreDatabase {
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
             let merge = parse_prepared_merge_candidate_on(tx, &prepared)?;
             removable.push(remote_object_id(&merge.reference.object));
-            match load_merge_candidate_head_cleanup_on(
-                tx,
-                merge.head_prepared.reference(),
-                &merge.reference,
-            )? {
+            match load_merge_candidate_head_cleanup_on(tx, &merge.head_object, &merge.reference)? {
                 MergeCandidateHeadCleanup::Remote { .. } => {
-                    removable.push(remote_object_id(merge.head_prepared.reference()))
+                    removable.push(remote_object_id(&merge.head_object))
                 }
                 MergeCandidateHeadCleanup::ProtocolInert => {}
             }

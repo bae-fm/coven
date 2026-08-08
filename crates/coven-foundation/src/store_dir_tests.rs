@@ -143,11 +143,12 @@ fn remote_cache_paths_are_keyed_by_locator_hash() {
     );
 }
 
-/// The open-time orphan sweep clears crash-left atomic-write temps under
-/// every blob folder that predate this open, while leaving current-process
-/// temps and committed blobs untouched.
+/// The open-time orphan sweep clears crash-left atomic-write temps under every
+/// directory this store writes payloads into — the three blob folders and the
+/// payload spool — while leaving current-process temps and committed files
+/// untouched.
 #[test]
-fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
+fn orphan_sweep_clears_stale_write_temps_but_keeps_fresh_ones() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let store_dir = StoreDir::new(tmp.path());
     let process_start = std::time::SystemTime::now();
@@ -185,6 +186,10 @@ fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
     let stale_local_temp = staged_temp(local_namespace.join("stale-local"));
     let fresh_local_temp = staged_temp(local_namespace.join("fresh-local"));
     let committed_local = local_namespace.join("blob0bbb");
+    let payload_spool = store_dir.payload_spool_dir();
+    let stale_payload_temp = staged_temp(payload_spool.join("stale-payload"));
+    let fresh_payload_temp = staged_temp(payload_spool.join("fresh-payload"));
+    let committed_payload = payload_spool.join("payload0ccc");
     let stale_local_stage = runtime.block_on(async {
         let mut stage = crate::local_file::AtomicStagedFile::create(&local_namespace.join("blob"))
             .await
@@ -199,10 +204,17 @@ fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         &stale_pinned_temp,
         &stale_local_temp,
         &committed_local,
+        &stale_payload_temp,
+        &committed_payload,
     ] {
         write_with_mtime(path, stale);
     }
-    for path in [&fresh_cache_temp, &fresh_pinned_temp, &fresh_local_temp] {
+    for path in [
+        &fresh_cache_temp,
+        &fresh_pinned_temp,
+        &fresh_local_temp,
+        &fresh_payload_temp,
+    ] {
         write_with_mtime(path, fresh);
     }
     std::fs::OpenOptions::new()
@@ -213,7 +225,7 @@ fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         .expect("set local stage mtime");
 
     store_dir
-        .remove_orphaned_blob_temps(process_start)
+        .remove_orphaned_write_temps(process_start)
         .expect("orphan sweep");
 
     for path in [
@@ -221,6 +233,7 @@ fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         &stale_pinned_temp,
         &stale_local_temp,
         &stale_local_stage,
+        &stale_payload_temp,
     ] {
         assert!(!path.exists(), "stale temp remained: {}", path.display());
     }
@@ -228,8 +241,10 @@ fn orphan_sweep_clears_stale_blob_temps_but_keeps_fresh_ones() {
         &fresh_cache_temp,
         &fresh_pinned_temp,
         &fresh_local_temp,
+        &fresh_payload_temp,
         &committed_cache,
         &committed_local,
+        &committed_payload,
     ] {
         assert!(
             path.exists(),

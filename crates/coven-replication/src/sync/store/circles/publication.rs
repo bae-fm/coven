@@ -23,6 +23,7 @@ use std::collections::BTreeSet;
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn SyncStorage>,
+    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -32,6 +33,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         storage: std::sync::Arc<dyn SyncStorage>,
+        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -39,6 +41,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         Self {
             database,
             storage,
+            store_dir,
             membership,
             local_writer,
             history,
@@ -138,7 +141,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 })?;
             let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
-                object: prepared_head.reference().clone(),
+                object: prepared_head.clone(),
             };
             history_summary
                 .open(
@@ -290,7 +293,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .operation()
                 .prepared_objects
                 .iter()
-                .filter(|(_, prepared)| prepared.reference() == &bootstrap.image.object);
+                .filter(|(_, object)| *object == &bootstrap.image.object);
             let step = matching_steps
                 .next()
                 .map(|(step, _)| step.clone())
@@ -562,11 +565,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     winner,
                 ) = self
                     .history
-                    .observe_excluded_candidate_head(
-                        &head,
-                        &verified_commit,
-                        prepared_head.reference(),
-                    )
+                    .observe_excluded_candidate_head(&head, &verified_commit, prepared_head)
                     .await?
                 {
                     let block = coven_protocol::circle::CircleOperationBlock::PositionLost {
@@ -664,10 +663,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 "circle upload step {step:?} differs from its prepared journal bytes"
             )));
         }
-        self.database
-            .complete_circle_operation_upload_step(journal, step)
-            .await?;
-        Ok(())
+        self.record_completed_step(journal, step).await
     }
 
     async fn append_hashed_step(
@@ -686,9 +682,21 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 "circle upload step {step:?} differs from its signed image hash"
             )));
         }
+        self.record_completed_step(journal, step).await
+    }
+
+    /// Record the step as done, durably and then in the journal this
+    /// publication is walking, so a resumed run skips exactly the steps whose
+    /// rows committed.
+    async fn record_completed_step(
+        &self,
+        journal: &mut CircleOperationJournal,
+        step: &str,
+    ) -> Result<(), CircleOperationError> {
         self.database
-            .complete_circle_operation_upload_step(journal, step)
+            .complete_circle_operation_upload_step(&journal.operation_id, step)
             .await?;
+        journal.uploaded.insert(step.to_string());
         Ok(())
     }
 
@@ -699,7 +707,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         context: &ProtocolObjectContext,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, CircleOperationError> {
-        let prepared = journal
+        let object = journal
             .operation()
             .prepared_objects
             .get(step)
@@ -709,19 +717,24 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     "Circle upload step {step:?} lacks its prepared exact object"
                 ))
             })?;
-        if !journal.operation().uploaded.contains(step) {
+        if !journal.uploaded.contains(step) {
+            // The bytes have been in the spool since preparation, so a resumed
+            // run uploads the same object the first run would have.
+            // `PreparedExactObject` re-checks them against the reference the
+            // journal carries before any of them leave this device.
+            let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
+            let stored_bytes = spool.read(object.stored_hash()).await.map_err(|error| {
+                CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
+            })?;
+            let prepared =
+                coven_protocol::objects::PreparedExactObject::new(object.clone(), stored_bytes)
+                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
             self.storage
                 .create_protocol_object(&prepared)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
         }
-        read_exact_circle_object(
-            self.storage.as_ref(),
-            context,
-            prepared.reference(),
-            semantic_prefix,
-        )
-        .await
+        read_exact_circle_object(self.storage.as_ref(), context, &object, semantic_prefix).await
     }
 }
 
@@ -767,8 +780,8 @@ fn verify_prepared_objects_are_signed(
             signed.insert(bootstrap.object.clone());
         }
     }
-    for (step, prepared) in &operation.prepared_objects {
-        if step != "store-head" && !signed.contains(prepared.reference()) {
+    for (step, object) in &operation.prepared_objects {
+        if step != "store-head" && !signed.contains(object) {
             return Err(CircleOperationError::Journal(format!(
                 "Circle upload step {step:?} names an object outside its signed Store commit graph"
             )));

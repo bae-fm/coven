@@ -72,8 +72,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified,
-                        &candidate.head.value,
-                        &candidate.head.object,
+                        &candidate.head,
+                        &candidate.head_object,
                     )
                     .await?
                 else {
@@ -106,8 +106,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified_candidate,
-                        &candidates.candidate.head.value,
-                        &candidates.candidate.head.object,
+                        &candidates.candidate.head,
+                        &candidates.candidate.head_object,
                     )
                     .await?;
                 let verified_authority = self
@@ -118,8 +118,8 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                     .merge_conflict()
                     .excluded_candidate_nonactivation(
                         &verified_authority,
-                        &candidates.authority.head.value,
-                        &candidates.authority.head.object,
+                        &candidates.authority.head,
+                        &candidates.authority.head_object,
                     )
                     .await?;
                 match (candidate, authority) {

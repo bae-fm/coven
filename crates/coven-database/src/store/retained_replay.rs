@@ -50,6 +50,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Replace,
     ),
     ("circle_current_state", ReplayTableDisposition::Replace),
+    ("circle_operation_uploads", ReplayTableDisposition::Preserve),
     ("circle_operations", ReplayTableDisposition::Preserve),
     ("cloud_outbox", ReplayTableDisposition::Preserve),
     ("local_blob_refs", ReplayTableDisposition::Preserve),

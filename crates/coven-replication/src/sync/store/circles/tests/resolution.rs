@@ -217,16 +217,16 @@ impl ConflictFixture {
             )
             .await
             .expect("build resolution request");
-        let journal = circles
+        let prepared = circles
             .preparer()
             .prepare_request(request)
             .await
             .expect("prepare resolution operation");
         StoreDatabase::new(&self.db1)
-            .insert_circle_operation(journal.clone())
+            .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
             .await
             .expect("journal the resolution before publication");
-        journal
+        prepared.journal
     }
 }
 

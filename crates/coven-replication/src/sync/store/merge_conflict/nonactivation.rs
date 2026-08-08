@@ -58,9 +58,9 @@ impl MergeConflictHistory<'_, '_> {
             .await?;
         if let abandonment::ExcludedCandidateHeadObservation::MergeWinner(observation) = self
             .observe_excluded_candidate_head(
-                &candidate.head.value,
+                &candidate.head,
                 &verified_candidate,
-                &candidate.head.object,
+                &candidate.head_object,
             )
             .await?
         {
@@ -78,8 +78,8 @@ impl MergeConflictHistory<'_, '_> {
         if let Some(nonactivation) = self
             .excluded_candidate_nonactivation(
                 &verified_candidate,
-                &candidate.head.value,
-                &candidate.head.object,
+                &candidate.head,
+                &candidate.head_object,
             )
             .await?
         {
@@ -91,8 +91,8 @@ impl MergeConflictHistory<'_, '_> {
         self.membership_revocation_candidate_nonactivation(
             revoked_grant,
             &verified_candidate,
-            &candidate.head.value,
-            &candidate.head.object,
+            &candidate.head,
+            &candidate.head_object,
         )
         .await
     }
@@ -300,28 +300,28 @@ impl MergeConflictHistory<'_, '_> {
         coven_protocol::remote_object::VerifiedCandidateNonactivation,
         crate::sync::store::pull::StorePullError,
     > {
-        let reference = &verification.candidate.head.value.commit;
+        let reference = &verification.candidate.head.commit;
         let candidate = self
             .history
-            .authenticate_bytes(reference, &verification.candidate.commit.bytes)
+            .authenticate_bytes(reference, &verification.candidate.commit_bytes)
             .await?;
-        if candidate.value() != verification.candidate.commit.value.value() {
+        if candidate.value() != verification.candidate.commit.value() {
             return Err(crate::sync::store::pull::StorePullError::InvalidState(
                 "terminal cleanup candidate differs from its authenticated commit".to_string(),
             ));
         }
         let target = coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
             coord: reference.coord.clone(),
-            object: verification.candidate.commit.object.clone(),
-            canonical_signed_bytes: verification.candidate.commit.bytes.clone(),
+            object: verification.candidate.commit_object.clone(),
+            canonical_signed_bytes: verification.candidate.commit_bytes.clone(),
         };
         match &verification.authority {
             coven_database::TerminalCandidateAuthority::AuthorExclusion(locator) => {
                 self.verify_author_exclusion_nonactivation(
                     locator,
                     &candidate,
-                    &verification.candidate.head.value,
-                    &verification.candidate.head.object,
+                    &verification.candidate.head,
+                    &verification.candidate.head_object,
                 )
                 .await
             }
@@ -338,8 +338,8 @@ impl MergeConflictHistory<'_, '_> {
                         activation_commit,
                         activation_head,
                         &candidate,
-                        &verification.candidate.head.value,
-                        &verification.candidate.head.object,
+                        &verification.candidate.head,
+                        &verification.candidate.head_object,
                     )
                     .await
             }
@@ -348,7 +348,7 @@ impl MergeConflictHistory<'_, '_> {
                     authority.clone(),
                     target,
                     candidate.author(),
-                    verification.candidate.head.object.clone(),
+                    verification.candidate.head_object.clone(),
                 )
                 .map_err(crate::sync::store::pull::StorePullError::RemoteObject)
             }

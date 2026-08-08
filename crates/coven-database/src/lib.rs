@@ -157,8 +157,12 @@ pub use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
 pub use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
 pub use changeset::{value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset};
 pub use changeset_identity::ChangesetIdentityError;
+pub(crate) use circle_operation_records::{
+    circle_operation_ids_in_phase_on, circle_operation_phase_json,
+};
 pub use circle_operation_records::{
-    load_circle_operation_on, parse_circle_operation_row, PreparedCircleOperationRow,
+    circle_operation_uploaded_steps_on, load_circle_operation_on, parse_circle_operation_row,
+    PreparedCircleOperationRow,
 };
 pub use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
 pub use database_connection::DatabaseConnection;
@@ -224,7 +228,7 @@ pub use store::{
     HostWriteBlobTransaction, HostWriteError, HostWriteOperation, IncomingTimestampPolicy,
     LocalBlobCleanup, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry,
     OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
-    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
+    PreparedCircleObjects, ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
     RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
     SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,

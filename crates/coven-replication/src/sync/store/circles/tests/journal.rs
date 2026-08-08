@@ -14,9 +14,8 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     replacement_commit.body_mut().write_id = replacement_write_id;
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
-    let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
     db.test_sql(move |database| {
-        database.replace_circle_operation_payload(&expected_operation_id, &payload)
+        database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
     })
     .await
     .expect("install mismatched Circle operation payload");
@@ -38,9 +37,8 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     let mut replacement = journal.clone();
     replacement.circle_id = replacement_circle_id;
     replacement.operation_mut().creation.circle_id = replacement_circle_id;
-    let payload = serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
     db.test_sql(move |database| {
-        database.replace_circle_operation_payload(&expected_operation_id, &payload)
+        database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
     })
     .await
     .expect("install mismatched Circle operation payload");
@@ -64,9 +62,10 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect("prepare second Circle operation");
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(second.clone())
+        .insert_circle_operation(second.journal.clone(), second.prepared_objects)
         .await
         .expect("persist second Circle operation");
+    let second = second.journal;
 
     coven_database::StoreDatabase::new(&db)
         .block_circle_operation(

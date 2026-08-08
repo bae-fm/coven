@@ -78,6 +78,7 @@ pub use blob_transitions::PostUpload;
 #[cfg(any(test, feature = "test-utils"))]
 pub use candidate_records::select_author_exclusion_activation_locator;
 pub use candidate_records::CandidateCleanupObject;
+pub use circle_controls::PreparedCircleObjects;
 pub use device_join::DeviceJoinJournalStore;
 pub use host_sql::{SqlContext, SqlReadContext};
 pub use host_write_capture::{

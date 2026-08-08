@@ -4,8 +4,8 @@ use coven_protocol::circle_activation::CircleAuthoringState;
 #[cfg(test)]
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::circle_journal::{
-    CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleOperationProgress,
-    CircleTransitionHistory, PreparedCircleOperation,
+    CircleOperationIntent, CircleOperationJournal, CircleOperationPolicy, CircleTransitionHistory,
+    PreparedCircleOperation,
 };
 pub use error::CircleOperationError;
 use exact_object::read_exact_circle_object;
@@ -25,6 +25,8 @@ pub(super) use authorized_writer::AuthorizedCircleWriter;
 pub use commands::StoreCircleCommands;
 pub(crate) use history::VerifiedCircleHistory;
 pub use packages::CirclePackageReadError;
+#[cfg(test)]
+pub(crate) use preparation::PreparedCircleJournal;
 
 #[cfg(test)]
 mod tests;

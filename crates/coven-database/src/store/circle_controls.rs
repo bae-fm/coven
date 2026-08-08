@@ -1,32 +1,41 @@
-use crate::query_mapped_rows;
 use rusqlite::Connection;
 
 use super::{MergeMaterializationTransaction, StoreDatabase};
 use crate::{
-    candidate_graph_exact_objects, load_activated_registration_on, load_circle_operation_on,
-    mark_remote_object_uploaded_on, persist_prepared_remote_object_on,
-    required_store_root_authority_on, DbError, PreparedCircleOperationRow,
-    VerifiedMergeMaterialization,
+    candidate_graph_exact_objects, circle_operation_ids_in_phase_on,
+    load_activated_registration_on, load_circle_operation_on, load_remote_object_on,
+    persist_prepared_remote_object_on, required_store_root_authority_on, update_remote_object_on,
+    DbError, PreparedCircleOperationRow, VerifiedMergeMaterialization,
 };
 use coven_protocol::circle::{CircleOperationId, CircleOperationState};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
-use coven_protocol::circle_journal::CircleOperationJournal;
+use coven_protocol::circle_journal::{CircleOperationJournal, CircleOperationProgress};
+use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::remote_object::remote_object_id;
 use coven_protocol::store_commit::{
     commit_semantic_prefix, StoreBatchCommit, StoreDeviceHead, VerifiedStoreBatchCommit,
     VerifiedStoreDeviceOperations,
 };
 
+/// The stored bytes of one operation's objects, supplied alongside the
+/// operation that names them.
+///
+/// The operation holds references; `remote_objects` still stores the bytes
+/// those references name inline, so the flows that write those rows are handed
+/// the bytes by whoever prepared or read them.
+pub type PreparedCircleObjects = std::collections::BTreeMap<String, PreparedExactObject>;
+
 impl StoreDatabase {
     pub async fn insert_circle_operation(
         &self,
         journal: CircleOperationJournal,
+        prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
         let remotes = journal
-            .closed_remote_objects()
+            .closed_remote_objects(&prepared_objects)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
-        let row = PreparedCircleOperationRow::from_journal(journal)?;
+        let row = PreparedCircleOperationRow::from_journal(&journal)?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -38,12 +47,7 @@ impl StoreDatabase {
                         "Circle candidate graph",
                     )?;
                 }
-                tx.execute(
-                    "INSERT INTO circle_operations (operation_id, circle_id, payload)
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![row.operation_id, row.circle_id, row.payload],
-                )
-                .map_err(DbError::from)?;
+                insert_circle_operation_row_on(&tx, &row)?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -58,17 +62,29 @@ impl StoreDatabase {
         &self,
         journal: CircleOperationJournal,
         superseded: CircleOperationId,
+        prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
         let remotes = journal
-            .closed_remote_objects()
+            .closed_remote_objects(&prepared_objects)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
-        let row = PreparedCircleOperationRow::from_journal(journal)?;
+        let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let discarded = load_circle_operation_on(&tx, &superseded)?.ok_or_else(|| {
+                    DbError::Message(
+                        "superseded Circle operation is absent from its slot".to_string(),
+                    )
+                })?;
+                if discarded.circle_id.to_string() != circle_id {
+                    return Err(DbError::Message(
+                        "superseded Circle operation belongs to another circle".to_string(),
+                    ));
+                }
+                enqueue_operation_payload_cleanup_on(&tx, discarded.operation())?;
                 let removed = tx
                     .execute(
                         "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
@@ -88,12 +104,7 @@ impl StoreDatabase {
                         "Circle candidate graph",
                     )?;
                 }
-                tx.execute(
-                    "INSERT INTO circle_operations (operation_id, circle_id, payload)
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![row.operation_id, row.circle_id, row.payload],
-                )
-                .map_err(DbError::from)?;
+                insert_circle_operation_row_on(&tx, &row)?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -114,28 +125,17 @@ impl StoreDatabase {
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         self.connection
             .call(|conn| {
-                let rows = query_mapped_rows(
-                    conn,
-                    "SELECT operation_id, circle_id, payload
-                         FROM circle_operations
-                         ORDER BY rowid",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                        ))
-                    },
-                )?;
-                for (operation_id, circle_id, payload) in rows {
-                    let journal =
-                        crate::parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
-                    if journal.is_publishable() {
-                        return Ok(Some(journal));
-                    }
-                }
-                Ok(None)
+                let Some(operation_id) = circle_operation_ids_in_phase_on(conn, |progress| {
+                    matches!(
+                        progress,
+                        CircleOperationProgress::Ready | CircleOperationProgress::Finalizing
+                    )
+                })?
+                .into_iter()
+                .next() else {
+                    return Ok(None);
+                };
+                load_circle_operation_on(conn, &operation_id)
             })
             .await
     }
@@ -143,70 +143,92 @@ impl StoreDatabase {
     pub async fn waiting_circle_operations(&self) -> Result<Vec<CircleOperationJournal>, DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT operation_id, circle_id, payload
-                         FROM circle_operations
-                         ORDER BY rowid",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                        ))
+                let waiting = circle_operation_ids_in_phase_on(conn, |progress| {
+                    matches!(progress, CircleOperationProgress::WaitingForCloseResponses)
+                })?;
+                waiting
+                    .iter()
+                    .map(|operation_id| {
+                        load_circle_operation_on(conn, operation_id)?.ok_or_else(|| {
+                            DbError::Message(format!(
+                                "Circle operation {operation_id} disappeared while being listed"
+                            ))
+                        })
                     })
-                    .map_err(DbError::from)?;
-                let mut waiting = Vec::new();
-                for row in rows {
-                    let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
-                    let journal =
-                        crate::parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
-                    if matches!(
-                        journal.state(),
-                        CircleOperationState::WaitingForCloseResponses
-                    ) {
-                        waiting.push(journal);
-                    }
-                }
-                Ok(waiting)
+                    .collect()
             })
             .await
     }
 
-    pub async fn update_circle_operation(
+    /// Record that one upload step finished: the step's row, and — for a step
+    /// carrying an object the candidate owns — that object's uploaded state.
+    ///
+    /// A step whose object is a shared Circle object rather than a
+    /// candidate-exclusive one records only its row: no `remote_objects` record
+    /// exists for it to mark, which is why the operation's own commit decides
+    /// that rather than an absent lookup.
+    ///
+    /// The operation beside it is untouched. Both writes are idempotent, so a
+    /// retry of a step whose transaction already committed is a no-op rather
+    /// than a conflict, and the foreign key is what refuses a step for an
+    /// operation that is no longer there.
+    pub async fn complete_circle_operation_upload_step(
         &self,
-        journal: CircleOperationJournal,
+        operation_id: &CircleOperationId,
+        step: &str,
     ) -> Result<(), DbError> {
+        let operation_id = operation_id.as_str().to_string();
+        let step = step.to_string();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                update_circle_operation_on(&tx, journal)?;
+                let journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
+                    DbError::Message(format!(
+                        "Circle operation {operation_id} disappeared before its upload step"
+                    ))
+                })?;
+                let object = journal
+                    .operation()
+                    .prepared_objects
+                    .get(&step)
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "Circle upload step {step:?} names no object of operation {operation_id}"
+                        ))
+                    })?
+                    .clone();
+                let candidate_owned = journal
+                    .candidate_owned_objects()
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO circle_operation_uploads (operation_id, step)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![operation_id, step],
+                )
+                .map_err(DbError::from)?;
+                if candidate_owned.contains(&object) {
+                    mark_uploaded_object_on(&tx, remote_object_id(&object)).map_err(|error| {
+                        DbError::Message(format!(
+                            "Circle upload step {step:?} of operation {operation_id}: {error}"
+                        ))
+                    })?;
+                }
                 tx.commit().map_err(DbError::from)
             })
             .await
     }
 
-    pub async fn complete_circle_operation_upload_step(
-        &self,
-        journal: &mut CircleOperationJournal,
-        step: &str,
-    ) -> Result<(), DbError> {
-        if journal.operation().uploaded.contains(step) {
-            return Ok(());
-        }
-        let mut completed = journal.clone();
-        completed.operation_mut().uploaded.insert(step.to_string());
-        self.update_circle_operation(completed.clone()).await?;
-        *journal = completed;
-        Ok(())
-    }
-
+    /// Replace a closed operation with its freshly prepared finalization.
+    ///
+    /// This is the one transition that rewrites the prepared operation, so it
+    /// is also the one that has to retire what it replaces: the superseded
+    /// operation's upload rows go, because the finalization reuses their step
+    /// names for different objects, and its spool files go, because nothing
+    /// names them once the operation that did is gone.
     pub async fn begin_circle_operation_finalization(
         &self,
         journal: CircleOperationJournal,
+        prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
         if !matches!(journal.state(), CircleOperationState::Finalizing) {
             return Err(DbError::Message(
@@ -214,9 +236,10 @@ impl StoreDatabase {
             ));
         }
         let remotes = journal
-            .closed_remote_objects()
+            .closed_remote_objects(&prepared_objects)
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
+        let row = PreparedCircleOperationRow::from_journal(&journal)?;
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -246,8 +269,58 @@ impl StoreDatabase {
                         "Circle close-finalization candidate graph",
                     )?;
                 }
-                persist_circle_operation_row_on(&tx, journal)?;
+                enqueue_operation_payload_cleanup_on(&tx, durable.operation())?;
+                tx.execute(
+                    "DELETE FROM circle_operation_uploads WHERE operation_id = ?1",
+                    [&row.operation_id],
+                )
+                .map_err(DbError::from)?;
+                let updated = tx
+                    .execute(
+                        "UPDATE circle_operations SET prepared = ?3, phase = ?4
+                         WHERE operation_id = ?1 AND circle_id = ?2",
+                        rusqlite::params![row.operation_id, row.circle_id, row.prepared, row.phase],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(
+                        "Circle operation disappeared during finalization".to_string(),
+                    ));
+                }
                 tx.commit().map_err(DbError::from)
+            })
+            .await
+    }
+
+    /// Replace one operation's prepared payload with a substituted one, leaving
+    /// its phase and upload rows where they are.
+    ///
+    /// Production rewrites `prepared` only at the close-to-finalization
+    /// boundary. This is how a test hands the publication and activation paths
+    /// a durable operation that contradicts what it names, to check that they
+    /// refuse it rather than trusting the row.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn substitute_circle_operation_for_test(
+        &self,
+        journal: CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        let row = PreparedCircleOperationRow::from_journal(&journal)?;
+        self.connection
+            .call(move |conn| {
+                let updated = conn
+                    .execute(
+                        "UPDATE circle_operations SET prepared = ?3
+                         WHERE operation_id = ?1 AND circle_id = ?2",
+                        rusqlite::params![row.operation_id, row.circle_id, row.prepared],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(format!(
+                        "Circle operation {} is absent from its slot",
+                        row.operation_id
+                    )));
+                }
+                Ok(())
             })
             .await
     }
@@ -268,7 +341,7 @@ impl StoreDatabase {
                 journal
                     .block(block)
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                update_circle_operation_on(&tx, journal)?;
+                update_circle_operation_phase_on(&tx, &journal)?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -289,7 +362,7 @@ impl StoreDatabase {
                 journal
                     .unblock()
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                update_circle_operation_on(&tx, journal)?;
+                update_circle_operation_phase_on(&tx, &journal)?;
                 tx.commit().map_err(DbError::from)
             })
             .await
@@ -445,7 +518,7 @@ impl StoreDatabase {
                         &device_operations,
                         &verified,
                         head,
-                        prepared_head.reference(),
+                        prepared_head,
                         history_summary,
                         None,
                         &[],
@@ -453,11 +526,7 @@ impl StoreDatabase {
                     )?;
                     MergeMaterializationTransaction::new(&tx)
                         .record_verified_merge_materialization(materialization)?;
-                    (
-                        commit,
-                        activation.clone(),
-                        Some(remote_object_id(prepared_head.reference())),
-                    )
+                    (commit, activation.clone(), Some(remote_object_id(prepared_head)))
                 };
                 let mut object_ids = candidate_graph_exact_objects(&commit)?
                     .iter()
@@ -518,8 +587,9 @@ impl StoreDatabase {
                     waiting
                         .wait_for_close_responses()
                         .map_err(|error| DbError::Message(error.to_string()))?;
-                    persist_circle_operation_row_on(&tx, waiting)?;
+                    update_circle_operation_phase_on(&tx, &waiting)?;
                 } else {
+                    enqueue_operation_payload_cleanup_on(&tx, journal.operation())?;
                     let deleted = tx
                         .execute(
                             "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
@@ -541,48 +611,76 @@ impl StoreDatabase {
     }
 }
 
-fn update_circle_operation_on(
+fn insert_circle_operation_row_on(
     conn: &Connection,
-    journal: CircleOperationJournal,
+    row: &PreparedCircleOperationRow,
 ) -> Result<(), DbError> {
-    let uploaded_ids = journal
-        .uploaded_object_ids()
-        .map_err(|error| DbError::Message(error.to_string()))?;
-    let uploaded = journal
-        .closed_remote_objects()
-        .map_err(|error| DbError::Message(error.to_string()))?
-        .into_iter()
-        .filter(|remote| uploaded_ids.contains(&remote.object_id()))
-        .collect::<Vec<_>>();
-    persist_circle_operation_row_on(conn, journal)?;
-    for remote in uploaded {
-        mark_remote_object_uploaded_on(conn, remote)?;
+    conn.execute(
+        "INSERT INTO circle_operations (operation_id, circle_id, prepared, phase)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![row.operation_id, row.circle_id, row.prepared, row.phase],
+    )
+    .map_err(DbError::from)
+    .map(|_| ())
+}
+
+/// Move one operation to the phase it now stands in, leaving the prepared
+/// operation and its completed upload steps as they are.
+pub(crate) fn update_circle_operation_phase_on(
+    conn: &Connection,
+    journal: &CircleOperationJournal,
+) -> Result<(), DbError> {
+    let updated = conn
+        .execute(
+            "UPDATE circle_operations SET phase = ?3
+             WHERE operation_id = ?1 AND circle_id = ?2",
+            rusqlite::params![
+                journal.operation_id.as_str(),
+                journal.circle_id.to_string(),
+                crate::circle_operation_phase_json(&journal.progress)?
+            ],
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(format!(
+            "circle operation {} disappeared during publication",
+            journal.operation_id
+        )));
     }
     Ok(())
 }
 
-pub(crate) fn persist_circle_operation_row_on(
+/// Owe a deletion for every spool file this operation's objects are stored in.
+///
+/// Called in the transaction that stops the operation naming them — the row
+/// going away, or the finalization boundary replacing it — so the obligation
+/// and the reason for it commit together.
+pub(crate) fn enqueue_operation_payload_cleanup_on(
     conn: &Connection,
-    journal: CircleOperationJournal,
+    operation: &coven_protocol::circle_journal::PreparedCircleOperation,
 ) -> Result<(), DbError> {
-    let row = PreparedCircleOperationRow::from_journal(journal)?;
-    load_circle_operation_on(conn, &row.operation_id)?.ok_or_else(|| {
-        DbError::Message(format!(
-            "circle operation {} disappeared during publication",
-            row.operation_id
-        ))
-    })?;
-    let updated = conn
-        .execute(
-            "UPDATE circle_operations SET payload = ?3
-             WHERE operation_id = ?1 AND circle_id = ?2",
-            rusqlite::params![row.operation_id, row.circle_id, row.payload],
-        )
-        .map_err(DbError::from)?;
-    if updated != 1 {
-        return Err(DbError::Message(
-            "circle operation disappeared during publication".to_string(),
-        ));
+    for object in operation.prepared_objects.values() {
+        crate::payload_spool::enqueue_payload_spool_cleanup_on(conn, object.stored_hash())?;
     }
     Ok(())
+}
+
+/// Record that the object one upload step carried is now in cloud storage.
+///
+/// The durable row is the truth being advanced, so it is read and transitioned
+/// in place rather than compared against a reconstruction of what the operation
+/// says it should be.
+fn mark_uploaded_object_on(
+    conn: &Connection,
+    object_id: coven_protocol::store_commit::ObjectHash,
+) -> Result<(), DbError> {
+    let current = load_remote_object_on(conn, object_id)?;
+    let mut uploaded = current.clone();
+    uploaded
+        .mark_uploaded_verified()
+        .map_err(|error| DbError::context(format!("mark {object_id} uploaded"), error))?;
+    if uploaded == current {
+        return Ok(());
+    }
+    update_remote_object_on(conn, object_id, &uploaded)
 }

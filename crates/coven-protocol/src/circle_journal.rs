@@ -23,6 +23,14 @@ pub struct CircleOperationPolicy {
     pub history_summary: crate::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
+/// One Circle operation as prepared: everything the publication pipeline needs
+/// to upload its object graph, and nothing that changes while it does.
+///
+/// The objects themselves are named, not carried. Their stored bytes live in
+/// the payload spool under each reference's stored hash, written before the row
+/// that names them, so this value stays KB-scale however large the graph is —
+/// and the upload progress that does change per step lives in
+/// `circle_operation_uploads`, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedCircleOperation {
@@ -30,9 +38,32 @@ pub struct PreparedCircleOperation {
     pub history: CircleTransitionHistory,
     pub commit_bytes: Vec<u8>,
     pub commit_ref: StoreBatchCommitRef,
-    pub prepared_objects: BTreeMap<String, PreparedExactObject>,
+    pub prepared_objects: BTreeMap<String, ExactObjectRef>,
     pub policy: CircleOperationPolicy,
-    pub uploaded: BTreeSet<String>,
+}
+
+impl PreparedCircleOperation {
+    /// Refuse a byte-carrying object map that is not this operation's own.
+    ///
+    /// The spool holds the bytes and this value holds the references; a caller
+    /// that supplies both is asserting they belong together, and the assertion
+    /// is checked rather than trusted.
+    pub fn require_prepared_objects(
+        &self,
+        prepared: &BTreeMap<String, PreparedExactObject>,
+    ) -> Result<(), CircleJournalError> {
+        if prepared.len() != self.prepared_objects.len()
+            || !prepared
+                .iter()
+                .all(|(step, object)| self.prepared_objects.get(step) == Some(object.reference()))
+        {
+            return Err(CircleJournalError(
+                "Circle prepared object bytes name a different object graph than the operation"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,22 +95,24 @@ pub enum CircleOperationIntent {
     Delete,
 }
 
+/// Where one Circle operation stands. Persisted on its own, apart from the
+/// operation it describes: this is what a transition rewrites, and the prepared
+/// operation is what a transition leaves alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationProgress {
-    Ready(Box<PreparedCircleOperation>),
-    WaitingForCloseResponses(Box<PreparedCircleOperation>),
-    Finalizing(Box<PreparedCircleOperation>),
+    Ready,
+    WaitingForCloseResponses,
+    Finalizing,
     Blocked {
         block: crate::circle::CircleOperationBlock,
         phase: CircleOperationPhase,
-        operation: Box<PreparedCircleOperation>,
     },
     /// A verified nonactivation proof was accepted. The candidate's exclusive
     /// objects are being exact-deleted and the durable row cleared in the
-    /// completing transaction. The retained payload identifies the candidate
+    /// completing transaction. The retained operation identifies the candidate
     /// graph so a restart resumes the exact same cleanup.
-    Discarding(Box<PreparedCircleOperation>),
+    Discarding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,45 +122,114 @@ pub enum CircleOperationPhase {
     Finalization,
 }
 
+/// One Circle operation as it stands right now: the identity and prepared
+/// operation held in `circle_operations`, the phase held beside them, and the
+/// upload steps already completed, joined from `circle_operation_uploads`.
+///
+/// The three parts have different lifetimes on disk, which is why they are
+/// stored apart: the operation is written once, the phase changes on
+/// transitions, and the upload steps accumulate one row at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleOperationJournal {
     pub operation_id: CircleOperationId,
     pub circle_id: CircleId,
     pub intent: CircleOperationIntent,
+    pub operation: PreparedCircleOperation,
     pub progress: CircleOperationProgress,
+    pub uploaded: BTreeSet<String>,
 }
 
 impl CircleOperationJournal {
+    /// A freshly prepared operation, with nothing uploaded yet.
+    pub fn ready(
+        operation_id: CircleOperationId,
+        circle_id: CircleId,
+        intent: CircleOperationIntent,
+        operation: PreparedCircleOperation,
+    ) -> Self {
+        Self {
+            operation_id,
+            circle_id,
+            intent,
+            operation,
+            progress: CircleOperationProgress::Ready,
+            uploaded: BTreeSet::new(),
+        }
+    }
+
     pub fn circle_id(&self) -> CircleId {
         self.circle_id
     }
 
     pub fn operation(&self) -> &PreparedCircleOperation {
-        match &self.progress {
-            CircleOperationProgress::Ready(operation)
-            | CircleOperationProgress::WaitingForCloseResponses(operation)
-            | CircleOperationProgress::Finalizing(operation)
-            | CircleOperationProgress::Blocked { operation, .. }
-            | CircleOperationProgress::Discarding(operation) => operation,
-        }
+        &self.operation
     }
 
     pub fn operation_mut(&mut self) -> &mut PreparedCircleOperation {
-        match &mut self.progress {
-            CircleOperationProgress::Ready(operation)
-            | CircleOperationProgress::WaitingForCloseResponses(operation)
-            | CircleOperationProgress::Finalizing(operation)
-            | CircleOperationProgress::Blocked { operation, .. }
-            | CircleOperationProgress::Discarding(operation) => operation,
-        }
+        &mut self.operation
     }
 
+    /// Refuse an upload step that names no object in this operation. Every
+    /// completed step must name one, so a joined upload row that does not is a
+    /// journal that contradicts itself.
+    pub fn validate_uploaded(&self) -> Result<(), CircleJournalError> {
+        for step in &self.uploaded {
+            if !self.operation.prepared_objects.contains_key(step) {
+                return Err(CircleJournalError(format!(
+                    "Circle upload marker {step} names no prepared object"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The objects of this operation that `remote_objects` holds a record for:
+    /// its commit's candidate-exclusive graph, plus the commit and the Store
+    /// head published with it.
+    ///
+    /// The rest of an operation's objects — its control head, roster and
+    /// metadata — are shared Circle objects the candidate does not own
+    /// exclusively, so completing their upload step has no candidate record to
+    /// mark. This names that set so a caller dispatches on it rather than
+    /// discovering it by a lookup that comes back empty.
+    pub fn candidate_owned_objects(&self) -> Result<BTreeSet<ExactObjectRef>, CircleJournalError> {
+        let operation = self.operation();
+        let commit = self.commit()?;
+        operation
+            .commit_ref
+            .verify_commit(&commit)
+            .map_err(|error| CircleJournalError(error.to_string()))?;
+        let mut objects = crate::remote_object::CandidateObjectGraph::from_commit(&commit)
+            .map_err(|error| CircleJournalError(error.to_string()))?
+            .exact_objects()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        objects.insert(operation.commit_ref.object.clone());
+        objects.insert(
+            operation
+                .prepared_objects
+                .get("store-head")
+                .ok_or_else(|| {
+                    CircleJournalError("Circle operation lacks its prepared Store head".to_string())
+                })?
+                .clone(),
+        );
+        Ok(objects)
+    }
+
+    /// The candidate graph this operation would activate, closed over the
+    /// stored bytes of its objects.
+    ///
+    /// The bytes come from the caller because this value holds only references
+    /// to them: the durable copy is in the payload spool, and the caller that
+    /// has just written or read it supplies what it read.
     pub fn closed_remote_objects(
         &self,
+        prepared_objects: &BTreeMap<String, PreparedExactObject>,
     ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, CircleJournalError> {
-        self.uploaded_object_ids()?;
         let operation = self.operation();
+        operation.require_prepared_objects(prepared_objects)?;
         let commit: StoreBatchCommit = serde_json::from_slice(&operation.commit_bytes)
             .map_err(|error| CircleJournalError(format!("Circle commit: {error}")))?;
         operation
@@ -145,8 +247,7 @@ impl CircleOperationJournal {
             ));
         }
         let prepared_for = |object: &ExactObjectRef| {
-            operation
-                .prepared_objects
+            prepared_objects
                 .values()
                 .find(|prepared| prepared.reference() == object)
                 .ok_or_else(|| {
@@ -299,12 +400,9 @@ impl CircleOperationJournal {
                 .map_err(|error| CircleJournalError(error.to_string()))?,
             );
         }
-        let commit_prepared = operation
-            .prepared_objects
-            .get("store-commit")
-            .ok_or_else(|| {
-                CircleJournalError("Circle operation lacks its prepared Store commit".to_string())
-            })?;
+        let commit_prepared = prepared_objects.get("store-commit").ok_or_else(|| {
+            CircleJournalError("Circle operation lacks its prepared Store commit".to_string())
+        })?;
         remotes.push(
             crate::remote_object::RemoteObjectRecord::candidate_commit(
                 operation.commit_ref.clone(),
@@ -313,12 +411,9 @@ impl CircleOperationJournal {
             )
             .map_err(|error| CircleJournalError(error.to_string()))?,
         );
-        let prepared = operation
-            .prepared_objects
-            .get("store-head")
-            .ok_or_else(|| {
-                CircleJournalError("Circle operation lacks its prepared Store head".to_string())
-            })?;
+        let prepared = prepared_objects.get("store-head").ok_or_else(|| {
+            CircleJournalError("Circle operation lacks its prepared Store head".to_string())
+        })?;
         remotes.push(
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_head(
                 crate::store_commit::StoreDeviceHeadRef {
@@ -334,34 +429,17 @@ impl CircleOperationJournal {
         Ok(remotes)
     }
 
-    pub fn uploaded_object_ids(
-        &self,
-    ) -> Result<BTreeSet<crate::store_commit::ObjectHash>, CircleJournalError> {
-        self.operation()
-            .uploaded
-            .iter()
-            .map(|step| {
-                let prepared = self.operation().prepared_objects.get(step).ok_or_else(|| {
-                    CircleJournalError(format!(
-                        "Circle upload marker {step} names no prepared object"
-                    ))
-                })?;
-                Ok(crate::remote_object::remote_object_id(prepared.reference()))
-            })
-            .collect()
-    }
-
     pub fn state(&self) -> CircleOperationState {
         match &self.progress {
-            CircleOperationProgress::Ready(_) => CircleOperationState::Pending,
-            CircleOperationProgress::WaitingForCloseResponses(_) => {
+            CircleOperationProgress::Ready => CircleOperationState::Pending,
+            CircleOperationProgress::WaitingForCloseResponses => {
                 CircleOperationState::WaitingForCloseResponses
             }
-            CircleOperationProgress::Finalizing(_) => CircleOperationState::Finalizing,
+            CircleOperationProgress::Finalizing => CircleOperationState::Finalizing,
             CircleOperationProgress::Blocked { block, .. } => CircleOperationState::Blocked {
                 block: block.clone(),
             },
-            CircleOperationProgress::Discarding(_) => CircleOperationState::Discarding,
+            CircleOperationProgress::Discarding => CircleOperationState::Discarding,
         }
     }
 
@@ -370,107 +448,105 @@ impl CircleOperationJournal {
     /// initial candidate, or a finalization candidate. A candidate that already
     /// won its slot has no journal row in these states, so no path reaches here.
     pub fn begin_discard(&mut self) -> Result<(), CircleJournalError> {
-        let operation = match &self.progress {
-            CircleOperationProgress::Ready(operation)
-            | CircleOperationProgress::Finalizing(operation)
-            | CircleOperationProgress::Blocked { operation, .. } => operation.clone(),
-            CircleOperationProgress::WaitingForCloseResponses(_)
-            | CircleOperationProgress::Discarding(_) => {
+        match &self.progress {
+            CircleOperationProgress::Ready
+            | CircleOperationProgress::Finalizing
+            | CircleOperationProgress::Blocked { .. } => {}
+            CircleOperationProgress::WaitingForCloseResponses
+            | CircleOperationProgress::Discarding => {
                 return Err(CircleJournalError(format!(
                     "Circle operation {} cannot enter discard from its current state",
                     self.operation_id
                 )));
             }
-        };
-        self.progress = CircleOperationProgress::Discarding(operation);
+        }
+        self.progress = CircleOperationProgress::Discarding;
         Ok(())
     }
 
     pub fn is_discarding(&self) -> bool {
-        matches!(&self.progress, CircleOperationProgress::Discarding(_))
+        matches!(&self.progress, CircleOperationProgress::Discarding)
     }
 
     pub fn block(
         &mut self,
         block: crate::circle::CircleOperationBlock,
     ) -> Result<(), CircleJournalError> {
-        let (phase, operation) = match &self.progress {
-            CircleOperationProgress::Ready(operation) => {
-                (CircleOperationPhase::Initial, operation.clone())
-            }
-            CircleOperationProgress::Finalizing(operation) => {
-                (CircleOperationPhase::Finalization, operation.clone())
-            }
-            CircleOperationProgress::WaitingForCloseResponses(_)
+        let phase = match &self.progress {
+            CircleOperationProgress::Ready => CircleOperationPhase::Initial,
+            CircleOperationProgress::Finalizing => CircleOperationPhase::Finalization,
+            CircleOperationProgress::WaitingForCloseResponses
             | CircleOperationProgress::Blocked { .. }
-            | CircleOperationProgress::Discarding(_) => {
+            | CircleOperationProgress::Discarding => {
                 return Err(CircleJournalError(format!(
                     "Circle operation {} is not publishable",
                     self.operation_id
                 )));
             }
         };
-        self.progress = CircleOperationProgress::Blocked {
-            block,
-            phase,
-            operation,
-        };
+        self.progress = CircleOperationProgress::Blocked { block, phase };
         Ok(())
     }
 
     /// Return a blocked operation to the phase captured when it blocked, so it
-    /// re-enters the idempotent publish pipeline with its exact retained payload.
+    /// re-enters the idempotent publish pipeline against its exact retained
+    /// operation.
     pub fn unblock(&mut self) -> Result<(), CircleJournalError> {
-        let CircleOperationProgress::Blocked {
-            phase, operation, ..
-        } = &self.progress
-        else {
+        let CircleOperationProgress::Blocked { phase, .. } = &self.progress else {
             return Err(CircleJournalError(format!(
                 "Circle operation {} is not blocked",
                 self.operation_id
             )));
         };
-        let operation = operation.clone();
         self.progress = match phase {
-            CircleOperationPhase::Initial => CircleOperationProgress::Ready(operation),
-            CircleOperationPhase::Finalization => CircleOperationProgress::Finalizing(operation),
+            CircleOperationPhase::Initial => CircleOperationProgress::Ready,
+            CircleOperationPhase::Finalization => CircleOperationProgress::Finalizing,
         };
         Ok(())
     }
 
     pub fn wait_for_close_responses(&mut self) -> Result<(), CircleJournalError> {
-        let CircleOperationProgress::Ready(operation) = &mut self.progress else {
+        if !matches!(&self.progress, CircleOperationProgress::Ready) {
             return Err(CircleJournalError(format!(
                 "Circle operation {} is not ready to enter close-response waiting",
                 self.operation_id
             )));
-        };
-        let operation = operation.clone();
-        self.progress = CircleOperationProgress::WaitingForCloseResponses(operation);
+        }
+        self.progress = CircleOperationProgress::WaitingForCloseResponses;
         Ok(())
     }
 
+    /// Install the freshly prepared finalization operation, replacing the one
+    /// that reached its close.
+    ///
+    /// This is the one point in an operation's life where the prepared
+    /// operation changes: the finalization commit is a new candidate graph.
+    /// Its steps are named for the object kinds they carry, so they repeat the
+    /// names the superseded operation used — which is why the completed uploads
+    /// go with the operation they belonged to.
     pub fn begin_finalization(
         &mut self,
         operation: PreparedCircleOperation,
     ) -> Result<(), CircleJournalError> {
         if !matches!(
             &self.progress,
-            CircleOperationProgress::WaitingForCloseResponses(_)
+            CircleOperationProgress::WaitingForCloseResponses
         ) {
             return Err(CircleJournalError(format!(
                 "Circle operation {} is not waiting for close responses",
                 self.operation_id
             )));
         }
-        self.progress = CircleOperationProgress::Finalizing(Box::new(operation));
+        self.operation = operation;
+        self.uploaded.clear();
+        self.progress = CircleOperationProgress::Finalizing;
         Ok(())
     }
 
     pub fn is_finalizing(&self) -> bool {
         matches!(
             &self.progress,
-            CircleOperationProgress::Finalizing(_)
+            CircleOperationProgress::Finalizing
                 | CircleOperationProgress::Blocked {
                     phase: CircleOperationPhase::Finalization,
                     ..
@@ -481,7 +557,7 @@ impl CircleOperationJournal {
     pub fn is_publishable(&self) -> bool {
         matches!(
             &self.progress,
-            CircleOperationProgress::Ready(_) | CircleOperationProgress::Finalizing(_)
+            CircleOperationProgress::Ready | CircleOperationProgress::Finalizing
         )
     }
 

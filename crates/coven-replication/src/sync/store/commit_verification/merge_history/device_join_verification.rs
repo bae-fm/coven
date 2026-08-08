@@ -284,14 +284,14 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         candidate: &coven_database::BlockedMergeCandidate,
     ) -> Result<VerifiedStoreBatchCommit, StoreError> {
-        let reference = &candidate.head.value.commit;
+        let reference = &candidate.head.commit;
         let verified = self
             .commit_verifier
-            .authenticate_bytes(reference, &candidate.commit.bytes)
+            .authenticate_bytes(reference, &candidate.commit_bytes)
             .await?;
-        if verified.value() != candidate.commit.value.value()
-            || verified.reference().object != candidate.commit.object
-            || verified.value().to_bytes() != candidate.commit.bytes
+        if verified.value() != candidate.commit.value()
+            || verified.reference().object != candidate.commit_object
+            || verified.value().to_bytes() != candidate.commit_bytes
         {
             return Err(StoreError::InvalidOutbound(
                 "blocked Merge candidate differs from its authenticated commit".to_string(),

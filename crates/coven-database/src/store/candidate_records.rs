@@ -16,9 +16,8 @@ pub struct PreparedMergeCandidate {
     pub commit: VerifiedStoreBatchCommit,
     pub reference: StoreBatchCommitRef,
     pub canonical_signed_bytes: Vec<u8>,
-    pub commit_prepared: coven_protocol::objects::PreparedExactObject,
     pub head: StoreDeviceHead,
-    pub head_prepared: coven_protocol::objects::PreparedExactObject,
+    pub head_object: ExactObjectRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,16 +155,29 @@ pub fn parse_prepared_merge_candidate_on(
             ..
         } => (candidate_commit, candidate_head),
     };
-    parse_prepared_merge_candidate_parts_on(conn, commit, head)
+    parse_prepared_merge_candidate_parts_on(
+        conn,
+        commit.semantic_bytes(),
+        commit.prepared().reference(),
+        head.semantic_bytes(),
+        head.prepared().reference(),
+    )
 }
 
+/// Verify one candidate from the two objects that identify it.
+///
+/// Both objects arrive as their signed bytes plus the reference they are stored
+/// under; the upload representation is not needed to verify a candidate, only to
+/// create one, so it is not asked for.
 pub fn parse_prepared_merge_candidate_parts_on(
     conn: &Connection,
-    commit: &DurablePreparedProtocolObject,
-    head: &DurablePreparedProtocolObject,
+    commit_bytes: &[u8],
+    commit_object: &ExactObjectRef,
+    head_bytes: &[u8],
+    head_object: &ExactObjectRef,
 ) -> Result<PreparedMergeCandidate, DbError> {
     let root = required_store_root_authority_on(conn)?;
-    let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
+    let unverified: StoreBatchCommit = serde_json::from_slice(commit_bytes)
         .map_err(|error| DbError::context("signed Merge candidate", error))?;
     let registration =
         load_activated_registration_on(conn, &root, &unverified.author_registration)?;
@@ -178,28 +190,23 @@ pub fn parse_prepared_merge_candidate_parts_on(
         sequence: unverified.seq(),
     };
     let value = VerifiedStoreBatchCommit::parse_prepared(
-        commit.semantic_bytes(),
+        commit_bytes,
         root.store_root_hash,
         coord,
-        commit.prepared().reference().clone(),
+        commit_object.clone(),
         &registration,
     )
     .map_err(|error| DbError::context("verify Merge candidate", error))?;
     let reference = value.reference().clone();
-    let head_value = StoreDeviceHead::parse_at(
-        head.semantic_bytes(),
-        root.store_root_hash,
-        &registration,
-        &reference,
-    )
-    .map_err(|error| DbError::context("verify Merge candidate head", error))?;
+    let head_value =
+        StoreDeviceHead::parse_at(head_bytes, root.store_root_hash, &registration, &reference)
+            .map_err(|error| DbError::context("verify Merge candidate head", error))?;
     Ok(PreparedMergeCandidate {
         commit: value,
         reference,
-        canonical_signed_bytes: commit.semantic_bytes().to_vec(),
-        commit_prepared: commit.prepared().clone(),
+        canonical_signed_bytes: commit_bytes.to_vec(),
         head: head_value,
-        head_prepared: head.prepared().clone(),
+        head_object: head_object.clone(),
     })
 }
 
@@ -207,18 +214,11 @@ pub fn blocked_merge_candidate_from_prepared(
     candidate: PreparedMergeCandidate,
 ) -> BlockedMergeCandidate {
     BlockedMergeCandidate {
-        commit: ExactProtocolObject {
-            value: candidate.commit,
-            bytes: candidate.canonical_signed_bytes,
-            object: candidate.reference.object,
-            prepared: candidate.commit_prepared,
-        },
-        head: ExactProtocolObject {
-            bytes: candidate.head.to_bytes(),
-            object: candidate.head_prepared.reference().clone(),
-            value: candidate.head,
-            prepared: candidate.head_prepared,
-        },
+        commit: candidate.commit,
+        commit_bytes: candidate.canonical_signed_bytes,
+        commit_object: candidate.reference.object,
+        head: candidate.head,
+        head_object: candidate.head_object,
     }
 }
 
@@ -228,13 +228,25 @@ pub fn parse_prepared_merge_publication_on(
 ) -> Result<PreparedMergeCandidate, DbError> {
     match prepared {
         PreparedStoreWriteState::Publication { commit, head, .. } => {
-            parse_prepared_merge_candidate_parts_on(conn, commit, head)
+            parse_prepared_merge_candidate_parts_on(
+                conn,
+                commit.semantic_bytes(),
+                commit.prepared().reference(),
+                head.semantic_bytes(),
+                head.prepared().reference(),
+            )
         }
         PreparedStoreWriteState::MergeAbandonment {
             authority_commit,
             authority_head,
             ..
-        } => parse_prepared_merge_candidate_parts_on(conn, authority_commit, authority_head),
+        } => parse_prepared_merge_candidate_parts_on(
+            conn,
+            authority_commit.semantic_bytes(),
+            authority_commit.prepared().reference(),
+            authority_head.semantic_bytes(),
+            authority_head.prepared().reference(),
+        ),
     }
 }
 
@@ -622,7 +634,7 @@ pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
         let _cleanup_target =
             begin_remote_candidate_nonactivation_on(conn, object_id, nonactivation.clone())?;
     }
-    let head_object_id = remote_object_id(candidate.head_prepared.reference());
+    let head_object_id = remote_object_id(&candidate.head_object);
     let _head_cleanup_target = match head_evidence {
         MergeCandidateHeadEvidence::OccupiedByProof => {
             begin_remote_candidate_nonactivation_on(conn, head_object_id, nonactivation.clone())?
@@ -773,11 +785,8 @@ pub fn merge_candidate_cleanup_targets_on(
             }
         }
     }
-    let head_cleanup = load_merge_candidate_head_cleanup_on(
-        conn,
-        candidate.head_prepared.reference(),
-        &candidate.reference,
-    )?;
+    let head_cleanup =
+        load_merge_candidate_head_cleanup_on(conn, &candidate.head_object, &candidate.reference)?;
     if matches!(
         head_cleanup,
         MergeCandidateHeadCleanup::Remote { complete: false }
@@ -949,7 +958,7 @@ pub fn remove_cleaned_merge_authority_on(
 ) -> Result<(), DbError> {
     for object in [
         authority.reference.object.clone(),
-        authority.head_prepared.reference().clone(),
+        authority.head_object.clone(),
     ] {
         let object_id = remote_object_id(&object);
         let remote = load_remote_object_on(tx, object_id)?;
@@ -1012,7 +1021,7 @@ pub fn remove_cleaned_author_excluded_merge_authority_on(
         ));
     }
 
-    let head = authority.head_prepared.reference();
+    let head = &authority.head_object;
     if let MergeCandidateHeadCleanup::Remote { complete } =
         load_merge_candidate_head_cleanup_on(tx, head, &authority.reference)?
     {

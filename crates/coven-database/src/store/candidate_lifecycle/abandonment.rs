@@ -61,28 +61,11 @@ impl StoreDatabase {
                     ));
                 }
                 Ok(Some(BlockedMergeCandidate {
-                    commit: ExactProtocolObject {
-                        value: candidate.commit,
-                        bytes: candidate.canonical_signed_bytes,
-                        object: candidate.reference.object.clone(),
-                        prepared: match &prepared {
-                            PreparedStoreWriteState::Publication { commit, .. } => {
-                                commit.prepared().clone()
-                            }
-                            _ => unreachable!("matched Merge preparation"),
-                        },
-                    },
-                    head: ExactProtocolObject {
-                        value: candidate.head,
-                        bytes: match &prepared {
-                            PreparedStoreWriteState::Publication { head, .. } => {
-                                head.semantic_bytes().to_vec()
-                            }
-                            _ => unreachable!("matched Merge preparation"),
-                        },
-                        object: candidate.head_prepared.reference().clone(),
-                        prepared: candidate.head_prepared,
-                    },
+                    commit: candidate.commit,
+                    commit_bytes: candidate.canonical_signed_bytes,
+                    commit_object: candidate.reference.object.clone(),
+                    head: candidate.head,
+                    head_object: candidate.head_object,
                 }))
             })
             .await
@@ -149,15 +132,19 @@ impl StoreDatabase {
                     candidate: blocked_merge_candidate_from_prepared(
                         parse_prepared_merge_candidate_parts_on(
                             conn,
-                            candidate_commit,
-                            candidate_head,
+                            candidate_commit.semantic_bytes(),
+                            candidate_commit.prepared().reference(),
+                            candidate_head.semantic_bytes(),
+                            candidate_head.prepared().reference(),
                         )?,
                     ),
                     authority: blocked_merge_candidate_from_prepared(
                         parse_prepared_merge_candidate_parts_on(
                             conn,
-                            authority_commit,
-                            authority_head,
+                            authority_commit.semantic_bytes(),
+                            authority_commit.prepared().reference(),
+                            authority_head.semantic_bytes(),
+                            authority_head.prepared().reference(),
                         )?,
                     ),
                 }))
@@ -278,10 +265,20 @@ impl StoreDatabase {
                         "Merge abandonment already has a publication outcome".to_string(),
                     ));
                 }
-                let candidate =
-                    parse_prepared_merge_candidate_parts_on(&tx, candidate_commit, candidate_head)?;
-                let authority =
-                    parse_prepared_merge_candidate_parts_on(&tx, authority_commit, authority_head)?;
+                let candidate = parse_prepared_merge_candidate_parts_on(
+                    &tx,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
+                )?;
+                let authority = parse_prepared_merge_candidate_parts_on(
+                    &tx,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
+                )?;
                 begin_blocked_merge_candidate_nonactivation_on(
                     &tx,
                     &root,
@@ -362,8 +359,10 @@ impl StoreDatabase {
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
                     conn,
-                    candidate_commit,
-                    candidate_head,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
                 )?;
                 Ok(match outcome {
                     MergeAbandonmentOutcome::Prepared => MergeAbandonmentState::Prepared,
@@ -423,8 +422,10 @@ impl StoreDatabase {
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &candidate_commit,
-                    &candidate_head,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
                 )?;
                 if winner_commit != candidate.reference {
                     return Err(DbError::Message(
@@ -433,8 +434,10 @@ impl StoreDatabase {
                 }
                 let authority = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &authority_commit,
-                    &authority_head,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
                 )?;
                 remove_cleaned_merge_authority_on(&tx, &authority)?;
                 let replacement = PreparedStoreWriteState::Publication {
@@ -509,8 +512,10 @@ impl StoreDatabase {
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &candidate_commit,
-                    &candidate_head,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
                 )?;
                 if winner_commit == candidate.reference {
                     return Err(DbError::Message(
@@ -519,8 +524,10 @@ impl StoreDatabase {
                 }
                 let authority = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &authority_commit,
-                    &authority_head,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
                 )?;
                 remove_cleaned_merge_authority_on(&tx, &authority)?;
                 let replacement = PreparedStoreWriteState::Publication {
@@ -593,13 +600,17 @@ impl StoreDatabase {
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &candidate_commit,
-                    &candidate_head,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
                 )?;
                 let authority = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &authority_commit,
-                    &authority_head,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
                 )?;
                 if !merge_candidate_cleanup_targets_on(&tx, &write_id, &candidate, true, &[])?
                     .is_empty()

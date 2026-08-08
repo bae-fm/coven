@@ -138,6 +138,11 @@ pub struct TestStore {
     signer: UserKeypair,
     founder: TestDevice,
     producers: Arc<tokio::sync::Mutex<TestStoreProducers>>,
+    /// One store directory per device identity. A device that is bound, dropped
+    /// and bound again is the same device, and the local state it left behind —
+    /// the payload spool a prepared operation writes its object bytes into —
+    /// has to still be there when it comes back.
+    store_dirs: std::sync::Mutex<HashMap<String, TestStoreDir>>,
 }
 
 /// Why a test pull did not produce a result. Keeps the three steps a test pull
@@ -273,11 +278,36 @@ mod test_device {
         }
     }
 
+    /// One device's store directory, held apart from the device itself.
+    ///
+    /// A test rebinds the same device many times, and durable state under the
+    /// directory — the payload spool among it — has to survive rebinding, so
+    /// the temporary directory outlives any one [`TestDevice`] that reads it.
+    #[derive(Clone)]
+    pub struct TestStoreDir {
+        _temporary: std::sync::Arc<tempfile::TempDir>,
+        dir: StoreDir,
+    }
+
+    impl TestStoreDir {
+        pub fn new() -> Self {
+            let (temporary, dir) = temp_store_dir();
+            Self {
+                _temporary: std::sync::Arc::new(temporary),
+                dir,
+            }
+        }
+
+        pub fn dir(&self) -> &StoreDir {
+            &self.dir
+        }
+    }
+
     #[derive(Clone)]
     pub struct TestDevice {
         db: coven_database::StoreDatabase,
         store: std::sync::Arc<crate::sync::store::Store>,
-        _store_dir_temp: std::sync::Arc<tempfile::TempDir>,
+        store_dir: TestStoreDir,
         pub device_id: String,
         storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
         identity: UserKeypair,
@@ -305,11 +335,11 @@ mod test_device {
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
-            let (store_dir_temp, store_dir) = temp_store_dir();
+            let store_dir = TestStoreDir::new();
             let initialized = crate::sync::store::Store::create(
                 database.clone(),
                 storage.clone(),
-                store_dir,
+                store_dir.dir().clone(),
                 founder_timestamp,
                 &identity,
             )
@@ -318,7 +348,7 @@ mod test_device {
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(initialized.store),
-                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
+                store_dir,
                 device_id: initialized.device_id,
                 storage,
                 identity,
@@ -331,11 +361,11 @@ mod test_device {
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
-            let (store_dir_temp, store_dir) = temp_store_dir();
+            let store_dir = TestStoreDir::new();
             let initialized = crate::sync::store::Store::open(
                 database.clone(),
                 storage.clone(),
-                store_dir,
+                store_dir.dir().clone(),
                 root,
                 identity,
             )
@@ -344,7 +374,7 @@ mod test_device {
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(initialized.store),
-                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
+                store_dir,
                 device_id: initialized.device_id,
                 storage,
                 identity: identity.clone(),
@@ -356,20 +386,25 @@ mod test_device {
             storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
-            Self::load_with_database(coven_database::StoreDatabase::new(db), storage, identity)
-                .await
+            Self::load_with_database(
+                coven_database::StoreDatabase::new(db),
+                storage,
+                identity,
+                TestStoreDir::new(),
+            )
+            .await
         }
 
         pub async fn load_with_database(
             database: coven_database::StoreDatabase,
             storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             identity: UserKeypair,
+            store_dir: TestStoreDir,
         ) -> Result<Self, crate::sync::store::StoreError> {
-            let (store_dir_temp, store_dir) = temp_store_dir();
             let store = crate::sync::store::Store::load(
                 database.clone(),
                 storage.clone(),
-                store_dir,
+                store_dir.dir().clone(),
                 identity.clone(),
             )
             .await?;
@@ -382,11 +417,21 @@ mod test_device {
             Ok(Self {
                 db: database,
                 store: std::sync::Arc::new(store),
-                _store_dir_temp: std::sync::Arc::new(store_dir_temp),
+                store_dir,
                 device_id,
                 storage,
                 identity,
             })
+        }
+
+        /// The directory this device's durable local state lives under —
+        /// stable across every rebinding of the device.
+        pub fn store_dir(&self) -> &StoreDir {
+            self.store_dir.dir()
+        }
+
+        pub fn test_store_dir(&self) -> &TestStoreDir {
+            &self.store_dir
         }
 
         pub fn adopt_key_rotation(
@@ -1768,12 +1813,13 @@ mod test_device {
             })
         }
 
-        pub async fn prepare_circle_operation(
+        #[cfg(test)]
+        pub(crate) async fn prepare_circle_operation(
             &self,
             metadata_stamp: &str,
             name: &str,
         ) -> Result<
-            coven_protocol::circle_journal::CircleOperationJournal,
+            crate::sync::store::circles::PreparedCircleJournal,
             crate::sync::store::CircleOperationError,
         > {
             self.circle_writer()
@@ -2477,7 +2523,7 @@ mod test_device {
     }
 }
 
-pub use test_device::{TestDevice, TestDeviceSigningAuthority};
+pub use test_device::{TestDevice, TestDeviceSigningAuthority, TestStoreDir};
 
 struct TestStoreProducers {
     unassigned: Option<TestDevice>,
@@ -2896,6 +2942,10 @@ impl TestStore {
             TestDevice::create_with_database(database, storage.clone(), store_id, signer.clone())
                 .await?;
         let root = founder.store_root().clone();
+        let store_dirs = HashMap::from([(
+            coven_keys::keys::public_key_hex(&signer),
+            founder.test_store_dir().clone(),
+        )]);
         Ok(Arc::new(Self {
             home,
             storage,
@@ -2906,6 +2956,7 @@ impl TestStore {
                 unassigned: Some(founder),
                 by_name: HashMap::new(),
             })),
+            store_dirs: std::sync::Mutex::new(store_dirs),
         }))
     }
 
@@ -2939,6 +2990,17 @@ impl TestStore {
             .await
             .map_err(|error| error.to_string())?;
         Ok(prepared.reference().clone())
+    }
+
+    /// Publish one object from the bytes and reference that identify it, for
+    /// tests holding a candidate that carries references rather than uploads.
+    pub async fn publish_exact_protocol_object(
+        &self,
+        object: &coven_protocol::objects::ExactObjectRef,
+        bytes: Vec<u8>,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
+        let prepared = coven_protocol::objects::PreparedExactObject::new(object.clone(), bytes)?;
+        self.storage.create_protocol_object(&prepared).await
     }
 
     pub async fn publish_prepared_protocol_object(
@@ -3210,7 +3272,6 @@ impl TestStore {
             .prepared_objects
             .get("store-head")
             .expect("candidate carries a prepared Store head")
-            .reference()
             .slot()
             .clone();
         let head_prefix = coven_protocol::store_commit::head_slot_prefix(
@@ -3242,19 +3303,21 @@ impl TestStore {
         candidate: &coven_database::BlockedMergeCandidate,
     ) {
         let registration = coven_database::StoreDatabase::new(peer_db)
-            .activated_store_device_registration(candidate.commit.value.author_registration.clone())
+            .activated_store_device_registration(
+                candidate.commit.value().author_registration.clone(),
+            )
             .await
             .expect("load third-winner device registration");
         let device_signer = registration
             .value()
             .device_signer(&self.signer)
             .expect("derive third-winner device signer");
-        let coord = candidate.head.value.commit.coord.clone();
-        let candidate_family = candidate.commit.value.candidate_family();
+        let coord = candidate.head.commit.coord.clone();
+        let candidate_family = candidate.commit.value().candidate_family();
         let package = coven_protocol::audience_package::AudiencePackage::store(
             self.root.store_root_hash,
             candidate_family,
-            candidate.commit.value.write_id.clone(),
+            candidate.commit.value().write_id.clone(),
             coord.clone(),
             peer_db.schema_version(),
             b"third winner package".to_vec(),
@@ -3292,16 +3355,16 @@ impl TestStore {
             .expect("prepare third winner package");
         let third = coven_protocol::store_commit::StoreBatchCommit::signed_operations(
             self.root.store_root_hash,
-            candidate.commit.value.write_id.clone(),
+            candidate.commit.value().write_id.clone(),
             coord.clone(),
-            candidate.commit.value.author_registration.clone(),
+            candidate.commit.value().author_registration.clone(),
             registration.value(),
-            candidate.commit.value.order.clone(),
-            candidate.commit.value.membership_state.clone(),
-            candidate.commit.value.device_state.clone(),
+            candidate.commit.value().order.clone(),
+            candidate.commit.value().membership_state.clone(),
+            candidate.commit.value().device_state.clone(),
             candidate
                 .commit
-                .value
+                .value()
                 .operations_membership_authority()
                 .expect("load third winner membership authority"),
             coven_protocol::store_commit::StoreCommitOperationsInput {
@@ -3352,10 +3415,10 @@ impl TestStore {
         .expect("reference third winner commit");
         let third_head = coven_protocol::store_commit::StoreDeviceHead::signed(
             self.root.store_root_hash,
-            candidate.commit.value.author_registration.clone(),
+            candidate.commit.value().author_registration.clone(),
             third_ref,
-            candidate.head.value.history_summary,
-            candidate.head.value.successor.clone(),
+            candidate.head.history_summary,
+            candidate.head.successor.clone(),
             &device_signer,
         )
         .expect("sign third winner head");
@@ -3366,7 +3429,7 @@ impl TestStore {
         let head_prefix = coven_protocol::store_commit::head_slot_prefix(
             &candidate
                 .commit
-                .value
+                .value()
                 .author_registration
                 .device_id
                 .to_string(),
@@ -3376,7 +3439,7 @@ impl TestStore {
             .storage
             .prepare_protocol_object(
                 &head_context,
-                candidate.head.object.slot().clone(),
+                candidate.head_object.slot().clone(),
                 &head_prefix,
                 third_head.to_bytes(),
             )
@@ -3588,6 +3651,7 @@ impl TestStore {
             activated_database,
             self.storage_for_device(joining_identity.clone())?,
             joining_identity.clone(),
+            self.device_store_dir(joining_identity),
         )
         .await
         .map_err(|error| error.to_string())
@@ -3602,9 +3666,21 @@ impl TestStore {
             database.clone(),
             self.storage_for_device(identity.clone())?,
             identity.clone(),
+            self.device_store_dir(identity),
         )
         .await
         .map_err(|error| error.to_string())
+    }
+
+    /// The store directory this identity's device keeps across bindings,
+    /// created the first time the identity is bound.
+    fn device_store_dir(&self, identity: &UserKeypair) -> TestStoreDir {
+        self.store_dirs
+            .lock()
+            .expect("Circle test store directories")
+            .entry(coven_keys::keys::public_key_hex(identity))
+            .or_insert_with(TestStoreDir::new)
+            .clone()
     }
 
     pub async fn invite_member(

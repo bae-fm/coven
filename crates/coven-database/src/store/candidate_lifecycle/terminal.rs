@@ -49,13 +49,17 @@ impl StoreDatabase {
                         } => {
                             candidates.push(parse_prepared_merge_candidate_parts_on(
                                 conn,
-                                candidate_commit,
-                                candidate_head,
+                                candidate_commit.semantic_bytes(),
+                                candidate_commit.prepared().reference(),
+                                candidate_head.semantic_bytes(),
+                                candidate_head.prepared().reference(),
                             )?);
                             candidates.push(parse_prepared_merge_candidate_parts_on(
                                 conn,
-                                authority_commit,
-                                authority_head,
+                                authority_commit.semantic_bytes(),
+                                authority_commit.prepared().reference(),
+                                authority_head.semantic_bytes(),
+                                authority_head.prepared().reference(),
                             )?);
                         }
                     }
@@ -126,7 +130,13 @@ impl StoreDatabase {
                         .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
                     match &prepared {
                         PreparedStoreWriteState::Publication { commit, head, .. } => candidates
-                            .push(parse_prepared_merge_candidate_parts_on(&tx, commit, head)?),
+                            .push(parse_prepared_merge_candidate_parts_on(
+                                &tx,
+                                commit.semantic_bytes(),
+                                commit.prepared().reference(),
+                                head.semantic_bytes(),
+                                head.prepared().reference(),
+                            )?),
                         PreparedStoreWriteState::MergeAbandonment {
                             candidate_commit,
                             candidate_head,
@@ -136,13 +146,17 @@ impl StoreDatabase {
                         } => {
                             candidates.push(parse_prepared_merge_candidate_parts_on(
                                 &tx,
-                                candidate_commit,
-                                candidate_head,
+                                candidate_commit.semantic_bytes(),
+                                candidate_commit.prepared().reference(),
+                                candidate_head.semantic_bytes(),
+                                candidate_head.prepared().reference(),
                             )?);
                             candidates.push(parse_prepared_merge_candidate_parts_on(
                                 &tx,
-                                authority_commit,
-                                authority_head,
+                                authority_commit.semantic_bytes(),
+                                authority_commit.prepared().reference(),
+                                authority_head.semantic_bytes(),
+                                authority_head.prepared().reference(),
                             )?);
                         }
                     }
@@ -156,7 +170,7 @@ impl StoreDatabase {
                         )
                     })?;
                 validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
-                let object_id = remote_object_id(candidate.head_prepared.reference());
+                let object_id = remote_object_id(&candidate.head_object);
                 let remote_exists: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
@@ -242,7 +256,7 @@ impl StoreDatabase {
                 }
                 replace_prepared_merge_head_remote_on(
                     &tx,
-                    publication.head_prepared.reference(),
+                    &publication.head_object,
                     &winner,
                     &winner_prepared,
                     &candidate,

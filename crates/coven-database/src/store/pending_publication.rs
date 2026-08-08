@@ -151,16 +151,19 @@ impl StoreDatabase {
                     let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
                     let graph_commit = match graph_commit {
                         Some(graph_commit) => {
+                            let candidate_head = match &prepared {
+                                PreparedStoreWriteState::MergeAbandonment {
+                                    candidate_head,
+                                    ..
+                                } => candidate_head,
+                                _ => unreachable!("matched Merge abandonment"),
+                            };
                             let candidate = parse_prepared_merge_candidate_parts_on(
                                 conn,
-                                graph_commit,
-                                match &prepared {
-                                    PreparedStoreWriteState::MergeAbandonment {
-                                        candidate_head,
-                                        ..
-                                    } => candidate_head,
-                                    _ => unreachable!("matched Merge abandonment"),
-                                },
+                                graph_commit.semantic_bytes(),
+                                graph_commit.prepared().reference(),
+                                candidate_head.semantic_bytes(),
+                                candidate_head.prepared().reference(),
                             )?;
                             candidate.commit
                         }

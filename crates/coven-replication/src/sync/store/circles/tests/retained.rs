@@ -45,8 +45,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
         .await
         .expect("prepare operation while successor is authorized");
+    let journal_operation_id = journal.journal.operation_id.clone();
+    let journal_circle_id = journal.journal.circle_id();
     StoreDatabase::new(&successor_db)
-        .insert_circle_operation(journal.clone())
+        .insert_circle_operation(journal.journal, journal.prepared_objects)
         .await
         .expect("persist operation that will lose authorization");
     let custody = TestCustody::default();
@@ -84,8 +86,10 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .prepare_circle_operation("0000000001004-0000-successor", "Later Circle")
         .await
         .expect("prepare still-authorized operation");
+    let later_operation_id = later.journal.operation_id.clone();
+    let later_circle_id = later.journal.circle_id();
     StoreDatabase::new(&successor_db)
-        .insert_circle_operation(later.clone())
+        .insert_circle_operation(later.journal, later.prepared_objects)
         .await
         .expect("persist still-authorized operation");
 
@@ -98,7 +102,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("revoked journal is blocked without interrupting the resume loop");
 
     let blocked = StoreDatabase::new(&successor_db)
-        .circle_operation(&journal.operation_id)
+        .circle_operation(&journal_operation_id)
         .await
         .expect("read revoked journal")
         .expect("revoked journal remains durable");
@@ -107,7 +111,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         CircleOperationState::Blocked { .. }
     ));
     assert!(StoreDatabase::new(&successor_db)
-        .circle_operation(&later.operation_id)
+        .circle_operation(&later_operation_id)
         .await
         .expect("read later journal")
         .is_none());
@@ -120,7 +124,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
             .await
             .expect("read successor circles"),
         vec![coven_protocol::circle::CircleInfo::Active {
-            id: later.circle_id(),
+            id: later_circle_id,
             name: "Later Circle".to_string(),
             role: CircleRole::Owner,
             rotation_required: false,
@@ -128,7 +132,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     );
     assert_eq!(
         StoreDatabase::new(&successor_db)
-            .circle_control_activation_count_for_test(journal.circle_id())
+            .circle_control_activation_count_for_test(journal_circle_id)
             .await
             .expect("count circle activations"),
         0
@@ -177,20 +181,21 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         )
         .await
         .expect("invite retained Circle peer");
-    let journal = store
+    let prepared = store
         .bind_device(&db, &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
         .expect("prepare retained Circle activation");
-    for object in journal.operation().prepared_objects.values() {
+    for object in prepared.prepared_objects.values() {
         store
             .storage()
             .create_protocol_object(object)
             .await
             .expect("publish retained Circle activation object");
     }
+    let journal = prepared.journal;
     let commit = journal.commit().expect("parse retained Circle commit");
     let commit_ref = &journal.operation().commit_ref;
     let author = coven_database::StoreDatabase::new(&db)

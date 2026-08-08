@@ -84,6 +84,28 @@ fn open_circle_blob_test_db() -> Database {
     )
 }
 
+/// A Circle-scoped `documents` table whose rows carry their bytes inline, so a
+/// single row can make the Circle's database image arbitrarily large.
+fn open_circle_bulk_row_test_db() -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        vec![coven_protocol::synced_schema::SyncedTable::new(
+            "documents",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience")],
+        vec![coven_database::Migration::sql(
+            1,
+            "Circle bulk row schema",
+            "CREATE TABLE documents (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
 /// The materialized `documents` row a recipient installed, as
 /// `(audience, size, hash, stamp)`.
 async fn installed_document_row(
@@ -557,7 +579,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .value
         .corrupt_signature_for_test();
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal)
+        .substitute_circle_operation_for_test(journal)
         .await
         .expect("persist forged deletion");
 
@@ -588,6 +610,116 @@ async fn a_forged_deletion_control_is_held_invalid() {
             [coven_protocol::circle::CircleInfo::Active { id, .. }] if *id == circle_id
         ),
         "the forged deletion never took effect; the Circle remains active"
+    );
+}
+
+/// A member addition carries the Circle's whole database image, which is as
+/// large as the Circle's data. The operation row names that image; the bytes
+/// are in the payload spool. So the row is smaller than the single object it
+/// names — which it cannot be if it is carrying that object's bytes — and it is
+/// written once rather than rewritten with them at every upload step.
+#[tokio::test]
+async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
+    let db = open_circle_bulk_row_test_db();
+    let (store, _home, signer, founder) =
+        persist_merge_operation(&db, "circle-journal-payload").await;
+    let circle_id = founder.circle_id();
+    store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store")
+        .resume_circle_operations()
+        .await
+        .expect("activate founder Circle");
+
+    let body = "d".repeat(512 * 1024);
+    let insert = format!(
+        "INSERT INTO documents (id, audience, body, _updated_at)
+         VALUES ('00000000-0000-4000-8000-000000000001', '{circle_id}', '{body}',
+                 '0000000001500-0000-owner')"
+    );
+    coven_database::StoreDatabase::new(&db)
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([42; 32])),
+            None,
+            move |transaction| transaction.execute_batch(&insert).map_err(DbError::from),
+        )
+        .await
+        .expect("capture the Circle's bulk row");
+    let (_temp, store_dir) = temp_store_dir();
+    let components = prepare_owner_sync_components(
+        &db,
+        &store,
+        &_home,
+        &store_dir,
+        &signer,
+        "circle-journal-payload",
+    )
+    .await;
+    components
+        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .await
+        .expect("publish the Circle's bulk row");
+
+    let member = UserKeypair::generate();
+    let member_pubkey = keys::public_key_hex(&member);
+    store
+        .invite_member(
+            &db,
+            &signer,
+            &member_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "Circle bulk row Store",
+        )
+        .await
+        .expect("invite Store member");
+    let member_db = open_circle_bulk_row_test_db();
+    store
+        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .await
+        .expect("activate Store member device");
+
+    // Stop the addition before its first upload, so the operation it journaled
+    // is still in its slot to be measured.
+    _home.fail_exact_create_before_call(1);
+    components
+        .add_circle_member(circle_id, member_pubkey, CircleRole::Member)
+        .await
+        .expect_err("interrupt the member addition before its first upload");
+
+    let operation_id = coven_database::StoreDatabase::new(&db)
+        .get_circle_operations()
+        .await
+        .expect("list journaled Circle operations")
+        .into_iter()
+        .find(|operation| operation.circle_id == circle_id)
+        .expect("the interrupted member addition remains journaled")
+        .operation_id;
+    let journal = coven_database::StoreDatabase::new(&db)
+        .circle_operation(&operation_id)
+        .await
+        .expect("read the journaled member addition")
+        .expect("the journaled member addition remains durable");
+    let image = journal
+        .operation()
+        .prepared_objects
+        .get("bootstrap-image")
+        .expect("a member addition carries the Circle's database image")
+        .stored_size();
+    let stored = coven_database::PreparedCircleOperationRow::from_journal(&journal)
+        .expect("re-derive the stored operation row")
+        .prepared
+        .len() as u64;
+
+    assert!(
+        image > 512 * 1024,
+        "the Circle's database image is only {image} bytes, too small to say anything"
+    );
+    assert!(
+        stored < image,
+        "the stored operation is {stored} bytes and the image it names is {image}"
     );
 }
 
@@ -1850,7 +1982,7 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .await
             .expect("read interrupted circle operation")
             .expect("interrupted circle operation remains durable");
-        assert!(persisted.operation().uploaded.contains("metadata"));
+        assert!(persisted.uploaded.contains("metadata"));
 
         let metadata = expected
             .operation()
@@ -1858,12 +1990,9 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .get("metadata")
             .expect("operation carries exact metadata object");
         if corrupt {
-            _home.replace_exact_object(
-                metadata.reference().slot(),
-                b"corrupt metadata bytes".to_vec(),
-            );
+            _home.replace_exact_object(metadata.slot(), b"corrupt metadata bytes".to_vec());
         } else {
-            _home.remove_exact_object(metadata.reference().slot());
+            _home.remove_exact_object(metadata.slot());
         }
         std::thread::spawn(move || drop(db))
             .join()
@@ -1893,9 +2022,9 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
 }
 
 #[tokio::test]
-async fn uploaded_circle_candidate_fails_when_its_ownership_record_is_missing() {
+async fn an_upload_step_fails_when_its_object_has_no_ownership_record() {
     let db = open_test_db();
-    let (_store, _home, _signer, mut journal) =
+    let (_store, _home, _signer, journal) =
         persist_merge_operation(&db, "circle-missing-candidate-ownership").await;
     let step = "access-leaf-0";
     let object = journal
@@ -1903,57 +2032,65 @@ async fn uploaded_circle_candidate_fails_when_its_ownership_record_is_missing() 
         .prepared_objects
         .get(step)
         .expect("operation carries its access leaf")
-        .reference()
         .clone();
     db.delete_remote_object_for_test(object)
         .await
         .expect("remove candidate ownership record");
-    journal.operation_mut().uploaded.insert(step.to_string());
 
     let error = coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .complete_circle_operation_upload_step(&journal.operation_id, step)
         .await
         .expect_err("an uploaded candidate must retain its ownership record");
     assert!(error.to_string().contains("remote object"), "{error}");
     let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
-        .expect("read operation after rejected update")
-        .expect("operation remains durable after rejected update");
-    assert!(!persisted.operation().uploaded.contains(step));
+        .expect("read operation after rejected step")
+        .expect("operation remains durable after rejected step");
+    assert!(!persisted.uploaded.contains(step));
 }
 
 #[tokio::test]
-async fn journal_update_rejects_an_uploaded_marker_without_a_prepared_object() {
+async fn an_upload_step_must_name_a_prepared_object() {
     let db = open_test_db();
-    let (_store, _home, _signer, mut journal) =
+    let (_store, _home, _signer, journal) =
         persist_merge_operation(&db, "circle-unknown-upload-marker").await;
     let unknown_step = "absent-prepared-object";
-    journal
-        .operation_mut()
-        .uploaded
-        .insert(unknown_step.to_string());
 
     let error = coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .complete_circle_operation_upload_step(&journal.operation_id, unknown_step)
         .await
-        .expect_err("an upload marker must name a prepared object");
+        .expect_err("an upload step must name a prepared object");
     assert!(error.to_string().contains(unknown_step), "{error}");
     let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
-        .expect("read operation after rejected upload marker")
-        .expect("operation remains durable after rejected upload marker");
-    assert!(!persisted.operation().uploaded.contains(unknown_step));
+        .expect("read operation after rejected upload step")
+        .expect("operation remains durable after rejected upload step");
+    assert!(!persisted.uploaded.contains(unknown_step));
 }
 
+/// The prepared operation is written once and never rewritten per step, so the
+/// journaling transaction is the only place its candidate graph can be checked
+/// against the objects it names — and the one that has to refuse a graph whose
+/// plaintext no longer matches the objects prepared from it.
 #[tokio::test]
-async fn journal_update_rejects_a_tampered_leaf_disposition() {
+async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
     let db = open_test_db();
-    let (_store, _home, signer, mut journal) =
-        persist_merge_operation(&db, "circle-tampered-local-access").await;
+    let signer = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let store =
+        create_test_store_in_its_own_task(&db, "circle-tampered-local-access", &signer, home).await;
+    let mut prepared = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-creator", "Household")
+        .await
+        .expect("prepare circle operation");
     let author = keys::public_key_hex(&signer);
-    let own_access = journal
+    let own_access = prepared
+        .journal
         .operation_mut()
         .creation
         .access
@@ -1965,10 +2102,12 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
         CircleAccessDisposition::Active { .. }
     ));
     own_access.leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
+    let circle_id = prepared.journal.circle_id();
+    let operation_id = prepared.journal.operation_id.clone();
     let error = coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
-        .expect_err("journal update must verify its closed candidate graph");
+        .expect_err("journaling must verify its closed candidate graph");
     assert!(
         error.to_string().contains("stored reference differs"),
         "{error}"
@@ -1976,16 +2115,16 @@ async fn journal_update_rejects_a_tampered_leaf_disposition() {
 
     assert_eq!(
         StoreDatabase::new(&db)
-            .circle_control_activation_count_for_test(journal.circle_id())
+            .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         0
     );
     assert!(coven_database::StoreDatabase::new(&db)
-        .circle_operation(&journal.operation_id)
+        .circle_operation(&operation_id)
         .await
         .expect("read rejected operation")
-        .is_some());
+        .is_none());
 }
 
 struct ClosingFounderCircle {
@@ -2631,7 +2770,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         })
         .expect("closing control is present in its activating commit")
         .clone();
-    let journal = authority
+    let prepared = authority
         .circles()
         .preparer()
         .prepare_request(CircleOperationRequest::CancelEpochClose(Box::new(
@@ -2650,8 +2789,11 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     // verifier that keyed on the epoch origin would accept it. Publish every exact
     // object except the cancellation, leaving the outcome slot empty, and strip the
     // cancellation reference from the re-signed activating commit.
-    let old_commit = journal.commit().expect("parse prepared reopen commit");
-    for (step, object) in &journal.operation().prepared_objects {
+    let old_commit = prepared
+        .journal
+        .commit()
+        .expect("parse prepared reopen commit");
+    for (step, object) in &prepared.prepared_objects {
         if step == "epoch-close-cancellation" || step == "store-commit" || step == "store-head" {
             continue;
         }
@@ -2668,7 +2810,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
         "legitimate reopen names its cancellation"
     );
     objects.close_cancellation = None;
-    let mut journal = journal;
+    let mut journal = prepared.journal;
     let forged_reference = journal.operation().creation.control_ref(
         objects,
         Some(old_commit.circle_controls()[0].head_object().clone()),
@@ -2705,23 +2847,27 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     );
 }
 
-// Runs `flow` on a thread whose stack is capped at 1 MiB — below the 2 MiB
-// default thread stack, above the ~0.5 MiB an optimized build of these Circle
-// operations actually needs. An unoptimized (`opt-level = 0`) build of the same
+// Runs `flow` on a thread whose stack is capped at 1.5 MiB — below the 2 MiB
+// default thread stack, above the ~1.05 MiB an optimized build of these Circle
+// operations measures at. An unoptimized (`opt-level = 0`) build of the same
 // flow needs ~2 MiB and overflows here; `[profile.test.package.coven]
 // opt-level = 1` in the workspace `Cargo.toml` is what keeps the poll-frame
 // scratch small enough to fit. This guards that profile setting on every
-// platform: drop the optimization (or regrow the operation graph past 1 MiB of
-// optimized frames) and this thread overflows and aborts the test binary, so
+// platform: drop the optimization (or regrow the operation graph past the cap
+// in optimized frames) and this thread overflows and aborts the test binary, so
 // macOS/Windows CI catch the regression, not only the tighter-stacked Linux job.
-fn run_circle_flow_on_a_one_megabyte_stack<Flow, Fut>(flow: Flow)
+//
+// The cap is a budget over the whole composed flow — a founder Circle, two
+// member additions and an epoch close driven from one future — so it moves when
+// that flow's frames do, not only when the profile changes.
+fn run_circle_flow_on_a_bounded_stack<Flow, Fut>(flow: Flow)
 where
     Flow: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
 {
     std::thread::Builder::new()
         .name("circle-bounded-stack".to_string())
-        .stack_size(1024 * 1024)
+        .stack_size(3 * 512 * 1024)
         .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2731,7 +2877,7 @@ where
         })
         .expect("spawn bounded-stack Circle thread")
         .join()
-        .expect("Circle cancellation flow completes on a 1 MiB stack without overflow");
+        .expect("Circle cancellation flow completes on a bounded stack without overflow");
 }
 
 #[tokio::test]
@@ -2740,12 +2886,12 @@ async fn interrupted_cancellation_resumes_idempotently() {
 }
 
 // A regression guard for the deep, non-recursive async frames of the Circle
-// resume/prepare path: it runs the same flow on a 1 MiB stack (see
-// `run_circle_flow_on_a_one_megabyte_stack`). Optimized, the flow fits with room
-// to spare; unoptimized it needs ~2 MiB and this overflows.
+// resume/prepare path: it runs the same flow on a capped stack (see
+// `run_circle_flow_on_a_bounded_stack`). Optimized, the flow fits; unoptimized
+// it needs ~2 MiB and this overflows.
 #[test]
-fn interrupted_cancellation_resumes_within_a_one_megabyte_stack() {
-    run_circle_flow_on_a_one_megabyte_stack(interrupted_cancellation_flow);
+fn interrupted_cancellation_resumes_within_a_bounded_stack() {
+    run_circle_flow_on_a_bounded_stack(interrupted_cancellation_flow);
 }
 
 async fn interrupted_cancellation_flow() {

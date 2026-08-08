@@ -59,6 +59,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         publication::CircleCandidatePublisher::new(
             database,
             storage,
+            self.store_dir,
             membership,
             std::sync::Arc::clone(&self.local_writer),
             history,
@@ -78,6 +79,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             membership,
             root,
             storage,
+            self.store_dir,
             std::sync::Arc::clone(&self.local_writer),
             history,
         )

@@ -101,10 +101,20 @@ pub struct PreparedStoreWriteCommit {
     pub head: ExactProtocolObject<StoreDeviceHead>,
 }
 
+/// A candidate whose activation is blocked: the commit and head it would have
+/// activated, each named by the reference that identifies it.
+///
+/// The upload bytes are deliberately absent. A blocked candidate is only ever
+/// examined and cleaned up — its objects are deleted from storage by reference,
+/// never written again — so carrying them would be carrying what no reader
+/// reads.
 #[derive(Debug, Clone)]
 pub struct BlockedMergeCandidate {
-    pub commit: ExactProtocolObject<VerifiedStoreBatchCommit>,
-    pub head: ExactProtocolObject<StoreDeviceHead>,
+    pub commit: VerifiedStoreBatchCommit,
+    pub commit_bytes: Vec<u8>,
+    pub commit_object: ExactObjectRef,
+    pub head: StoreDeviceHead,
+    pub head_object: ExactObjectRef,
 }
 
 #[derive(Debug, Clone)]

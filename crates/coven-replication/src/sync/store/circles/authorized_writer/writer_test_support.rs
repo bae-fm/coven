@@ -1,12 +1,12 @@
 use super::*;
 
 impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub(crate) async fn prepare_create_for_test(
         &mut self,
         metadata_stamp: &str,
         name: &str,
-    ) -> Result<CircleOperationJournal, CircleOperationError> {
+    ) -> Result<PreparedCircleJournal, CircleOperationError> {
         self.preparer().prepare_create(metadata_stamp, name).await
     }
 
@@ -113,7 +113,6 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     "Circle operation has no prepared Store head".to_string(),
                 )
             })?
-            .reference()
             .slot()
             .clone();
         let head_prepared = self.preparer().prepare_circle_object_at(
@@ -128,20 +127,31 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             ),
             head.to_bytes(),
         )?;
+        // The replacement objects have to reach the spool the same way
+        // preparation puts them there, or the publisher would find no bytes
+        // under the references this journal now carries.
+        let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
+        for object in [&commit_prepared, &head_prepared] {
+            spool
+                .write(object.stored_bytes())
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        }
         let operation = journal.operation_mut();
         operation.commit_bytes = commit.to_bytes();
         operation.commit_ref = commit_ref;
+        operation.prepared_objects.insert(
+            "store-commit".to_string(),
+            commit_prepared.reference().clone(),
+        );
         operation
             .prepared_objects
-            .insert("store-commit".to_string(), commit_prepared);
-        operation
-            .prepared_objects
-            .insert("store-head".to_string(), head_prepared);
+            .insert("store-head".to_string(), head_prepared.reference().clone());
         operation.policy = CircleOperationPolicy {
             head,
             history_summary,
         };
-        operation.uploaded.clear();
+        journal.uploaded.clear();
         Ok(())
     }
 

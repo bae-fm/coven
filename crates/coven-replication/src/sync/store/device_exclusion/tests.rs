@@ -338,7 +338,7 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         restored
             .tamper_author_exclusion_locator_for_test(
                 &exclusion,
-                &transferred_candidate.head.value.commit,
+                &transferred_candidate.head.commit,
                 tamper,
             )
             .await
@@ -379,10 +379,10 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .expect("restored exclusion candidate exists");
     restored
         .author_exclusion_activation_for_candidate_for_test(
-            transferred_candidate.head.value.commit.clone(),
+            transferred_candidate.head.commit.clone(),
             transferred_candidate
                 .commit
-                .value
+                .value()
                 .author_registration
                 .clone(),
         )
@@ -892,17 +892,26 @@ impl<'a> ExcludedPeer<'a> {
             PreparedAbandonmentHeadPublication::Absent => {}
             PreparedAbandonmentHeadPublication::Original => {
                 self.store
-                    .publish_prepared_protocol_object(&candidates.candidate.head.prepared)
+                    .publish_exact_protocol_object(
+                        &candidates.candidate.head_object,
+                        candidates.candidate.head.to_bytes(),
+                    )
                     .await
                     .expect("publish exact original candidate head");
             }
             PreparedAbandonmentHeadPublication::Authority => {
                 self.store
-                    .publish_prepared_protocol_object(&candidates.authority.commit.prepared)
+                    .publish_exact_protocol_object(
+                        &candidates.authority.commit_object,
+                        candidates.authority.commit_bytes.clone(),
+                    )
                     .await
                     .expect("publish abandonment authority commit");
                 self.store
-                    .publish_prepared_protocol_object(&candidates.authority.head.prepared)
+                    .publish_exact_protocol_object(
+                        &candidates.authority.head_object,
+                        candidates.authority.head.to_bytes(),
+                    )
                     .await
                     .expect("publish exact abandonment authority head");
             }
@@ -923,8 +932,8 @@ impl<'a> ExcludedPeer<'a> {
             MergeCandidateAbandonment::Abandoned,
         );
         for reference in [
-            &candidates.candidate.head.value.commit,
-            &candidates.authority.head.value.commit,
+            &candidates.candidate.head.commit,
+            &candidates.authority.head.commit,
         ] {
             let prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
                 &reference.object,
@@ -947,10 +956,7 @@ impl<'a> ExcludedPeer<'a> {
             .bind_device(self.database, signer)
             .await
             .expect("bind exclusion cleanup Store");
-        for commit in [
-            &candidates.candidate.commit.value,
-            &candidates.authority.commit.value,
-        ] {
+        for commit in [&candidates.candidate.commit, &candidates.authority.commit] {
             if commit.store_package().is_some() {
                 assert!(matches!(
                     peer_store
@@ -1676,8 +1682,10 @@ async fn run_excluded_author_candidate_cleanup_case(
         match head_publication {
             ExcludedCandidateHeadPublication::AfterAbsentProofExactLate => {
                 post_proof_store
-                    .storage()
-                    .create_protocol_object(&candidate.head.prepared)
+                    .publish_exact_protocol_object(
+                        &candidate.head_object,
+                        candidate.head.to_bytes(),
+                    )
                     .await
                     .expect("publish candidate head after absent proof");
             }

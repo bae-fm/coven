@@ -3,7 +3,8 @@ use std::sync::Arc;
 use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::sync::test_helpers::{
-    open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
+    open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestDevice,
+    TestStore,
 };
 use coven_database::StoreDatabase;
 use coven_database::{Database, DbError};
@@ -55,7 +56,7 @@ async fn persist_merge_operation(
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
     let store = create_test_store_in_its_own_task(db, name, &signer, home.clone()).await;
-    let journal = store
+    let prepared = store
         .bind_device(db, &signer)
         .await
         .expect("bind Circle preparation Store")
@@ -63,10 +64,47 @@ async fn persist_merge_operation(
         .await
         .expect("prepare circle operation");
     StoreDatabase::new(db)
-        .insert_circle_operation(journal.clone())
+        .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
         .await
         .expect("persist circle operation");
-    (store, home, signer, journal)
+    (store, home, signer, prepared.journal)
+}
+
+/// The bytes an operation's object was spooled under when it was prepared.
+///
+/// The operation names its objects; the spool beside the device's database is
+/// where their bytes are, so a test that wants the bytes reads them the same
+/// way publication does.
+async fn spooled_bytes(device: &TestDevice, object: &ExactObjectRef) -> Vec<u8> {
+    coven_database::payload_spool::PayloadSpool::new(device.store_dir())
+        .read(object.stored_hash())
+        .await
+        .expect("read a prepared Circle object from the payload spool")
+}
+
+/// Publish every object an operation names, from the bytes preparation spooled
+/// for it — what a completed publication would have left in storage.
+async fn publish_prepared_objects(
+    store: &TestStore,
+    device: &TestDevice,
+    journal: &CircleOperationJournal,
+) {
+    for object in journal.operation().prepared_objects.values() {
+        store
+            .publish_exact_protocol_object(object, spooled_bytes(device, object).await)
+            .await
+            .expect("publish a prepared Circle object");
+    }
+}
+
+/// Put a substituted object's bytes where preparation would have put them, so
+/// the publication path finds bytes under the reference a test has just
+/// written into an operation.
+async fn spool_substituted_object(device: &TestDevice, prepared: &PreparedExactObject) {
+    coven_database::payload_spool::PayloadSpool::new(device.store_dir())
+        .write(prepared.stored_bytes())
+        .await
+        .expect("spool a substituted Circle object");
 }
 
 fn promote_store_member_access_without_adding_to_circle_roster(

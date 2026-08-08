@@ -16,8 +16,7 @@ use super::candidate_records::{
 use super::StoreDatabase;
 use crate::{
     candidate_graph_exact_objects, finish_remote_candidate_nonactivation_on,
-    load_protocol_inert_object_on, load_remote_object_on, DurablePreparedProtocolObject,
-    TerminalCandidateCleanupVerification,
+    load_protocol_inert_object_on, load_remote_object_on, TerminalCandidateCleanupVerification,
 };
 use coven_protocol::circle::{CircleAccessDisposition, CircleOperationId};
 use coven_protocol::circle_journal::{CircleOperationJournal, PreparedCircleOperation};
@@ -44,31 +43,25 @@ fn circle_operation_candidate_on(
     conn: &Connection,
     operation: &PreparedCircleOperation,
 ) -> Result<CircleOperationCandidate, crate::DbError> {
-    let commit = DurablePreparedProtocolObject::new(
-        operation.commit_bytes.clone(),
-        operation
-            .prepared_objects
-            .get("store-commit")
-            .ok_or_else(|| {
-                crate::DbError::Message(
-                    "Circle operation lacks its prepared Store commit".to_string(),
-                )
-            })?
-            .clone(),
-    );
-    let head = DurablePreparedProtocolObject::new(
-        operation.policy.head.to_bytes(),
-        operation
-            .prepared_objects
-            .get("store-head")
-            .ok_or_else(|| {
-                crate::DbError::Message(
-                    "Circle operation lacks its prepared Store head".to_string(),
-                )
-            })?
-            .clone(),
-    );
-    let candidate = parse_prepared_merge_candidate_parts_on(conn, &commit, &head)?;
+    let commit_object = operation
+        .prepared_objects
+        .get("store-commit")
+        .ok_or_else(|| {
+            crate::DbError::Message("Circle operation lacks its prepared Store commit".to_string())
+        })?;
+    let head_object = operation
+        .prepared_objects
+        .get("store-head")
+        .ok_or_else(|| {
+            crate::DbError::Message("Circle operation lacks its prepared Store head".to_string())
+        })?;
+    let candidate = parse_prepared_merge_candidate_parts_on(
+        conn,
+        &operation.commit_bytes,
+        commit_object,
+        &operation.policy.head.to_bytes(),
+        head_object,
+    )?;
     if candidate.reference != operation.commit_ref {
         return Err(crate::DbError::Message(
             "Circle operation candidate differs from its durable commit reference".to_string(),
@@ -167,7 +160,7 @@ impl StoreDatabase {
                 journal
                     .begin_discard()
                     .map_err(|error| crate::DbError::Message(error.to_string()))?;
-                super::circle_controls::persist_circle_operation_row_on(&tx, journal)?;
+                super::circle_controls::update_circle_operation_phase_on(&tx, &journal)?;
                 tx.commit().map_err(crate::DbError::from)
             })
             .await
@@ -232,7 +225,7 @@ impl StoreDatabase {
                     ));
                 }
                 validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
-                let object_id = remote_object_id(candidate.head_prepared.reference());
+                let object_id = remote_object_id(&candidate.head_object);
                 let remote_exists: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
@@ -304,32 +297,17 @@ impl StoreDatabase {
     ) -> Result<Vec<CircleOperationId>, crate::DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT operation_id, circle_id, payload
-                         FROM circle_operations
-                         ORDER BY rowid",
+                crate::circle_operation_ids_in_phase_on(conn, |progress| {
+                    matches!(
+                        progress,
+                        coven_protocol::circle_journal::CircleOperationProgress::Discarding
                     )
-                    .map_err(crate::DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                        ))
-                    })
-                    .map_err(crate::DbError::from)?;
-                let mut discarding = Vec::new();
-                for row in rows {
-                    let (operation_id, circle_id, payload) = row.map_err(crate::DbError::from)?;
-                    let journal =
-                        crate::parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
-                    if journal.is_discarding() {
-                        discarding.push(journal.operation_id);
-                    }
-                }
-                Ok(discarding)
+                })?
+                .into_iter()
+                .map(|operation_id| {
+                    Ok(load_discarding_operation_on(conn, &operation_id)?.operation_id)
+                })
+                .collect()
             })
             .await
     }
@@ -413,6 +391,10 @@ impl StoreDatabase {
                         }
                     }
                 }
+                super::circle_controls::enqueue_operation_payload_cleanup_on(
+                    &tx,
+                    journal.operation(),
+                )?;
                 let deleted = tx
                     .execute(
                         "DELETE FROM circle_operations WHERE operation_id = ?1",

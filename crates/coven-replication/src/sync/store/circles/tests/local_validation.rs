@@ -24,7 +24,7 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
     );
     own_access.envelope.resign(&signer);
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted journal plaintext");
     store
@@ -54,25 +54,23 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .get("metadata")
         .expect("operation carries exact metadata object");
     let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
-        original.reference().slot().logical_key().to_string(),
+        original.slot().logical_key().to_string(),
         "substituted-metadata-object".to_string(),
     )
     .expect("construct alternate provider object slot");
-    let substituted = PreparedExactObject::new(
-        coven_protocol::objects::ExactObjectRef::new(
-            substituted_slot,
-            original.reference().stored_size(),
-            original.reference().stored_hash(),
-        ),
-        original.stored_bytes().to_vec(),
-    )
-    .expect("construct substituted prepared metadata object");
+    // Only the slot moves: the same bytes are already spooled under the same
+    // hash, so publication finds them and rejects the object on its slot alone.
+    let substituted = coven_protocol::objects::ExactObjectRef::new(
+        substituted_slot,
+        original.stored_size(),
+        original.stored_hash(),
+    );
     journal
         .operation_mut()
         .prepared_objects
         .insert("metadata".to_string(), substituted);
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted journal object");
 
@@ -150,10 +148,9 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .prepared_objects
         .get("store-head")
         .expect("Merge operation carries a Store head")
-        .reference()
         .clone();
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted signed Circle graph");
 
@@ -249,14 +246,13 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .prepared_objects
             .get("store-head")
             .expect("Merge operation carries a Store head")
-            .reference()
             .clone();
         let StoreCommitCoord {
             stream_id,
             sequence,
         } = journal.operation().commit_ref.coord;
         coven_database::StoreDatabase::new(&db)
-            .update_circle_operation(journal.clone())
+            .substitute_circle_operation_for_test(journal.clone())
             .await
             .expect("persist Circle journal with substituted stream authority");
 
@@ -342,14 +338,13 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .prepared_objects
         .get("store-head")
         .expect("Merge operation carries a Store head")
-        .reference()
         .clone();
     let StoreCommitCoord {
         stream_id,
         sequence,
     } = journal.operation().commit_ref.coord;
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist Circle journal with unexpected acknowledgement");
 
@@ -425,7 +420,6 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .prepared_objects
         .get("control-head")
         .expect("rename carries a control head")
-        .reference()
         .slot()
         .clone();
     let creation = &mut journal.operation_mut().creation;
@@ -444,10 +438,11 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         circle_id,
         control: &control_head.control,
     });
-    let prepared_head = store
+    let forging_device = store
         .bind_device(&db, &signer)
         .await
-        .expect("bind forged Circle object Store")
+        .expect("bind forged Circle object Store");
+    let prepared_head = forging_device
         .prepare_circle_object_at(
             &ProtocolObjectContext::store_encrypted(
                 commit.store_root_hash,
@@ -459,10 +454,11 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         )
         .await
         .expect("prepare forged control head");
-    journal
-        .operation_mut()
-        .prepared_objects
-        .insert("control-head".to_string(), prepared_head.clone());
+    spool_substituted_object(&forging_device, &prepared_head).await;
+    journal.operation_mut().prepared_objects.insert(
+        "control-head".to_string(),
+        prepared_head.reference().clone(),
+    );
     let [old_reference] = commit.circle_controls() else {
         panic!("rename commit carries one Circle reference")
     };
@@ -489,10 +485,9 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .prepared_objects
         .get("store-head")
         .expect("Merge operation carries a Store head")
-        .reference()
         .clone();
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal)
+        .substitute_circle_operation_for_test(journal)
         .await
         .expect("persist forged successor journal");
 
@@ -525,25 +520,22 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .get("store-head")
         .expect("Merge operation carries an exact Store head");
     let substituted_slot = coven_protocol::objects::ObjectSlot::opaque(
-        original.reference().slot().logical_key().to_string(),
+        original.slot().logical_key().to_string(),
         "substituted-store-head".to_string(),
     )
     .expect("construct alternate Store head slot");
-    let substituted = PreparedExactObject::new(
-        coven_protocol::objects::ExactObjectRef::new(
-            substituted_slot,
-            original.reference().stored_size(),
-            original.reference().stored_hash(),
-        ),
-        original.stored_bytes().to_vec(),
-    )
-    .expect("construct substituted prepared Store head");
+    // The head's own bytes, under a slot the Store never reserved for it.
+    let substituted = coven_protocol::objects::ExactObjectRef::new(
+        substituted_slot,
+        original.stored_size(),
+        original.stored_hash(),
+    );
     journal
         .operation_mut()
         .prepared_objects
         .insert("store-head".to_string(), substituted);
     coven_database::StoreDatabase::new(&db)
-        .update_circle_operation(journal.clone())
+        .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted Store head slot");
 
@@ -619,15 +611,21 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         circle_id,
         coord: &entry_coord,
     });
-    let entry_prepared = journal
+    let entry_reference = journal
         .operation()
         .prepared_objects
         .get("roster-entry")
         .expect("the operation carries its sealed roster entry");
-    assert_eq!(entry_prepared.reference(), &entry_object);
+    assert_eq!(entry_reference, &entry_object);
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind the roster entry's own Store");
     store
-        .storage()
-        .create_protocol_object(entry_prepared)
+        .publish_exact_protocol_object(
+            entry_reference,
+            spooled_bytes(&device, entry_reference).await,
+        )
         .await
         .expect("publish the founder roster entry");
     let entry_plaintext = store

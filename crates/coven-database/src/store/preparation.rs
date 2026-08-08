@@ -384,8 +384,10 @@ impl StoreDatabase {
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
                     &tx,
-                    &candidate_commit,
-                    &candidate_head,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
                 )?;
                 if candidate.commit.write_id != stage.write_id {
                     return Err(DbError::Message(
@@ -429,7 +431,7 @@ impl StoreDatabase {
                     || stage.history_summary.causal_cut.get(&authority_ref.coord)
                         != Some(&authority_ref)
                     || stage.head.prepared.reference().slot()
-                        != candidate.head_prepared.reference().slot()
+                        != candidate.head_object.slot()
                     || stage.head.value.successor != candidate.head.successor
                     || stage.head.value.author_registration != candidate.commit.author_registration
                 {

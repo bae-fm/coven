@@ -63,16 +63,16 @@ impl RevokedOperation {
             .expect("operation author has one active Store grant");
         // The member device is the one that authors and publishes; drive everything
         // through its database so its local membership view governs authority.
-        let journal = store
+        let prepared = store
             .bind_device(&successor_db, &successor)
             .await
             .expect("bind Circle preparation Store")
             .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
             .await
             .expect("prepare operation while authorized");
-        let operation_id = journal.operation_id.clone();
+        let operation_id = prepared.journal.operation_id.clone();
         StoreDatabase::new(&successor_db)
-            .insert_circle_operation(journal)
+            .insert_circle_operation(prepared.journal, prepared.prepared_objects)
             .await
             .expect("persist operation");
 
@@ -143,16 +143,16 @@ async fn operation_inspection_surface_reports_the_typed_block() {
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
-    let journal = store
+    let prepared = store
         .bind_device(&db, &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Ready Circle")
         .await
         .expect("prepare a ready operation");
-    let ready_id = journal.operation_id.clone();
+    let ready_id = prepared.journal.operation_id.clone();
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(journal)
+        .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist the ready operation");
     let refusal = store
@@ -217,17 +217,17 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
-    let journal = store
+    let prepared = store
         .bind_device(&db, &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
         .expect("prepare authorized founder operation");
-    let operation_id = journal.operation_id.clone();
-    let circle_id = journal.circle_id();
-    let expected_control = journal.operation().creation.control.coord.clone();
-    let expected_commit_object = journal.operation().commit_ref.object.clone();
+    let operation_id = prepared.journal.operation_id.clone();
+    let circle_id = prepared.journal.circle_id();
+    let expected_control = prepared.journal.operation().creation.control.coord.clone();
+    let expected_commit_object = prepared.journal.operation().commit_ref.object.clone();
     let founder_pubkey = keys::public_key_hex(&founder);
     let exact_membership = store
         .bind_device(&db, &founder)
@@ -243,7 +243,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .try_into()
         .expect("founder has one active Store grant");
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(journal)
+        .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist authorized operation");
 
@@ -554,9 +554,9 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
         .expect("prepare an authorized operation");
-    let ready_id = ready.operation_id.clone();
+    let ready_id = ready.journal.operation_id.clone();
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(ready)
+        .insert_circle_operation(ready.journal, ready.prepared_objects)
         .await
         .expect("persist the ready operation");
     let refusal = store
@@ -623,9 +623,9 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare the operation queued behind the loser");
-    let second_id = second.operation_id.clone();
+    let second_id = second.journal.operation_id.clone();
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(second.clone())
+        .insert_circle_operation(second.journal, second.prepared_objects)
         .await
         .expect("persist the operation queued behind the loser");
 

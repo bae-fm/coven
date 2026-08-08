@@ -746,16 +746,21 @@ impl StoreDir {
             .map_err(StoreBlobFileError::Io)
     }
 
-    /// Remove unpublished local, cached, and pinned blob files left by an
-    /// earlier process. Files created at or after `process_start` belong to the
-    /// current process and are left untouched.
-    pub fn remove_orphaned_blob_temps(
+    /// Remove in-progress write temporaries left by an earlier process — blob
+    /// files and payload-spool files alike. Files created at or after
+    /// `process_start` belong to the current process and are left untouched.
+    pub fn remove_orphaned_write_temps(
         &self,
         process_start: std::time::SystemTime,
     ) -> std::io::Result<()> {
         let storage = self.storage_dir();
-        for folder in ["local", "cache", "pinned"] {
-            self.remove_orphaned_temps_in_dir(&storage.join(folder), process_start)?;
+        for directory in [
+            storage.join("local"),
+            storage.join("cache"),
+            storage.join("pinned"),
+            self.payload_spool_dir(),
+        ] {
+            self.remove_orphaned_temps_in_dir(&directory, process_start)?;
         }
         Ok(())
     }

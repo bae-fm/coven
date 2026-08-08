@@ -212,18 +212,18 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     },
                 )))
                 .await?;
-            if prepared.operation_id != journal.operation_id
-                || prepared.circle_id != journal.circle_id
-                || prepared.intent != journal.intent
+            if prepared.journal.operation_id != journal.operation_id
+                || prepared.journal.circle_id != journal.circle_id
+                || prepared.journal.intent != journal.intent
             {
                 return Err(CircleOperationError::Journal(format!(
                     "Circle operation {} finalization changed its durable identity",
                     journal.operation_id
                 )));
             }
-            journal.begin_finalization(prepared.operation().clone())?;
+            journal.begin_finalization(prepared.journal.operation().clone())?;
             self.database
-                .begin_circle_operation_finalization(journal.clone())
+                .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
                 .await?;
             let routing_key = coven_protocol::circle::derive_row_routing_key(
                 routing_encryption,

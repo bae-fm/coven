@@ -147,15 +147,19 @@ impl StoreDatabase {
                 {
                     let root = required_store_root_authority_on(&tx)?;
                     let candidate = parse_prepared_merge_candidate_parts_on(
-                        &tx,
-                        candidate_commit,
-                        candidate_head,
-                    )?;
+                    &tx,
+                    candidate_commit.semantic_bytes(),
+                    candidate_commit.prepared().reference(),
+                    candidate_head.semantic_bytes(),
+                    candidate_head.prepared().reference(),
+                )?;
                     let authority = parse_prepared_merge_candidate_parts_on(
-                        &tx,
-                        authority_commit,
-                        authority_head,
-                    )?;
+                    &tx,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
+                )?;
                     if authority.commit.write_id.as_str() != stored_write_id
                         || accepted != authority.reference
                         || !matches!(
@@ -214,7 +218,7 @@ impl StoreDatabase {
                         &authority.commit,
                         &[],
                         &authority.head,
-                        authority.head_prepared.reference(),
+                        &authority.head_object,
                         authority_history_summary,
                         &[],
                         None,
@@ -583,8 +587,8 @@ impl StoreDatabase {
                     .map_err(|error| DbError::context("prepared Merge candidate", error))?;
                 let prepared_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 let publication = parse_prepared_merge_publication_on(&tx, &prepared)?;
-                if winner_head.object.slot() != publication.head_prepared.reference().slot()
-                    || winner_head.object == *publication.head_prepared.reference()
+                if winner_head.object.slot() != publication.head_object.slot()
+                    || winner_head.object == publication.head_object
                 {
                     return Err(DbError::Message(
                         "Merge winner does not replace the prepared exact head slot".to_string(),

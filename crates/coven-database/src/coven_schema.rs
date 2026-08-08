@@ -555,7 +555,22 @@ macro_rules! coven_tables {
             "
     operation_id TEXT PRIMARY KEY,
     circle_id TEXT NOT NULL UNIQUE,
-    payload BLOB NOT NULL
+    prepared BLOB NOT NULL,
+    phase TEXT NOT NULL CHECK (json_valid(phase))
+"
+        );
+        // Which of an operation's upload steps have completed. One row per
+        // completed step, so recording a step appends instead of rewriting the
+        // operation beside it. The rows belong to the operation named in
+        // `prepared`, and the finalization boundary that replaces that
+        // operation clears them with it.
+        $visit!(
+            circle_operation_uploads,
+            "
+    operation_id TEXT NOT NULL,
+    step TEXT NOT NULL,
+    PRIMARY KEY (operation_id, step),
+    FOREIGN KEY (operation_id) REFERENCES circle_operations(operation_id) ON DELETE CASCADE
 "
         );
         $visit!(

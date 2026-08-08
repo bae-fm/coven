@@ -10,13 +10,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("bind invented-access Circle object Store");
     let old_commit = journal.commit().expect("parse prepared Store commit");
-    for object in journal.operation().prepared_objects.values() {
-        store
-            .storage()
-            .create_protocol_object(object)
-            .await
-            .expect("publish original exact Circle activation object");
-    }
+    publish_prepared_objects(&store, &device, &journal).await;
     let mut objects = old_commit
         .operations()
         .expect("Circle commit carries operations")
@@ -194,7 +188,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .storage()
         .prepare_protocol_object(
             &head_context,
-            original_head_object.reference().slot().clone(),
+            original_head_object.slot().clone(),
             &head_slot_prefix(
                 &commit.author_registration.device_id.to_string(),
                 commit.seq(),
@@ -203,7 +197,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         )
         .expect("prepare Store head naming the re-signed commit");
     _home.replace_exact_object(
-        original_head_object.reference().slot(),
+        original_head_object.slot(),
         forged_head_object.stored_bytes().to_vec(),
     );
 
@@ -279,7 +273,8 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
-        .expect("prepare Circle with inactive Store-member access");
+        .expect("prepare Circle with inactive Store-member access")
+        .journal;
     let old_commit = journal.commit().expect("parse prepared Store commit");
     let candidate_family = old_commit.candidate_family();
     let author = coven_database::StoreDatabase::new(&db)
@@ -367,29 +362,38 @@ async fn candidate_graph_rejects_partial_circle_access_ownership() {
     )
     .await
     .expect("create exact Circle test Store");
-    let mut journal = store
+    let mut prepared = store
         .bind_device(&db, &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Partial access graph")
         .await
         .expect("prepare Circle operation");
-    let commit = journal.commit().expect("parse Circle commit");
+    let commit = prepared.journal.commit().expect("parse Circle commit");
     let envelope_object = commit.circle_controls()[0].objects().access[0]
         .envelope
         .object
         .clone();
-    let removed = journal
-        .operation_mut()
+    let removed = prepared
+        .journal
+        .operation()
         .prepared_objects
         .iter()
-        .find(|(_, prepared)| prepared.reference() == &envelope_object)
+        .find(|(_, object)| *object == &envelope_object)
         .map(|(step, _)| step.clone())
         .expect("find prepared access envelope");
-    journal.operation_mut().prepared_objects.remove(&removed);
+    // The step leaves the operation and its bytes together, so what the graph
+    // is missing is the envelope itself, not a bytes-to-references mismatch.
+    prepared
+        .journal
+        .operation_mut()
+        .prepared_objects
+        .remove(&removed);
+    prepared.prepared_objects.remove(&removed);
 
-    let error = journal
-        .closed_remote_objects()
+    let error = prepared
+        .journal
+        .closed_remote_objects(&prepared.prepared_objects)
         .expect_err("a leaf without its envelope must not acquire candidate ownership");
     assert!(
         error.to_string().contains("has no prepared bytes"),
@@ -423,17 +427,20 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         )
         .await
         .expect("invite Store member outside the Circle");
-    let journal = store
+    let prepared = store
         .bind_device(&db, &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
         .expect("prepare founder Circle");
-    let commit = journal.commit().expect("parse founder Circle commit");
-    let commit_ref = journal.operation().commit_ref.clone();
+    let commit = prepared
+        .journal
+        .commit()
+        .expect("parse founder Circle commit");
+    let commit_ref = prepared.journal.operation().commit_ref.clone();
     coven_database::StoreDatabase::new(&db)
-        .insert_circle_operation(journal.clone())
+        .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist founder Circle operation");
     store
@@ -475,13 +482,11 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let (baseline_store, _home, baseline_signer, baseline) =
         persist_merge_operation(&baseline_db, "circle-remote-metadata-baseline").await;
     let baseline_commit = baseline.commit().expect("parse baseline Store commit");
-    for object in baseline.operation().prepared_objects.values() {
-        baseline_store
-            .storage()
-            .create_protocol_object(object)
-            .await
-            .expect("publish baseline exact Circle activation object");
-    }
+    let baseline_device = baseline_store
+        .bind_device(&baseline_db, &baseline_signer)
+        .await
+        .expect("bind baseline Circle preparation Store");
+    publish_prepared_objects(&baseline_store, &baseline_device, &baseline).await;
     let baseline_author = StoreDatabase::new(&baseline_db)
         .activated_store_device_registration(baseline_commit.author_registration.clone())
         .await

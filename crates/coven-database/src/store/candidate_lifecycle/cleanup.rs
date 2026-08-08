@@ -80,10 +80,12 @@ impl StoreDatabase {
                     ..
                 } => {
                     let authority = parse_prepared_merge_candidate_parts_on(
-                        conn,
-                        authority_commit,
-                        authority_head,
-                    )?;
+                    conn,
+                    authority_commit.semantic_bytes(),
+                    authority_commit.prepared().reference(),
+                    authority_head.semantic_bytes(),
+                    authority_head.prepared().reference(),
+                )?;
                     match outcome {
                         MergeAbandonmentOutcome::Prepared => Ok(false),
                         MergeAbandonmentOutcome::Accepted { .. } => cleanup_pending(&candidate),
@@ -158,8 +160,10 @@ impl StoreDatabase {
                     } => {
                         let authority = parse_prepared_merge_candidate_parts_on(
                             conn,
-                            authority_commit,
-                            authority_head,
+                            authority_commit.semantic_bytes(),
+                            authority_commit.prepared().reference(),
+                            authority_head.semantic_bytes(),
+                            authority_head.prepared().reference(),
                         )?;
                         let mut targets = Vec::new();
                         match outcome {
@@ -385,7 +389,7 @@ impl StoreDatabase {
                     .reference()
                     .map_err(|error| DbError::Message(error.to_string()))?
                     != candidate
-                    || head_nonactivation.head().object() != prepared.head_prepared.reference()
+                    || head_nonactivation.head().object() != &prepared.head_object
                 {
                     return Err(DbError::Message(
                         "verified Merge retraction cleanup names another candidate".to_string(),
@@ -419,11 +423,7 @@ impl StoreDatabase {
                     ));
                 }
                 if !matches!(
-                    load_merge_candidate_head_cleanup_on(
-                        conn,
-                        prepared.head_prepared.reference(),
-                        &candidate,
-                    )?,
+                    load_merge_candidate_head_cleanup_on(conn, &prepared.head_object, &candidate,)?,
                     MergeCandidateHeadCleanup::ProtocolInert
                 ) {
                     return Err(DbError::Message(

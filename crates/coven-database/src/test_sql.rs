@@ -360,15 +360,20 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn replace_circle_operation_payload(
+    /// Store one operation's prepared payload under another operation's row,
+    /// bypassing the identity checks every writing path applies, so a test can
+    /// hand a reader a row whose columns and payload name different operations.
+    pub fn replace_circle_operation_prepared(
         &self,
         operation_id: &coven_protocol::circle::CircleOperationId,
-        payload: &[u8],
+        substitute: &coven_protocol::circle_journal::CircleOperationJournal,
     ) -> Result<(), DbError> {
+        let prepared =
+            crate::circle_operation_records::prepared_circle_operation_payload(substitute)?;
         self.connection
             .execute(
-                "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
-                rusqlite::params![operation_id.as_str(), payload],
+                "UPDATE circle_operations SET prepared = ?2 WHERE operation_id = ?1",
+                rusqlite::params![operation_id.as_str(), prepared],
             )
             .map(|_| ())
             .map_err(DbError::from)

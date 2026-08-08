@@ -21,26 +21,33 @@ impl StoreDatabase {
     ) -> Result<Vec<coven_protocol::circle::CircleOperationInfo>, DbError> {
         self.connection
             .call(|conn| {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT operation_id, circle_id, payload
+                let rows = crate::query_mapped_rows(
+                    conn,
+                    "SELECT operation_id, circle_id, prepared, phase
                      FROM circle_operations
                      ORDER BY rowid",
-                    )
-                    .map_err(DbError::from)?;
-                let operations = statement
-                    .query_map([], |row| {
+                    [],
+                    |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
-                    })
-                    .map_err(DbError::from)?
-                    .map(|row| {
-                        let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
-                        let journal =
-                            parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
+                    },
+                )
+                .map_err(DbError::from)?;
+                rows.into_iter()
+                    .map(|(operation_id, circle_id, prepared, phase)| {
+                        let uploaded =
+                            crate::circle_operation_uploaded_steps_on(conn, &operation_id)?;
+                        let journal = parse_circle_operation_row(
+                            &operation_id,
+                            &circle_id,
+                            &prepared,
+                            &phase,
+                            uploaded,
+                        )?;
                         Ok(coven_protocol::circle::CircleOperationInfo {
                             operation_id: journal.operation_id.clone(),
                             circle_id: journal.circle_id(),
@@ -48,8 +55,7 @@ impl StoreDatabase {
                             state: journal.state(),
                         })
                     })
-                    .collect();
-                operations
+                    .collect()
             })
             .await
     }

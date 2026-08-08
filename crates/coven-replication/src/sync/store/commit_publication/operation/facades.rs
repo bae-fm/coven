@@ -151,11 +151,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         self.history
             .merge_conflict()
-            .excluded_candidate_nonactivation(
-                &verified,
-                &candidate.head.value,
-                &candidate.head.object,
-            )
+            .excluded_candidate_nonactivation(&verified, &candidate.head, &candidate.head_object)
             .await
     }
 

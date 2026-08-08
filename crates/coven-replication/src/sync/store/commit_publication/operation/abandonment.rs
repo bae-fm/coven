@@ -26,27 +26,27 @@ impl AuthorizedWriterOperation<'_> {
         let storage = Arc::clone(self.storage);
         if !self
             .writer
-            .is_authored_by_registration(&candidate.commit.value.author_registration)
+            .is_authored_by_registration(&candidate.commit.author_registration)
         {
             return Err(StoreError::InvalidOutbound(
                 "blocked Merge candidate belongs to another local registration".to_string(),
             ));
         }
-        let coord = candidate.head.value.commit.coord.clone();
+        let coord = candidate.head.commit.coord.clone();
         let commit = self
             .writer
             .sign_candidate_abandonment(
                 root.store_root_hash,
                 write_id.clone(),
                 coord.clone(),
-                candidate.commit.value.order.clone(),
-                candidate.commit.value.membership_state.clone(),
-                candidate.commit.value.device_state.clone(),
+                candidate.commit.order.clone(),
+                candidate.commit.membership_state.clone(),
+                candidate.commit.device_state.clone(),
                 vec![CandidateCleanupManifest {
                     candidate: StoreBatchCommitDeletionTarget {
                         coord: coord.clone(),
-                        object: candidate.commit.object.clone(),
-                        canonical_signed_bytes: candidate.commit.bytes.clone(),
+                        object: candidate.commit_object.clone(),
+                        canonical_signed_bytes: candidate.commit_bytes.clone(),
                     },
                 }],
             )
@@ -87,7 +87,7 @@ impl AuthorizedWriterOperation<'_> {
         let commit_ref = commit.reference().clone();
         let history_summary = prepare_merge_abandonment_history_summary(
             &candidate_summary,
-            &candidate.commit.value,
+            &candidate.commit,
             &commit,
         )
         .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
@@ -95,7 +95,7 @@ impl AuthorizedWriterOperation<'_> {
             root.store_root_hash,
             commit_ref,
             history_summary.digest(),
-            candidate.head.value.successor.clone(),
+            candidate.head.successor.clone(),
         )?;
         let head_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -105,7 +105,7 @@ impl AuthorizedWriterOperation<'_> {
         let head_prepared = storage
             .prepare_protocol_object(
                 &head_context,
-                candidate.head.object.slot().clone(),
+                candidate.head_object.slot().clone(),
                 &head_prefix,
                 head.to_bytes(),
             )

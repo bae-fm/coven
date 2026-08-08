@@ -761,7 +761,13 @@ impl StoreDatabase {
             input.activation_head.stored_bytes().to_vec(),
             input.activation_head,
         );
-        let prepared = parse_prepared_merge_candidate_parts_on(conn, &commit, &head)?;
+        let prepared = parse_prepared_merge_candidate_parts_on(
+            conn,
+            commit.semantic_bytes(),
+            commit.prepared().reference(),
+            head.semantic_bytes(),
+            head.prepared().reference(),
+        )?;
         if &prepared.reference != candidate {
             return Err(DbError::Message(
                 "Merge retraction cleanup opens another candidate".to_string(),

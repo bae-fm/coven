@@ -7,9 +7,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         name: &str,
     ) -> Result<CircleId, CircleOperationError> {
         let journal = self.preparer().prepare_create(metadata_stamp, name).await?;
-        let circle_id = journal.circle_id();
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
+        let circle_id = journal.journal.circle_id();
+        let operation_id = journal.journal.operation_id.clone();
+        self.database
+            .insert_circle_operation(journal.journal, journal.prepared_objects)
+            .await?;
         self.publisher().publish(&operation_id, None).await?;
         Ok(circle_id)
     }
@@ -33,13 +35,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 },
             )))
             .await?;
-        if journal.circle_id() != circle_id {
+        if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle rename changed Circle identity".to_string(),
             ));
         }
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
+        let operation_id = journal.journal.operation_id.clone();
+        self.database
+            .insert_circle_operation(journal.journal, journal.prepared_objects)
+            .await?;
         self.publisher().publish(&operation_id, None).await
     }
 
@@ -75,13 +79,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 },
             )))
             .await?;
-        if journal.circle_id() != circle_id {
+        if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle member removal changed Circle identity".to_string(),
             ));
         }
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
+        let operation_id = journal.journal.operation_id.clone();
+        self.database
+            .insert_circle_operation(journal.journal, journal.prepared_objects)
+            .await?;
         self.publisher().publish(&operation_id, None).await?;
         Ok(operation_id)
     }
@@ -100,13 +106,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .resolution_request(circle_id, &chosen, &branches, branches.clone())
             .await?;
         let journal = self.preparer().prepare_request(request).await?;
-        if journal.circle_id() != circle_id {
+        if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle control resolution changed Circle identity".to_string(),
             ));
         }
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
+        let operation_id = journal.journal.operation_id.clone();
+        self.database
+            .insert_circle_operation(journal.journal, journal.prepared_objects)
+            .await?;
         self.publisher().publish(&operation_id, None).await
     }
 
@@ -309,18 +317,18 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 },
             )))
             .await?;
-        if prepared.operation_id != journal.operation_id
-            || prepared.circle_id != circle_id
-            || prepared.intent != journal.intent
+        if prepared.journal.operation_id != journal.operation_id
+            || prepared.journal.circle_id != circle_id
+            || prepared.journal.intent != journal.intent
         {
             return Err(CircleOperationError::Journal(format!(
                 "Circle operation {} cancellation changed its durable identity",
                 journal.operation_id
             )));
         }
-        journal.begin_finalization(prepared.operation().clone())?;
+        journal.begin_finalization(prepared.journal.operation().clone())?;
         self.database
-            .begin_circle_operation_finalization(journal.clone())
+            .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
             .await?;
         Ok(journal.operation_id)
     }
@@ -485,12 +493,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 },
             )))
             .await?;
-        if journal.circle_id() != circle_id {
+        if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle deletion changed Circle identity".to_string(),
             ));
         }
-        let operation_id = journal.operation_id.clone();
+        let operation_id = journal.journal.operation_id.clone();
         let superseded = self
             .database
             .waiting_circle_operations()
@@ -501,10 +509,18 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         match superseded {
             Some(superseded) => {
                 self.database
-                    .insert_circle_operation_superseding(journal, superseded)
+                    .insert_circle_operation_superseding(
+                        journal.journal,
+                        superseded,
+                        journal.prepared_objects,
+                    )
                     .await?
             }
-            None => self.database.insert_circle_operation(journal).await?,
+            None => {
+                self.database
+                    .insert_circle_operation(journal.journal, journal.prepared_objects)
+                    .await?
+            }
         }
         self.publisher().publish(&operation_id, None).await
     }
@@ -547,13 +563,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 },
             )))
             .await?;
-        if journal.circle_id() != circle_id {
+        if journal.journal.circle_id() != circle_id {
             return Err(CircleOperationError::InvalidState(
                 "prepared Circle member addition changed Circle identity".to_string(),
             ));
         }
-        let operation_id = journal.operation_id.clone();
-        self.database.insert_circle_operation(journal).await?;
+        let operation_id = journal.journal.operation_id.clone();
+        self.database
+            .insert_circle_operation(journal.journal, journal.prepared_objects)
+            .await?;
         self.publisher()
             .publish(&operation_id, Some(routing_key))
             .await
