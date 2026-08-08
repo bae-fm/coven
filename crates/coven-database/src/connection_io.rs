@@ -98,6 +98,12 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection, DbError> {
     // later read-only open finds the db already in WAL.
     conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
         .map_err(DbError::from)?;
+    // The operation journal is the durable side of the local-intent →
+    // idempotent-remote-step bridge. Pin FULL rather than inheriting SQLite's
+    // compiled default so a successful journal commit reaches the OS before an
+    // external step can begin.
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(DbError::from)?;
     Ok(conn)
 }
 
@@ -111,4 +117,26 @@ pub(crate) fn open_connection_read_only(path: &Path) -> Result<Connection, DbErr
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
     Connection::open_with_flags(path, flags).map_err(DbError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writable_connection_pins_wal_commit_durability() {
+        let directory = tempfile::tempdir().expect("create database directory");
+        let connection =
+            open_connection(&directory.path().join("store.db")).expect("open database");
+
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous setting");
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode");
+
+        assert_eq!(synchronous, 2);
+        assert_eq!(journal_mode, "wal");
+    }
 }
