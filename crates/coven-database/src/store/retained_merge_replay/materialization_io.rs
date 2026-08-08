@@ -1,16 +1,47 @@
 use super::cache::*;
 use super::*;
+use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
+
+/// The plaintext one record names, read from the spool and checked against the
+/// identity that named it.
+///
+/// A record loaded from its row no longer re-verifies its payload, so the check
+/// happens here — at the point the bytes enter, which is what makes reading them
+/// safe without paying for it on every load.
+fn spooled_semantic_payload(
+    records: StoreRecords<'_>,
+    remote: &coven_protocol::remote_object::RemoteObjectRecord,
+) -> Result<Vec<u8>, DbError> {
+    let coven_protocol::remote_object::SemanticPayload::Spooled(hash) = remote.semantic_payload()
+    else {
+        return Err(DbError::Message(format!(
+            "remote object {} names no spooled plaintext",
+            remote.object_id()
+        )));
+    };
+    let bytes = records
+        .payload(hash)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    remote.validate_payload(&bytes).map_err(|error| {
+        DbError::context(
+            format!("remote object {} payload", remote.object_id()),
+            error,
+        )
+    })?;
+    Ok(bytes)
+}
 
 impl StoreDatabase {
     pub fn open_retained_merge_materialization_input_with_authority_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         commit_ref: &StoreBatchCommitRef,
         input: &RetainedMergeMaterializationInput,
         input_hash: ObjectHash,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let conn = records.conn();
         let sequence = &commit_ref.coord.sequence;
         if sequence == &0 {
             return Err(DbError::Message(
@@ -151,12 +182,12 @@ impl StoreDatabase {
             let entry_remote =
                 load_remote_object_on(conn, remote_object_id(&objects.entry().object))?;
             let entry: MembershipEntry =
-                serde_json::from_slice(entry_remote.bytes().canonical_semantic_bytes())
+                serde_json::from_slice(&spooled_semantic_payload(records, &entry_remote)?)
                     .map_err(|error| DbError::context("retained membership entry", error))?;
             let head_remote =
                 load_remote_object_on(conn, remote_object_id(&objects.head().object))?;
             let head_value: AuthorHead =
-                serde_json::from_slice(head_remote.bytes().canonical_semantic_bytes())
+                serde_json::from_slice(&spooled_semantic_payload(records, &head_remote)?)
                     .map_err(|error| DbError::context("retained membership head", error))?;
             let verified_objects = VerifiedMergeMembershipObjects::verify(
                 &commit,
@@ -173,7 +204,7 @@ impl StoreDatabase {
             if let Some(reference) = objects.resolution() {
                 let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
                 let resolution: coven_protocol::membership::StoreMembershipConflictResolution =
-                    serde_json::from_slice(remote.bytes().canonical_semantic_bytes()).map_err(
+                    serde_json::from_slice(&spooled_semantic_payload(records, &remote)?).map_err(
                         |error| DbError::context("retained membership resolution", error),
                     )?;
                 if !resolution.verify_signature()
@@ -203,7 +234,7 @@ impl StoreDatabase {
     }
 
     pub fn retain_merge_materialization_on(
-        conn: &rusqlite::Transaction<'_>,
+        records: StoreRecordTransaction<'_, '_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<
@@ -214,7 +245,7 @@ impl StoreDatabase {
         DbError,
     > {
         Self::retain_merge_materialization_with_authority_on(
-            conn,
+            records,
             root,
             materialization,
             RetainedCommitAuthority::Operation(materialization.verified_commit()),
@@ -222,7 +253,7 @@ impl StoreDatabase {
     }
 
     pub fn retain_merge_materialization_with_authority_on(
-        conn: &rusqlite::Transaction<'_>,
+        records: StoreRecordTransaction<'_, '_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
         authority: RetainedCommitAuthority<'_>,
@@ -271,13 +302,14 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            conn,
+            *records,
             root,
             materialization.commit_ref(),
             &input,
             input_hash,
             authority,
         )?;
+        let conn = records.transaction();
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -340,7 +372,7 @@ impl StoreDatabase {
     }
 
     pub fn load_retained_merge_materialization_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
@@ -348,7 +380,7 @@ impl StoreDatabase {
         expected_input_hash: &str,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         Self::load_retained_merge_materialization_with_authority_on(
-            conn,
+            records,
             root,
             stream_id,
             sequence,
@@ -359,7 +391,7 @@ impl StoreDatabase {
     }
 
     pub fn load_retained_merge_materialization_with_verified_commit_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
@@ -368,7 +400,7 @@ impl StoreDatabase {
         verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         Self::load_retained_merge_materialization_with_authority_on(
-            conn,
+            records,
             root,
             stream_id,
             sequence,
@@ -379,7 +411,7 @@ impl StoreDatabase {
     }
 
     pub fn load_retained_merge_materialization_with_authority_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         stream_id: &str,
         sequence: u64,
@@ -387,6 +419,7 @@ impl StoreDatabase {
         expected_input_hash: &str,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let conn = records.conn();
         let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
         let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
             .query_row(
@@ -428,7 +461,7 @@ impl StoreDatabase {
             )
         })?;
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            conn, root, commit_ref, &input, input_hash, authority,
+            records, root, commit_ref, &input, input_hash, authority,
         )?;
         Self::validate_retained_merge_pin_closure_on(
             conn,
@@ -442,10 +475,11 @@ impl StoreDatabase {
     }
 
     pub fn load_retained_merge_materialization_by_ref_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        let conn = records.conn();
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -467,7 +501,7 @@ impl StoreDatabase {
             ));
         }
         Self::load_retained_merge_materialization_on(
-            conn,
+            records,
             root,
             &stream_id,
             *sequence,
@@ -477,10 +511,11 @@ impl StoreDatabase {
     }
 
     pub fn load_retained_merge_history_checkpoint_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         reference: &StoreBatchCommitRef,
     ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+        let conn = records.conn();
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -503,7 +538,7 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
                 ));
             }
-            let baseline = load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+            let baseline = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
                 DbError::Message(
                     "snapshot Merge checkpoint has no retained replay baseline".to_string(),
                 )
@@ -566,7 +601,7 @@ impl StoreDatabase {
             ));
         }
         let retained = Self::load_retained_merge_materialization_on(
-            conn,
+            records,
             root,
             &stream_id.to_string(),
             *sequence,
@@ -712,9 +747,9 @@ impl StoreDatabase {
     }
 
     pub fn generation_zero_replay_baseline_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
     ) -> Result<RetainedReplayBaseline, DbError> {
-        load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+        load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
             DbError::Message("generation-zero retained replay baseline is absent".to_string())
         })
     }
@@ -778,11 +813,11 @@ impl StoreDatabase {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn load_retained_merge_replay_inputs_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
-            conn,
+            records.conn(),
             "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
@@ -801,7 +836,7 @@ impl StoreDatabase {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
                 let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
                 Self::load_retained_merge_materialization_on(
-                    conn,
+                    records,
                     root,
                     &stream_id,
                     sequence,

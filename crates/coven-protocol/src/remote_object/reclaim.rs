@@ -11,13 +11,60 @@ impl RemoteObjectRecord {
         }
     }
 
-    pub fn bytes(&self) -> &RemoteObjectBytes {
+    pub fn payloads(&self) -> &RemoteObjectPayloads {
         match self {
-            Self::CandidateCommit(record) => &record.bytes,
-            Self::CandidateExclusive(record) => &record.bytes,
-            Self::RetainedAuthority(record) => &record.bytes,
-            Self::SharedLiveSet(record) => &record.bytes,
+            Self::CandidateCommit(record) => &record.payloads,
+            Self::CandidateExclusive(record) => &record.payloads,
+            Self::RetainedAuthority(record) => &record.payloads,
+            Self::SharedLiveSet(record) => &record.payloads,
         }
+    }
+
+    /// Where this record's plaintext is. A stored blob carries its locator in
+    /// the row, the image domains have no plaintext of their own, and every
+    /// other domain names its plaintext in the spool by the identity's semantic
+    /// hash.
+    pub fn semantic_payload(&self) -> SemanticPayload<'_> {
+        if let Some(locator_bytes) = self.payloads().carried_locator_bytes() {
+            return SemanticPayload::Carried(locator_bytes);
+        }
+        match self {
+            Self::CandidateCommit(record) => SemanticPayload::Spooled(record.semantic_hash),
+            Self::CandidateExclusive(record) => match &record.identity.domain {
+                CandidateExclusiveObjectDomain::CircleBootstrapImage { .. } => {
+                    SemanticPayload::Absent
+                }
+                _ => SemanticPayload::Spooled(record.identity.semantic_hash),
+            },
+            Self::RetainedAuthority(record) => {
+                SemanticPayload::Spooled(record.identity.semantic_hash)
+            }
+            Self::SharedLiveSet(record) => match &record.identity.domain {
+                SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => SemanticPayload::Absent,
+                _ => SemanticPayload::Spooled(record.identity.semantic_hash),
+            },
+        }
+    }
+
+    /// The spooled ciphertext this record uploads, when the ciphertext is its
+    /// own to upload.
+    pub fn stored_payload(&self) -> Option<ObjectHash> {
+        match self.payloads() {
+            RemoteObjectPayloads::SpooledInline => Some(self.object().stored_hash()),
+            RemoteObjectPayloads::SpooledExternal | RemoteObjectPayloads::RowBlob { .. } => None,
+        }
+    }
+
+    /// Every spool file this record names. The claim it holds while its row
+    /// exists, and what the row's deletion lets go of.
+    pub fn payload_claims(&self) -> BTreeSet<ObjectHash> {
+        let mut claims = BTreeSet::new();
+        if let SemanticPayload::Spooled(hash) = self.semantic_payload() {
+            claims.insert(hash);
+        }
+        claims.extend(self.stored_payload());
+        claims
     }
 
     pub fn object_id(&self) -> ObjectHash {
@@ -186,7 +233,7 @@ impl RemoteObjectRecord {
             SharedLiveSetObjectDomain::StoreSnapshotImage { reference } if reference == image
         ) || record.identity.semantic_hash != image.image_hash
             || record.identity.object != image.object
-            || !record.bytes.canonical_semantic_bytes().is_empty()
+            || !matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }
@@ -217,7 +264,7 @@ impl RemoteObjectRecord {
             SharedLiveSetObjectDomain::CircleBootstrapImage { reference } if reference == image
         ) || record.identity.semantic_hash != image.image_hash
             || record.identity.object != image.object
-            || !record.bytes.canonical_semantic_bytes().is_empty()
+            || !matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }
@@ -247,7 +294,7 @@ impl RemoteObjectRecord {
         if record.identity.domain != SharedLiveSetObjectDomain::StoredBlob
             || record.identity.semantic_hash != ObjectHash::digest(&locator_bytes)
             || record.identity.object != *stored.object()
-            || record.bytes.canonical_semantic_bytes() != locator_bytes
+            || record.payloads.carried_locator_bytes() != Some(locator_bytes.as_slice())
         {
             return Err(RemoteObjectRecordError::InvalidReclaim);
         }

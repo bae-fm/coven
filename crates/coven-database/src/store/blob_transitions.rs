@@ -186,6 +186,7 @@ impl StoreDatabase {
         let root_table = root_table.clone();
         let root_id = root_id.clone();
         let row = row.clone();
+        let store_dir = self.store_dir.clone();
         let tables = self.synced_tables().to_vec();
         let gates = self.gates();
         let blob_decls = self.blob_decls();
@@ -277,6 +278,7 @@ impl StoreDatabase {
                 let publication_write_id = write_id.clone();
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
                     connection,
+                    &store_dir,
                     &tables,
                     &gates,
                     &blob_decls,
@@ -327,6 +329,7 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         let gate_column = gate_column.to_string();
+        let store_dir = self.store_dir.clone();
         let tables = self.synced_tables().to_vec();
         let write_id = self.new_store_write_id();
         let gates = self.gates();
@@ -335,6 +338,7 @@ impl StoreDatabase {
             .call(move |connection| {
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
                     connection,
+                    &store_dir,
                     &tables,
                     &gates,
                     &blob_decls,

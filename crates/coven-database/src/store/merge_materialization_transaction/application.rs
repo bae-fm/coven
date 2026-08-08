@@ -322,6 +322,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 crate::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
             Database::install_pulled_package_activation_on(
                 conn,
+                self.store_dir,
                 commit_ref,
                 retained.domain(),
                 retained.object(),
@@ -414,6 +415,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )?;
         Database::install_pulled_merge_membership_activations_on(
             conn,
+            self.store_dir,
             commit_ref,
             &membership_remote_objects,
         )?;

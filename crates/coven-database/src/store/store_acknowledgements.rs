@@ -123,7 +123,7 @@ impl StoreDatabase {
                 for expected_record in &expected_records {
                     let object_id = expected_record.object_id();
                     let stored = load_remote_object_on(&tx, object_id)?;
-                    if stored != *expected_record {
+                    if stored != **expected_record {
                         return Err(DbError::Message(
                             "losing acknowledgement candidate is no longer wholly unuploaded"
                                 .to_string(),

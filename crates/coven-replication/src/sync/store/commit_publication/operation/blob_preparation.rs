@@ -602,7 +602,7 @@ pub(crate) fn close_prepared_packages(
     owner: &StoreBatchCommitRef,
 ) -> Result<
     (
-        Vec<remote_object::RemoteObjectRecord>,
+        Vec<remote_object::ClosedRemoteObject>,
         PreparedAudienceObjects,
     ),
     StoreError,
@@ -648,7 +648,7 @@ pub(super) fn close_prepared_blobs(
     owner: &StoreBatchCommitRef,
 ) -> Result<
     (
-        Vec<remote_object::RemoteObjectRecord>,
+        Vec<remote_object::ClosedRemoteObject>,
         Vec<PreparedAudienceBlob>,
     ),
     StoreError,
@@ -682,7 +682,7 @@ pub(super) fn close_prepared_blobs(
         let prepared = PreparedAudienceBlob::from_remote(
             blob.audience,
             &locator_hash.to_string(),
-            remote.clone(),
+            remote.record().clone(),
             blob.spool_path,
         )?;
         indexed_blobs.push(prepared);

@@ -1553,7 +1553,12 @@ fn closed_candidate_graph_rejects_omitted_invented_and_substituted_package_mater
         ),
         Err(remote_object::RemoteObjectRecordError::CandidateObjectInvented)
     ));
-    let mut records = graph.close(&commit, &owner, vec![exact_material]).unwrap();
+    let mut records = graph
+        .close(&commit, &owner, vec![exact_material])
+        .unwrap()
+        .into_iter()
+        .map(remote_object::ClosedRemoteObject::into_record)
+        .collect::<Vec<_>>();
     let remote_object::RemoteObjectRecord::CandidateExclusive(record) = &mut records[0] else {
         panic!("package graph must close as candidate-exclusive")
     };

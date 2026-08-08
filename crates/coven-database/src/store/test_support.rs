@@ -135,6 +135,7 @@ impl StoreDatabase {
     where
         R: Send + 'static,
     {
+        let store_dir = self.store_dir.clone();
         let synced_tables = self.synced_tables().to_vec();
         let gates = self.gates();
         let blob_decls = self.blob_decls();
@@ -143,6 +144,7 @@ impl StoreDatabase {
             .call(move |connection| {
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
                     connection,
+                    &store_dir,
                     &synced_tables,
                     &gates,
                     &blob_decls,
@@ -167,6 +169,7 @@ impl StoreDatabase {
     where
         R: Send + 'static,
     {
+        let store_dir = self.store_dir.clone();
         let synced_tables = self.synced_tables().to_vec();
         let gates = self.gates();
         let blob_decls = self.blob_decls();
@@ -175,6 +178,7 @@ impl StoreDatabase {
             .call(move |connection| {
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
                     connection,
+                    &store_dir,
                     &synced_tables,
                     &gates,
                     &blob_decls,
@@ -394,14 +398,19 @@ impl StoreDatabase {
         historical_id: String,
         late_id: String,
     ) -> Result<(i64, i64, i64, i64), DbError> {
+        let store_dir = self.store_dir.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
         self.with_retained_merge_materializations(
-            move |connection, retained_merge_materializations| {
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+            move |records, retained_merge_materializations| {
+                let transaction = records
+                    .conn()
+                    .unchecked_transaction()
+                    .map_err(DbError::from)?;
                 let retained = retained_merge_materializations.replay_projection_on(
                     &transaction,
+                    &store_dir,
                     &root,
                     &blob_decls,
                     &gates,
@@ -427,6 +436,7 @@ impl StoreDatabase {
                     .map_err(DbError::from)?;
                 let sabotaged = retained_merge_materializations.replay_projection_on(
                     &transaction,
+                    &store_dir,
                     &root,
                     &blob_decls,
                     &gates,
@@ -482,6 +492,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<String, DbError> {
+        let store_dir = self.store_dir.clone();
         let activation_commit = activation_commit.clone();
         self.connection
             .call(move |connection| {
@@ -498,12 +509,12 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-                    &transaction,
+                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
                     &root,
                     &activation_commit,
                 )?;
                 let error = StoreDatabase::record_circle_bootstrap_coverage_on(
-                    &transaction,
+                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
                     &root,
                     &activation_commit,
                     retained.circle_activations(),

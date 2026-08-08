@@ -59,7 +59,7 @@ pub fn remote_object_id(object: &ExactObjectRef) -> ObjectHash {
 #[serde(deny_unknown_fields)]
 pub struct CandidateObjectRecord {
     pub identity: CandidateExclusiveTarget,
-    pub bytes: RemoteObjectBytes,
+    pub payloads: RemoteObjectPayloads,
     pub state: CandidateObjectState,
 }
 
@@ -67,7 +67,12 @@ pub struct CandidateObjectRecord {
 #[serde(deny_unknown_fields)]
 pub struct CandidateCommitRecord {
     pub identity: StoreBatchCommitRef,
-    pub bytes: RemoteObjectBytes,
+    /// The digest of the commit's canonical signed bytes, which is the name
+    /// their payload file carries. A commit reference names the commit by its
+    /// signed-body hash and its stored object, neither of which is the digest
+    /// of the bytes as serialized, so the record carries it.
+    pub semantic_hash: ObjectHash,
+    pub payloads: RemoteObjectPayloads,
     pub state: CandidateCommitState,
 }
 
@@ -75,7 +80,7 @@ pub struct CandidateCommitRecord {
 #[serde(deny_unknown_fields)]
 pub struct RetainedAuthorityRecord {
     pub identity: RetainedAuthorityObjectRef,
-    pub bytes: RemoteObjectBytes,
+    pub payloads: RemoteObjectPayloads,
     pub state: RetainedAuthorityObjectState,
 }
 
@@ -117,107 +122,148 @@ impl RetainedAuthorityObjectState {
 #[serde(deny_unknown_fields)]
 pub struct SharedObjectRecord {
     pub identity: SharedLiveSetObjectRef,
-    pub bytes: RemoteObjectBytes,
+    pub payloads: RemoteObjectPayloads,
     pub state: OwnedObjectState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteObjectBytes {
-    canonical_semantic_bytes: Vec<u8>,
-    stored: RemoteStoredRepresentation,
-}
-
-impl RemoteObjectBytes {
-    pub fn inline(
-        canonical_semantic_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
-        object: ExactObjectRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            canonical_semantic_bytes,
-            stored: RemoteStoredRepresentation::Inline {
-                bytes: stored_bytes,
-                object,
-            },
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub fn blob(
-        canonical_semantic_bytes: Vec<u8>,
-        object: ExactObjectRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            canonical_semantic_bytes,
-            stored: RemoteStoredRepresentation::Blob { object },
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub(crate) fn external_exact(
-        canonical_semantic_bytes: Vec<u8>,
-        object: ExactObjectRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let value = Self {
-            canonical_semantic_bytes,
-            stored: RemoteStoredRepresentation::ExternalExact { object },
-        };
-        value.validate()?;
-        Ok(value)
-    }
-
-    pub fn canonical_semantic_bytes(&self) -> &[u8] {
-        &self.canonical_semantic_bytes
-    }
-
-    pub fn stored(&self) -> &RemoteStoredRepresentation {
-        &self.stored
-    }
-
-    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
-        match &self.stored {
-            RemoteStoredRepresentation::Inline { bytes, object } => object
-                .verify(bytes)
-                .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string())),
-            RemoteStoredRepresentation::Blob { .. }
-            | RemoteStoredRepresentation::ExternalExact { .. } => Ok(()),
-        }
-    }
-}
-
+/// Where a remote object's payloads are, and what upload that implies.
+///
+/// A stored blob's row rides inside published snapshot and bootstrap images,
+/// where a restoring device holds the row but none of the writing device's
+/// payload spool, so it carries its locator in the row. Every other domain is
+/// read only on the device that wrote it and names its payloads in the spool:
+/// the plaintext under the identity's semantic hash, the ciphertext under the
+/// exact object's stored hash. Neither hash is repeated here — the identity
+/// already names both, and a second copy would be a second thing to keep in
+/// agreement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum RemoteStoredRepresentation {
-    Inline {
-        bytes: Vec<u8>,
-        object: ExactObjectRef,
-    },
-    Blob {
-        object: ExactObjectRef,
-    },
-    ExternalExact {
-        object: ExactObjectRef,
-    },
+pub enum RemoteObjectPayloads {
+    /// Plaintext and ciphertext both in the spool. This device uploads the
+    /// ciphertext from there.
+    SpooledInline,
+    /// The ciphertext was created outside this record — a staged image, or a
+    /// package this device observed rather than sealed — so this record never
+    /// uploads it. The plaintext is in the spool, except for the image domains,
+    /// which have no plaintext at all.
+    SpooledExternal,
+    /// The blob locator, in the row. The body is in the blob store and the
+    /// device uploads it from its blob spool.
+    RowBlob { locator_bytes: Vec<u8> },
 }
 
-impl RemoteStoredRepresentation {
-    pub fn object(&self) -> &ExactObjectRef {
+impl RemoteObjectPayloads {
+    /// The locator a stored blob's row carries, and nothing for the domains
+    /// whose payloads are in the spool.
+    pub fn carried_locator_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Inline { object, .. }
-            | Self::Blob { object }
-            | Self::ExternalExact { object } => object,
+            Self::RowBlob { locator_bytes } => Some(locator_bytes),
+            Self::SpooledInline | Self::SpooledExternal => None,
+        }
+    }
+}
+
+/// One closed remote object and the payload bytes its row will name.
+///
+/// A record holds references into the payload spool, so a record on its own is
+/// not yet something a row can name — the files have to be there first. This
+/// carries both from the moment the record is closed to the transaction that
+/// installs the files and writes the row, and the map is keyed by exactly the
+/// hashes the record claims, so a claim whose bytes are missing cannot be
+/// written down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedRemoteObject {
+    record: RemoteObjectRecord,
+    payloads: BTreeMap<ObjectHash, Vec<u8>>,
+}
+
+impl ClosedRemoteObject {
+    /// A record whose payloads are named by other rows: a stored blob, whose
+    /// body is in the blob store, or an image, whose bytes are staged by the
+    /// flow that built it.
+    pub(crate) fn carried(record: RemoteObjectRecord) -> Result<Self, RemoteObjectRecordError> {
+        Self::with_payloads(record, BTreeMap::new())
+    }
+
+    /// A record and the bytes for exactly the payloads it claims.
+    ///
+    /// Used both when a record is first closed and when one is read back from
+    /// its row alongside its spool files. The spool names files by the digest of
+    /// their contents, so bytes found under a claimed hash are that payload; all
+    /// this has to check is that the set matches.
+    pub fn with_payloads(
+        record: RemoteObjectRecord,
+        payloads: BTreeMap<ObjectHash, Vec<u8>>,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        if payloads.keys().copied().collect::<BTreeSet<_>>() != record.payload_claims() {
+            return Err(RemoteObjectRecordError::PayloadPlacement);
+        }
+        Ok(Self { record, payloads })
+    }
+
+    pub fn record(&self) -> &RemoteObjectRecord {
+        &self.record
+    }
+
+    pub fn into_record(self) -> RemoteObjectRecord {
+        self.record
+    }
+
+    /// Advance the record this holds, keeping its payloads. A transition never
+    /// changes what a record names — neither hash mutates and the domain changes
+    /// re-wrap the same reference — so the payload set carries over unchanged,
+    /// and is re-checked against the new record rather than assumed.
+    pub fn map_record(
+        self,
+        transition: impl FnOnce(
+            RemoteObjectRecord,
+        ) -> Result<RemoteObjectRecord, RemoteObjectRecordError>,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        Self::with_payloads(transition(self.record)?, self.payloads)
+    }
+
+    /// The payload files this record names, by the hash each is stored under.
+    /// Named apart from the record's own [`RemoteObjectRecord::payloads`],
+    /// which says *where* the payloads are rather than carrying them.
+    pub fn payload_bytes(&self) -> &BTreeMap<ObjectHash, Vec<u8>> {
+        &self.payloads
+    }
+
+    /// The record's plaintext: the locator a stored blob's row carries, or the
+    /// spool file every other domain's identity names. `None` for the image
+    /// domains, which name their payload by reference and have no body here.
+    pub fn semantic_bytes(&self) -> Option<&[u8]> {
+        match self.record.semantic_payload() {
+            SemanticPayload::Carried(bytes) => Some(bytes),
+            SemanticPayload::Spooled(hash) => self.payloads.get(&hash).map(Vec::as_slice),
+            SemanticPayload::Absent => None,
         }
     }
 
-    pub fn inline_bytes(&self) -> Option<&[u8]> {
-        match self {
-            Self::Inline { bytes, .. } => Some(bytes),
-            Self::Blob { .. } | Self::ExternalExact { .. } => None,
-        }
+    /// The ciphertext this record uploads, for the domains that seal one.
+    pub fn stored_bytes(&self) -> Option<&[u8]> {
+        self.record
+            .stored_payload()
+            .and_then(|hash| self.payloads.get(&hash).map(Vec::as_slice))
     }
+}
+
+impl std::ops::Deref for ClosedRemoteObject {
+    type Target = RemoteObjectRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+/// Where one record's plaintext is: in the row, in the spool, or nowhere,
+/// because the image domains name their payload by reference and have no
+/// semantic body of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticPayload<'record> {
+    Carried(&'record [u8]),
+    Spooled(ObjectHash),
+    Absent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +312,8 @@ pub use super::store_commit::StoreBatchCommitDeletionTarget;
 pub enum RemoteObjectRecordError {
     #[error("prepared stored bytes do not match their exact reference: {0}")]
     StoredBytes(String),
+    #[error("remote object payload placement contradicts its domain")]
+    PayloadPlacement,
     #[error("prepared stored reference differs from the closed identity reference")]
     StoredReferenceMismatch,
     #[error("prepared semantic hash is {actual}, expected {expected}")]

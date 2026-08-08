@@ -140,30 +140,30 @@ impl StoreDatabase {
     ) -> Result<(), crate::DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(crate::DbError::from)?;
-                let mut journal = load_discardable_operation_on(&tx, &operation_id)?;
-                let CircleOperationCandidate {
-                    candidate,
-                    bootstrap_blobs,
-                } = circle_operation_candidate_on(&tx, journal.operation())?;
-                begin_blocked_merge_candidate_nonactivation_on(
-                    &tx,
-                    &root,
-                    &candidate.commit.write_id,
-                    &candidate,
-                    &nonactivation,
-                    false,
-                    &bootstrap_blobs,
-                )?;
-                journal
-                    .begin_discard()
-                    .map_err(|error| crate::DbError::Message(error.to_string()))?;
-                super::circle_controls::update_circle_operation_phase_on(&tx, &journal)?;
-                tx.commit().map_err(crate::DbError::from)
-            })
-            .await
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let tx = conn.unchecked_transaction().map_err(crate::DbError::from)?;
+            let mut journal = load_discardable_operation_on(&tx, &operation_id)?;
+            let CircleOperationCandidate {
+                candidate,
+                bootstrap_blobs,
+            } = circle_operation_candidate_on(&tx, journal.operation())?;
+            begin_blocked_merge_candidate_nonactivation_on(
+                crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
+                &root,
+                &candidate.commit.write_id,
+                &candidate,
+                &nonactivation,
+                false,
+                &bootstrap_blobs,
+            )?;
+            journal
+                .begin_discard()
+                .map_err(|error| crate::DbError::Message(error.to_string()))?;
+            super::circle_controls::update_circle_operation_phase_on(&tx, &journal)?;
+            tx.commit().map_err(crate::DbError::from)
+        })
+        .await
     }
 
     /// The terminal cleanup authorities the candidate carries — non-empty only
@@ -176,17 +176,17 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call(move |conn| {
-                let journal = load_discarding_operation_on(conn, &operation_id)?;
-                let candidate = circle_operation_candidate_on(conn, journal.operation())?;
-                Ok(
-                    terminal_candidate_verification_on(conn, &root, candidate.candidate)?
-                        .into_iter()
-                        .collect(),
-                )
-            })
-            .await
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let journal = load_discarding_operation_on(conn, &operation_id)?;
+            let candidate = circle_operation_candidate_on(conn, journal.operation())?;
+            Ok(
+                terminal_candidate_verification_on(records, &root, candidate.candidate)?
+                    .into_iter()
+                    .collect(),
+            )
+        })
+        .await
     }
 
     /// Reconcile the candidate's activation head against fresh excluded-author
@@ -211,57 +211,62 @@ impl StoreDatabase {
             .into_terminal_head_nonactivation()
             .map_err(|error| crate::DbError::Message(error.to_string()))?;
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(crate::DbError::from)?;
-                let journal = load_discarding_operation_on(&tx, &operation_id)?;
-                let candidate = circle_operation_candidate_on(&tx, journal.operation())?.candidate;
-                let reference = durable
-                    .reference()
-                    .map_err(|error| crate::DbError::Message(error.to_string()))?;
-                if reference != candidate.reference {
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let tx = conn.unchecked_transaction().map_err(crate::DbError::from)?;
+            let journal = load_discarding_operation_on(&tx, &operation_id)?;
+            let candidate = circle_operation_candidate_on(&tx, journal.operation())?.candidate;
+            let reference = durable
+                .reference()
+                .map_err(|error| crate::DbError::Message(error.to_string()))?;
+            if reference != candidate.reference {
+                return Err(crate::DbError::Message(
+                    "fresh excluded-author head evidence names another candidate".to_string(),
+                ));
+            }
+            validate_terminal_candidate_authority_on(
+                crate::payload_spool::StoreRecords::new(&tx, records.store_dir()),
+                &root,
+                &candidate,
+                &durable,
+            )?;
+            let object_id = remote_object_id(&candidate.head_object);
+            let remote_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)?;
+            if !remote_exists {
+                let inert = load_protocol_inert_object_on(&tx, object_id)?;
+                if inert
+                    .candidate_nonactivation_proof(&candidate.reference)
+                    .map_err(|error| crate::DbError::Message(error.to_string()))?
+                    != Some(durable.proof())
+                {
                     return Err(crate::DbError::Message(
-                        "fresh excluded-author head evidence names another candidate".to_string(),
+                        "protocol-inert candidate head carries another proof".to_string(),
                     ));
                 }
-                validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
-                let object_id = remote_object_id(&candidate.head_object);
-                let remote_exists: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
+                return tx.commit().map_err(crate::DbError::from);
+            }
+            let mut remote = load_remote_object_on(&tx, object_id)?;
+            let inert = remote
+                .begin_candidate_nonactivation_with_verified_head_nonactivation(
+                    durable,
+                    &head_nonactivation,
+                )
+                .map_err(|error| {
+                    crate::DbError::context(
+                        format!("reconcile excluded-author head {object_id}"),
+                        error,
                     )
-                    .map_err(crate::DbError::from)?;
-                if !remote_exists {
-                    let inert = load_protocol_inert_object_on(&tx, object_id)?;
-                    if inert
-                        .candidate_nonactivation_proof(&candidate.reference)
-                        .map_err(|error| crate::DbError::Message(error.to_string()))?
-                        != Some(durable.proof())
-                    {
-                        return Err(crate::DbError::Message(
-                            "protocol-inert candidate head carries another proof".to_string(),
-                        ));
-                    }
-                    return tx.commit().map_err(crate::DbError::from);
-                }
-                let mut remote = load_remote_object_on(&tx, object_id)?;
-                let inert = remote
-                    .begin_candidate_nonactivation_with_verified_head_nonactivation(
-                        durable,
-                        &head_nonactivation,
-                    )
-                    .map_err(|error| {
-                        crate::DbError::context(
-                            format!("reconcile excluded-author head {object_id}"),
-                            error,
-                        )
-                    })?;
-                finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
-                tx.commit().map_err(crate::DbError::from)
-            })
-            .await
+                })?;
+            finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
+            tx.commit().map_err(crate::DbError::from)
+        })
+        .await
     }
 
     /// The candidate-exclusive objects still present in cloud storage, ordered by

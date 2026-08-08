@@ -16,7 +16,12 @@ pub struct PreparedAudiencePackage {
 }
 
 impl PreparedAudiencePackage {
-    pub fn from_remote(remote: RemoteObjectRecord) -> Result<Self, DbError> {
+    /// The prepared package one remote object names, read back from the payload
+    /// spool the record's identity files it under.
+    pub fn from_remote(
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        remote: RemoteObjectRecord,
+    ) -> Result<Self, DbError> {
         remote
             .validate()
             .map_err(|error| DbError::context("prepared remote package", error))?;
@@ -41,17 +46,31 @@ impl PreparedAudiencePackage {
             ));
         }
         let remote_object_id = remote.object_id();
-        let semantic_bytes = remote.bytes().canonical_semantic_bytes().to_vec();
         let object = remote.object().clone();
-        let stored_bytes = remote
-            .bytes()
-            .stored()
-            .inline_bytes()
-            .ok_or_else(|| {
-                DbError::Message("prepared package remote object is not inline".to_string())
-            })?
-            .to_vec();
-        Self::new(remote_object_id, semantic_bytes, stored_bytes, object)
+        let coven_protocol::remote_object::SemanticPayload::Spooled(semantic_hash) =
+            remote.semantic_payload()
+        else {
+            return Err(DbError::Message(
+                "prepared package remote object names no spooled plaintext".to_string(),
+            ));
+        };
+        let stored_hash = remote.stored_payload().ok_or_else(|| {
+            DbError::Message("prepared package remote object uploads no ciphertext".to_string())
+        })?;
+        let read = |hash| {
+            crate::payload_spool::read_payload_blocking(store_dir, hash)
+                .map_err(|error| DbError::Message(error.to_string()))
+        };
+        let semantic_bytes = read(semantic_hash)?;
+        let stored_bytes = read(stored_hash)?;
+        let prepared = Self::new(remote_object_id, semantic_bytes, stored_bytes, object)?;
+        // The spool is content-keyed, so the bytes match the hashes that named
+        // them; what this checks is that those bytes are the package the
+        // record's reference describes — the ingestion check for a spool read.
+        remote
+            .validate_payload(prepared.semantic_bytes())
+            .map_err(|error| DbError::context("prepared package payload", error))?;
+        Ok(prepared)
     }
 
     pub fn new(
@@ -122,7 +141,10 @@ impl PreparedAudienceBlob {
                 "prepared blob index references a non-blob remote object".to_string(),
             ));
         }
-        let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
+        let locator_bytes = remote.payloads().carried_locator_bytes().ok_or_else(|| {
+            DbError::Message("prepared blob remote object carries no locator".to_string())
+        })?;
+        let locator = BlobLocator::parse(locator_bytes)
             .map_err(|error| DbError::context("prepared blob locator", error))?;
         if locator.locator_hash().to_string() != expected_locator_hash {
             return Err(DbError::Message(format!(
@@ -185,7 +207,9 @@ pub struct PreparedAudienceObjects {
 }
 
 pub struct PreparedRemoteObject {
-    pub record: RemoteObjectRecord,
+    /// The record awaiting upload, with the payload files its row names read
+    /// back beside it: the upload reads the ciphertext from here.
+    pub closed: coven_protocol::remote_object::ClosedRemoteObject,
     pub spool_path: Option<PathBuf>,
 }
 

@@ -101,7 +101,7 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
         .find(|remote| remote.object_id() == first_id)
         .expect("identical exact ref remains indexed");
     assert!(matches!(
-        first_remote,
+        first_remote.record(),
         coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
             if matches!(
                 record.state,

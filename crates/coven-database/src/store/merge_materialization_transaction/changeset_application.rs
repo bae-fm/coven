@@ -113,12 +113,13 @@ impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn resolve_and_apply_changeset(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     bytes: &[u8],
     tables: &[SyncedTable],
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let schema = Arc::new(TableSchema::from_db(conn, tables)?);
-    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms)
+    resolve_and_apply_changeset_with_schema(conn, store_dir, bytes, schema, receiver_wall_ms)
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
@@ -141,6 +142,7 @@ pub fn resolve_and_apply_changeset(
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
@@ -148,7 +150,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
     let changeset = ValidatedChangeset::new(bytes, schema)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let result = MergeMaterializationTransaction::new(&tx).apply_changeset(
+    let result = MergeMaterializationTransaction::new(&tx, store_dir).apply_changeset(
         changeset,
         IncomingTimestampPolicy::Received { receiver_wall_ms },
     )?;

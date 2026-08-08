@@ -423,7 +423,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
     coven_database::StoreDatabase::new(&db)
-        .mark_remote_object_uploaded(acknowledgement_remote)
+        .mark_remote_object_uploaded(acknowledgement_remote.into_record())
         .await
         .expect("record acknowledgement upload");
     device
@@ -529,7 +529,8 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
         .expect("candidate owns acknowledgement")
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
-        .expect("acknowledgement ownership record");
+        .expect("acknowledgement ownership record")
+        .into_record();
     acknowledgement
         .mark_uploaded_verified()
         .expect("acknowledgement upload is durable");

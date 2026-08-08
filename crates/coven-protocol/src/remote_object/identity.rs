@@ -46,9 +46,7 @@ pub(super) fn validate_access_pairs(
                 .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
         let leaf_bytes = serde_json::to_vec(&leaf)
             .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-        if envelope.value_hash != ObjectHash::digest(&leaf_bytes)
-            || ObjectHash::digest(&leaf_material.stored_bytes) != leaf_ref.leaf_hash
-        {
+        if envelope.value_hash != ObjectHash::digest(&leaf_bytes) {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
         let bootstrap = match &leaf.disposition {
@@ -81,7 +79,6 @@ pub(super) fn validate_access_pairs(
                     || reference != &bootstrap.image
                     || !bootstrap.verify_for_access(&leaf)
                     || !material.canonical_semantic_bytes.is_empty()
-                    || reference.object.verify(&material.stored_bytes).is_err()
                 {
                     return Err(RemoteObjectRecordError::StoredReferenceMismatch);
                 }
@@ -438,11 +435,17 @@ pub(super) fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
-        RetainedAuthorityObjectDomain::DeviceHead { reference } => {
+        RetainedAuthorityObjectDomain::DeviceHead {
+            reference,
+            head_commit,
+        } => {
             let head: crate::store_commit::StoreDeviceHead =
                 serde_json::from_slice(canonical_semantic_bytes)
                     .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            if head.head_hash() != reference.head_hash || reference.object != identity.object {
+            if head.head_hash() != reference.head_hash
+                || reference.object != identity.object
+                || head.commit != *head_commit
+            {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }

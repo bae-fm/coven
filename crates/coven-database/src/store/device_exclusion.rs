@@ -201,6 +201,7 @@ impl StoreDatabase {
         let remotes = operation
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
+        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
@@ -224,6 +225,7 @@ impl StoreDatabase {
             for remote in &remotes {
                 persist_exact_remote_object_on(
                     &tx,
+                    &store_dir,
                     remote,
                     "Store-device exclusion candidate object",
                 )?;
@@ -265,6 +267,7 @@ impl StoreDatabase {
                     .to_string(),
             ));
         }
+        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
@@ -274,6 +277,7 @@ impl StoreDatabase {
                     let (winner, prepared) = next_candidate.publication();
                     replace_prepared_merge_head_remote_on(
                         &tx,
+                        &store_dir,
                         &current.object,
                         winner,
                         prepared,
@@ -377,7 +381,7 @@ impl StoreDatabase {
                             coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { .. }
                         )
                 );
-                if current != *remote || !unuploaded {
+                if current != **remote || !unuploaded {
                     return Err(DbError::Message(format!(
                         "outcome-slot loss cannot discard uploaded exclusion object {object_id}"
                     )));
@@ -514,6 +518,7 @@ impl StoreDatabase {
         }
         .remote_objects()
         .map_err(store_device_exclusion_journal_error)?;
+        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
@@ -523,6 +528,7 @@ impl StoreDatabase {
             {
                 persist_exact_remote_object_on(
                     &tx,
+                    &store_dir,
                     remote,
                     "replacement Store-device exclusion candidate object",
                 )?;
@@ -790,14 +796,14 @@ impl StoreDatabase {
                 let (
                     RemoteObjectRecord::RetainedAuthority(expected_record),
                     RemoteObjectRecord::RetainedAuthority(current_record),
-                ) = (&expected, &current)
+                ) = (expected.record(), &current)
                 else {
                     return Err(DbError::Message(
                         "Store-device exclusion authority is not retained authority".to_string(),
                     ));
                 };
                 if expected_record.identity != current_record.identity
-                    || expected_record.bytes != current_record.bytes
+                    || expected_record.payloads != current_record.payloads
                 {
                     return Err(DbError::Message(
                         "Store-device exclusion authority changed before upload completion"

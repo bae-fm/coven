@@ -158,11 +158,10 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-        self.connection
-            .call(move |conn| {
-                author_exclusion_activation_for_candidate_on(conn, &root, &candidate, &author)
-            })
-            .await
+        self.call_records(move |records| {
+            author_exclusion_activation_for_candidate_on(records, &root, &candidate, &author)
+        })
+        .await
     }
 
     pub async fn begin_blocked_merge_candidate_nonactivation(
@@ -172,45 +171,43 @@ impl StoreDatabase {
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let (raw_status, raw_prepared): (String, String) = tx
-                    .query_row(
-                        "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
-                if !matches!(status, WriteStatus::Blocked(_)) {
-                    return Err(DbError::Message(format!(
-                        "Merge candidate {write_id} is not blocked"
-                    )));
-                }
-                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                    .map_err(|error| {
-                        DbError::context("blocked Merge candidate preparation", error)
-                    })?;
-                let PreparedStoreWriteState::Publication { .. } = &prepared else {
-                    return Err(DbError::Message(
-                        "author exclusion reached a non-candidate Merge preparation".to_string(),
-                    ));
-                };
-                let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
-                begin_blocked_merge_candidate_nonactivation_on(
-                    &tx,
-                    &root,
-                    &write_id,
-                    &candidate,
-                    &nonactivation,
-                    true,
-                    &[],
-                )?;
-                tx.commit().map_err(DbError::from)
-            })
-            .await
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(format!(
+                    "Merge candidate {write_id} is not blocked"
+                )));
+            }
+            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                .map_err(|error| DbError::context("blocked Merge candidate preparation", error))?;
+            let PreparedStoreWriteState::Publication { .. } = &prepared else {
+                return Err(DbError::Message(
+                    "author exclusion reached a non-candidate Merge preparation".to_string(),
+                ));
+            };
+            let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
+            begin_blocked_merge_candidate_nonactivation_on(
+                crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
+                &root,
+                &write_id,
+                &candidate,
+                &nonactivation,
+                true,
+                &[],
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
     }
 
     pub async fn begin_prepared_merge_abandonment_nonactivation(
@@ -226,8 +223,8 @@ impl StoreDatabase {
             blocked_merge_candidate_nonactivation(authority_nonactivation)?;
         let notified_write_id = write_id.clone();
         let blocked = self
-            .connection
-            .call(move |conn| {
+            .call_records(move |records| {
+                let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -280,7 +277,7 @@ impl StoreDatabase {
                     authority_head.prepared().reference(),
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
                     &root,
                     &write_id,
                     &candidate,
@@ -289,7 +286,7 @@ impl StoreDatabase {
                     &[],
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
                     &root,
                     &write_id,
                     &authority,

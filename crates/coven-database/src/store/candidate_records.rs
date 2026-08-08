@@ -256,11 +256,12 @@ pub enum MergeCandidateHeadEvidence<'a> {
 }
 
 pub fn author_exclusion_activation_for_candidate_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
+    let conn = records.conn();
     let expected_stream =
         coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
@@ -302,7 +303,7 @@ pub fn author_exclusion_activation_for_candidate_on(
         terminals.as_slice(),
         &expected_stream,
         *sequence,
-        |exclusion| load_author_exclusion_activation_locator_on(conn, root, exclusion),
+        |exclusion| load_author_exclusion_activation_locator_on(records, root, exclusion),
     )
 }
 
@@ -328,10 +329,11 @@ pub fn select_author_exclusion_activation_locator(
 }
 
 pub fn load_author_exclusion_activation_locator_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
+    let conn = records.conn();
     let exclusion_json = serde_json::to_string(exclusion)
         .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
     let stored: Option<(String, String, String)> = conn
@@ -362,7 +364,7 @@ pub fn load_author_exclusion_activation_locator_on(
         activation_head,
     );
     let retained = crate::StoreDatabase::load_retained_merge_materialization_by_ref_on(
-        conn,
+        records,
         root,
         locator.activation_commit(),
     )?;
@@ -415,7 +417,7 @@ pub fn blocked_merge_candidate_nonactivation(
 }
 
 pub fn validate_terminal_candidate_authority_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &PreparedMergeCandidate,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
@@ -429,14 +431,15 @@ pub fn validate_terminal_candidate_authority_on(
             "terminal candidate authority names another candidate".to_string(),
         ));
     }
-    validate_terminal_nonactivation_authority_on(conn, root, durable)
+    validate_terminal_nonactivation_authority_on(records, root, durable)
 }
 
 pub fn validate_terminal_nonactivation_authority_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
+    let conn = records.conn();
     match durable.proof() {
         coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
             exclusion,
@@ -451,7 +454,7 @@ pub fn validate_terminal_nonactivation_authority_on(
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
             let current = author_exclusion_activation_for_candidate_on(
-                conn,
+                records,
                 root,
                 &reference,
                 &commit.author_registration,
@@ -496,7 +499,7 @@ pub fn validate_terminal_nonactivation_authority_on(
             dependency_nonactivation,
             ..
         } => {
-            validate_terminal_nonactivation_authority_on(conn, root, dependency_nonactivation)?;
+            validate_terminal_nonactivation_authority_on(records, root, dependency_nonactivation)?;
         }
         coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
             return Err(DbError::Message(
@@ -507,8 +510,9 @@ pub fn validate_terminal_nonactivation_authority_on(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn begin_blocked_merge_candidate_nonactivation_on(
-    tx: &rusqlite::Transaction<'_>,
+    records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -516,8 +520,9 @@ pub fn begin_blocked_merge_candidate_nonactivation_on(
     include_indexed_blobs: bool,
     extra_objects: &[ExactObjectRef],
 ) -> Result<(), DbError> {
+    let tx = records.transaction();
     if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
-        validate_terminal_candidate_authority_on(tx, root, candidate, durable)?;
+        validate_terminal_candidate_authority_on(*records, root, candidate, durable)?;
     }
     match nonactivation {
         BlockedMergeCandidateNonactivation::Merge(durable) => {
@@ -660,10 +665,11 @@ pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// by occupation, not terminal reconciliation). Shared by Merge cleanup and
 /// Circle-operation discard so both derive the authority identically.
 pub fn terminal_candidate_verification_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,
 ) -> Result<Option<TerminalCandidateCleanupVerification>, DbError> {
+    let conn = records.conn();
     let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
     let Some(proof) = remote
         .candidate_nonactivation_proof(&candidate.reference)
@@ -676,7 +682,7 @@ pub fn terminal_candidate_verification_on(
             exclusion,
             ..
         } => TerminalCandidateAuthority::AuthorExclusion(
-            load_author_exclusion_activation_locator_on(conn, root, exclusion)?,
+            load_author_exclusion_activation_locator_on(records, root, exclusion)?,
         ),
         coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
             grant_id,
@@ -696,7 +702,7 @@ pub fn terminal_candidate_verification_on(
                 proof.clone(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?;
-            validate_terminal_nonactivation_authority_on(conn, root, &durable)?;
+            validate_terminal_nonactivation_authority_on(records, root, &durable)?;
             TerminalCandidateAuthority::DependencyRetraction(
                 coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                     .map_err(|error| DbError::Message(error.to_string()))?,

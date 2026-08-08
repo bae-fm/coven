@@ -66,11 +66,11 @@ impl std::ops::DerefMut for PreparedStoreOperationCommit {
 impl PreparedStoreOperationCommit {
     fn candidate_remote_objects(
         &self,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let mut objects = vec![crate::remote_object::RemoteObjectRecord::candidate_commit(
             self.reference.clone(),
-            self.commit.to_bytes(),
-            self.prepared.stored_bytes().to_vec(),
+            &self.commit.to_bytes(),
+            self.prepared.stored_bytes(),
         )
         .map_err(|error| PreparedCommitError(error.to_string()))?];
         objects.push(
@@ -79,8 +79,8 @@ impl PreparedStoreOperationCommit {
                     head_hash: self.head.head_hash(),
                     object: self.prepared_head.reference().clone(),
                 },
-                self.head.to_bytes(),
-                self.prepared_head.stored_bytes().to_vec(),
+                &self.head.to_bytes(),
+                self.prepared_head.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -129,7 +129,7 @@ impl PreparedStoreOperationCommit {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
         let expected_wraps = match &transition.entry.change {
             super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
@@ -159,7 +159,7 @@ impl PreparedStoreOperationCommit {
         resolution: &super::membership::StoreMembershipConflictResolution,
         reference: &super::membership::StoreMembershipConflictResolutionRef,
         prepared: &PreparedExactObject,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
         if !matches!(
             &transition.entry.change,
@@ -183,12 +183,12 @@ impl PreparedStoreOperationCommit {
         let authority =
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 reference.clone(),
-                serde_json::to_vec(resolution).map_err(|error| {
+                &serde_json::to_vec(resolution).map_err(|error| {
                     PreparedCommitError(format!(
                         "serialize Store membership resolution: {error}"
                     ))
                 })?,
-                prepared.stored_bytes().to_vec(),
+                prepared.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?;
@@ -200,7 +200,7 @@ impl PreparedStoreOperationCommit {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         wrapped_key: &super::wrapped_store_key::PreparedWrappedStoreKey,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
         if !matches!(
             &transition.entry.change,
@@ -225,8 +225,8 @@ impl PreparedStoreOperationCommit {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
         wraps: &[super::wrapped_store_key::PreparedWrappedStoreKey],
-        authorities: Vec<crate::remote_object::RemoteObjectRecord>,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+        authorities: Vec<crate::remote_object::ClosedRemoteObject>,
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let family = self.commit.candidate_family();
         let mut objects = self.candidate_remote_objects()?;
         let entry_bytes = serde_json::to_vec(&transition.entry).map_err(|error| {
@@ -238,8 +238,8 @@ impl PreparedStoreOperationCommit {
             crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
                 family,
                 transition.entry_ref.clone(),
-                entry_bytes,
-                transition.entry_object.stored_bytes().to_vec(),
+                &entry_bytes,
+                transition.entry_object.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -248,12 +248,12 @@ impl PreparedStoreOperationCommit {
             crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
                 family,
                 publication.head_ref.clone(),
-                serde_json::to_vec(&publication.head).map_err(|error| {
+                &serde_json::to_vec(&publication.head).map_err(|error| {
                     PreparedCommitError(format!(
                         "serialize Merge membership candidate head: {error}"
                     ))
                 })?,
-                publication.head_object.stored_bytes().to_vec(),
+                publication.head_object.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -269,8 +269,8 @@ impl PreparedStoreOperationCommit {
                 crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_wrapped_store_key(
                     family,
                     prepared.reference.clone(),
-                    canonical,
-                    prepared.object.stored_bytes().to_vec(),
+                    &canonical,
+                    prepared.object.stored_bytes(),
                     self.reference.clone(),
                 )
                 .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -280,7 +280,7 @@ impl PreparedStoreOperationCommit {
         let mut unique = std::collections::BTreeSet::new();
         if objects
             .iter()
-            .any(|object| !unique.insert(object.object_id()))
+            .any(|object| !unique.insert(object.record().object_id()))
         {
             return Err(PreparedCommitError(
                 "Merge membership authority graph repeats an exact object".to_string(),
@@ -342,7 +342,7 @@ impl PreparedStoreOperationCommit {
     pub fn acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::objects::ExactProtocolObject<super::store_commit::StoreAck>,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let reference = self.commit.acknowledgement().ok_or_else(|| {
             PreparedCommitError(
                 "prepared acknowledgement operation has no exact acknowledgement ref".to_string(),
@@ -360,8 +360,8 @@ impl PreparedStoreOperationCommit {
         let authority =
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_acknowledgement(
                 reference.clone(),
-                acknowledgement.bytes.clone(),
-                acknowledgement.prepared.stored_bytes().to_vec(),
+                &acknowledgement.bytes,
+                acknowledgement.prepared.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?;
@@ -371,7 +371,7 @@ impl PreparedStoreOperationCommit {
     pub fn circle_acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::objects::ExactProtocolObject<super::store_commit::CircleAck>,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let reference = self
             .commit
             .circle_acknowledgements()
@@ -395,8 +395,8 @@ impl PreparedStoreOperationCommit {
         let authority =
             crate::remote_object::RemoteObjectRecord::candidate_activated_circle_acknowledgement(
                 reference.clone(),
-                acknowledgement.bytes.clone(),
-                acknowledgement.prepared.stored_bytes().to_vec(),
+                &acknowledgement.bytes,
+                acknowledgement.prepared.stored_bytes(),
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?;
@@ -405,8 +405,8 @@ impl PreparedStoreOperationCommit {
 
     pub fn retained_authority_remote_objects(
         &self,
-        authorities: Vec<crate::remote_object::RemoteObjectRecord>,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, PreparedCommitError> {
+        authorities: Vec<crate::remote_object::ClosedRemoteObject>,
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         if authorities.is_empty() {
             return Err(PreparedCommitError(
                 "Store operation has no retained authority objects".to_string(),
@@ -414,10 +414,7 @@ impl PreparedStoreOperationCommit {
         }
         let mut authority_ids = std::collections::BTreeSet::new();
         for authority in &authorities {
-            authority
-                .validate()
-                .map_err(|error| PreparedCommitError(error.to_string()))?;
-            if !matches!(authority, crate::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+            if !matches!(authority.record(), crate::remote_object::RemoteObjectRecord::RetainedAuthority(record)
                 if matches!(&record.state, crate::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
                     if ownership.pending == std::collections::BTreeSet::from([self.reference.clone()])))
             {
@@ -426,7 +423,7 @@ impl PreparedStoreOperationCommit {
                         .to_string(),
                 ));
             }
-            if !authority_ids.insert(authority.object_id()) {
+            if !authority_ids.insert(authority.record().object_id()) {
                 return Err(PreparedCommitError(
                     "Store operation repeats a retained authority object".to_string(),
                 ));

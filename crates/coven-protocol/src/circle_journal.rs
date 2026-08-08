@@ -227,7 +227,7 @@ impl CircleOperationJournal {
     pub fn closed_remote_objects(
         &self,
         prepared_objects: &BTreeMap<String, PreparedExactObject>,
-    ) -> Result<Vec<crate::remote_object::RemoteObjectRecord>, CircleJournalError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, CircleJournalError> {
         let operation = self.operation();
         operation.require_prepared_objects(prepared_objects)?;
         let commit: StoreBatchCommit = serde_json::from_slice(&operation.commit_bytes)
@@ -406,8 +406,8 @@ impl CircleOperationJournal {
         remotes.push(
             crate::remote_object::RemoteObjectRecord::candidate_commit(
                 operation.commit_ref.clone(),
-                operation.commit_bytes.clone(),
-                commit_prepared.stored_bytes().to_vec(),
+                &operation.commit_bytes,
+                commit_prepared.stored_bytes(),
             )
             .map_err(|error| CircleJournalError(error.to_string()))?,
         );
@@ -420,8 +420,8 @@ impl CircleOperationJournal {
                     head_hash: operation.policy.head.head_hash(),
                     object: prepared.reference().clone(),
                 },
-                operation.policy.head.to_bytes(),
-                prepared.stored_bytes().to_vec(),
+                &operation.policy.head.to_bytes(),
+                prepared.stored_bytes(),
                 operation.commit_ref.clone(),
             )
             .map_err(|error| CircleJournalError(error.to_string()))?,

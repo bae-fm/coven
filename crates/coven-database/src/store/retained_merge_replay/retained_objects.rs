@@ -74,10 +74,7 @@ impl StoreDatabase {
                 if record.identity.domain == expected_domain
                     && record.identity.semantic_hash == ObjectHash::digest(&expected_bytes)
                     && record.identity.object == *retained.object()
-                    && !matches!(
-                        record.bytes.stored(),
-                        coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
-                    )
+                    && record.payloads.carried_locator_bytes().is_none()
                     && matches!(
                         &record.state,
                         coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
@@ -107,12 +104,7 @@ impl StoreDatabase {
                 if record.identity.domain == SharedLiveSetObjectDomain::StoredBlob
                     && record.identity.semantic_hash == ObjectHash::digest(&locator_bytes)
                     && record.identity.object == *stored.object()
-                    && record.bytes.canonical_semantic_bytes() == locator_bytes
-                    && matches!(
-                        record.bytes.stored(),
-                        coven_protocol::remote_object::RemoteStoredRepresentation::Blob { object }
-                            if object == stored.object()
-                    )
+                    && record.payloads.carried_locator_bytes() == Some(locator_bytes.as_slice())
                     && matches!(
                         &record.state,
                         coven_protocol::remote_object::OwnedObjectState::UploadedVerified {

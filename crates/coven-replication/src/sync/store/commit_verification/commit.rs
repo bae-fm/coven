@@ -102,7 +102,7 @@ pub(crate) struct StoreCommitVerifier<'a> {
 
 pub(crate) struct VerifiedMergeMembershipClosure {
     objects: coven_database::VerifiedMergeMembershipObjects,
-    remote_objects: Vec<remote_object::RemoteObjectRecord>,
+    remote_objects: Vec<remote_object::ClosedRemoteObject>,
     pub(crate) proof: RetainedMergeMembershipProof,
 }
 
@@ -111,7 +111,7 @@ impl VerifiedMergeMembershipClosure {
         &self.objects
     }
 
-    pub(crate) fn into_remote_objects(self) -> Vec<remote_object::RemoteObjectRecord> {
+    pub(crate) fn into_remote_objects(self) -> Vec<remote_object::ClosedRemoteObject> {
         self.remote_objects
     }
 }

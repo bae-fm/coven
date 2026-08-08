@@ -233,10 +233,8 @@ fn is_external_circle_package(
     if !matches!(
         record.identity.domain,
         coven_protocol::remote_object::SharedLiveSetObjectDomain::CirclePackage { .. }
-    ) || !matches!(
-        record.bytes.stored(),
-        coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact { .. }
-    ) {
+    ) || record.payloads != coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal
+    {
         return false;
     }
     let coven_protocol::remote_object::OwnedObjectState::UploadedVerified { ownership } =
@@ -1935,12 +1933,9 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
                     reference
                 } if reference == &package_ref
             )
-                && matches!(
-                    record.bytes.stored(),
-                    coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
-                        object
-                    } if object == &package_ref.object
-                )
+                && record.payloads
+                    == coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal
+                && record.identity.object == package_ref.object
                 && matches!(
                     &record.state,
                     coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
@@ -2113,8 +2108,13 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &missing)
         .await;
     let root = storage.root.clone();
+    let store_dir = target.store_dir_for_test().clone();
     assert!(target
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .test_sql(move |database| {
+            database
+                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .map(drop)
+        })
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
@@ -2146,8 +2146,13 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &tampered)
         .await;
     let root = storage.root.clone();
+    let store_dir = target.store_dir_for_test().clone();
     assert!(target
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .test_sql(move |database| {
+            database
+                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .map(drop)
+        })
         .await
         .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
@@ -2187,8 +2192,13 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure"));
     let root = storage.root.clone();
+    let store_dir = target.store_dir_for_test().clone();
     assert!(target
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .test_sql(move |database| {
+            database
+                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .map(drop)
+        })
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()

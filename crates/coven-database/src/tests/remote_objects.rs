@@ -122,12 +122,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
                 semantic_hash: ObjectHash::digest(&semantic),
                 object: package_object.clone(),
             },
-            bytes: coven_protocol::remote_object::RemoteObjectBytes::inline(
-                semantic.clone(),
-                stored_package.clone(),
-                package_object.clone(),
-            )
-            .expect("package remote bytes"),
+            payloads: coven_protocol::remote_object::RemoteObjectPayloads::SpooledInline,
             state: coven_protocol::remote_object::CandidateObjectState::Prepared {
                 ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
@@ -198,6 +193,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .expect("prepare package");
 
     let directory = tempfile::tempdir().expect("temp dir");
+    let (_payload_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let spool = directory.path().join("blob.spool");
     coven_foundation::local_file::AtomicStagedFile::write_for_test(
         &spool,
@@ -212,11 +208,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
                 semantic_hash: ObjectHash::digest(&binding.blob().locator().to_bytes()),
                 object: binding.blob().object().clone(),
             },
-            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(
-                binding.blob().locator().to_bytes(),
-                binding.blob().object().clone(),
-            )
-            .expect("blob remote bytes"),
+            payloads: coven_protocol::remote_object::RemoteObjectPayloads::RowBlob {
+                locator_bytes: binding.blob().locator().to_bytes(),
+            },
             state: coven_protocol::remote_object::OwnedObjectState::Prepared {
                 ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
@@ -240,11 +234,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
                 semantic_hash: ObjectHash::digest(&second_blob.locator().to_bytes()),
                 object: second_blob.object().clone(),
             },
-            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(
-                second_blob.locator().to_bytes(),
-                second_blob.object().clone(),
-            )
-            .expect("second blob remote bytes"),
+            payloads: coven_protocol::remote_object::RemoteObjectPayloads::RowBlob {
+                locator_bytes: second_blob.locator().to_bytes(),
+            },
             state: coven_protocol::remote_object::OwnedObjectState::Prepared {
                 ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner]),
@@ -284,7 +276,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         )
         .map_err(DbError::from)?;
         crate::StoreDatabase::persist_prepared_audience_objects_on(
-            &tx,
+            crate::payload_spool::StoreRecords::new(&tx, &store_dir),
             &persisted_write_id,
             &[prepared_package],
             &[prepared_blob, second_prepared_blob],

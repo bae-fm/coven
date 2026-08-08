@@ -1,4 +1,3 @@
-use super::identity::*;
 use super::nonactivation::*;
 use super::*;
 
@@ -289,19 +288,16 @@ pub struct RetainedAuthorityObjectRef {
 #[serde(deny_unknown_fields)]
 pub struct ProtocolInertObject {
     pub identity: RetainedAuthorityObjectRef,
-    pub canonical_semantic_bytes: Vec<u8>,
     pub(crate) former_candidates: Vec<CandidateNonactivation>,
 }
 
 impl ProtocolInertObject {
     pub(super) fn new(
         identity: RetainedAuthorityObjectRef,
-        canonical_semantic_bytes: Vec<u8>,
         former_candidates: Vec<CandidateNonactivation>,
     ) -> Result<Self, RemoteObjectRecordError> {
         let value = Self {
             identity,
-            canonical_semantic_bytes,
             former_candidates,
         };
         value.validate()?;
@@ -313,7 +309,6 @@ impl ProtocolInertObject {
     }
 
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
-        validate_retained_authority_identity(&self.identity, &self.canonical_semantic_bytes)?;
         validate_nonactivations(&self.former_candidates)
     }
 
@@ -331,15 +326,11 @@ impl ProtocolInertObject {
         object: &ExactObjectRef,
     ) -> Result<bool, RemoteObjectRecordError> {
         self.validate()?;
-        let head: crate::store_commit::StoreDeviceHead =
-            serde_json::from_slice(&self.canonical_semantic_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
         Ok(self.identity.object == *object
-            && head.commit == *candidate
             && matches!(
                 &self.identity.domain,
-                RetainedAuthorityObjectDomain::DeviceHead { reference }
-                    if reference.object == *object
+                RetainedAuthorityObjectDomain::DeviceHead { reference, head_commit }
+                    if reference.object == *object && head_commit == candidate
             )
             && matches!(
                 self.candidate_nonactivation_proof(candidate)?,
@@ -365,6 +356,11 @@ pub enum RetainedAuthorityObjectDomain {
     },
     DeviceHead {
         reference: crate::store_commit::StoreDeviceHeadRef,
+        /// The commit this head publishes, read out of the head's bytes when
+        /// the record was built. A head must belong to a candidate that owns
+        /// it, and carrying the commit is what lets a load check that without
+        /// re-parsing megabytes of signed head.
+        head_commit: StoreBatchCommitRef,
     },
     Acknowledgement {
         reference: crate::store_commit::StoreAckRef,

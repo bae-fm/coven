@@ -2,6 +2,13 @@ use crate::{Database, DatabaseTestSql, DbError};
 use rusqlite::OptionalExtension;
 
 impl Database {
+    /// The directory this database opened under, and with it the payload spool
+    /// its rows name. Tests that reach past the async API into `test_sql` need
+    /// the same pair the real read paths carry.
+    pub fn store_dir_for_test(&self) -> &coven_foundation::store_dir::StoreDir {
+        &self.state.store_dir
+    }
+
     pub async fn remove_store_protocol_root_for_test(&self) {
         self.test_sql(|database| database.remove_store_protocol_root())
             .await
@@ -187,8 +194,11 @@ impl Database {
         let bytes = bytes.to_vec();
         let tables = self.synced_tables().to_vec();
         let receiver_wall_ms = self.receive_wall_ms();
-        self.test_sql(move |database| database.apply_changeset(&bytes, &tables, receiver_wall_ms))
-            .await
+        let store_dir = self.state.store_dir.clone();
+        self.test_sql(move |database| {
+            database.apply_changeset(&store_dir, &bytes, &tables, receiver_wall_ms)
+        })
+        .await
     }
 
     pub async fn try_apply_test_changeset(&self, bytes: &[u8]) -> Result<(), DbError> {
@@ -704,10 +714,8 @@ impl Database {
         let locator = stored.locator().clone();
         let record =
             coven_protocol::remote_object::RemoteObjectRecord::activated_blob(stored, owner)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        record
-            .validate()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(|error| DbError::Message(error.to_string()))?
+                .into_record();
         let object_id = record.object_id().to_string();
         let state =
             serde_json::to_string(&record).map_err(|error| DbError::Message(error.to_string()))?;

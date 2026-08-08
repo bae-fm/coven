@@ -32,6 +32,7 @@ impl StoreDatabase {
         stage: StoreWritePreparation,
     ) -> Result<(), DbError> {
         let write_id = stage.write_id.clone();
+        let store_dir = self.store_dir.clone();
         self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id =
@@ -190,6 +191,7 @@ impl StoreDatabase {
             for remote in &stage.remote_objects {
                 crate::persist_prepared_remote_object_on(
                     &tx,
+                    &store_dir,
                     remote,
                     &commit_ref,
                     "candidate audience object",
@@ -197,13 +199,13 @@ impl StoreDatabase {
             }
             let commit_remote = RemoteObjectRecord::candidate_commit(
                 commit_ref.clone(),
-                stage.commit.value.to_bytes(),
-                stage.commit.prepared.stored_bytes().to_vec(),
+                &stage.commit.value.to_bytes(),
+                stage.commit.prepared.stored_bytes(),
             )
             .map_err(|error| {
                 DbError::context("prepared candidate commit", error)
             })?;
-            persist_exact_remote_object_on(&tx, &commit_remote, "candidate commit")?;
+            persist_exact_remote_object_on(&tx, &store_dir, &commit_remote, "candidate commit")?;
             let expected_partition_count = usize::from(partitions.store.is_some())
                 .checked_add(partitions.circles.len())
                 .ok_or_else(|| {
@@ -285,7 +287,7 @@ impl StoreDatabase {
             );
             debug_assert_eq!(indexed, object_ids);
             Self::persist_prepared_audience_objects_on(
-                &tx,
+                crate::payload_spool::StoreRecords::new(&tx, &store_dir),
                 &stage.write_id,
                 &stage.audiences.packages,
                 &stage.audiences.blobs,
@@ -296,12 +298,12 @@ impl StoreDatabase {
             };
             let head_remote = RemoteObjectRecord::candidate_activated_store_head(
                 head_ref,
-                stage.head.value.to_bytes(),
-                stage.head.prepared.stored_bytes().to_vec(),
+                &stage.head.value.to_bytes(),
+                stage.head.prepared.stored_bytes(),
                 commit_ref.clone(),
             )
             .map_err(|error| DbError::context("prepared Store head", error))?;
-            persist_exact_remote_object_on(&tx, &head_remote, "Store head")?;
+            persist_exact_remote_object_on(&tx, &store_dir, &head_remote, "Store head")?;
 
             let prepared = PreparedStoreWriteState::Publication {
                 commit: DurablePreparedProtocolObject::new(
@@ -346,6 +348,7 @@ impl StoreDatabase {
         &self,
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         let notified_write_id = stage.write_id.clone();
         self.connection
             .call(move |conn| {
@@ -451,23 +454,33 @@ impl StoreDatabase {
                 })?;
                 let authority_commit = RemoteObjectRecord::candidate_commit(
                     authority_ref.clone(),
-                    stage.commit.value.to_bytes(),
-                    stage.commit.prepared.stored_bytes().to_vec(),
+                    &stage.commit.value.to_bytes(),
+                    stage.commit.prepared.stored_bytes(),
                 )
                 .map_err(|error| DbError::context("Merge abandonment commit", error))?;
-                persist_exact_remote_object_on(&tx, &authority_commit, "Merge abandonment commit")?;
+                persist_exact_remote_object_on(
+                    &tx,
+                    &store_dir,
+                    &authority_commit,
+                    "Merge abandonment commit",
+                )?;
                 let authority_head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
                     head_hash: stage.head.value.head_hash(),
                     object: stage.head.prepared.reference().clone(),
                 };
                 let authority_head = RemoteObjectRecord::candidate_activated_store_head(
                     authority_head_ref,
-                    stage.head.value.to_bytes(),
-                    stage.head.prepared.stored_bytes().to_vec(),
+                    &stage.head.value.to_bytes(),
+                    stage.head.prepared.stored_bytes(),
                     authority_ref,
                 )
                 .map_err(|error| DbError::context("Merge abandonment head", error))?;
-                persist_exact_remote_object_on(&tx, &authority_head, "Merge abandonment head")?;
+                persist_exact_remote_object_on(
+                    &tx,
+                    &store_dir,
+                    &authority_head,
+                    "Merge abandonment head",
+                )?;
                 let replacement = PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,

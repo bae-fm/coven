@@ -113,11 +113,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = retained_merge_materializations.replay_inputs_on(conn, root)?;
+        let retained = retained_merge_materializations.replay_inputs_on(self.records(), root)?;
         let mut required = BTreeSet::new();
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(
-                conn,
+                self.records(),
                 root,
                 retained.commit_ref(),
                 &retained.commit().author_registration,
@@ -165,7 +165,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let candidate = nonactivation
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            validate_terminal_nonactivation_authority_on(conn, root, &nonactivation)?;
+            validate_terminal_nonactivation_authority_on(self.records(), root, &nonactivation)?;
             match nonactivation.proof() {
                 coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
@@ -173,7 +173,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     activation_head,
                 } => {
                     let locator =
-                        load_author_exclusion_activation_locator_on(conn, root, exclusion)?;
+                        load_author_exclusion_activation_locator_on(self.records(), root, exclusion)?;
                     if locator.accepted_cut() != accepted_cut
                         || locator.activation_head() != activation_head
                     {
@@ -208,7 +208,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 )
                 .map_err(DbError::from)?;
             let retained = StoreDatabase::load_retained_merge_materialization_on(
-                conn,
+                self.records(),
                 root,
                 &stream_id,
                 *sequence,

@@ -101,7 +101,8 @@ impl DurableStoreReclaimObject {
     pub fn remote_objects(
         &self,
         candidate: &PreparedStoreOperationCommit,
-    ) -> Result<Vec<RemoteObjectRecord>, StoreReclaimJournalError> {
+    ) -> Result<Vec<coven_protocol::remote_object::ClosedRemoteObject>, StoreReclaimJournalError>
+    {
         self.validate()?;
         if !self.commit_names_object(candidate) {
             return Err(StoreReclaimJournalError::Invalid(
@@ -120,14 +121,14 @@ impl DurableStoreReclaimObject {
             } => vec![
                 RemoteObjectRecord::candidate_activated_reclaim_evidence(
                     evidence_ref.clone(),
-                    evidence.to_bytes(),
-                    evidence_prepared.stored_bytes().to_vec(),
+                    &evidence.to_bytes(),
+                    evidence_prepared.stored_bytes(),
                     owner.clone(),
                 )?,
                 RemoteObjectRecord::candidate_activated_reclaim_authorization(
                     authorization_ref.clone(),
-                    authorization.to_bytes(),
-                    authorization_prepared.stored_bytes().to_vec(),
+                    &authorization.to_bytes(),
+                    authorization_prepared.stored_bytes(),
                     owner,
                 )?,
             ],
@@ -137,8 +138,8 @@ impl DurableStoreReclaimObject {
                 receipt_prepared,
             } => vec![RemoteObjectRecord::candidate_activated_reclaim_receipt(
                 receipt_ref.clone(),
-                receipt.to_bytes(),
-                receipt_prepared.stored_bytes().to_vec(),
+                &receipt.to_bytes(),
+                receipt_prepared.stored_bytes(),
                 owner,
             )?],
         };

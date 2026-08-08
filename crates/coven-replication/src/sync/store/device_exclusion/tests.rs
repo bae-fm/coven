@@ -1012,8 +1012,9 @@ fn indexed_shared_blob(
                 semantic_hash: ObjectHash::digest(&locator_bytes),
                 object: object.clone(),
             },
-            bytes: coven_protocol::remote_object::RemoteObjectBytes::blob(locator_bytes, object)
-                .expect("construct indexed shared blob bytes"),
+            payloads: coven_protocol::remote_object::RemoteObjectPayloads::RowBlob {
+                locator_bytes,
+            },
             state: coven_protocol::remote_object::OwnedObjectState::UploadedVerified {
                 ownership: coven_protocol::remote_object::SharedObjectOwnership {
                     pending: std::collections::BTreeSet::from([candidate.clone()]),
@@ -1840,45 +1841,23 @@ async fn run_excluded_author_candidate_cleanup_case(
                     coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion { .. }
                 )
             ));
+            // The inert record carries the commit its head publishes as
+            // structured state, so a head that names another commit is refused
+            // without any bytes being read back.
             let mut mismatched = inert.clone();
-            let mut mismatched_head: coven_protocol::store_commit::StoreDeviceHead =
-                serde_json::from_slice(&mismatched.canonical_semantic_bytes)
-                    .expect("parse inert candidate head");
-            mismatched_head.body_mut().commit.object = candidate_head.clone();
-            let mismatched_bytes = mismatched_head.to_bytes();
-            let head_context = ProtocolObjectContext::signed_plaintext(
-                store.root.store_root_hash,
-                ProtocolObjectDomain::StoreHead,
-            );
-            let head_prefix = coven_protocol::store_commit::head_slot_prefix(
-                &target.device_id.to_string(),
-                candidate_ref.coord.sequence(),
-            );
-            let mismatched_prepared = store
-                .storage()
-                .prepare_protocol_object(
-                    &head_context,
-                    candidate_head.slot().clone(),
-                    &head_prefix,
-                    mismatched_bytes.clone(),
-                )
-                .expect("prepare mismatched inert head");
-            mismatched.canonical_semantic_bytes = mismatched_bytes.clone();
-            mismatched.identity.semantic_hash = ObjectHash::digest(&mismatched_bytes);
-            mismatched.identity.object = mismatched_prepared.reference().clone();
             let coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                reference,
+                head_commit,
+                ..
             } = &mut mismatched.identity.domain
             else {
                 panic!("protocol-inert candidate object is not a Store head")
             };
-            reference.head_hash = mismatched_head.head_hash();
-            reference.object = mismatched_prepared.reference().clone();
+            head_commit.coord.sequence += 1;
             mismatched
                 .validate()
                 .expect("mismatched inert head remains internally valid");
             assert!(!mismatched
-                .is_terminal_head_for(&candidate_ref, mismatched_prepared.reference(),)
+                .is_terminal_head_for(&candidate_ref, &mismatched.identity.object)
                 .expect("check candidate binding on mismatched inert head"));
         }
         ExcludedCandidateHeadPublication::AfterCommitUpload => {

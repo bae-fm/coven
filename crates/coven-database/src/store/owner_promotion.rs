@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use crate::{persist_exact_remote_object_on, DbError};
-use coven_protocol::remote_object::RemoteObjectRecord;
 
 use super::StoreDatabase;
 
@@ -143,13 +142,14 @@ impl StoreDatabase {
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 Self::advance_owner_promotion_journal_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
                     journal_key,
                     target_key,
                     previous_value,
@@ -175,6 +175,7 @@ impl StoreDatabase {
         objects: Vec<coven_protocol::objects::ExactObjectRef>,
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
+        let store_dir = self.store_dir.clone();
         if nonactivation
             .candidate_reference()
             .map_err(|error| DbError::Message(error.to_string()))?
@@ -197,7 +198,7 @@ impl StoreDatabase {
                     &nonactivation,
                 )?;
                 Self::advance_owner_promotion_journal_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
                     journal_key,
                     target_key,
                     previous_value,
@@ -226,14 +227,16 @@ impl StoreDatabase {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn advance_owner_promotion_journal_on(
-        tx: &rusqlite::Transaction<'_>,
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         journal_key: String,
         target_key: String,
         previous_value: String,
         next_value: String,
-        remote_objects: Vec<RemoteObjectRecord>,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     ) -> Result<(), DbError> {
+        let tx = records.transaction();
         let mut object_ids = BTreeSet::new();
         for remote in &remote_objects {
             if !object_ids.insert(remote.object_id()) {
@@ -241,7 +244,12 @@ impl StoreDatabase {
                     "Owner-promotion journal repeats a remote object".to_string(),
                 ));
             }
-            persist_exact_remote_object_on(tx, remote, "Owner-promotion candidate object")?;
+            persist_exact_remote_object_on(
+                tx,
+                records.store_dir(),
+                remote,
+                "Owner-promotion candidate object",
+            )?;
         }
         let by_id = tx
             .execute(

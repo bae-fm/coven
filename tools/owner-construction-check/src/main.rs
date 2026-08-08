@@ -55,6 +55,7 @@ const NON_OWNER_TYPES: &[&str] = &[
     "ResolvedBlobAccess",
     "ResolvedBlobConnection",
     "StoreDatabaseConnection",
+    "StoreRecords",
 ];
 
 // Public API namespaces borrow a retained owner without becoming a separately

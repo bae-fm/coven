@@ -109,7 +109,7 @@ impl SnapshotDatabaseImage {
 
     fn capture(
         self,
-        connection: &Connection,
+        records: crate::payload_spool::StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
@@ -118,6 +118,7 @@ impl SnapshotDatabaseImage {
         if tables.is_empty() {
             return self.finish(Err(SnapshotImageError::NoSyncedTables));
         }
+        let connection = records.conn();
 
         let gates = match crate::Gates::from_tables(connection, tables) {
             Ok(gates) => gates,
@@ -151,7 +152,13 @@ impl SnapshotDatabaseImage {
         if let Err(error) = connection.execute("VACUUM INTO ?1", [path_str]) {
             return self.finish(Err(SnapshotImageError::VacuumFailed(error.to_string())));
         }
-        if let Err(error) = self.project(root, tables, routing_key.as_ref(), audience) {
+        if let Err(error) = self.project(
+            records.store_dir(),
+            root,
+            tables,
+            routing_key.as_ref(),
+            audience,
+        ) {
             return self.finish(Err(error));
         }
         let blobs = match self.blob_facts(connection, tables) {
@@ -262,6 +269,7 @@ impl SnapshotDatabaseImage {
 
     fn project(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced: &[SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
@@ -295,9 +303,11 @@ impl SnapshotDatabaseImage {
                     })?;
             }
             if matches!(audience, coven_protocol::circle::Audience::Store) {
-                StoreDatabase::retain_snapshot_replay_inputs_on(&transaction, root)
+                let records =
+                    crate::payload_spool::StoreRecordTransaction::new(&transaction, store_dir);
+                StoreDatabase::retain_snapshot_replay_inputs_on(records, root)
                     .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-                StoreDatabase::retain_snapshot_device_states_on(&transaction, root, coverage)
+                StoreDatabase::retain_snapshot_device_states_on(records, root, coverage)
                     .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             }
             let preserved_non_synced_tables = match audience {
@@ -599,27 +609,27 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        self.connection
-            .call(move |connection| {
-                require_no_unpublished_store_writes(connection)?;
-                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
-                    .and_then(|image| {
-                        image.capture(
-                            connection,
-                            &root,
-                            &tables,
-                            routing_encryption.as_ref(),
-                            &coven_protocol::circle::Audience::Store,
-                        )
-                    })
-                    .map_err(snapshot_image_db_error)?;
-                let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-                    Self::materialized_frontier_on(connection, None)?,
-                )
-                .map_err(|error| DbError::context("snapshot coverage", error))?;
-                Ok((snapshot, coverage))
-            })
-            .await
+        self.call_records(move |records| {
+            let connection = records.conn();
+            require_no_unpublished_store_writes(connection)?;
+            let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
+                .and_then(|image| {
+                    image.capture(
+                        records,
+                        &root,
+                        &tables,
+                        routing_encryption.as_ref(),
+                        &coven_protocol::circle::Audience::Store,
+                    )
+                })
+                .map_err(snapshot_image_db_error)?;
+            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+                Self::materialized_frontier_on(connection, None)?,
+            )
+            .map_err(|error| DbError::context("snapshot coverage", error))?;
+            Ok((snapshot, coverage))
+        })
+        .await
     }
 
     pub async fn capture_circle_snapshot_cut(
@@ -636,27 +646,27 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        self.connection
-            .call(move |connection| {
-                require_no_unpublished_store_writes(connection)?;
-                let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
-                    .and_then(|image| {
-                        image.capture(
-                            connection,
-                            &root,
-                            &tables,
-                            Some(&routing_encryption),
-                            &coven_protocol::circle::Audience::Circle(circle_id),
-                        )
-                    })
-                    .map_err(snapshot_image_db_error)?;
-                let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-                    Self::materialized_frontier_on(connection, None)?,
-                )
-                .map_err(|error| DbError::context("snapshot coverage", error))?;
-                Ok((snapshot, coverage))
-            })
-            .await
+        self.call_records(move |records| {
+            let connection = records.conn();
+            require_no_unpublished_store_writes(connection)?;
+            let snapshot = SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
+                .and_then(|image| {
+                    image.capture(
+                        records,
+                        &root,
+                        &tables,
+                        Some(&routing_encryption),
+                        &coven_protocol::circle::Audience::Circle(circle_id),
+                    )
+                })
+                .map_err(snapshot_image_db_error)?;
+            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+                Self::materialized_frontier_on(connection, None)?,
+            )
+            .map_err(|error| DbError::context("snapshot coverage", error))?;
+            Ok((snapshot, coverage))
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -670,12 +680,17 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
+        let store_dir = self.store_dir.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
-        self.with_retained_merge_materializations(move |connection, retained| {
-            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+        self.with_retained_merge_materializations(move |records, retained| {
+            let transaction = records
+                .conn()
+                .unchecked_transaction()
+                .map_err(DbError::from)?;
             let replay = retained.replay_projection_on(
                 &transaction,
+                &store_dir,
                 &root,
                 &blob_decls,
                 &gates,
@@ -699,7 +714,7 @@ impl StoreDatabase {
             SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
                 .and_then(|image| {
                     image.capture(
-                        &replay,
+                        crate::payload_spool::StoreRecords::new(&replay, &store_dir),
                         &root,
                         &tables,
                         Some(&routing_encryption),
@@ -719,22 +734,21 @@ impl StoreDatabase {
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<u8>, DbError> {
         let tables = self.synced_tables().to_vec();
-        self.connection
-            .call(move |connection| {
-                SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
-                    .and_then(|image| {
-                        image.capture(
-                            connection,
-                            &root,
-                            &tables,
-                            routing_encryption.as_ref(),
-                            &coven_protocol::circle::Audience::Store,
-                        )
-                    })
-                    .map(|snapshot| snapshot.db_image)
-                    .map_err(snapshot_image_db_error)
-            })
-            .await
+        self.call_records(move |records| {
+            SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
+                .and_then(|image| {
+                    image.capture(
+                        records,
+                        &root,
+                        &tables,
+                        routing_encryption.as_ref(),
+                        &coven_protocol::circle::Audience::Store,
+                    )
+                })
+                .map(|snapshot| snapshot.db_image)
+                .map_err(snapshot_image_db_error)
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -746,22 +760,21 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Vec<u8>, DbError> {
         let tables = self.synced_tables().to_vec();
-        self.connection
-            .call(move |connection| {
-                SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
-                    .and_then(|image| {
-                        image.capture(
-                            connection,
-                            &root,
-                            &tables,
-                            Some(&routing_encryption),
-                            &coven_protocol::circle::Audience::Circle(circle_id),
-                        )
-                    })
-                    .map(|snapshot| snapshot.db_image)
-                    .map_err(snapshot_image_db_error)
-            })
-            .await
+        self.call_records(move |records| {
+            SnapshotDatabaseImage::prepare_snapshot(&temp_dir)
+                .and_then(|image| {
+                    image.capture(
+                        records,
+                        &root,
+                        &tables,
+                        Some(&routing_encryption),
+                        &coven_protocol::circle::Audience::Circle(circle_id),
+                    )
+                })
+                .map(|snapshot| snapshot.db_image)
+                .map_err(snapshot_image_db_error)
+        })
+        .await
     }
 }
 

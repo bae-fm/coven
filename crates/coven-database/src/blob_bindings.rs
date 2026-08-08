@@ -39,12 +39,14 @@ impl Database {
                     })?;
                 remote
             } else {
-                RemoteObjectRecord::activated_blob(stored, owner.clone()).map_err(|error| {
-                    DbError::context(
-                        format!("construct pulled blob activation {object_id}"),
-                        error,
-                    )
-                })?
+                RemoteObjectRecord::activated_blob(stored, owner.clone())
+                    .map_err(|error| {
+                        DbError::context(
+                            format!("construct pulled blob activation {object_id}"),
+                            error,
+                        )
+                    })?
+                    .into_record()
             };
             let state = serde_json::to_string(&remote)
                 .map_err(|error| DbError::context("serialize pulled blob activation", error))?;
@@ -60,6 +62,7 @@ impl Database {
 
     pub fn install_pulled_package_activation_on(
         conn: &Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         commit_ref: &StoreBatchCommitRef,
         domain: SharedLiveSetObjectDomain,
         object: &ExactObjectRef,
@@ -103,14 +106,15 @@ impl Database {
                             error,
                         )
                     })?;
-            persist_exact_remote_object_on(conn, &remote, "pulled audience package")
+            persist_exact_remote_object_on(conn, store_dir, &remote, "pulled audience package")
         }
     }
 
     pub fn install_pulled_merge_membership_activations_on(
         conn: &Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         commit_ref: &StoreBatchCommitRef,
-        remotes: &[RemoteObjectRecord],
+        remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
     ) -> Result<(), DbError> {
         let mut object_ids = BTreeSet::new();
         for expected in remotes {
@@ -141,6 +145,7 @@ impl Database {
             } else {
                 persist_exact_remote_object_on(
                     conn,
+                    store_dir,
                     expected,
                     "pulled Merge membership authority",
                 )?;
@@ -338,16 +343,13 @@ impl Database {
                             table.name()
                         )));
                     }
-                    let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
-                        .map_err(|error| {
-                            DbError::context(
-                                format!(
-                                    "remote blob row {:?}/{row_id:?} has invalid locator",
-                                    table.name()
-                                ),
-                                error,
-                            )
-                        })?;
+                    let locator = crate::blob_records::carried_blob_locator(
+                        &remote,
+                        &format!(
+                            "remote blob row {:?}/{row_id:?} has invalid locator",
+                            table.name()
+                        ),
+                    )?;
                     let stored = StoredBlobRef::new(locator, remote.object().clone()).map_err(
                         |error| {
                             DbError::context(format!("remote blob row {:?}/{row_id:?} has invalid stored blob reference", table.name()), error)

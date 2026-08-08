@@ -9,6 +9,7 @@ impl StoreDatabase {
         expected: StoreAckRef,
         candidate: PreparedStoreOperationCommit,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -38,6 +39,7 @@ impl StoreDatabase {
                 {
                     persist_exact_remote_object_on(
                         &tx,
+                        &store_dir,
                         &remote,
                         "Merge Store acknowledgement activation object",
                     )?;
@@ -49,6 +51,7 @@ impl StoreDatabase {
                     {
                         persist_exact_remote_object_on(
                             &tx,
+                            &store_dir,
                             &remote,
                             "Merge Circle acknowledgement activation object",
                         )?;
@@ -210,6 +213,7 @@ impl StoreDatabase {
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -247,6 +251,7 @@ impl StoreDatabase {
                 }
                 replace_prepared_merge_head_remote_on(
                     &tx,
+                    &store_dir,
                     &current.object,
                     &winner,
                     &winner_prepared,

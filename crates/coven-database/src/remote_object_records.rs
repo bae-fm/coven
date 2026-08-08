@@ -1,12 +1,10 @@
+use coven_foundation::store_dir::StoreDir;
+use coven_protocol::remote_object::{ClosedRemoteObject, SemanticPayload};
+
 use crate::blob_records::remote_audience_to_db;
 use crate::store_reclaim_records::store_reclaim_journal_error;
 
 use super::*;
-
-pub enum RemoteStoredRepresentationRef<'a> {
-    Inline(&'a [u8]),
-    Blob,
-}
 
 pub fn candidate_graph_exact_objects(
     commit: &StoreBatchCommit,
@@ -16,26 +14,25 @@ pub fn candidate_graph_exact_objects(
         .map_err(|error| DbError::context("closed candidate object graph", error))
 }
 
+/// Refuse an indexed remote object that is not the one the index names.
+///
+/// The comparison is by identity: the exact object, and the hash the record's
+/// plaintext is filed under. Payload files are named for the digest of their
+/// own contents, so a record whose semantic hash is the digest of these bytes
+/// names these bytes.
 pub fn validate_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
     expected_object: &ExactObjectRef,
     expected_semantic_bytes: &[u8],
-    expected_stored: RemoteStoredRepresentationRef<'_>,
 ) -> Result<(), DbError> {
     let remote = load_remote_object_on(conn, object_id)?;
-    let stored = remote.bytes().stored();
-    let stored_matches = match expected_stored {
-        RemoteStoredRepresentationRef::Inline(expected) => stored.inline_bytes() == Some(expected),
-        RemoteStoredRepresentationRef::Blob => matches!(
-            stored,
-            coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
-        ),
+    let semantic_matches = match remote.semantic_payload() {
+        SemanticPayload::Carried(carried) => carried == expected_semantic_bytes,
+        SemanticPayload::Spooled(hash) => hash == ObjectHash::digest(expected_semantic_bytes),
+        SemanticPayload::Absent => false,
     };
-    if remote.object() != expected_object
-        || remote.bytes().canonical_semantic_bytes() != expected_semantic_bytes
-        || !stored_matches
-    {
+    if remote.object() != expected_object || !semantic_matches {
         return Err(DbError::Message(format!(
             "prepared remote object {object_id} differs from its semantic index"
         )));
@@ -85,6 +82,27 @@ pub fn load_remote_object_on(
         )));
     }
     Ok(remote)
+}
+
+/// Load one record together with the payload files it claims.
+///
+/// The row and the files are one record; the flows that upload or re-encrypt an
+/// object need both halves, and reading them here keeps "the row's claims and
+/// the bytes agree" a single check rather than a per-caller convention.
+pub fn reopen_remote_object_on(
+    records: crate::payload_spool::StoreRecords<'_>,
+    object_id: ObjectHash,
+) -> Result<coven_protocol::remote_object::ClosedRemoteObject, DbError> {
+    let remote = load_remote_object_on(records.conn(), object_id)?;
+    let mut payloads = std::collections::BTreeMap::new();
+    for hash in remote.payload_claims() {
+        let bytes = records
+            .payload(hash)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        payloads.insert(hash, bytes);
+    }
+    coven_protocol::remote_object::ClosedRemoteObject::with_payloads(remote, payloads)
+        .map_err(|error| DbError::context(format!("remote object {object_id} payloads"), error))
 }
 
 pub(crate) fn indexed_retained_replay_owners_on(
@@ -354,13 +372,7 @@ pub fn record_reclaimed_store_package_on(
             [object_id.to_string()],
         )
         .map_err(DbError::from)?;
-        let deleted = conn
-            .execute(
-                "DELETE FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if deleted != 1 {
+        if !delete_remote_object_on(conn, object_id)? {
             return Err(DbError::Message(format!(
                 "Store package {object_id} disappeared during reclaim closure"
             )));
@@ -398,11 +410,65 @@ pub fn record_reclaimed_store_package_on(
     Ok(())
 }
 
+/// Install one record's payload files and record its claim on them, in the
+/// transaction that writes the row naming them.
+///
+/// The files land before the row commits and the claim commits with the row, so
+/// a row that exists names files that exist, and a transaction that rolls back
+/// leaves content-named files no row points at. Writing them here rather than in
+/// each producing flow keeps that a fact of one function instead of a convention
+/// ten flows have to honour.
+fn install_record_payloads_on(
+    conn: &Connection,
+    store_dir: &StoreDir,
+    closed: &ClosedRemoteObject,
+) -> Result<(), DbError> {
+    for (hash, bytes) in closed.payload_bytes() {
+        let written = crate::payload_spool::write_payload_blocking(store_dir, bytes)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if written != *hash {
+            return Err(DbError::Message(format!(
+                "remote object payload spooled under {written}, named as {hash}"
+            )));
+        }
+    }
+    crate::payload_spool::set_payload_owner_claims_on(
+        conn,
+        &crate::payload_spool::remote_object_owner_key(closed.record().object_id()),
+        &closed.payload_bytes().keys().copied().collect(),
+    )
+}
+
+/// Let go of the payload files one remote object claimed, and remove its row.
+///
+/// Every deletion of a `remote_objects` row goes through here, so a payload no
+/// row names any more is owed its deletion by the same commit. Never used
+/// against a projected snapshot copy: those rows describe another device's
+/// spool, and deleting them must not touch this one's.
+pub(crate) fn delete_remote_object_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<bool, DbError> {
+    crate::payload_spool::release_payload_owner_on(
+        conn,
+        &crate::payload_spool::remote_object_owner_key(object_id),
+    )?;
+    let removed = conn
+        .execute(
+            "DELETE FROM remote_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+    Ok(removed == 1)
+}
+
 pub fn persist_exact_remote_object_on(
     conn: &Connection,
-    remote: &RemoteObjectRecord,
+    store_dir: &StoreDir,
+    closed: &ClosedRemoteObject,
     domain: &str,
 ) -> Result<(), DbError> {
+    let remote = closed.record();
     remote
         .validate()
         .map_err(|error| DbError::context(format!("prepared {domain}"), error))?;
@@ -428,8 +494,9 @@ pub fn persist_exact_remote_object_on(
                 "prepared {domain} {object_id} already has different closed state"
             )));
         }
-        return Ok(());
+        return install_record_payloads_on(conn, store_dir, closed);
     }
+    install_record_payloads_on(conn, store_dir, closed)?;
     let state = serde_json::to_string(remote)
         .map_err(|error| DbError::context(format!("serialize prepared {domain}"), error))?;
     conn.execute(
@@ -469,10 +536,12 @@ fn ensure_remote_object_is_writable_on(
 
 pub fn persist_prepared_remote_object_on(
     conn: &Connection,
-    remote: &RemoteObjectRecord,
+    store_dir: &StoreDir,
+    closed: &ClosedRemoteObject,
     owner: &StoreBatchCommitRef,
     domain: &str,
 ) -> Result<(), DbError> {
+    let remote = closed.record();
     remote
         .validate()
         .map_err(|error| DbError::context(format!("prepared {domain}"), error))?;
@@ -486,10 +555,11 @@ pub fn persist_prepared_remote_object_on(
         )
         .map_err(DbError::from)?;
     if !exists {
-        return persist_exact_remote_object_on(conn, remote, domain);
+        return persist_exact_remote_object_on(conn, store_dir, closed, domain);
     }
     let existing = load_remote_object_on(conn, object_id)?;
     let merged = merge_prepared_remote_object(existing, remote, owner)?;
+    install_record_payloads_on(conn, store_dir, closed)?;
     update_remote_object_on(conn, object_id, &merged)
 }
 
@@ -581,13 +651,7 @@ pub fn finish_remote_candidate_nonactivation_on(
         .map_err(|error| DbError::context(format!("protocol-inert object {object_id}"), error))?;
     let encoded = serde_json::to_string(&inert)
         .map_err(|error| DbError::context("serialize protocol-inert object", error))?;
-    let removed = conn
-        .execute(
-            "DELETE FROM remote_objects WHERE object_id = ?1",
-            [object_id.to_string()],
-        )
-        .map_err(DbError::from)?;
-    if removed != 1 {
+    if !delete_remote_object_on(conn, object_id)? {
         return Err(DbError::Message(format!(
             "remote object {object_id} disappeared during protocol-inert transition"
         )));
@@ -608,6 +672,7 @@ pub fn finish_remote_candidate_nonactivation_on(
 
 pub fn replace_prepared_merge_head_remote_on(
     conn: &Connection,
+    store_dir: &StoreDir,
     current: &ExactObjectRef,
     winner: &StoreDeviceHead,
     winner_prepared: &PreparedExactObject,
@@ -639,13 +704,7 @@ pub fn replace_prepared_merge_head_remote_on(
             "prepared Merge head lost its candidate ownership".to_string(),
         ));
     }
-    let removed = conn
-        .execute(
-            "DELETE FROM remote_objects WHERE object_id = ?1",
-            [old_object_id.to_string()],
-        )
-        .map_err(DbError::from)?;
-    if removed != 1 {
+    if !delete_remote_object_on(conn, old_object_id)? {
         return Err(DbError::Message(
             "prepared Merge head disappeared during replacement".to_string(),
         ));
@@ -654,17 +713,20 @@ pub fn replace_prepared_merge_head_remote_on(
         head_hash: winner.head_hash(),
         object: winner_prepared.reference().clone(),
     };
-    let mut winner_remote = RemoteObjectRecord::candidate_activated_store_head(
+    let winner_closed = RemoteObjectRecord::candidate_activated_store_head(
         winner_ref,
-        winner.to_bytes(),
-        winner_prepared.stored_bytes().to_vec(),
+        &winner.to_bytes(),
+        winner_prepared.stored_bytes(),
         candidate.clone(),
     )
     .map_err(|error| DbError::context("alternate Merge head", error))?;
-    winner_remote
-        .mark_uploaded_verified()
+    let winner_closed = winner_closed
+        .map_record(|mut record| {
+            record.mark_uploaded_verified()?;
+            Ok(record)
+        })
         .map_err(|error| DbError::context("mark alternate Merge head uploaded", error))?;
-    persist_exact_remote_object_on(conn, &winner_remote, "alternate Merge head")
+    persist_exact_remote_object_on(conn, store_dir, &winner_closed, "alternate Merge head")
 }
 
 pub fn mark_remote_object_uploaded_on(
@@ -690,7 +752,7 @@ pub fn mark_remote_object_uploaded_on(
             == Some(current_record.identity.domain.clone())
             && expected_record.identity.semantic_hash == current_record.identity.semantic_hash
             && expected_record.identity.object == current_record.identity.object
-            && expected_record.bytes == current_record.bytes
+            && expected_record.payloads == current_record.payloads
             && expected_owner.is_some_and(|owner| {
                 matches!(
                     &current_record.state,
@@ -724,7 +786,7 @@ pub fn mark_remote_object_uploaded_on(
             == Some(current_record.identity.domain.clone())
             && expected_record.identity.semantic_hash == current_record.identity.semantic_hash
             && expected_record.identity.object == current_record.identity.object
-            && expected_record.bytes == current_record.bytes
+            && expected_record.payloads == current_record.payloads
             && expected_owner.is_some_and(|owner| {
                 matches!(
                     &current_record.state,
@@ -803,7 +865,7 @@ pub fn mark_reusable_retained_authority_uploaded_on(
         )));
     };
     if current_record.identity != expected_record.identity
-        || current_record.bytes != expected_record.bytes
+        || current_record.payloads != expected_record.payloads
     {
         return Err(DbError::Message(format!(
             "reusable retained authority {object_id} changed exact identity or bytes"
@@ -867,7 +929,7 @@ pub(crate) fn merge_prepared_remote_object(
             != Some(existing_record.identity.domain.clone())
             || proposed_record.identity.semantic_hash != existing_record.identity.semantic_hash
             || proposed_record.identity.object != existing_record.identity.object
-            || proposed_record.bytes != existing_record.bytes
+            || proposed_record.payloads != existing_record.payloads
             || !proposed_owner
         {
             return Err(DbError::Message(format!(
@@ -913,7 +975,7 @@ pub(crate) fn merge_prepared_remote_object(
             != Some(existing_record.identity.domain.clone())
             || proposed_record.identity.semantic_hash != existing_record.identity.semantic_hash
             || proposed_record.identity.object != existing_record.identity.object
-            || proposed_record.bytes != existing_record.bytes
+            || proposed_record.payloads != existing_record.payloads
         {
             return Err(DbError::Message(format!(
                 "retained candidate object {} already has different identity or bytes",
@@ -958,7 +1020,7 @@ pub(crate) fn merge_prepared_remote_object(
     if existing.identity.domain != SharedLiveSetObjectDomain::StoredBlob
         || proposed.identity.domain != SharedLiveSetObjectDomain::StoredBlob
         || existing.identity != proposed.identity
-        || existing.bytes != proposed.bytes
+        || existing.payloads != proposed.payloads
     {
         return Err(DbError::Message(format!(
             "stored blob object {} already has different identity or bytes",
@@ -1023,6 +1085,7 @@ pub(crate) fn merge_prepared_remote_object(
 
 pub fn validate_prepared_package_on(
     conn: &Connection,
+    store_dir: &StoreDir,
     write_id: &WriteId,
     expected: &PreparedAudiencePackage,
 ) -> Result<(), DbError> {
@@ -1039,8 +1102,10 @@ pub fn validate_prepared_package_on(
     let remote_object_id = remote_object_id
         .parse()
         .map_err(|error| DbError::context("stored prepared remote object id is invalid", error))?;
-    let actual =
-        PreparedAudiencePackage::from_remote(load_remote_object_on(conn, remote_object_id)?)?;
+    let actual = PreparedAudiencePackage::from_remote(
+        store_dir,
+        load_remote_object_on(conn, remote_object_id)?,
+    )?;
     if actual.package() != expected.package()
         || actual.semantic_bytes() != expected.semantic_bytes()
         || actual.stored_bytes() != expected.stored_bytes()

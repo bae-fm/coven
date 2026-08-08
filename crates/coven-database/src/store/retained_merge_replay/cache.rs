@@ -1,4 +1,5 @@
 use super::*;
+use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
 
 #[derive(Clone, Default)]
@@ -69,15 +70,19 @@ impl RetainedMergeMaterializationCache {
 
     pub fn replay_inputs_on(
         &mut self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.replay_inputs_with_authorities_on(conn, root, RetainedCommitAuthorities::StoredBytes)
+        self.replay_inputs_with_authorities_on(
+            records,
+            root,
+            RetainedCommitAuthorities::StoredBytes,
+        )
     }
 
     pub fn replay_inputs_with_verified_commits_on(
         &mut self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         verified: &BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
@@ -85,7 +90,7 @@ impl RetainedMergeMaterializationCache {
         >,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.replay_inputs_with_authorities_on(
-            conn,
+            records,
             root,
             RetainedCommitAuthorities::Operation(verified),
         )
@@ -93,12 +98,12 @@ impl RetainedMergeMaterializationCache {
 
     pub fn replay_inputs_with_authorities_on(
         &mut self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         authorities: RetainedCommitAuthorities<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
-            conn,
+            records.conn(),
             "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
@@ -137,7 +142,7 @@ impl RetainedMergeMaterializationCache {
                 _ => match &authorities {
                     RetainedCommitAuthorities::StoredBytes => {
                         StoreDatabase::load_retained_merge_materialization_on(
-                            conn,
+                            records,
                             root,
                             &stream_id,
                             sequence,
@@ -152,7 +157,7 @@ impl RetainedMergeMaterializationCache {
                             ))
                         })?;
                         StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
-                            conn,
+                            records,
                             root,
                             &stream_id,
                             sequence,
@@ -230,6 +235,7 @@ impl RetainedMergeMaterializationCache {
     pub fn replay_projection_on(
         &mut self,
         live: &rusqlite::Transaction<'_>,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root: &StoreRootRef,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
@@ -240,7 +246,8 @@ impl RetainedMergeMaterializationCache {
         include_local_write_overlays: bool,
         local_store_membership: LocalStoreMembership,
     ) -> Result<rusqlite::Connection, DbError> {
-        let baseline = StoreDatabase::generation_zero_replay_baseline_on(live)?;
+        let baseline =
+            StoreDatabase::generation_zero_replay_baseline_on(StoreRecords::new(live, store_dir))?;
         let replay = baseline.open_image()?;
         replay
             .pragma_update(None, "foreign_keys", "ON")
@@ -283,7 +290,7 @@ impl RetainedMergeMaterializationCache {
                 )));
             }
         }
-        let retained = self.replay_inputs_on(live, root)?;
+        let retained = self.replay_inputs_on(StoreRecords::new(live, store_dir), root)?;
         let circle_epochs = self.circle_replay_epoch_index_on(live)?;
         let active_references = retained
             .iter()
@@ -464,20 +471,30 @@ impl RetainedMergeMaterializationCache {
                                 "retained Merge membership {kind} {object_id} has different exact object"
                             )));
                         }
-                        let stored = remote
-                            .bytes()
-                            .stored()
-                            .inline_bytes()
-                            .ok_or_else(|| {
-                                DbError::Message(format!(
-                                    "retained Merge membership {kind} {object_id} has no inline stored bytes"
-                                ))
-                            })?
-                            .to_vec();
-                        Ok(MembershipAuthorityBytes::new(
-                            remote.bytes().canonical_semantic_bytes().to_vec(),
-                            stored,
-                        ))
+                        let coven_protocol::remote_object::SemanticPayload::Spooled(semantic_hash) =
+                            remote.semantic_payload()
+                        else {
+                            return Err(DbError::Message(format!(
+                                "retained Merge membership {kind} {object_id} names no spooled plaintext"
+                            )));
+                        };
+                        let stored_hash = remote.stored_payload().ok_or_else(|| {
+                            DbError::Message(format!(
+                                "retained Merge membership {kind} {object_id} names no spooled ciphertext"
+                            ))
+                        })?;
+                        let read = |hash| {
+                            crate::payload_spool::read_payload_blocking(store_dir, hash)
+                                .map_err(|error| DbError::Message(error.to_string()))
+                        };
+                        let semantic = read(semantic_hash)?;
+                        remote.validate_payload(&semantic).map_err(|error| {
+                            DbError::context(
+                                format!("retained Merge membership {kind} {object_id} payload"),
+                                error,
+                            )
+                        })?;
+                        Ok(MembershipAuthorityBytes::new(semantic, read(stored_hash)?))
                     };
                     let family = materialization.commit().candidate_family();
                     let owner = materialization.commit_ref();
@@ -516,7 +533,7 @@ impl RetainedMergeMaterializationCache {
                     package_application,
                 };
                 let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-                let outcome = MergeMaterializationTransaction::new(&tx)
+                let outcome = MergeMaterializationTransaction::new(&tx, store_dir)
                     .apply_prepared_merge_materialization(
                         blob_decls,
                         gates,
@@ -577,7 +594,7 @@ impl RetainedMergeMaterializationCache {
                             error,
                         )
                     })?;
-                let applied = MergeMaterializationTransaction::new(&tx)
+                let applied = MergeMaterializationTransaction::new(&tx, store_dir)
                     .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
                 if applied.had_fk_violations || !applied.constraint_conflict_tables.is_empty() {
                     return Err(DbError::Message(format!(

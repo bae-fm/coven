@@ -3,7 +3,6 @@ use crate::{
     StoreBatchLocalCleanup,
 };
 use coven_protocol::objects::PreparedProtocolObject;
-use coven_protocol::remote_object::RemoteObjectRecord;
 use coven_protocol::store_commit::{
     StoreBatchCommitRef, StoreDeviceHead, StoreRootRef, VerifiedStoreBatchCommit,
 };
@@ -12,7 +11,7 @@ use coven_protocol::write::WriteId;
 pub struct StoreWritePreparation {
     pub root: StoreRootRef,
     pub write_id: WriteId,
-    pub remote_objects: Vec<RemoteObjectRecord>,
+    pub remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     pub audiences: PreparedAudienceObjects,
     pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,

@@ -190,6 +190,7 @@ impl StoreDatabase {
         &self,
         accepted: CircleSnapshotRef,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -231,6 +232,7 @@ impl StoreDatabase {
                 };
                 persist_snapshot_image_on(
                     &tx,
+                    &store_dir,
                     &outbound.meta.value.bootstrap.image,
                     snapshot_owner,
                     "Circle snapshot image",

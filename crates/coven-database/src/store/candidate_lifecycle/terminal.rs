@@ -6,75 +6,75 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
-        self.connection
-            .call(move |conn| {
-                let (raw_status, raw_prepared): (String, Option<String>) = conn
-                    .query_row(
-                        "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::context("Merge cleanup status", error))?;
-                let mut candidates = Vec::new();
-                if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
-                    witness.validate().map_err(DbError::Message)?;
-                    let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
-                        conn,
-                        witness.original_position().commit(),
-                    )?;
-                    if candidate.commit.write_id != write_id {
-                        return Err(DbError::Message(
-                            "Merge retraction cleanup names another write".to_string(),
-                        ));
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let (raw_status, raw_prepared): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::context("Merge cleanup status", error))?;
+            let mut candidates = Vec::new();
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
+                witness.validate().map_err(DbError::Message)?;
+                let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    conn,
+                    witness.original_position().commit(),
+                )?;
+                if candidate.commit.write_id != write_id {
+                    return Err(DbError::Message(
+                        "Merge retraction cleanup names another write".to_string(),
+                    ));
+                }
+                candidates.push(candidate);
+            } else {
+                let raw_prepared = raw_prepared.ok_or_else(|| {
+                    DbError::Message("Merge cleanup has no prepared candidate".to_string())
+                })?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
+                match &prepared {
+                    PreparedStoreWriteState::Publication { .. } => {
+                        candidates.push(parse_prepared_merge_candidate_on(conn, &prepared)?);
                     }
-                    candidates.push(candidate);
-                } else {
-                    let raw_prepared = raw_prepared.ok_or_else(|| {
-                        DbError::Message("Merge cleanup has no prepared candidate".to_string())
-                    })?;
-                    let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                        .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
-                    match &prepared {
-                        PreparedStoreWriteState::Publication { .. } => {
-                            candidates.push(parse_prepared_merge_candidate_on(conn, &prepared)?);
-                        }
-                        PreparedStoreWriteState::MergeAbandonment {
-                            candidate_commit,
-                            candidate_head,
-                            authority_commit,
-                            authority_head,
-                            ..
-                        } => {
-                            candidates.push(parse_prepared_merge_candidate_parts_on(
-                                conn,
-                                candidate_commit.semantic_bytes(),
-                                candidate_commit.prepared().reference(),
-                                candidate_head.semantic_bytes(),
-                                candidate_head.prepared().reference(),
-                            )?);
-                            candidates.push(parse_prepared_merge_candidate_parts_on(
-                                conn,
-                                authority_commit.semantic_bytes(),
-                                authority_commit.prepared().reference(),
-                                authority_head.semantic_bytes(),
-                                authority_head.prepared().reference(),
-                            )?);
-                        }
+                    PreparedStoreWriteState::MergeAbandonment {
+                        candidate_commit,
+                        candidate_head,
+                        authority_commit,
+                        authority_head,
+                        ..
+                    } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            conn,
+                            candidate_commit.semantic_bytes(),
+                            candidate_commit.prepared().reference(),
+                            candidate_head.semantic_bytes(),
+                            candidate_head.prepared().reference(),
+                        )?);
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            conn,
+                            authority_commit.semantic_bytes(),
+                            authority_commit.prepared().reference(),
+                            authority_head.semantic_bytes(),
+                            authority_head.prepared().reference(),
+                        )?);
                     }
                 }
-                let mut verifications = Vec::new();
-                for candidate in candidates {
-                    if let Some(verification) =
-                        terminal_candidate_verification_on(conn, &root, candidate)?
-                    {
-                        verifications.push(verification);
-                    }
+            }
+            let mut verifications = Vec::new();
+            for candidate in candidates {
+                if let Some(verification) =
+                    terminal_candidate_verification_on(records, &root, candidate)?
+                {
+                    verifications.push(verification);
                 }
-                Ok(verifications)
-            })
-            .await
+            }
+            Ok(verifications)
+        })
+        .await
     }
 
     pub async fn reconcile_merge_candidate_terminal_head(
@@ -95,118 +95,121 @@ impl StoreDatabase {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let (raw_status, raw_prepared): (String, Option<String>) = tx
-                    .query_row(
-                        "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(DbError::from)?;
-                let reference = durable
-                    .reference()
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                let mut candidates = Vec::new();
-                let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::context("Merge cleanup status", error))?;
-                if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
-                    witness.validate().map_err(DbError::Message)?;
-                    if witness.original_position().commit() != &reference {
-                        return Err(DbError::Message(
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_prepared): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let reference = durable
+                .reference()
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let mut candidates = Vec::new();
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::context("Merge cleanup status", error))?;
+            if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
+                witness.validate().map_err(DbError::Message)?;
+                if witness.original_position().commit() != &reference {
+                    return Err(DbError::Message(
                         "fresh excluded-author head evidence differs from the retraction witness"
                             .to_string(),
                     ));
+                }
+                candidates.push(crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    &tx, &reference,
+                )?);
+            } else {
+                let raw_prepared = raw_prepared.ok_or_else(|| {
+                    DbError::Message("Merge cleanup has no prepared candidate".to_string())
+                })?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
+                match &prepared {
+                    PreparedStoreWriteState::Publication { commit, head, .. } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            &tx,
+                            commit.semantic_bytes(),
+                            commit.prepared().reference(),
+                            head.semantic_bytes(),
+                            head.prepared().reference(),
+                        )?)
                     }
-                    candidates.push(crate::StoreDatabase::load_merge_retraction_cleanup_on(
-                        &tx, &reference,
-                    )?);
-                } else {
-                    let raw_prepared = raw_prepared.ok_or_else(|| {
-                        DbError::Message("Merge cleanup has no prepared candidate".to_string())
-                    })?;
-                    let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                        .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
-                    match &prepared {
-                        PreparedStoreWriteState::Publication { commit, head, .. } => candidates
-                            .push(parse_prepared_merge_candidate_parts_on(
-                                &tx,
-                                commit.semantic_bytes(),
-                                commit.prepared().reference(),
-                                head.semantic_bytes(),
-                                head.prepared().reference(),
-                            )?),
-                        PreparedStoreWriteState::MergeAbandonment {
-                            candidate_commit,
-                            candidate_head,
-                            authority_commit,
-                            authority_head,
-                            ..
-                        } => {
-                            candidates.push(parse_prepared_merge_candidate_parts_on(
-                                &tx,
-                                candidate_commit.semantic_bytes(),
-                                candidate_commit.prepared().reference(),
-                                candidate_head.semantic_bytes(),
-                                candidate_head.prepared().reference(),
-                            )?);
-                            candidates.push(parse_prepared_merge_candidate_parts_on(
-                                &tx,
-                                authority_commit.semantic_bytes(),
-                                authority_commit.prepared().reference(),
-                                authority_head.semantic_bytes(),
-                                authority_head.prepared().reference(),
-                            )?);
-                        }
+                    PreparedStoreWriteState::MergeAbandonment {
+                        candidate_commit,
+                        candidate_head,
+                        authority_commit,
+                        authority_head,
+                        ..
+                    } => {
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            &tx,
+                            candidate_commit.semantic_bytes(),
+                            candidate_commit.prepared().reference(),
+                            candidate_head.semantic_bytes(),
+                            candidate_head.prepared().reference(),
+                        )?);
+                        candidates.push(parse_prepared_merge_candidate_parts_on(
+                            &tx,
+                            authority_commit.semantic_bytes(),
+                            authority_commit.prepared().reference(),
+                            authority_head.semantic_bytes(),
+                            authority_head.prepared().reference(),
+                        )?);
                     }
                 }
-                let candidate = candidates
-                    .into_iter()
-                    .find(|candidate| candidate.reference == reference)
-                    .ok_or_else(|| {
-                        DbError::Message(
-                            "fresh excluded-author head evidence names another write".to_string(),
-                        )
-                    })?;
-                validate_terminal_candidate_authority_on(&tx, &root, &candidate, &durable)?;
-                let object_id = remote_object_id(&candidate.head_object);
-                let remote_exists: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
+            }
+            let candidate = candidates
+                .into_iter()
+                .find(|candidate| candidate.reference == reference)
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "fresh excluded-author head evidence names another write".to_string(),
                     )
-                    .map_err(DbError::from)?;
-                if !remote_exists {
-                    let inert = load_protocol_inert_object_on(&tx, object_id)?;
-                    if inert
-                        .candidate_nonactivation_proof(&candidate.reference)
-                        .map_err(|error| DbError::Message(error.to_string()))?
-                        != Some(durable.proof())
-                    {
-                        return Err(DbError::Message(
-                            "protocol-inert candidate head carries another proof".to_string(),
-                        ));
-                    }
-                    return tx.commit().map_err(DbError::from);
+                })?;
+            validate_terminal_candidate_authority_on(
+                crate::payload_spool::StoreRecords::new(&tx, records.store_dir()),
+                &root,
+                &candidate,
+                &durable,
+            )?;
+            let object_id = remote_object_id(&candidate.head_object);
+            let remote_exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !remote_exists {
+                let inert = load_protocol_inert_object_on(&tx, object_id)?;
+                if inert
+                    .candidate_nonactivation_proof(&candidate.reference)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    != Some(durable.proof())
+                {
+                    return Err(DbError::Message(
+                        "protocol-inert candidate head carries another proof".to_string(),
+                    ));
                 }
-                let mut remote = load_remote_object_on(&tx, object_id)?;
-                let inert = remote
-                    .begin_candidate_nonactivation_with_verified_head_nonactivation(
-                        durable,
-                        &head_nonactivation,
-                    )
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("reconcile excluded-author head {object_id}"),
-                            error,
-                        )
-                    })?;
-                finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
-                tx.commit().map_err(DbError::from)
-            })
-            .await
+                return tx.commit().map_err(DbError::from);
+            }
+            let mut remote = load_remote_object_on(&tx, object_id)?;
+            let inert = remote
+                .begin_candidate_nonactivation_with_verified_head_nonactivation(
+                    durable,
+                    &head_nonactivation,
+                )
+                .map_err(|error| {
+                    DbError::context(format!("reconcile excluded-author head {object_id}"), error)
+                })?;
+            finish_remote_candidate_nonactivation_on(&tx, object_id, remote, inert)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
     }
 
     pub async fn adopt_alternate_merge_head(
@@ -215,6 +218,7 @@ impl StoreDatabase {
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -256,6 +260,7 @@ impl StoreDatabase {
                 }
                 replace_prepared_merge_head_remote_on(
                     &tx,
+                    &store_dir,
                     &publication.head_object,
                     &winner,
                     &winner_prepared,

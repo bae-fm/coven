@@ -1,4 +1,5 @@
 use super::*;
+use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
 
 impl StoreDatabase {
@@ -6,44 +7,49 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                Self::seed_stream_activation_index_from_retained_on(&tx, &root)?;
-                let rows = query_mapped_rows(
-                    &tx,
-                    "SELECT circle_id, control_coord FROM circle_control_activations
+        self.call_records(move |records| {
+            let tx = records
+                .conn()
+                .unchecked_transaction()
+                .map_err(DbError::from)?;
+            Self::seed_stream_activation_index_from_retained_on(
+                StoreRecords::new(&tx, records.store_dir()),
+                &root,
+            )?;
+            let rows = query_mapped_rows(
+                &tx,
+                "SELECT circle_id, control_coord FROM circle_control_activations
                          ORDER BY circle_id, control_coord",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )?;
-                let mut circles: Vec<(
-                    coven_protocol::circle::CircleId,
-                    Vec<coven_protocol::circle::CircleControlCoord>,
-                )> = Vec::new();
-                for (circle_id, control_coord) in rows {
-                    let circle_id: coven_protocol::circle::CircleId = circle_id
-                        .parse()
-                        .map_err(|error| DbError::context("parse retained Circle id", error))?;
-                    let control: coven_protocol::circle::CircleControlCoord =
-                        serde_json::from_str(&control_coord).map_err(|error| {
-                            DbError::context("parse retained Circle control coordinate", error)
-                        })?;
-                    match circles.last_mut() {
-                        Some((last_circle, controls)) if *last_circle == circle_id => {
-                            controls.push(control)
-                        }
-                        _ => circles.push((circle_id, vec![control])),
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            let mut circles: Vec<(
+                coven_protocol::circle::CircleId,
+                Vec<coven_protocol::circle::CircleControlCoord>,
+            )> = Vec::new();
+            for (circle_id, control_coord) in rows {
+                let circle_id: coven_protocol::circle::CircleId = circle_id
+                    .parse()
+                    .map_err(|error| DbError::context("parse retained Circle id", error))?;
+                let control: coven_protocol::circle::CircleControlCoord =
+                    serde_json::from_str(&control_coord).map_err(|error| {
+                        DbError::context("parse retained Circle control coordinate", error)
+                    })?;
+                match circles.last_mut() {
+                    Some((last_circle, controls)) if *last_circle == circle_id => {
+                        controls.push(control)
                     }
+                    _ => circles.push((circle_id, vec![control])),
                 }
-                let preserved_images = Self::circle_bootstrap_replay_inputs_on(&tx)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(CircleRestoreSelectionIndex {
-                    circles,
-                    preserved_images,
-                })
+            }
+            let preserved_images = Self::circle_bootstrap_replay_inputs_on(&tx)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(CircleRestoreSelectionIndex {
+                circles,
+                preserved_images,
             })
-            .await
+        })
+        .await
     }
 
     pub async fn retained_merge_materialization_by_ref(
@@ -51,26 +57,25 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.connection
-            .call(move |conn| {
-                Self::load_retained_merge_materialization_by_ref_on(conn, &root, &reference)
-            })
-            .await
+        self.call_records(move |records| {
+            Self::load_retained_merge_materialization_by_ref_on(records, &root, &reference)
+        })
+        .await
     }
 
     pub async fn circle_replay_epoch_index(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.with_retained_merge_materializations(move |conn, cache| {
-            cache.replay_inputs_on(conn, &root)?;
-            cache.circle_replay_epoch_index_on(conn)
+        self.with_retained_merge_materializations(move |records, cache| {
+            cache.replay_inputs_on(records, &root)?;
+            cache.circle_replay_epoch_index_on(records.conn())
         })
         .await
     }
 
     pub fn record_circle_bootstrap_coverage_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
         activations: &VerifiedCircleActivations,
@@ -89,7 +94,7 @@ impl StoreDatabase {
                     )
                 })?;
             Self::record_one_circle_bootstrap_coverage_on(
-                conn,
+                records,
                 root,
                 activation_commit,
                 bootstrap,
@@ -108,12 +113,13 @@ impl StoreDatabase {
     /// in-flight activation set; the restore installer resolves it from the
     /// just-installed control indexes.
     pub fn record_one_circle_bootstrap_coverage_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
         bootstrap: &coven_protocol::circle_activation::VerifiedCircleImage,
         activation_control: &coven_protocol::circle::PreparedCircleControl,
     ) -> Result<(), DbError> {
+        let conn = records.conn();
         {
             let circle_id = bootstrap.circle_id().to_string();
             let control_coord = serde_json::to_string(bootstrap.control())
@@ -197,7 +203,7 @@ impl StoreDatabase {
                         DbError::context("parse prior Circle bootstrap coverage", error)
                     })?;
                 let prior_activation = Self::verified_circle_activation_on(
-                    conn,
+                    records,
                     root,
                     bootstrap.circle_id(),
                     &prior_control,
@@ -209,7 +215,7 @@ impl StoreDatabase {
                 })?;
                 if !bootstrap.reference().coverage.covers(&prior_cut)
                     || !Self::verified_circle_control_covers_on(
-                        conn,
+                        records,
                         root,
                         bootstrap.circle_id(),
                         activation_control,
@@ -273,9 +279,10 @@ impl StoreDatabase {
     /// from the retained inputs it will otherwise replay from. Idempotent: the
     /// recorder re-verifies each activation against any existing row.
     pub fn seed_stream_activation_index_from_retained_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
+        let conn = records.conn();
         let encoded_refs = query_mapped_rows(
             conn,
             "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
@@ -288,7 +295,7 @@ impl StoreDatabase {
                     DbError::context("parse retained materialization commit ref", error)
                 })?;
             let owned =
-                Self::load_retained_merge_materialization_by_ref_on(conn, root, &reference)?;
+                Self::load_retained_merge_materialization_by_ref_on(records, root, &reference)?;
             Self::record_verified_stream_activations_on(
                 conn,
                 owned.circle_activations().stream_activations(),

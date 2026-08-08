@@ -515,7 +515,7 @@ pub struct PreparedMergeMaterialization {
     pub activation_head_object: ExactObjectRef,
     pub history_summary: RetainedVerifiedMergeHistorySummary,
     pub membership_objects: Option<VerifiedMergeMembershipObjects>,
-    pub membership_remote_objects: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
+    pub membership_remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     pub registrations: Vec<ActivatedStoreDeviceRegistration>,
     pub packages: Vec<PreparedMergeMaterializationPackage>,
     pub device_operations: VerifiedStoreDeviceOperations,
@@ -542,26 +542,26 @@ pub fn activated_merge_membership_remote_objects(
     resolution_bytes: Option<MembershipAuthorityBytes>,
     commit_ref: &StoreBatchCommitRef,
 ) -> Result<
-    Vec<coven_protocol::remote_object::RemoteObjectRecord>,
+    Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     coven_protocol::remote_object::RemoteObjectRecordError,
 > {
     let mut remotes = vec![
         coven_protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
             family,
             objects.entry().clone(),
-            entry_bytes.canonical,
-            entry_bytes.stored,
+            &entry_bytes.canonical,
+            &entry_bytes.stored,
             commit_ref.clone(),
         )?
-        .into_observed_activated(commit_ref)?,
+        .map_record(|record| record.into_observed_activated(commit_ref))?,
         coven_protocol::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
             family,
             objects.head().clone(),
-            head_bytes.canonical,
-            head_bytes.stored,
+            &head_bytes.canonical,
+            &head_bytes.stored,
             commit_ref.clone(),
         )?
-        .into_observed_activated(commit_ref)?,
+        .map_record(|record| record.into_observed_activated(commit_ref))?,
     ];
     if let Some(resolution) = objects.resolution() {
         let bytes = resolution_bytes.ok_or(
@@ -570,11 +570,11 @@ pub fn activated_merge_membership_remote_objects(
         remotes.push(
             coven_protocol::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 resolution.clone(),
-                bytes.canonical,
-                bytes.stored,
+                &bytes.canonical,
+                &bytes.stored,
                 commit_ref.clone(),
             )?
-            .into_observed_activated(commit_ref)?,
+            .map_record(|record| record.into_observed_activated(commit_ref))?,
         );
     } else if resolution_bytes.is_some() {
         return Err(

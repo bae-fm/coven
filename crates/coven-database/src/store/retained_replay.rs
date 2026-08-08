@@ -1,5 +1,6 @@
 //! Private accepted-history baselines and deterministic retained replay.
 
+use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -369,12 +370,12 @@ pub struct RetainedReplayBaseline {
 
 impl RetainedReplayBaseline {
     pub fn generation_zero(
-        source: &Connection,
+        source: StoreRecords<'_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplayGenesisAuthority,
     ) -> Result<Self, DbError> {
-        let image_bytes = project_generation_zero_image(source)?;
+        let image_bytes = project_generation_zero_image(source.conn())?;
         let baseline = Self {
             generation: GENERATION_ZERO,
             exact_cut: CommitFrontier(Default::default()),
@@ -384,18 +385,18 @@ impl RetainedReplayBaseline {
             image_bytes,
             authority: RetainedReplayAuthority::Genesis(authority),
         };
-        baseline.validate_image()?;
+        baseline.validate_image(source.store_dir())?;
         Ok(baseline)
     }
 
     pub fn stable_snapshot(
-        source: &Connection,
+        source: StoreRecords<'_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplaySnapshotAuthority,
     ) -> Result<Self, DbError> {
         authority.validate()?;
-        let image_bytes = serialized_database(source)?;
+        let image_bytes = serialized_database(source.conn())?;
         let baseline = Self {
             generation: GENERATION_ZERO,
             exact_cut: authority.metadata.coverage.clone(),
@@ -405,7 +406,7 @@ impl RetainedReplayBaseline {
             image_bytes,
             authority: RetainedReplayAuthority::StableSnapshot(authority),
         };
-        baseline.validate_image()?;
+        baseline.validate_image(source.store_dir())?;
         Ok(baseline)
     }
 
@@ -418,7 +419,10 @@ impl RetainedReplayBaseline {
         open_image(&self.image_bytes)
     }
 
-    pub fn validate_image(&self) -> Result<(), DbError> {
+    pub fn validate_image(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), DbError> {
         if self.generation != GENERATION_ZERO
             || self.image_hash != ObjectHash::digest(&self.image_bytes)
         {
@@ -529,7 +533,7 @@ impl RetainedReplayBaseline {
                     ));
                 }
                 crate::StoreDatabase::validate_snapshot_retained_inputs_on(
-                    &image,
+                    StoreRecords::new(&image, store_dir),
                     &authority.store_root,
                 )?;
                 validate_replay_image_foreign_keys(&image)

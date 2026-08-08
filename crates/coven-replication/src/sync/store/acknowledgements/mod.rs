@@ -291,7 +291,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                     )
                 })?;
             self.database
-                .mark_remote_object_uploaded(acknowledgement_remote)
+                .mark_remote_object_uploaded(acknowledgement_remote.into_record())
                 .await?;
             self.writer
                 .circles()

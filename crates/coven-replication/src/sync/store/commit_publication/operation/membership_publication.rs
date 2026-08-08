@@ -14,7 +14,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
-        remote_objects: Option<Vec<coven_protocol::remote_object::RemoteObjectRecord>>,
+        remote_objects: Option<Vec<coven_protocol::remote_object::ClosedRemoteObject>>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<coven_protocol::store_commit::ObjectHash, InviteError> {
         match remote_objects {

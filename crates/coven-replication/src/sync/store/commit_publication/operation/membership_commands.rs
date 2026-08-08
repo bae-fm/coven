@@ -660,24 +660,24 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         persistence
-            .mark_remote_object_uploaded(exact_owned_remote(&remotes, &plan.reference.object)?)
+            .mark_remote_object_uploaded(
+                exact_owned_remote(&remotes, &plan.reference.object)?.into_record(),
+            )
             .await?;
         self.publish_membership_authority(&plan.transition, &[])
             .await?;
         persistence
-            .mark_remote_object_uploaded(exact_owned_remote(
-                &remotes,
-                &plan.transition.entry_ref.object,
-            )?)
+            .mark_remote_object_uploaded(
+                exact_owned_remote(&remotes, &plan.transition.entry_ref.object)?.into_record(),
+            )
             .await?;
         self.upload_commit(&plan.candidate)
             .await
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
         persistence
-            .mark_remote_object_uploaded(exact_owned_remote(
-                &remotes,
-                &plan.candidate.reference.object,
-            )?)
+            .mark_remote_object_uploaded(
+                exact_owned_remote(&remotes, &plan.candidate.reference.object)?.into_record(),
+            )
             .await?;
         loop {
             let previous = plan.candidate.as_ref().clone();
@@ -693,7 +693,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             candidate: plan.candidate.reference.clone(),
                         }
                         .encode()?,
-                        remote_objects: current_remotes.clone(),
+                        remote_objects: current_remotes
+                            .iter()
+                            .map(|remote| remote.record().clone())
+                            .collect(),
                     },
                 )
                 .await?;
@@ -719,7 +722,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     persistence
                         .adopt_candidate_head(
                             bytes,
-                            exact_owned_remote(&previous_remotes, &previous_head.object)?,
+                            exact_owned_remote(&previous_remotes, &previous_head.object)?
+                                .into_record(),
                             exact_owned_remote(&replacement_remotes, &replacement_head.object)?,
                             None,
                         )

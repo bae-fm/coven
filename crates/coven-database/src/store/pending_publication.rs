@@ -34,9 +34,10 @@ impl StoreDatabase {
     pub async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
+        let store_dir = self.store_dir.clone();
         let loaded = self
             .connection
-            .call(|conn| {
+            .call(move |conn| {
                 let row = conn
                     .query_row(
                         "SELECT write_id, changeset, base, prepared FROM store_writes
@@ -148,7 +149,7 @@ impl StoreDatabase {
                         write_id.as_str(),
                         &stored_changeset,
                     )?;
-                    let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
+                    let audiences = load_prepared_audience_objects_on(conn, &store_dir, &write_id)?;
                     let graph_commit = match graph_commit {
                         Some(graph_commit) => {
                             let candidate_head = match &prepared {

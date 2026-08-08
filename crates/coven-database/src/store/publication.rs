@@ -26,6 +26,7 @@ impl StoreDatabase {
         accepted: StoreBatchCommitRef,
         nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
+        let store_dir = self.store_dir.clone();
         let nonactivations = nonactivations
             .into_iter()
             .map(|verified| {
@@ -38,8 +39,8 @@ impl StoreDatabase {
         let gates = self.gates();
         let synced_tables = self.synced_tables().to_vec();
         let (outcome, notification) = self
-            .connection
-            .call(move |conn| {
+            .call_records(move |records| {
+                let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let local_device_id =
                     crate::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
@@ -71,7 +72,7 @@ impl StoreDatabase {
                     .map_err(|error| DbError::context("prepared Store write", error))?;
                 let exclusion_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
                 if author_exclusion_activation_for_candidate_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir()),
                     &root,
                     &exclusion_candidate.reference,
                     &exclusion_candidate.commit.author_registration,
@@ -213,7 +214,7 @@ impl StoreDatabase {
                         true,
                         &[],
                     )?;
-                    MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
+                    MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
                         &root,
                         &authority.commit,
                         &[],
@@ -332,7 +333,7 @@ impl StoreDatabase {
                         "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
                     )));
                 }
-                let audiences = load_prepared_audience_objects_on(&tx, &write_id)?;
+                let audiences = load_prepared_audience_objects_on(&tx, &store_dir, &write_id)?;
                 let retained_packages = audiences
                     .packages
                     .iter()
@@ -384,7 +385,7 @@ impl StoreDatabase {
                 };
                 let apply_schema =
                     crate::TableSchema::for_apply(&tx, &synced_tables, &gates)?;
-                let store_transaction = MergeMaterializationTransaction::new(&tx);
+                let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
                 let cloud_outbox = CloudOutboxRecords::new(&tx);
                 let mut consumed_uploads = 0;
                 for package in &audiences.packages {
@@ -470,7 +471,7 @@ impl StoreDatabase {
                     [write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-                MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
+                MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
                     &root,
                     &commit_value,
                     &[],

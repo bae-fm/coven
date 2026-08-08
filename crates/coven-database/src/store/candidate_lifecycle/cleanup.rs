@@ -297,7 +297,8 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
-        self.connection.call(move |conn| {
+        self.call_records(move |records| {
+            let conn = records.conn();
             let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
             let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
             let proof = remote
@@ -313,7 +314,7 @@ impl StoreDatabase {
                     exclusion,
                     ..
                 } => TerminalCandidateAuthority::AuthorExclusion(
-                    load_author_exclusion_activation_locator_on(conn, &root, exclusion)?,
+                    load_author_exclusion_activation_locator_on(records, &root, exclusion)?,
                 ),
                 coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
                     grant_id,
@@ -333,7 +334,7 @@ impl StoreDatabase {
                         proof.clone(),
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                    validate_terminal_nonactivation_authority_on(conn, &root, &durable)?;
+                    validate_terminal_nonactivation_authority_on(records, &root, &durable)?;
                     TerminalCandidateAuthority::DependencyRetraction(
                         coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                             .map_err(|error| DbError::Message(error.to_string()))?,
@@ -381,59 +382,59 @@ impl StoreDatabase {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call(move |conn| {
-                let prepared =
-                    crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
-                if durable
-                    .reference()
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != candidate
-                    || head_nonactivation.head().object() != &prepared.head_object
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let prepared =
+                crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            if durable
+                .reference()
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != candidate
+                || head_nonactivation.head().object() != &prepared.head_object
+            {
+                return Err(DbError::Message(
+                    "verified Merge retraction cleanup names another candidate".to_string(),
+                ));
+            }
+            if let coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+                exclusion,
+                accepted_cut,
+                activation_head,
+            } = durable.proof()
+            {
+                let locator =
+                    load_author_exclusion_activation_locator_on(records, &root, exclusion)?;
+                if locator.accepted_cut() != accepted_cut
+                    || locator.activation_head() != activation_head
                 {
                     return Err(DbError::Message(
-                        "verified Merge retraction cleanup names another candidate".to_string(),
-                    ));
-                }
-                if let coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
-                    exclusion,
-                    accepted_cut,
-                    activation_head,
-                } = durable.proof()
-                {
-                    let locator =
-                        load_author_exclusion_activation_locator_on(conn, &root, exclusion)?;
-                    if locator.accepted_cut() != accepted_cut
-                        || locator.activation_head() != activation_head
-                    {
-                        return Err(DbError::Message(
-                            "verified Merge retraction differs from durable exclusion authority"
-                                .to_string(),
-                        ));
-                    }
-                }
-                let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
-                if remote
-                    .candidate_nonactivation_proof(&candidate)
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != Some(durable.proof())
-                {
-                    return Err(DbError::Message(
-                        "verified Merge retraction differs from candidate ownership".to_string(),
-                    ));
-                }
-                if !matches!(
-                    load_merge_candidate_head_cleanup_on(conn, &prepared.head_object, &candidate,)?,
-                    MergeCandidateHeadCleanup::ProtocolInert
-                ) {
-                    return Err(DbError::Message(
-                        "retracted Merge activation head is not retained as inert authority"
+                        "verified Merge retraction differs from durable exclusion authority"
                             .to_string(),
                     ));
                 }
-                Ok(())
-            })
-            .await
+            }
+            let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
+            if remote
+                .candidate_nonactivation_proof(&candidate)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != Some(durable.proof())
+            {
+                return Err(DbError::Message(
+                    "verified Merge retraction differs from candidate ownership".to_string(),
+                ));
+            }
+            if !matches!(
+                load_merge_candidate_head_cleanup_on(conn, &prepared.head_object, &candidate,)?,
+                MergeCandidateHeadCleanup::ProtocolInert
+            ) {
+                return Err(DbError::Message(
+                    "retracted Merge activation head is not retained as inert authority"
+                        .to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn finish_merge_retraction_cleanup(

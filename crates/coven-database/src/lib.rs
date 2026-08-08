@@ -31,7 +31,6 @@ pub use crate::remote_object_records::candidate_graph_exact_objects;
 pub use crate::remote_object_records::finish_remote_candidate_nonactivation_on;
 pub use crate::remote_object_records::index_retained_replay_owner_on;
 pub use crate::remote_object_records::load_protocol_inert_object_on;
-pub use crate::remote_object_records::load_remote_object_on;
 pub use crate::remote_object_records::mark_remote_object_uploaded_on;
 pub use crate::remote_object_records::mark_reusable_retained_authority_uploaded_on;
 pub use crate::remote_object_records::persist_exact_remote_object_on;
@@ -39,9 +38,9 @@ pub use crate::remote_object_records::persist_prepared_remote_object_on;
 pub use crate::remote_object_records::record_reclaimed_store_package_on;
 pub use crate::remote_object_records::replace_prepared_merge_head_remote_on;
 pub use crate::remote_object_records::update_remote_object_on;
+pub use crate::remote_object_records::{load_remote_object_on, reopen_remote_object_on};
 pub use crate::remote_object_records::{
     validate_prepared_blob_on, validate_prepared_package_on, validate_remote_object_on,
-    RemoteStoredRepresentationRef,
 };
 use crate::snapshot_objects::validate_snapshot_object_owners_on;
 pub use crate::snapshot_objects::{
@@ -566,6 +565,10 @@ pub enum OpenError {
 
 #[derive(Clone)]
 struct DatabaseState {
+    /// The directory holding this database, and with it the payload spool the
+    /// rows name. Bound at open because a row and the file it names are one
+    /// store's state, so nothing downstream gets to pick a different directory.
+    store_dir: coven_foundation::store_dir::StoreDir,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
@@ -773,6 +776,7 @@ impl<K: Clone + PartialEq> TestPausePoints<K> {
 /// connection thread receives it by value across a single `thread::spawn` with no
 /// manual `unsafe impl`.
 struct DatabaseCore {
+    store_dir: coven_foundation::store_dir::StoreDir,
     conn: Connection,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
@@ -883,11 +887,12 @@ impl VerifiedSnapshotBootstrapInstall {
 
     fn install_on(
         &self,
-        conn: &Connection,
+        records: crate::payload_spool::StoreRecords<'_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
+        let conn = records.conn();
         let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: self.store_root.value.descriptor.store_root_id(),
             store_root_hash: self.store_root.semantic_hash,
@@ -939,12 +944,12 @@ impl VerifiedSnapshotBootstrapInstall {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            conn,
+            records,
             schema_version,
             routing_hash,
             self.stability.clone(),
         )?;
-        self.install_circle_decisions_on(conn, &root, synced_tables)
+        self.install_circle_decisions_on(records, &root, synced_tables)
     }
 
     /// Apply the staged Circle decisions inside the Store install's single
@@ -955,11 +960,12 @@ impl VerifiedSnapshotBootstrapInstall {
     /// image — a partially installed union is never exposed.
     fn install_circle_decisions_on(
         &self,
-        conn: &Connection,
+        records: crate::payload_spool::StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
         use crate::StoreDatabase;
+        let conn = records.conn();
         #[cfg(any(test, feature = "test-utils"))]
         if self.fail_circle_install {
             return Err(DbError::Message(
@@ -973,7 +979,7 @@ impl VerifiedSnapshotBootstrapInstall {
                     image,
                 } => {
                     let activation = StoreDatabase::verified_circle_activation_on(
-                        conn,
+                        records,
                         root,
                         image.circle_id(),
                         image.control(),
@@ -992,7 +998,7 @@ impl VerifiedSnapshotBootstrapInstall {
                         image,
                     )?;
                     StoreDatabase::record_one_circle_bootstrap_coverage_on(
-                        conn,
+                        records,
                         root,
                         activation_commit,
                         image,

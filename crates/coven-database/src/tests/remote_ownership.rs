@@ -17,7 +17,7 @@ fn reclaim_target_package(
     owner: &StoreBatchCommitRef,
 ) -> (
     coven_protocol::store_commit::StorePackageRef,
-    coven_protocol::remote_object::RemoteObjectRecord,
+    coven_protocol::remote_object::ClosedRemoteObject,
 ) {
     let package = AudiencePackage::store(
         ObjectHash::digest(format!("{label} Store root").as_bytes()),
@@ -63,10 +63,7 @@ fn reclaim_target_package(
                 semantic_hash: ObjectHash::digest(&semantic),
                 object: object.clone(),
             },
-            bytes: coven_protocol::remote_object::RemoteObjectBytes::inline(
-                semantic, stored, object,
-            )
-            .expect("reclaim package remote bytes"),
+            payloads: coven_protocol::remote_object::RemoteObjectPayloads::SpooledInline,
             state: coven_protocol::remote_object::CandidateObjectState::Prepared {
                 ownership: coven_protocol::remote_object::PendingCandidateOwnership {
                     pending: std::collections::BTreeSet::from([owner.clone()]),
@@ -82,7 +79,14 @@ fn reclaim_target_package(
     let activated = uploaded
         .into_activated(owner)
         .expect("activate reclaim package owner");
-    (reference, activated)
+    let payloads = std::collections::BTreeMap::from([
+        (ObjectHash::digest(&semantic), semantic),
+        (ObjectHash::digest(&stored), stored),
+    ]);
+    let closed =
+        coven_protocol::remote_object::ClosedRemoteObject::with_payloads(activated, payloads)
+            .expect("close reclaim package with its payloads");
+    (reference, closed)
 }
 
 /// A Store commit reference at `sequence`, distinct per `label`.
@@ -142,11 +146,14 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     .expect("valid absence closure");
     let object_id = absence.object_id();
     let closure_db = crate::synthetic_store::open_test_db();
+    let (_closure_spool, closure_store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir_for_insert = closure_store_dir.clone();
     let saved_remote_for_insert = package_remote.clone();
     closure_db
         .call(move |conn| {
             persist_exact_remote_object_on(
                 conn,
+                &store_dir_for_insert,
                 &saved_remote_for_insert,
                 "reclaim closure fixture package",
             )
@@ -165,6 +172,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("close reclaimed package");
 
+    let store_dir_for_revival = closure_store_dir.clone();
     let saved_remote_for_revival = package_remote.clone();
     closure_db
         .call(move |conn| {
@@ -175,6 +183,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
             );
             assert!(persist_exact_remote_object_on(
                 conn,
+                &store_dir_for_revival,
                 &saved_remote_for_revival,
                 "revived Store package",
             )
@@ -227,7 +236,8 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
         conn.execute("DELETE FROM remote_objects", [])
             .expect("clear snapshot owner");
         let remote = RemoteObjectRecord::snapshot_activated_blob(binding.blob(), owner)
-            .expect("build snapshot-owned blob");
+            .expect("build snapshot-owned blob")
+            .into_record();
         conn.execute(
             "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
             rusqlite::params![
@@ -422,6 +432,7 @@ async fn exact_deletes_for_distinct_objects_remain_distinct() {
 
 #[test]
 fn blob_bindings_install_only_for_exact_winning_row_stamps() {
+    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let mut conn = Connection::open_in_memory().expect("open");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute_batch(
@@ -470,7 +481,7 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
         row_stamp: Some("0000000001000-0000-a".to_string()),
     }];
     assert_eq!(
-        MergeMaterializationTransaction::new(&tx)
+        MergeMaterializationTransaction::new(&tx, &store_dir)
             .install_winning_blob_bindings(&gates, &tables, &package, &activation, &winning_rows,)
             .expect("install winning binding"),
         1
@@ -508,6 +519,7 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
 
 #[test]
 fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
+    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let mut conn = Connection::open_in_memory().expect("open");
     apply_coven_schema(&conn).expect("apply coven schema");
     conn.execute_batch(
@@ -551,7 +563,7 @@ fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
         row_id: "photo".to_string(),
         row_stamp: Some("0000000001000-0000-a".to_string()),
     }];
-    let error = MergeMaterializationTransaction::new(&tx)
+    let error = MergeMaterializationTransaction::new(&tx, &store_dir)
         .install_winning_blob_bindings(&gates, &tables, &package, &activation, &winning_rows)
         .expect_err("mismatched locator must fail");
     assert!(error

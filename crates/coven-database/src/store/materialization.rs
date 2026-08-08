@@ -21,6 +21,7 @@ impl StoreDatabase {
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
     ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
+        let store_dir = self.store_dir.clone();
         let root = materialization.root.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
@@ -49,8 +50,11 @@ impl StoreDatabase {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure_injection();
         let applied = self
-            .with_retained_merge_materializations(move |conn, retained_cache| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            .with_retained_merge_materializations(move |records, retained_cache| {
+                let tx = records
+                    .conn()
+                    .unchecked_transaction()
+                    .map_err(DbError::from)?;
                 let materialized_frontier =
                     coven_protocol::store_commit::CommitFrontier::from_refs(
                         Self::materialized_frontier_on(&tx, None)?,
@@ -65,7 +69,7 @@ impl StoreDatabase {
                     .frontier();
                 let requires_canonical_replay =
                     !candidate_predecessors.covers(&materialized_frontier);
-                let merge_transaction = MergeMaterializationTransaction::new(&tx);
+                let merge_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
                 let mut applied = merge_transaction.apply_prepared_merge_materialization(
                     &blob_decls,
                     &gates,
@@ -130,6 +134,7 @@ impl StoreDatabase {
                     {
                         let replay = transaction_cache.replay_projection_on(
                             &tx,
+                            &store_dir,
                             &root,
                             &blob_decls,
                             &gates,
@@ -248,10 +253,11 @@ impl StoreDatabase {
         >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let store_transaction = MergeMaterializationTransaction::new(&tx);
+                let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
                 if let Some(object_ids) = operation_object_ids {
                     store_transaction
                         .activate_store_operation_remote_objects(&reference, &object_ids)?;
@@ -306,6 +312,7 @@ impl StoreDatabase {
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -343,7 +350,7 @@ impl StoreDatabase {
                     &[],
                     None,
                 )?;
-                MergeMaterializationTransaction::new(&tx)
+                MergeMaterializationTransaction::new(&tx, &store_dir)
                     .record_verified_merge_materialization(materialization)?;
                 tx.commit().map_err(DbError::from)
             })
@@ -355,6 +362,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let installed_root = required_store_root_authority_on(&tx)?;
@@ -468,7 +476,7 @@ impl StoreDatabase {
                     &[],
                     None,
                 )?;
-                MergeMaterializationTransaction::new(&tx)
+                MergeMaterializationTransaction::new(&tx, &store_dir)
                     .record_verified_merge_materialization(materialization)?;
             }
             tx.commit().map_err(DbError::from)
@@ -484,6 +492,7 @@ impl StoreDatabase {
         history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -491,16 +500,17 @@ impl StoreDatabase {
                 let registrations = vec![registration];
                 let commit = verified_commit.value();
                 super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
-                MergeMaterializationTransaction::new(&tx).record_materialized_merge_commit(
-                    &root,
-                    &verified_commit,
-                    &registrations,
-                    &activation_head,
-                    &activation_head_object,
-                    &history_summary,
-                    &[],
-                    None,
-                )?;
+                MergeMaterializationTransaction::new(&tx, &store_dir)
+                    .record_materialized_merge_commit(
+                        &root,
+                        &verified_commit,
+                        &registrations,
+                        &activation_head,
+                        &activation_head_object,
+                        &history_summary,
+                        &[],
+                        None,
+                    )?;
                 tx.commit().map_err(DbError::from)
             })
             .await

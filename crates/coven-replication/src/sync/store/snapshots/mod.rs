@@ -554,7 +554,8 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             &blob.stored,
             owner.clone(),
         )
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+        .into_record();
         prepared.push(coven_database::PreparedSnapshotBlob {
             bindings: vec![binding],
             authority: package_authority,

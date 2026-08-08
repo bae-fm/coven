@@ -191,5 +191,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
             panic!("Store creation installed a snapshot replay baseline")
         }
     }
-    baseline.validate_image().expect("validate replay image");
+    baseline
+        .validate_image(db.store_dir_for_test())
+        .expect("validate replay image");
 }

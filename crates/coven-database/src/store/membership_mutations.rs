@@ -154,9 +154,10 @@ impl StoreDatabase {
         &self,
         plan_bytes: Vec<u8>,
         progress_bytes: Vec<u8>,
-        remote_objects: Vec<RemoteObjectRecord>,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let intent_hash = ObjectHash::digest(&plan_bytes);
@@ -178,7 +179,7 @@ impl StoreDatabase {
                     }
                     for remote in &remote_objects {
                         let stored = load_remote_object_on(&tx, remote.object_id())?;
-                        if stored != *remote {
+                        if stored != **remote {
                             return Err(DbError::Message(
                                 "persisted membership ownership differs from its durable plan"
                                     .to_string(),
@@ -201,7 +202,12 @@ impl StoreDatabase {
                             "membership candidate mutation repeats a remote object".to_string(),
                         ));
                     }
-                    persist_exact_remote_object_on(&tx, remote, "membership candidate object")?;
+                    persist_exact_remote_object_on(
+                        &tx,
+                        &store_dir,
+                        remote,
+                        "membership candidate object",
+                    )?;
                 }
                 tx.execute(
                     "INSERT INTO outbound_membership_mutation \
@@ -418,13 +424,13 @@ impl StoreDatabase {
         intent_hash: ObjectHash,
         plan_bytes: Vec<u8>,
         previous: RemoteObjectRecord,
-        mut replacement: RemoteObjectRecord,
+        replacement: coven_protocol::remote_object::ClosedRemoteObject,
         rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
         let (
             RemoteObjectRecord::RetainedAuthority(previous_head),
             RemoteObjectRecord::RetainedAuthority(replacement_head),
-        ) = (&previous, &replacement)
+        ) = (&previous, replacement.record())
         else {
             return Err(DbError::Message(
                 "Merge membership candidate head adoption received a non-authority object"
@@ -434,9 +440,11 @@ impl StoreDatabase {
         let (
             coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                 reference: previous_ref,
+                ..
             },
             coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                 reference: replacement_ref,
+                ..
             },
         ) = (
             &previous_head.identity.domain,
@@ -455,10 +463,16 @@ impl StoreDatabase {
                 "adopted Merge membership head does not replace the same exact slot".to_string(),
             ));
         }
-        replacement.mark_uploaded_verified().map_err(|error| {
-            DbError::context("mark adopted Merge membership head uploaded", error)
-        })?;
+        let replacement = replacement
+            .map_record(|mut record| {
+                record.mark_uploaded_verified()?;
+                Ok(record)
+            })
+            .map_err(|error| {
+                DbError::context("mark adopted Merge membership head uploaded", error)
+            })?;
         let replacement_hash = ObjectHash::digest(&plan_bytes);
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -470,14 +484,7 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [previous_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
+                if !crate::remote_object_records::delete_remote_object_on(&tx, previous_id)? {
                     return Err(DbError::Message(
                         "prepared Merge membership head disappeared during receipt adoption"
                             .to_string(),
@@ -485,6 +492,7 @@ impl StoreDatabase {
                 }
                 persist_exact_remote_object_on(
                     &tx,
+                    &store_dir,
                     &replacement,
                     "adopted Merge membership candidate head",
                 )?;

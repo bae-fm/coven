@@ -223,6 +223,7 @@ impl StoreDatabaseConnection {
 
 #[derive(Clone)]
 pub struct StoreDatabase {
+    store_dir: coven_foundation::store_dir::StoreDir,
     connection: StoreDatabaseConnection,
     runtime: StoreDatabaseRuntime,
     hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
@@ -251,6 +252,7 @@ impl StoreDatabase {
     pub fn from_database(database: Database) -> Self {
         let Database { connection, state } = database;
         Self {
+            store_dir: state.store_dir,
             connection: StoreDatabaseConnection::new(connection),
             runtime: state.store_runtime,
             hlc: state.hlc,
@@ -282,6 +284,24 @@ impl StoreDatabase {
                 let authorization = host_sql_transaction::HostSqlAuthorization::begin(connection)?;
                 Ok(authorization.run(|| read(SqlReadContext::new(connection))))
             })
+            .await
+    }
+
+    /// Run `operation` on the connection thread against this store's rows and
+    /// the payload files those rows name.
+    ///
+    /// The directory is bound here, from the one the database opened under, so
+    /// no flow picks a different one for the files a row it writes will name.
+    async fn call_records<F, R>(&self, operation: F) -> Result<R, DbError>
+    where
+        F: for<'records> FnOnce(payload_spool::StoreRecords<'records>) -> Result<R, DbError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        let store_dir = self.store_dir.clone();
+        self.connection
+            .call(move |conn| operation(payload_spool::StoreRecords::new(conn, &store_dir)))
             .await
     }
 
@@ -479,8 +499,8 @@ impl StoreDatabase {
 
     async fn with_retained_merge_materializations<F, R>(&self, operation: F) -> Result<R, DbError>
     where
-        F: FnOnce(
-                &rusqlite::Connection,
+        F: for<'records> FnOnce(
+                payload_spool::StoreRecords<'records>,
                 &mut RetainedMergeMaterializationCache,
             ) -> Result<R, DbError>
             + Send
@@ -488,16 +508,15 @@ impl StoreDatabase {
         R: Send + 'static,
     {
         let retained = self.runtime.retained_merge_materializations.clone();
-        self.connection
-            .call(move |connection| {
-                let mut retained = retained.lock().map_err(|_| {
-                    DbError::Message(
-                        "retained Merge materialization cache lock is poisoned".to_string(),
-                    )
-                })?;
-                operation(connection, &mut retained)
-            })
-            .await
+        self.call_records(move |records| {
+            let mut retained = retained.lock().map_err(|_| {
+                DbError::Message(
+                    "retained Merge materialization cache lock is poisoned".to_string(),
+                )
+            })?;
+            operation(records, &mut retained)
+        })
+        .await
     }
 
     pub async fn begin_store_creation_attempt(
@@ -656,8 +675,7 @@ impl StoreDatabase {
     pub async fn generation_zero_replay_baseline_for_test(
         &self,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        self.connection
-            .call(Self::generation_zero_replay_baseline_on)
+        self.call_records(Self::generation_zero_replay_baseline_on)
             .await
     }
 

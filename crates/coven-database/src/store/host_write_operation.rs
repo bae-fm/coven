@@ -396,6 +396,7 @@ impl StoreRowWrites {
         let blob_decls = database.blob_decls.clone();
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
+        let store_dir = self.store_dir.clone();
         let cleanup_store_dir = self.store_dir.clone();
         let stamper = coven_protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
@@ -405,6 +406,7 @@ impl StoreRowWrites {
                 let mut staged = staged;
                 let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
                     connection,
+                    &store_dir,
                     &tables,
                     &gates,
                     &blob_decls,

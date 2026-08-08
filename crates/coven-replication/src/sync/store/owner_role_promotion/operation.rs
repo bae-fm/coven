@@ -847,7 +847,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                     )
                 })?;
             database
-                .mark_remote_object_uploaded(remote)
+                .mark_remote_object_uploaded(remote.into_record())
                 .await
                 .map_err(|error| {
                     OwnerPromotionError::Protocol(format!(
@@ -863,7 +863,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 candidate,
                 coven_protocol::membership_mutation::StoreMembershipJournalCompletion::OwnerPromotion {
                     transition: journal_transition,
-                    remote_objects,
+                    remote_objects: remote_objects
+                        .iter()
+                        .map(|remote| remote.record().clone())
+                        .collect(),
                 },
             )
             .await

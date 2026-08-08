@@ -392,6 +392,7 @@ impl StoreDatabase {
     ) -> Result<BlockedWriteDiscard, DbError> {
         let write_id = write_id.clone();
         let synced_tables = self.synced_tables().to_vec();
+        let store_dir = self.store_dir.clone();
         let discarded_ids = self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let (raw_status, target_ordinal): (String, i64) = tx
@@ -460,7 +461,7 @@ impl StoreDatabase {
                     schema.clone(),
                 )
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
-                MergeMaterializationTransaction::new(&tx)
+                MergeMaterializationTransaction::new(&tx, &store_dir)
                     .apply_changeset_strict(inverse)
                     .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
             }

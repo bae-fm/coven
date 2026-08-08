@@ -200,8 +200,11 @@ mod tests {
         .await;
 
         let root = store.root.clone();
+        let store_dir = db.store_dir_for_test().clone();
         db.test_sql(move |database| {
-            database.load_retained_merge_replay_inputs(&root).map(drop)
+            database
+                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .map(drop)
         })
         .await
         .expect_err(
@@ -219,8 +222,11 @@ mod tests {
         .await;
 
         let root = store.root.clone();
+        let store_dir = db.store_dir_for_test().clone();
         db.test_sql(move |database| {
-            database.load_retained_merge_replay_inputs(&root).map(drop)
+            database
+                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .map(drop)
         })
             .await
             .expect_err(

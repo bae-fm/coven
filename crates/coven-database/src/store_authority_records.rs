@@ -386,8 +386,9 @@ struct StoredGenerationZeroReplayBaseline {
 }
 
 pub fn load_generation_zero_replay_baseline_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
+    let conn = records.conn();
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn
         .query_row(
             "SELECT generation, exact_cut, schema_version,
@@ -445,7 +446,7 @@ pub fn load_generation_zero_replay_baseline_on(
         image_bytes: stored.image_bytes,
         authority,
     };
-    baseline.validate_image()?;
+    baseline.validate_image(records.store_dir())?;
     validate_replay_authority_on(conn, &baseline)?;
     let image = baseline.open_image()?;
     let routing = load_coven_metadata(&image)?;
@@ -460,41 +461,42 @@ pub fn load_generation_zero_replay_baseline_on(
 }
 
 pub fn install_generation_zero_replay_baseline_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<(), DbError> {
-    if load_generation_zero_replay_baseline_on(conn)?.is_some() {
+    if load_generation_zero_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before founder activation".to_string(),
         ));
     }
     let baseline =
-        RetainedReplayBaseline::generation_zero(conn, schema_version, routing_hash, authority)?;
-    insert_retained_replay_baseline_on(conn, &baseline)
+        RetainedReplayBaseline::generation_zero(records, schema_version, routing_hash, authority)?;
+    insert_retained_replay_baseline_on(records, &baseline)
 }
 
 pub fn install_snapshot_replay_baseline_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplaySnapshotAuthority,
 ) -> Result<(), DbError> {
-    if load_generation_zero_replay_baseline_on(conn)?.is_some() {
+    if load_generation_zero_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
         ));
     }
     let baseline =
-        RetainedReplayBaseline::stable_snapshot(conn, schema_version, routing_hash, authority)?;
-    insert_retained_replay_baseline_on(conn, &baseline)
+        RetainedReplayBaseline::stable_snapshot(records, schema_version, routing_hash, authority)?;
+    insert_retained_replay_baseline_on(records, &baseline)
 }
 
 pub(crate) fn insert_retained_replay_baseline_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
+    let conn = records.conn();
     validate_replay_authority_on(conn, baseline)?;
     conn.execute(
         "INSERT INTO retained_replay_baselines
@@ -516,7 +518,7 @@ pub(crate) fn insert_retained_replay_baseline_on(
         ],
     )
     .map_err(DbError::from)?;
-    let installed = load_generation_zero_replay_baseline_on(conn)?.ok_or_else(|| {
+    let installed = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
         DbError::Message("installed retained replay baseline is absent".to_string())
     })?;
     if &installed != baseline {
@@ -528,12 +530,13 @@ pub(crate) fn insert_retained_replay_baseline_on(
 }
 
 pub fn ensure_founder_replay_baseline_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<(), DbError> {
-    if let Some(existing) = load_generation_zero_replay_baseline_on(conn)? {
+    let conn = records.conn();
+    if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
             RetainedReplayAuthority::StableSnapshot(existing) => {
@@ -564,7 +567,7 @@ pub fn ensure_founder_replay_baseline_on(
             "accepted Store history exists without a retained replay baseline".to_string(),
         ));
     }
-    install_generation_zero_replay_baseline_on(conn, schema_version, routing_hash, authority)
+    install_generation_zero_replay_baseline_on(records, schema_version, routing_hash, authority)
 }
 
 pub fn install_store_founder_state_on(

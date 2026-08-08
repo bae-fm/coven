@@ -87,7 +87,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 .map_err(|error| StoreReclaimError::Journal(error.to_string()))?
             {
                 if matches!(
-                    &remote,
+                    remote.record(),
                     coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             record.identity.domain,
@@ -97,7 +97,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         )
                 ) {
                     database
-                        .mark_reusable_retained_authority_uploaded(remote)
+                        .mark_reusable_retained_authority_uploaded(remote.into_record())
                         .await?;
                 }
             }

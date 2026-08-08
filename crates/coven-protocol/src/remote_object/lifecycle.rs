@@ -3,15 +3,169 @@ use super::nonactivation::*;
 use super::ownership::*;
 use super::*;
 
+/// A Store head names the commit it publishes. The record carries that commit
+/// reference, extracted from the head's bytes once when the record was built,
+/// so a load can check that the head still belongs to a candidate that owns it
+/// without parsing anything.
+fn validate_head_commit_ownership(
+    head_commit: &StoreBatchCommitRef,
+    state: &RetainedAuthorityObjectState,
+) -> Result<(), RemoteObjectRecordError> {
+    let owns_head_commit = match state {
+        RetainedAuthorityObjectState::Prepared { ownership } => {
+            ownership.pending.len() == 1 && ownership.pending.contains(head_commit)
+        }
+        RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+            ownership.pending.contains(head_commit) || ownership.activated.contains(head_commit)
+        }
+        RetainedAuthorityObjectState::CleanupPending { former_candidates }
+        | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
+        | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+            ensure_candidate_nonactivation(former_candidates, head_commit).is_ok()
+        }
+    };
+    if owns_head_commit {
+        Ok(())
+    } else {
+        Err(RemoteObjectRecordError::CandidateOwnerMismatch)
+    }
+}
+
 impl RemoteObjectRecord {
+    /// Everything this record asserts about itself that does not need its
+    /// payloads: where those payloads live, that the identity is the one the
+    /// record is filed under, and that its ownership state holds together.
+    ///
+    /// Byte agreement is [`Self::validate_payload`]'s job, and it is checked
+    /// where bytes enter — construction, and every spool read — rather than on
+    /// every load. Identity and payload cannot drift apart afterwards: neither
+    /// hash mutates across transitions, and the two domain changes that do
+    /// happen re-wrap the same reference.
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
-        self.bytes().validate()?;
+        self.validate_payload_placement()?;
+        match self {
+            Self::CandidateCommit(record) => match &record.state {
+                CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {}
+                CandidateCommitState::CleanupPending { proof }
+                | CandidateCommitState::AbsentVerified { proof } => {
+                    proof.validate()?;
+                }
+            },
+            Self::CandidateExclusive(record) => {
+                if record.identity.family != record.identity.domain.family()
+                    || record.identity.object != *record.identity.domain.object()
+                {
+                    return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                }
+                record.state.validate()?;
+            }
+            Self::RetainedAuthority(record) => {
+                if matches!(
+                    record.state,
+                    RetainedAuthorityObjectState::CleanupPending { .. }
+                        | RetainedAuthorityObjectState::AbsentVerified { .. }
+                ) && !matches!(
+                    record.identity.domain,
+                    RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
+                ) {
+                    return Err(RemoteObjectRecordError::DomainMismatch);
+                }
+                if let RetainedAuthorityObjectDomain::DeviceHead { head_commit, .. } =
+                    &record.identity.domain
+                {
+                    validate_head_commit_ownership(head_commit, &record.state)?;
+                }
+                record.state.validate()?;
+            }
+            Self::SharedLiveSet(record) => {
+                if let SharedLiveSetObjectDomain::StoredBlob = &record.identity.domain {
+                    let locator_bytes = record
+                        .payloads
+                        .carried_locator_bytes()
+                        .ok_or(RemoteObjectRecordError::PayloadPlacement)?;
+                    validate_semantic_hash(record.identity.semantic_hash, locator_bytes)?;
+                    let locator = crate::blob::locator::BlobLocator::parse(locator_bytes).map_err(
+                        |error| RemoteObjectRecordError::InvalidDomain(error.to_string()),
+                    )?;
+                    crate::blob::locator::StoredBlobRef::new(
+                        locator,
+                        record.identity.object.clone(),
+                    )
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                }
+                record.state.validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a record whose payloads sit somewhere its domain cannot put them.
+    ///
+    /// This is what makes the carry-set structural rather than conventional: a
+    /// stored blob's row travels inside published images and carries its
+    /// locator, and no other domain may, because no other domain's payload
+    /// would arrive with the row.
+    fn validate_payload_placement(&self) -> Result<(), RemoteObjectRecordError> {
+        let placed = match self {
+            Self::CandidateCommit(_) => {
+                matches!(self.payloads(), RemoteObjectPayloads::SpooledInline)
+            }
+            Self::CandidateExclusive(record) => match &record.identity.domain {
+                CandidateExclusiveObjectDomain::CircleBootstrapImage { .. } => {
+                    matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
+                }
+                // A package this device sealed uploads its own ciphertext; one
+                // it observed and activated was sealed elsewhere.
+                CandidateExclusiveObjectDomain::StorePackage { .. }
+                | CandidateExclusiveObjectDomain::CirclePackage { .. } => {
+                    !matches!(record.payloads, RemoteObjectPayloads::RowBlob { .. })
+                }
+                _ => matches!(record.payloads, RemoteObjectPayloads::SpooledInline),
+            },
+            Self::RetainedAuthority(record) => {
+                matches!(record.payloads, RemoteObjectPayloads::SpooledInline)
+            }
+            Self::SharedLiveSet(record) => match &record.identity.domain {
+                SharedLiveSetObjectDomain::StoredBlob => {
+                    matches!(record.payloads, RemoteObjectPayloads::RowBlob { .. })
+                }
+                SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {
+                    matches!(record.payloads, RemoteObjectPayloads::SpooledExternal)
+                }
+                SharedLiveSetObjectDomain::StorePackage { .. }
+                | SharedLiveSetObjectDomain::CirclePackage { .. } => {
+                    !matches!(record.payloads, RemoteObjectPayloads::RowBlob { .. })
+                }
+            },
+        };
+        if placed {
+            Ok(())
+        } else {
+            Err(RemoteObjectRecordError::PayloadPlacement)
+        }
+    }
+
+    /// Check this record's identity against the plaintext it names — the whole
+    /// domain parse, its signature verifications, and its agreement with the
+    /// reference.
+    ///
+    /// Called where the bytes enter: at construction, and after every spool
+    /// read, before the bytes are used. A record loaded from its row does not
+    /// run this, because the file is named for the digest of its own contents
+    /// and the record's identity fixed that digest when it was built.
+    pub fn validate_payload(
+        &self,
+        canonical_semantic_bytes: &[u8],
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.validate()?;
         match self {
             Self::CandidateCommit(record) => {
-                let commit: crate::store_commit::StoreBatchCommit = serde_json::from_slice(
-                    record.bytes.canonical_semantic_bytes(),
-                )
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                validate_semantic_hash(record.semantic_hash, canonical_semantic_bytes)?;
+                let commit: crate::store_commit::StoreBatchCommit =
+                    serde_json::from_slice(canonical_semantic_bytes).map_err(|error| {
+                        RemoteObjectRecordError::InvalidDomain(error.to_string())
+                    })?;
                 record
                     .identity
                     .verify_commit(&commit)
@@ -25,79 +179,24 @@ impl RemoteObjectRecord {
                 }
             }
             Self::CandidateExclusive(record) => {
-                validate_candidate_exclusive_identity(
-                    &record.identity,
-                    record.bytes.canonical_semantic_bytes(),
-                )?;
-                record.state.validate()?;
+                validate_candidate_exclusive_identity(&record.identity, canonical_semantic_bytes)?;
             }
             Self::RetainedAuthority(record) => {
-                validate_retained_authority_identity(
-                    &record.identity,
-                    record.bytes.canonical_semantic_bytes(),
-                )?;
-                if matches!(
-                    record.state,
-                    RetainedAuthorityObjectState::CleanupPending { .. }
-                        | RetainedAuthorityObjectState::AbsentVerified { .. }
-                ) && !matches!(
-                    record.identity.domain,
-                    RetainedAuthorityObjectDomain::StoreMembershipResolution { .. }
-                ) {
-                    return Err(RemoteObjectRecordError::DomainMismatch);
-                }
-                if let RetainedAuthorityObjectDomain::DeviceHead { .. } = &record.identity.domain {
-                    let head: crate::store_commit::StoreDeviceHead = serde_json::from_slice(
-                        record.bytes.canonical_semantic_bytes(),
-                    )
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-                    let owns_head_commit = match &record.state {
-                        RetainedAuthorityObjectState::Prepared { ownership } => {
-                            ownership.pending.len() == 1 && ownership.pending.contains(&head.commit)
-                        }
-                        RetainedAuthorityObjectState::UploadedVerified { ownership } => {
-                            ownership.pending.contains(&head.commit)
-                                || ownership.activated.contains(&head.commit)
-                        }
-                        RetainedAuthorityObjectState::CleanupPending { former_candidates }
-                        | RetainedAuthorityObjectState::AbsentVerified { former_candidates }
-                        | RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
-                            ensure_candidate_nonactivation(former_candidates, &head.commit).is_ok()
-                        }
-                    };
-                    if !owns_head_commit {
-                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
-                    }
-                }
-                record.state.validate()?;
+                validate_retained_authority_identity(&record.identity, canonical_semantic_bytes)?;
             }
             Self::SharedLiveSet(record) => {
                 record
                     .identity
-                    .validate_semantic(record.bytes.canonical_semantic_bytes())?;
+                    .validate_semantic(canonical_semantic_bytes)?;
                 match &record.identity.domain {
-                    SharedLiveSetObjectDomain::StoredBlob => {
-                        let locator = crate::blob::locator::BlobLocator::parse(
-                            record.bytes.canonical_semantic_bytes(),
-                        )
-                        .map_err(|error| {
-                            RemoteObjectRecordError::InvalidDomain(error.to_string())
-                        })?;
-                        crate::blob::locator::StoredBlobRef::new(
-                            locator,
-                            record.identity.object.clone(),
-                        )
-                        .map_err(|error| {
-                            RemoteObjectRecordError::InvalidDomain(error.to_string())
-                        })?;
-                    }
-                    SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
+                    SharedLiveSetObjectDomain::StoredBlob
+                    | SharedLiveSetObjectDomain::StoreSnapshotImage { .. }
                     | SharedLiveSetObjectDomain::CircleBootstrapImage { .. } => {}
                     SharedLiveSetObjectDomain::StorePackage { reference } => {
                         validate_package_reference(
                             reference,
                             None,
-                            record.bytes.canonical_semantic_bytes(),
+                            canonical_semantic_bytes,
                             &record.identity.object,
                         )?;
                     }
@@ -105,16 +204,12 @@ impl RemoteObjectRecord {
                         validate_package_reference(
                             &reference.package,
                             Some(reference),
-                            record.bytes.canonical_semantic_bytes(),
+                            canonical_semantic_bytes,
                             &record.identity.object,
                         )?;
                     }
                 }
-                record.state.validate()?;
             }
-        }
-        if self.object() != self.bytes().stored().object() {
-            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
         Ok(())
     }
@@ -132,13 +227,13 @@ impl RemoteObjectRecord {
                 }
                 Self::RetainedAuthority(RetainedAuthorityRecord {
                     identity: RetainedAuthorityObjectRef {
+                        semantic_hash: record.semantic_hash,
+                        object: record.identity.object.clone(),
                         domain: RetainedAuthorityObjectDomain::Commit {
                             reference: record.identity,
                         },
-                        semantic_hash: ObjectHash::digest(record.bytes.canonical_semantic_bytes()),
-                        object: record.bytes.stored().object().clone(),
                     },
-                    bytes: record.bytes,
+                    payloads: record.payloads,
                     state: RetainedAuthorityObjectState::UploadedVerified {
                         ownership: CandidateOwnership {
                             pending: BTreeSet::new(),
@@ -162,7 +257,7 @@ impl RemoteObjectRecord {
                             semantic_hash: record.identity.semantic_hash,
                             object: record.identity.object,
                         },
-                        bytes: record.bytes,
+                        payloads: record.payloads,
                         state: OwnedObjectState::UploadedVerified {
                             ownership: SharedObjectOwnership {
                                 pending: BTreeSet::new(),
@@ -180,7 +275,7 @@ impl RemoteObjectRecord {
                             semantic_hash: record.identity.semantic_hash,
                             object: record.identity.object,
                         },
-                        bytes: record.bytes,
+                        payloads: record.payloads,
                         state: RetainedAuthorityObjectState::UploadedVerified {
                             ownership: CandidateOwnership {
                                 pending: BTreeSet::new(),
@@ -352,7 +447,7 @@ impl RemoteObjectRecord {
                     != Some(expected.identity.domain.clone())
                     || current.identity.semantic_hash != expected.identity.semantic_hash
                     || current.identity.object != expected.identity.object
-                    || current.bytes != expected.bytes
+                    || current.payloads != expected.payloads
                 {
                     return Err(RemoteObjectRecordError::StoredReferenceMismatch);
                 }
@@ -372,7 +467,7 @@ impl RemoteObjectRecord {
                 *self = activated.into_activated(owner)?;
             }
             Self::RetainedAuthority(current) => {
-                if current.identity != expected.identity || current.bytes != expected.bytes {
+                if current.identity != expected.identity || current.payloads != expected.payloads {
                     return Err(RemoteObjectRecordError::StoredReferenceMismatch);
                 }
                 if matches!(current.state, RetainedAuthorityObjectState::Prepared { .. }) {
@@ -470,12 +565,10 @@ impl RemoteObjectRecord {
         }
         match &head_nonactivation.head {
             VerifiedCandidateHead::ExactCandidateAbsent { .. } => Ok(None),
-            VerifiedCandidateHead::ExactLateCandidate { .. } => ProtocolInertObject::new(
-                record.identity.clone(),
-                record.bytes.canonical_semantic_bytes().to_vec(),
-                former_candidates.clone(),
-            )
-            .map(Some),
+            VerifiedCandidateHead::ExactLateCandidate { .. } => {
+                ProtocolInertObject::new(record.identity.clone(), former_candidates.clone())
+                    .map(Some)
+            }
         }
     }
 
@@ -589,7 +682,6 @@ impl RemoteObjectRecord {
                             ) => {
                                 return ProtocolInertObject::new(
                                     record.identity.clone(),
-                                    record.bytes.canonical_semantic_bytes().to_vec(),
                                     ownership.nonactivated.clone(),
                                 )
                                 .map(Some);
@@ -643,7 +735,6 @@ impl RemoteObjectRecord {
                         UploadedRetainedNonactivation::Inert(former_candidates) => {
                             return ProtocolInertObject::new(
                                 record.identity.clone(),
-                                record.bytes.canonical_semantic_bytes().to_vec(),
                                 former_candidates,
                             )
                             .map(Some);

@@ -10,7 +10,9 @@ use coven_protocol::membership_mutation::{
 };
 use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
-use coven_protocol::remote_object::{CandidateNonactivation, RemoteObjectRecord};
+use coven_protocol::remote_object::{
+    CandidateNonactivation, ClosedRemoteObject, RemoteObjectRecord,
+};
 use coven_protocol::store_commit::{self, ObjectHash, StoreBatchCommitRef};
 use coven_protocol::wrapped_store_key::PreparedWrappedStoreKey;
 use coven_storage::cloud::{CloudAccessOutcome, CloudAccessState, CloudHomeJoinInfo};
@@ -250,7 +252,7 @@ impl RevokeMutationPlan {
 
     pub(super) fn candidate_remote_objects(
         &self,
-    ) -> Result<Option<Vec<RemoteObjectRecord>>, InviteError> {
+    ) -> Result<Option<Vec<ClosedRemoteObject>>, InviteError> {
         match &self.publication {
             RevokeMembershipPublication::Direct { .. } => Ok(None),
             RevokeMembershipPublication::StoreActivated {
@@ -322,7 +324,7 @@ impl ResolveMutationPlan {
         )
     }
 
-    pub(super) fn remote_objects(&self) -> Result<Vec<RemoteObjectRecord>, InviteError> {
+    pub(super) fn remote_objects(&self) -> Result<Vec<ClosedRemoteObject>, InviteError> {
         self.candidate
             .merge_membership_resolution_remote_objects(
                 &self.transition,
@@ -498,7 +500,7 @@ impl MutationPersistence {
         &mut self,
         plan_bytes: Vec<u8>,
         previous: RemoteObjectRecord,
-        replacement: RemoteObjectRecord,
+        replacement: ClosedRemoteObject,
         rotation_generation: Option<u64>,
     ) -> Result<(ObjectHash, ObjectHash), InviteError> {
         let previous_intent = self.intent_hash;
@@ -701,9 +703,9 @@ pub(super) fn decode_membership_mutation(
 }
 
 pub(super) fn exact_owned_remote(
-    remotes: &[RemoteObjectRecord],
+    remotes: &[ClosedRemoteObject],
     object: &ExactObjectRef,
-) -> Result<RemoteObjectRecord, InviteError> {
+) -> Result<ClosedRemoteObject, InviteError> {
     let mut matching = remotes.iter().filter(|remote| remote.object() == object);
     let remote = matching.next().cloned().ok_or_else(|| {
         InviteError::InvalidDurableMutation(format!(

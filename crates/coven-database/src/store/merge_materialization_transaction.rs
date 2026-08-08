@@ -33,7 +33,9 @@ use crate::blob_records::{
     validate_stored_row_binding_on,
 };
 use crate::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
-use crate::remote_object_records::{validate_remote_object_on, RemoteStoredRepresentationRef};
+use coven_foundation::store_dir::StoreDir;
+
+use crate::remote_object_records::validate_remote_object_on;
 use crate::ReclaimCommitActivation;
 use crate::{
     candidate_graph_exact_objects, finish_remote_candidate_nonactivation_on,
@@ -157,11 +159,33 @@ fn advance_max_updated_at(
 
 pub struct MergeMaterializationTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
+    /// Where this store's payload files go. Materializing a pulled commit
+    /// writes remote object rows, and a row that names a payload installs it in
+    /// the same transaction.
+    store_dir: &'transaction StoreDir,
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
-        Self { transaction }
+    pub fn new(
+        transaction: &'transaction rusqlite::Transaction<'connection>,
+        store_dir: &'transaction StoreDir,
+    ) -> Self {
+        Self {
+            transaction,
+            store_dir,
+        }
+    }
+
+    /// This transaction's rows together with the payload files they name.
+    pub fn records(&self) -> crate::payload_spool::StoreRecords<'transaction> {
+        crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir)
+    }
+
+    /// The same pair, carrying the transaction the writes commit in.
+    pub fn record_transaction(
+        &self,
+    ) -> crate::payload_spool::StoreRecordTransaction<'transaction, 'connection> {
+        crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir)
     }
 
     pub fn circle_current_state_is_deleted(
@@ -312,7 +336,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 object_id,
                 binding.blob().object(),
                 &locator.to_bytes(),
-                RemoteStoredRepresentationRef::Blob,
             )?;
             conn.execute(
                 "INSERT INTO blob_locators

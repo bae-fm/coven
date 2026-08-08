@@ -1,4 +1,23 @@
 use super::*;
+use coven_foundation::store_dir::StoreDir;
+
+/// The directory a database's payload spool lives in: the one holding the
+/// database file.
+///
+/// An in-memory database has no directory of its own, so its payloads go to a
+/// fresh temporary one — it holds no durable state for them to stay consistent
+/// with, and the directory outlives the process's use of it.
+fn store_dir_of(path: &Path) -> StoreDir {
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => StoreDir::new(parent),
+        None => StoreDir::new(
+            std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
+        ),
+    }
+}
 
 pub(crate) enum CovenMetadataOpen<'a> {
     Detect,
@@ -183,6 +202,7 @@ impl DatabaseCore {
         let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
+        let store_dir = store_dir_of(path);
 
         let initialized = match &metadata_open {
             CovenMetadataOpen::VerifiedSnapshot(_) => false,
@@ -246,7 +266,12 @@ impl DatabaseCore {
                         )
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     }
-                    install.install_on(&tx, schema_version, resolved.hash(), &synced_tables)?;
+                    install.install_on(
+                        crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                        schema_version,
+                        resolved.hash(),
+                        &synced_tables,
+                    )?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();
@@ -279,6 +304,7 @@ impl DatabaseCore {
         gate::attach_empty_clone(&conn, &gates)
             .map_err(|error| DbError::context("install host transaction gate", error))?;
         let core = DatabaseCore {
+            store_dir: store_dir_of(path),
             conn,
             hlc,
             synced_tables,
@@ -346,6 +372,7 @@ impl DatabaseCore {
                 .map_err(|e| DbError::Message(e.to_string()))?,
         );
         let core = DatabaseCore {
+            store_dir: store_dir_of(path),
             conn,
             hlc,
             synced_tables,
@@ -362,6 +389,7 @@ impl DatabaseCore {
 
     fn state(&self) -> DatabaseState {
         DatabaseState {
+            store_dir: self.store_dir.clone(),
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,

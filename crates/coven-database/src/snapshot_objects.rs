@@ -167,13 +167,14 @@ pub fn validate_snapshot_blob_plans_on(
 
 pub fn persist_snapshot_image_on(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     image: &SnapshotImageRef,
     owner: coven_protocol::remote_object::SnapshotObjectOwner,
     label: &str,
 ) -> Result<(), DbError> {
     let image = RemoteObjectRecord::snapshot_activated_image(image, owner)
         .map_err(|error| DbError::context(format!("{label} ownership"), error))?;
-    persist_exact_remote_object_on(conn, &image, label)
+    persist_exact_remote_object_on(conn, store_dir, &image, label)
 }
 
 pub fn snapshot_generation_as_i64(generation: u64, label: &str) -> Result<i64, DbError> {

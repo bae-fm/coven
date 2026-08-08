@@ -36,12 +36,14 @@ impl StoreDatabase {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 for remote in &remotes {
                     persist_prepared_remote_object_on(
                         &tx,
+                        &store_dir,
                         remote,
                         &owner,
                         "Circle candidate graph",
@@ -72,6 +74,7 @@ impl StoreDatabase {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -100,6 +103,7 @@ impl StoreDatabase {
                 for remote in &remotes {
                     persist_prepared_remote_object_on(
                         &tx,
+                        &store_dir,
                         remote,
                         &owner,
                         "Circle candidate graph",
@@ -242,6 +246,7 @@ impl StoreDatabase {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -266,6 +271,7 @@ impl StoreDatabase {
                 for remote in &remotes {
                     persist_prepared_remote_object_on(
                         &tx,
+                        &store_dir,
                         remote,
                         &owner,
                         "Circle close-finalization candidate graph",
@@ -376,6 +382,7 @@ impl StoreDatabase {
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
         let gates = self.gates();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -526,7 +533,7 @@ impl StoreDatabase {
                         &[],
                         None,
                     )?;
-                    MergeMaterializationTransaction::new(&tx)
+                    MergeMaterializationTransaction::new(&tx, &store_dir)
                         .record_verified_merge_materialization(materialization)?;
                     (commit, activation.clone(), Some(remote_object_id(prepared_head)))
                 };
@@ -558,7 +565,7 @@ impl StoreDatabase {
                 if let Some(head_object_id) = head_object_id {
                     object_ids.push(head_object_id);
                 }
-                let store_transaction = MergeMaterializationTransaction::new(&tx);
+                let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
                 store_transaction.activate_store_operation_remote_objects(
                     &operation.commit_ref,
                     &object_ids,

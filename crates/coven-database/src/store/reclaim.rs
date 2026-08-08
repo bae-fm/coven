@@ -20,6 +20,7 @@ impl StoreDatabase {
         &self,
         operation: DurableStoreReclaimOperation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let store_dir = self.store_dir.clone();
         operation.validate().map_err(store_reclaim_journal_error)?;
         let DurableStoreReclaimOperation::AuthorizationCandidate { .. } = &operation else {
             return Err(DbError::Message(
@@ -45,7 +46,12 @@ impl StoreDatabase {
                     return Ok(existing);
                 }
                 for remote in &remotes {
-                    persist_exact_remote_object_on(&tx, remote, "Store reclaim candidate object")?;
+                    persist_exact_remote_object_on(
+                        &tx,
+                        &store_dir,
+                        remote,
+                        "Store reclaim candidate object",
+                    )?;
                 }
                 insert_store_reclaim_operation_on(&tx, &operation)?;
                 tx.commit().map_err(DbError::from)?;
@@ -60,49 +66,49 @@ impl StoreDatabase {
         target: StorePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call(move |conn| {
-                let object_id = remote_object_id(&target.object);
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let object_id = remote_object_id(&target.object);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !exists {
+                return Ok(false);
+            }
+            let remote = load_remote_object_on(conn, object_id)?;
+            let retained = remote
+                .store_package_is_retained_for_replay(&target, &activation)
+                .map_err(|error| {
+                    DbError::context(
+                        format!("validate Store package {object_id} replay ownership"),
+                        error,
                     )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Ok(false);
-                }
-                let remote = load_remote_object_on(conn, object_id)?;
-                let retained = remote
-                    .store_package_is_retained_for_replay(&target, &activation)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("validate Store package {object_id} replay ownership"),
-                            error,
-                        )
-                    })?;
-                if !retained {
-                    return Ok(false);
-                }
-                for owner in remote.retained_replay_owners() {
-                    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-                    let StoreCommitCoord {
-                        stream_id,
-                        sequence,
-                    } = &commit.coord;
-                    crate::StoreDatabase::load_retained_merge_materialization_on(
-                        conn,
-                        &root,
-                        &stream_id.to_string(),
-                        *sequence,
-                        commit,
-                        &input_hash.to_string(),
-                    )?;
-                }
-                Ok(true)
-            })
-            .await
+                })?;
+            if !retained {
+                return Ok(false);
+            }
+            for owner in remote.retained_replay_owners() {
+                let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+                let StoreCommitCoord {
+                    stream_id,
+                    sequence,
+                } = &commit.coord;
+                crate::StoreDatabase::load_retained_merge_materialization_on(
+                    records,
+                    &root,
+                    &stream_id.to_string(),
+                    *sequence,
+                    commit,
+                    &input_hash.to_string(),
+                )?;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn circle_package_is_retained_for_replay(
@@ -111,49 +117,49 @@ impl StoreDatabase {
         target: coven_protocol::store_commit::CirclePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call(move |conn| {
-                let object_id = remote_object_id(&target.package.object);
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let object_id = remote_object_id(&target.package.object);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !exists {
+                return Ok(false);
+            }
+            let remote = load_remote_object_on(conn, object_id)?;
+            let retained = remote
+                .circle_package_is_retained_for_replay(&target, &activation)
+                .map_err(|error| {
+                    DbError::context(
+                        format!("validate Circle package {object_id} replay ownership"),
+                        error,
                     )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Ok(false);
-                }
-                let remote = load_remote_object_on(conn, object_id)?;
-                let retained = remote
-                    .circle_package_is_retained_for_replay(&target, &activation)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("validate Circle package {object_id} replay ownership"),
-                            error,
-                        )
-                    })?;
-                if !retained {
-                    return Ok(false);
-                }
-                for owner in remote.retained_replay_owners() {
-                    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-                    let StoreCommitCoord {
-                        stream_id,
-                        sequence,
-                    } = &commit.coord;
-                    crate::StoreDatabase::load_retained_merge_materialization_on(
-                        conn,
-                        &root,
-                        &stream_id.to_string(),
-                        *sequence,
-                        commit,
-                        &input_hash.to_string(),
-                    )?;
-                }
-                Ok(true)
-            })
-            .await
+                })?;
+            if !retained {
+                return Ok(false);
+            }
+            for owner in remote.retained_replay_owners() {
+                let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+                let StoreCommitCoord {
+                    stream_id,
+                    sequence,
+                } = &commit.coord;
+                crate::StoreDatabase::load_retained_merge_materialization_on(
+                    records,
+                    &root,
+                    &stream_id.to_string(),
+                    *sequence,
+                    commit,
+                    &input_hash.to_string(),
+                )?;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     /// Whether a Circle bootstrap image is still the local device's live seed for
@@ -237,12 +243,15 @@ impl StoreDatabase {
                     if !remote.is_activated_stored_blob() {
                         continue;
                     }
-                    let locator = coven_protocol::blob::locator::BlobLocator::parse(
-                        remote.bytes().canonical_semantic_bytes(),
-                    )
-                    .map_err(|error| {
-                        DbError::context(format!("stored blob {object_id} locator"), error)
-                    })?;
+                    let Some(locator_bytes) = remote.payloads().carried_locator_bytes() else {
+                        return Err(DbError::Message(format!(
+                            "stored blob {object_id} carries no locator"
+                        )));
+                    };
+                    let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
+                        .map_err(|error| {
+                            DbError::context(format!("stored blob {object_id} locator"), error)
+                        })?;
                     let stored = coven_protocol::blob::locator::StoredBlobRef::new(
                         locator,
                         remote.object().clone(),
@@ -381,6 +390,7 @@ impl StoreDatabase {
         object: DurableStoreReclaimObject,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let store_dir = self.store_dir.clone();
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
             authorization_activation,
@@ -419,7 +429,12 @@ impl StoreDatabase {
                     ));
                 }
                 for remote in &remotes {
-                    persist_exact_remote_object_on(&tx, remote, "Store reclaim receipt candidate")?;
+                    persist_exact_remote_object_on(
+                        &tx,
+                        &store_dir,
+                        remote,
+                        "Store reclaim receipt candidate",
+                    )?;
                 }
                 update_store_reclaim_operation_on(&tx, &expected, &next)?;
                 tx.commit().map_err(DbError::from)?;
@@ -516,37 +531,38 @@ impl StoreDatabase {
             }
         };
         next.validate().map_err(store_reclaim_journal_error)?;
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before candidate replacement".to_string(),
-                    ));
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+                .ok_or_else(|| {
+                    DbError::Message("Store reclaim operation disappeared".to_string())
+                })?;
+            if current != expected {
+                return Err(DbError::Message(
+                    "Store reclaim operation changed before candidate replacement".to_string(),
+                ));
+            }
+            let next_candidate = next.candidate().expect("constructed candidate state");
+            match (current_candidate.head_ref(), next_candidate.head_ref()) {
+                (current, replacement) if current != replacement => {
+                    let (winner, prepared) = next_candidate.publication();
+                    replace_prepared_merge_head_remote_on(
+                        &tx,
+                        records.store_dir(),
+                        &current.object,
+                        winner,
+                        prepared,
+                        &current_candidate.reference,
+                    )?;
                 }
-                let next_candidate = next.candidate().expect("constructed candidate state");
-                match (current_candidate.head_ref(), next_candidate.head_ref()) {
-                    (current, replacement) if current != replacement => {
-                        let (winner, prepared) = next_candidate.publication();
-                        replace_prepared_merge_head_remote_on(
-                            &tx,
-                            &current.object,
-                            winner,
-                            prepared,
-                            &current_candidate.reference,
-                        )?;
-                    }
-                    _ => {}
-                }
-                update_store_reclaim_operation_on(&tx, &expected, &next)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
-            })
-            .await
+                _ => {}
+            }
+            update_store_reclaim_operation_on(&tx, &expected, &next)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(next)
+        })
+        .await
     }
 
     pub async fn begin_store_reclaim_candidate_replacement(
@@ -610,6 +626,7 @@ impl StoreDatabase {
         let replacement_remotes = object
             .remote_objects(&replacement)
             .map_err(store_reclaim_journal_error)?;
+        let store_dir = self.store_dir.clone();
         self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
@@ -622,7 +639,7 @@ impl StoreDatabase {
             let authority_ids = replacement_remotes
                 .iter()
                 .filter(|remote| matches!(
-                    remote,
+                    remote.record(),
                     RemoteObjectRecord::RetainedAuthority(record)
                         if matches!(
                             record.identity.domain,
@@ -631,7 +648,7 @@ impl StoreDatabase {
                                 | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
                         )
                 ))
-                .map(RemoteObjectRecord::object_id)
+                .map(|remote| remote.object_id())
                 .collect::<BTreeSet<_>>();
             for remote in replacement_remotes
                 .iter()
@@ -639,6 +656,7 @@ impl StoreDatabase {
             {
                 persist_exact_remote_object_on(
                     &tx,
+                    &store_dir,
                     remote,
                     "replacement Store reclaim candidate object",
                 )?;

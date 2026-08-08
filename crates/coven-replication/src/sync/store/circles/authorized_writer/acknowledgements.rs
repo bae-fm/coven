@@ -133,7 +133,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                             .to_string(),
                     )
                 })?;
-            self.database.mark_remote_object_uploaded(remote).await?;
+            self.database
+                .mark_remote_object_uploaded(remote.into_record())
+                .await?;
         }
         Ok(())
     }

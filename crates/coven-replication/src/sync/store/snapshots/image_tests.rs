@@ -1225,7 +1225,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             }
         }
         baseline
-            .validate_image()
+            .validate_image(&store_dir)
             .expect("validate snapshot replay baseline");
         let mut tampered = baseline.authority.clone();
         let coven_database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
@@ -1451,8 +1451,8 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
             "snapshot remote blob state must not carry its source StoreDir",
         );
         assert!(matches!(
-            graph.5.bytes().stored(),
-            coven_protocol::remote_object::RemoteStoredRepresentation::Blob { .. }
+            graph.5.payloads(),
+            coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { .. }
         ));
         for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
             let count = snapshot
@@ -1595,7 +1595,8 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
             replacement.blob(),
             owner,
         )
-        .expect("activate replacement blob graph object");
+        .expect("activate replacement blob graph object")
+        .into_record();
     let prepared = coven_database::PreparedSnapshotBlob {
         bindings: vec![replacement],
         authority: coven_protocol::audience_package::PackageAudience::Store,

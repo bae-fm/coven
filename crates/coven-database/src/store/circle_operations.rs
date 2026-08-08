@@ -1,3 +1,4 @@
+use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
 use crate::*;
 use coven_keys::encryption::EncryptionService;
@@ -281,22 +282,21 @@ impl StoreDatabase {
         }
         let covering = covering.clone();
         let covered = covered.clone();
-        self.connection
-            .call(move |conn| {
-                let Some(covering_reference) =
-                    Self::verified_circle_activation_on(conn, &root, circle_id, &covering)?
-                else {
-                    return Ok(false);
-                };
-                Self::verified_circle_control_covers_on(
-                    conn,
-                    &root,
-                    circle_id,
-                    &covering_reference.control,
-                    &covered,
-                )
-            })
-            .await
+        self.call_records(move |records| {
+            let Some(covering_reference) =
+                Self::verified_circle_activation_on(records, &root, circle_id, &covering)?
+            else {
+                return Ok(false);
+            };
+            Self::verified_circle_control_covers_on(
+                records,
+                &root,
+                circle_id,
+                &covering_reference.control,
+                &covered,
+            )
+        })
+        .await
     }
 
     pub async fn closing_circle_controls(
@@ -447,10 +447,13 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, DbError> {
-        self.with_retained_merge_materializations(move |conn, retained| {
-            retained.replay_inputs_on(conn, &root)?;
-            let Some(activation) =
-                retained.verified_circle_activation_on(conn, circle_id, &expected_control)?
+        self.with_retained_merge_materializations(move |records, retained| {
+            retained.replay_inputs_on(records, &root)?;
+            let Some(activation) = retained.verified_circle_activation_on(
+                records.conn(),
+                circle_id,
+                &expected_control,
+            )?
             else {
                 return Ok(None);
             };
@@ -468,56 +471,57 @@ impl StoreDatabase {
         expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<Option<String>, DbError> {
-        self.connection
-            .call(move |conn| {
-                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                    return Ok(None);
-                };
-                let Some(current) = state
-                    .authoring_state()
-                    .or_else(|| state.closing_authoring_state())
-                else {
-                    return Ok(None);
-                };
-                let Some(historical) =
-                    Self::verified_circle_activation_on(conn, &root, circle_id, &expected_control)?
-                else {
-                    return Ok(None);
-                };
-                if !Self::verified_circle_control_covers_on(
-                    conn,
-                    &root,
-                    circle_id,
-                    &current.control,
-                    &expected_control,
-                )? || current.control.value.epoch_id() != historical.control.value.epoch_id()
-                    || current.control.value.key_fingerprint() != expected_key_fingerprint
-                    || historical.control.value.key_fingerprint() != expected_key_fingerprint
-                {
-                    return Ok(None);
-                }
-                let coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } =
-                    &current.access.disposition
-                else {
-                    return Ok(None);
-                };
-                let parsed = coven_keys::encryption::MasterKeyring::from_serialized(keyring)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("parse Circle {circle_id} historical package keyring"),
-                            error,
-                        )
-                    })?;
-                let encryption = EncryptionService::from(parsed);
-                if encryption
-                    .service_for_fingerprint(expected_key_fingerprint.as_bytes())
-                    .is_err()
-                {
-                    return Ok(None);
-                }
-                Ok(Some(keyring.clone()))
-            })
-            .await
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
+                return Ok(None);
+            };
+            let Some(current) = state
+                .authoring_state()
+                .or_else(|| state.closing_authoring_state())
+            else {
+                return Ok(None);
+            };
+            let Some(historical) =
+                Self::verified_circle_activation_on(records, &root, circle_id, &expected_control)?
+            else {
+                return Ok(None);
+            };
+            if !Self::verified_circle_control_covers_on(
+                records,
+                &root,
+                circle_id,
+                &current.control,
+                &expected_control,
+            )? || current.control.value.epoch_id() != historical.control.value.epoch_id()
+                || current.control.value.key_fingerprint() != expected_key_fingerprint
+                || historical.control.value.key_fingerprint() != expected_key_fingerprint
+            {
+                return Ok(None);
+            }
+            let coven_protocol::circle::CircleAccessDisposition::Active { keyring, .. } =
+                &current.access.disposition
+            else {
+                return Ok(None);
+            };
+            let parsed = coven_keys::encryption::MasterKeyring::from_serialized(keyring).map_err(
+                |error| {
+                    DbError::context(
+                        format!("parse Circle {circle_id} historical package keyring"),
+                        error,
+                    )
+                },
+            )?;
+            let encryption = EncryptionService::from(parsed);
+            if encryption
+                .service_for_fingerprint(expected_key_fingerprint.as_bytes())
+                .is_err()
+            {
+                return Ok(None);
+            }
+            Ok(Some(keyring.clone()))
+        })
+        .await
     }
 
     pub async fn verified_circle_activation_context(
@@ -532,23 +536,22 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call(move |conn| {
-                let Some(commit) =
-                    Self::circle_activation_commit_ref_on(conn, circle_id, &control)?
-                else {
-                    return Ok(None);
-                };
-                let activation =
-                    Self::verified_circle_activation_on(conn, &root, circle_id, &control)?
-                        .ok_or_else(|| {
-                            DbError::Message(format!(
-                                "Circle {circle_id} activation context lost control {control:?}"
-                            ))
-                        })?;
-                Ok(Some((activation, commit)))
-            })
-            .await
+        self.call_records(move |records| {
+            let Some(commit) =
+                Self::circle_activation_commit_ref_on(records.conn(), circle_id, &control)?
+            else {
+                return Ok(None);
+            };
+            let activation =
+                Self::verified_circle_activation_on(records, &root, circle_id, &control)?
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "Circle {circle_id} activation context lost control {control:?}"
+                        ))
+                    })?;
+            Ok(Some((activation, commit)))
+        })
+        .await
     }
 
     pub async fn circle_blob_opening_protection(
@@ -558,17 +561,16 @@ impl StoreDatabase {
         expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
-        self.connection
-            .call(move |conn| {
-                circle_blob_opening_protection_on(
-                    conn,
-                    &root,
-                    circle_id,
-                    &expected_control,
-                    expected_key_fingerprint,
-                )
-            })
-            .await
+        self.call_records(move |records| {
+            circle_blob_opening_protection_on(
+                records,
+                &root,
+                circle_id,
+                &expected_control,
+                expected_key_fingerprint,
+            )
+        })
+        .await
     }
 
     pub async fn verified_circle_activation(
@@ -577,9 +579,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
-        self.connection
-            .call(move |conn| Self::verified_circle_activation_on(conn, &root, circle_id, &control))
-            .await
+        self.call_records(move |records| {
+            Self::verified_circle_activation_on(records, &root, circle_id, &control)
+        })
+        .await
     }
 
     pub async fn circle_restore_head(
@@ -594,21 +597,20 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call(move |conn| {
-                let Some(head) = Self::head_circle_control_on(conn, &root, circle_id, &controls)?
-                else {
-                    return Ok(None);
-                };
-                let commit = Self::circle_activation_commit_ref_on(conn, circle_id, &head)?
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "Circle {circle_id} head control has no activating commit"
-                        ))
-                    })?;
-                Ok(Some((head, commit)))
-            })
-            .await
+        self.call_records(move |records| {
+            let Some(head) = Self::head_circle_control_on(records, &root, circle_id, &controls)?
+            else {
+                return Ok(None);
+            };
+            let commit = Self::circle_activation_commit_ref_on(records.conn(), circle_id, &head)?
+                .ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle {circle_id} head control has no activating commit"
+                ))
+            })?;
+            Ok(Some((head, commit)))
+        })
+        .await
     }
 
     pub async fn retained_circle_activation_commit_ref(
@@ -630,22 +632,21 @@ impl StoreDatabase {
         covering: coven_protocol::circle::CircleControlCoord,
         covered: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call(move |conn| {
-                let Some(reference) =
-                    Self::verified_circle_activation_on(conn, &root, circle_id, &covering)?
-                else {
-                    return Ok(false);
-                };
-                Self::verified_circle_control_covers_on(
-                    conn,
-                    &root,
-                    circle_id,
-                    &reference.control,
-                    &covered,
-                )
-            })
-            .await
+        self.call_records(move |records| {
+            let Some(reference) =
+                Self::verified_circle_activation_on(records, &root, circle_id, &covering)?
+            else {
+                return Ok(false);
+            };
+            Self::verified_circle_control_covers_on(
+                records,
+                &root,
+                circle_id,
+                &reference.control,
+                &covered,
+            )
+        })
+        .await
     }
 
     /// The head control of a Circle: the retained control whose lineage no other
@@ -655,11 +656,12 @@ impl StoreDatabase {
     /// — never against a stale predecessor that still lists them active. A Circle
     /// with two uncovered controls is a forked lineage and fails loud.
     pub fn head_circle_control_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         controls: &[coven_protocol::circle::CircleControlCoord],
     ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
+        let conn = records.conn();
         // A control whose activating commit was reclaimed is superseded by a later
         // epoch and cannot be head; keep only controls whose commit is retained.
         let mut retained: Vec<(
@@ -673,7 +675,7 @@ impl StoreDatabase {
                 continue;
             };
             let materialization = Self::load_retained_merge_materialization_by_ref_on(
-                conn,
+                records,
                 root,
                 &activation_commit,
             )?;
@@ -688,7 +690,7 @@ impl StoreDatabase {
                     continue;
                 }
                 if Self::verified_circle_control_covers_on(
-                    conn,
+                    records,
                     root,
                     circle_id,
                     other_control,
@@ -811,18 +813,18 @@ impl StoreDatabase {
     }
 
     pub fn verified_circle_activation_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
-            Self::circle_activation_commit_ref_on(conn, circle_id, control)?
+            Self::circle_activation_commit_ref_on(records.conn(), circle_id, control)?
         else {
             return Ok(None);
         };
         let retained =
-            Self::load_retained_merge_materialization_by_ref_on(conn, root, &activation_commit)?;
+            Self::load_retained_merge_materialization_by_ref_on(records, root, &activation_commit)?;
         retained.circle_activation(circle_id, control).map(Some)
     }
 
@@ -833,17 +835,14 @@ impl StoreDatabase {
         current: coven_protocol::circle::PreparedCircleControl,
         prior: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call(move |connection| {
-                Self::verified_circle_control_covers_on(
-                    connection, &root, circle_id, &current, &prior,
-                )
-            })
-            .await
+        self.call_records(move |records| {
+            Self::verified_circle_control_covers_on(records, &root, circle_id, &current, &prior)
+        })
+        .await
     }
 
     pub fn verified_circle_control_covers_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         current: &coven_protocol::circle::PreparedCircleControl,
@@ -870,7 +869,7 @@ impl StoreDatabase {
                 continue;
             }
             let predecessor =
-                Self::verified_circle_activation_on(conn, root, circle_id, &coordinate)?
+                Self::verified_circle_activation_on(records, root, circle_id, &coordinate)?
                     .ok_or_else(|| {
                         DbError::Message(format!(
                         "Circle {circle_id} control lineage omits retained control {coordinate:?}"
@@ -1086,14 +1085,15 @@ pub(crate) fn circle_publication_context_on(
 }
 
 pub(crate) fn circle_blob_opening_protection_on(
-    conn: &Connection,
+    records: StoreRecords<'_>,
     root: &coven_protocol::store_commit::StoreRootRef,
     circle_id: coven_protocol::circle::CircleId,
     expected_control: &coven_protocol::circle::CircleControlCoord,
     expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
 ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
+    let conn = records.conn();
     let Some(authority) =
-        StoreDatabase::verified_circle_activation_on(conn, root, circle_id, expected_control)?
+        StoreDatabase::verified_circle_activation_on(records, root, circle_id, expected_control)?
     else {
         return Err(DbError::Message(format!(
             "Circle {circle_id} has no retained authority for control {expected_control:?}"
@@ -1131,7 +1131,7 @@ pub(crate) fn circle_blob_opening_protection_on(
     let mut retained_key = None;
     for control in controls {
         let activation =
-            StoreDatabase::verified_circle_activation_on(conn, root, circle_id, &control)?
+            StoreDatabase::verified_circle_activation_on(records, root, circle_id, &control)?
                 .ok_or_else(|| {
                     DbError::Message(format!(
                         "Circle {circle_id} activation index lost control {control:?}"
@@ -1322,10 +1322,16 @@ mod tests {
             }),
         };
         let db = crate::synthetic_store::open_test_db();
+        let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+        let activation_store_dir = store_dir.clone();
         let store_database = crate::StoreDatabase::new(&db);
         let first_commit = verified_commit.clone();
         db.test_sql(move |database| {
-            database.record_verified_circle_activations(&first_commit, &[verified])
+            database.record_verified_circle_activations(
+                &activation_store_dir,
+                &first_commit,
+                &[verified],
+            )
         })
         .await
         .expect("record multi-Owner control");
@@ -1442,6 +1448,7 @@ mod tests {
         let error = db
             .test_sql(move |database| {
                 database.record_verified_circle_activations(
+                    &store_dir,
                     &second_commit,
                     &[coven_protocol::circle_activation::VerifiedCircleReference {
                         reference: second_reference,

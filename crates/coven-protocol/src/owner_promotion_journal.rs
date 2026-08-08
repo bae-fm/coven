@@ -122,7 +122,7 @@ pub fn owner_promotion_published_objects(
     Ok(candidate
         .merge_owner_promotion_remote_objects(transition, publication, wrapped_key)?
         .iter()
-        .map(|remote| remote.object().clone())
+        .map(|remote| remote.record().object().clone())
         .collect())
 }
 
@@ -865,7 +865,7 @@ impl OwnerPromotionJournalPredecessor {
     pub fn transition_to(
         &self,
         next: &OwnerPromotionJournal,
-        remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
+        remote_objects: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<OwnerPromotionJournalTransition, OwnerPromotionJournalError> {
         let previous: OwnerPromotionJournal =
             serde_json::from_str(&self.previous_value).map_err(|error| {
@@ -892,7 +892,7 @@ pub struct OwnerPromotionJournalTransition {
     target_key: String,
     previous_value: String,
     next_value: String,
-    remote_objects: Vec<crate::remote_object::RemoteObjectRecord>,
+    remote_objects: Vec<crate::remote_object::ClosedRemoteObject>,
 }
 
 impl OwnerPromotionJournalTransition {
@@ -903,7 +903,7 @@ impl OwnerPromotionJournalTransition {
         String,
         String,
         String,
-        Vec<crate::remote_object::RemoteObjectRecord>,
+        Vec<crate::remote_object::ClosedRemoteObject>,
     ) {
         (
             self.journal_key,

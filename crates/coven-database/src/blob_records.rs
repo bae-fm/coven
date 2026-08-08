@@ -3,6 +3,25 @@ use crate::remote_object_records::load_remote_object_on;
 
 use super::*;
 
+/// The locator a stored blob's row carries.
+///
+/// The caller has already established the record is an activated stored blob,
+/// and that domain's payloads are the row-carried locator by the record's own
+/// validation. An absent locator is therefore a record contradicting itself, not
+/// a case to substitute empty bytes for.
+pub(crate) fn carried_blob_locator(
+    remote: &coven_protocol::remote_object::RemoteObjectRecord,
+    context: &str,
+) -> Result<BlobLocator, DbError> {
+    let locator_bytes = remote.payloads().carried_locator_bytes().ok_or_else(|| {
+        DbError::Message(format!(
+            "{context}: stored blob {} carries no locator in its row",
+            remote.object_id()
+        ))
+    })?;
+    BlobLocator::parse(locator_bytes).map_err(|error| DbError::context(context.to_string(), error))
+}
+
 pub(crate) struct LiveBlobRow {
     pub stamp: String,
     pub blob_id: String,
@@ -145,13 +164,10 @@ pub(crate) fn validate_stored_locator_on(
             "stored blob locator {locator_hash} does not reference activated ownership"
         )));
     }
-    let locator =
-        BlobLocator::parse(remote.bytes().canonical_semantic_bytes()).map_err(|error| {
-            DbError::context(
-                format!("stored blob locator {locator_hash} is invalid"),
-                error,
-            )
-        })?;
+    let locator = carried_blob_locator(
+        &remote,
+        &format!("stored blob locator {locator_hash} is invalid"),
+    )?;
     let actual = StoredBlobRef::new(locator, remote.object().clone()).map_err(|error| {
         DbError::context(
             format!("stored blob reference {locator_hash} is invalid"),
@@ -204,6 +220,7 @@ pub(crate) fn validate_stored_row_binding_on(
 
 pub fn load_prepared_audience_objects_on(
     conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     write_id: &WriteId,
 ) -> Result<PreparedAudienceObjects, DbError> {
     let mut package_statement = conn
@@ -241,7 +258,7 @@ pub fn load_prepared_audience_objects_on(
             let object_id = encoded
                 .parse()
                 .map_err(|error| DbError::context("stored remote object id", error))?;
-            PreparedAudiencePackage::from_remote(load_remote_object_on(conn, object_id)?)
+            PreparedAudiencePackage::from_remote(store_dir, load_remote_object_on(conn, object_id)?)
         })
         .collect::<Result<Vec<_>, DbError>>()?;
     let blobs = blob_rows
@@ -347,8 +364,7 @@ pub fn previous_row_blob_for_write_on(
             "prior row blob {table}/{row_id}/{column} is not activated"
         )));
     }
-    let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
-        .map_err(|error| DbError::context("prior row blob locator", error))?;
+    let locator = carried_blob_locator(&remote, "prior row blob locator")?;
     if !coven_protocol::blob::locator_describes_row(&locator, blob, plaintext_size, plaintext_hash)
     {
         return Ok(None);

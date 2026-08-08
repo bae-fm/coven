@@ -181,8 +181,7 @@ impl RemoteObjectRecord {
         if record.identity.domain != SharedLiveSetObjectDomain::StoredBlob
             || record.identity.semantic_hash != ObjectHash::digest(&locator_bytes)
             || record.identity.object != *stored.object()
-            || record.bytes.canonical_semantic_bytes() != locator_bytes
-            || record.bytes.stored().object() != stored.object()
+            || record.payloads.carried_locator_bytes() != Some(locator_bytes.as_slice())
         {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
@@ -210,11 +209,7 @@ impl RemoteObjectRecord {
         if &record.identity.domain != domain
             || record.identity.semantic_hash != ObjectHash::digest(&canonical_semantic_bytes)
             || record.identity.object != *domain.package_object()?
-            || record.bytes.stored().object() != domain.package_object()?
-            || matches!(
-                record.bytes.stored(),
-                RemoteStoredRepresentation::Blob { .. }
-            )
+            || matches!(record.payloads, RemoteObjectPayloads::RowBlob { .. })
         {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
@@ -309,10 +304,10 @@ impl RemoteObjectRecord {
                 semantic_hash: record.identity.semantic_hash,
                 object: record.identity.object.clone(),
             };
-            let bytes = record.bytes.clone();
+            let payloads = record.payloads.clone();
             *self = Self::CandidateExclusive(CandidateObjectRecord {
                 identity,
-                bytes,
+                payloads,
                 state: CandidateObjectState::CleanupPending { former_candidates },
             });
         } else {
@@ -384,10 +379,11 @@ impl RemoteObjectRecord {
                     RetainedAuthorityObjectDomain::Commit { reference }
                         if reference == &candidate
                 ) {
-                    let bytes = record.bytes.clone();
+                    let payloads = record.payloads.clone();
                     *self = Self::CandidateCommit(CandidateCommitRecord {
                         identity: candidate,
-                        bytes,
+                        semantic_hash: record.identity.semantic_hash,
+                        payloads,
                         state: CandidateCommitState::CleanupPending {
                             proof: nonactivation.proof,
                         },
@@ -395,12 +391,8 @@ impl RemoteObjectRecord {
                     self.validate()?;
                     return Ok(None);
                 }
-                ProtocolInertObject::new(
-                    record.identity.clone(),
-                    record.bytes.canonical_semantic_bytes().to_vec(),
-                    ownership.nonactivated.clone(),
-                )
-                .map(Some)
+                ProtocolInertObject::new(record.identity.clone(), ownership.nonactivated.clone())
+                    .map(Some)
             }
             Self::SharedLiveSet(record) => {
                 if head_nonactivation.is_some() {
@@ -441,7 +433,7 @@ impl RemoteObjectRecord {
         if record.identity.domain != SharedLiveSetObjectDomain::StoredBlob
             || record.identity.semantic_hash != ObjectHash::digest(&locator_bytes)
             || record.identity.object != *stored.object()
-            || record.bytes.canonical_semantic_bytes() != locator_bytes
+            || record.payloads.carried_locator_bytes() != Some(locator_bytes.as_slice())
         {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }

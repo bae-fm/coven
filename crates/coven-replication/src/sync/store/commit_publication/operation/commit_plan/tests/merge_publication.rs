@@ -82,7 +82,8 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
             if matches!(
                 &record.identity.domain,
                 coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                    reference
+                    reference,
+                    ..
                 } if reference.object == fixture.head_object
             ) && matches!(
                 &record.state,
@@ -513,7 +514,8 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
             if matches!(
                 &record.identity.domain,
                 coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
-                    reference
+                    reference,
+                    ..
                 } if reference == &accepted_head
             )
     ));

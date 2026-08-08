@@ -51,6 +51,7 @@ fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
 #[tokio::test]
 async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     let database = crate::synthetic_store::open_test_db();
+    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let activation = StoreBatchCommitRef {
         coord: StoreCommitCoord {
             stream_id: coven_protocol::causal_grants::AuthorStreamId::from_bytes([23; 32]),
@@ -63,6 +64,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
         serde_json::to_string(&activation).expect("serialize bootstrap activation");
     database
         .call(move |connection| {
+            let store_dir = store_dir;
             connection
                 .execute(
                     "INSERT INTO circle_bootstrap_coverage
@@ -82,7 +84,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                 .map_err(DbError::from)?;
             let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
             assert_eq!(
-                MergeMaterializationTransaction::new(&transaction)
+                MergeMaterializationTransaction::new(&transaction, &store_dir)
                     .retire_circle_bootstrap_coverage(&activation)?,
                 1
             );
@@ -105,7 +107,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
             assert_eq!(retained, 1);
             let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
             assert_eq!(
-                MergeMaterializationTransaction::new(&transaction)
+                MergeMaterializationTransaction::new(&transaction, &store_dir)
                     .retire_circle_bootstrap_coverage(&activation)?,
                 1
             );

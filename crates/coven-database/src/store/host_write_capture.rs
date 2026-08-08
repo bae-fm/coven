@@ -49,6 +49,9 @@ enum AudienceBlobMoveMaterialization<'a> {
 
 pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
     transaction: rusqlite::Transaction<'connection>,
+    /// Where this store's payload files are. Staging an audience blob move
+    /// resolves the Circle authority behind it, whose records name payloads.
+    store_dir: &'operation coven_foundation::store_dir::StoreDir,
     changes_before: u64,
     synced_tables: &'operation [SyncedTable],
     gates: &'operation Gates,
@@ -60,11 +63,18 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
 
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
+    store_dir: &'transaction coven_foundation::store_dir::StoreDir,
 }
 
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
-    fn new(transaction: &'transaction rusqlite::Transaction<'connection>) -> Self {
-        Self { transaction }
+    fn new(
+        transaction: &'transaction rusqlite::Transaction<'connection>,
+        store_dir: &'transaction coven_foundation::store_dir::StoreDir,
+    ) -> Self {
+        Self {
+            transaction,
+            store_dir,
+        }
     }
 
     pub fn local_activated_registration(
@@ -101,7 +111,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         super::circle_blob_opening_protection_on(
-            self.transaction,
+            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
             root,
             circle_id,
             expected_control,
@@ -709,6 +719,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin_host(
         connection: &'connection Connection,
+        store_dir: &'operation coven_foundation::store_dir::StoreDir,
         synced_tables: &'operation [SyncedTable],
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
@@ -718,6 +729,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
     ) -> Result<Self, DbError> {
         Self::begin(
             connection,
+            store_dir,
             synced_tables,
             gates,
             blob_decls,
@@ -729,6 +741,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
 
     pub(crate) fn begin_prepared_blob_transition(
         connection: &'connection Connection,
+        store_dir: &'operation coven_foundation::store_dir::StoreDir,
         synced_tables: &'operation [SyncedTable],
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
@@ -737,6 +750,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
     ) -> Result<Self, DbError> {
         Self::begin(
             connection,
+            store_dir,
             synced_tables,
             gates,
             blob_decls,
@@ -746,8 +760,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn begin(
         connection: &'connection Connection,
+        store_dir: &'operation coven_foundation::store_dir::StoreDir,
         synced_tables: &'operation [SyncedTable],
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
@@ -760,6 +776,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         Ok(Self {
             transaction,
+            store_dir,
             changes_before,
             synced_tables,
             gates,
@@ -779,6 +796,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
     {
         let Self {
             transaction: tx,
+            store_dir,
             changes_before,
             synced_tables,
             gates,
@@ -871,7 +889,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
-                    let blob_transaction = HostWriteBlobTransaction::new(&tx);
+                    let blob_transaction = HostWriteBlobTransaction::new(&tx, store_dir);
                     Some(
                         staging
                             .stage_audience_move_blobs_on(

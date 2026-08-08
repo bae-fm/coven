@@ -104,14 +104,14 @@ impl DurableStoreDeviceExclusionObject {
     pub(crate) fn remote_record(
         &self,
         candidate: &PreparedStoreOperationCommit,
-    ) -> Result<RemoteObjectRecord, StoreDeviceExclusionJournalError> {
+    ) -> Result<crate::remote_object::ClosedRemoteObject, StoreDeviceExclusionJournalError> {
         let bytes = self.semantic_bytes();
-        let stored = self.prepared().stored_bytes().to_vec();
+        let stored = self.prepared().stored_bytes();
         match self {
             Self::Proposal { reference, .. } => {
                 RemoteObjectRecord::candidate_activated_device_exclusion_proposal(
                     reference.clone(),
-                    bytes,
+                    &bytes,
                     stored,
                     candidate.reference.clone(),
                 )
@@ -119,7 +119,7 @@ impl DurableStoreDeviceExclusionObject {
             Self::Outcome { reference, .. } => {
                 RemoteObjectRecord::candidate_activated_device_exclusion_outcome(
                     reference.clone(),
-                    bytes,
+                    &bytes,
                     stored,
                     candidate.reference.clone(),
                 )
@@ -314,7 +314,8 @@ impl DurableStoreDeviceExclusionOperation {
 
     pub fn remote_objects(
         &self,
-    ) -> Result<Vec<RemoteObjectRecord>, StoreDeviceExclusionJournalError> {
+    ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, StoreDeviceExclusionJournalError>
+    {
         let candidate = self.candidate().ok_or_else(|| {
             StoreDeviceExclusionJournalError::Invalid(
                 "Store-device exclusion has no prepared activation candidate".to_string(),
@@ -328,7 +329,7 @@ impl DurableStoreDeviceExclusionOperation {
 
     pub fn authority_remote_object(
         &self,
-    ) -> Result<RemoteObjectRecord, StoreDeviceExclusionJournalError> {
+    ) -> Result<crate::remote_object::ClosedRemoteObject, StoreDeviceExclusionJournalError> {
         let candidate = self.candidate().ok_or_else(|| {
             StoreDeviceExclusionJournalError::Invalid(
                 "Store-device exclusion has no authority owner candidate".to_string(),

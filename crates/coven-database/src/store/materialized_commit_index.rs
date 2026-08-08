@@ -29,8 +29,8 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.with_retained_merge_materializations(move |conn, cache| {
-            cache.replay_inputs_on(conn, &root)
+        self.with_retained_merge_materializations(move |records, cache| {
+            cache.replay_inputs_on(records, &root)
         })
         .await
     }
@@ -71,8 +71,8 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.with_retained_merge_materializations(move |conn, cache| {
-            cache.replay_inputs_with_verified_commits_on(conn, &root, &verified)
+        self.with_retained_merge_materializations(move |records, cache| {
+            cache.replay_inputs_with_verified_commits_on(records, &root, &verified)
         })
         .await
     }
@@ -82,9 +82,9 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.with_retained_merge_materializations(move |conn, cache| {
+        self.with_retained_merge_materializations(move |records, cache| {
             cache
-                .replay_inputs_on(conn, &root)?
+                .replay_inputs_on(records, &root)?
                 .into_iter()
                 .find(|materialization| materialization.commit_ref() == &reference)
                 .ok_or_else(|| {
@@ -102,8 +102,8 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
-        self.with_retained_merge_materializations(move |conn, cache| {
-            let retained = { cache.replay_inputs_on(conn, &root)? };
+        self.with_retained_merge_materializations(move |records, cache| {
+            let retained = { cache.replay_inputs_on(records, &root)? };
             references
                 .iter()
                 .map(|reference| {
@@ -112,13 +112,13 @@ impl StoreDatabase {
                         .find(|materialization| materialization.commit_ref() == reference)
                     {
                         Some(materialization) => Self::open_retained_merge_history_checkpoint_on(
-                            conn,
+                            records.conn(),
                             reference,
                             materialization,
                         ),
-                        None => {
-                            Self::load_retained_merge_history_checkpoint_on(conn, &root, reference)
-                        }
+                        None => Self::load_retained_merge_history_checkpoint_on(
+                            records, &root, reference,
+                        ),
                     }
                 })
                 .collect()

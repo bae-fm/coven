@@ -1861,7 +1861,8 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
             generation: 0,
         },
     )
-    .expect("activate exact user blob for the initial snapshot");
+    .expect("activate exact user blob for the initial snapshot")
+    .into_record();
     let object_id = record.object_id().to_string();
     let state = serde_json::to_string(&record).expect("serialize exact user blob state");
     let locator_hash = stored.locator().locator_hash().to_string();

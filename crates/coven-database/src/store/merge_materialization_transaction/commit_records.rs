@@ -234,7 +234,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
                 StoreDatabase::advance_owner_promotion_journal_on(
-                    self.transaction,
+                    self.record_transaction(),
                     journal_key,
                     target_key,
                     previous_value,
@@ -325,9 +325,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             ));
         }
         let (retained_commit_ref, retained) =
-            crate::StoreDatabase::retain_merge_materialization_on(conn, &root, &materialization)?;
+            crate::StoreDatabase::retain_merge_materialization_on(
+                self.record_transaction(),
+                &root,
+                &materialization,
+            )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
-            conn,
+            self.records(),
             &root,
             materialization.commit_ref(),
             materialization.circle_activations(),

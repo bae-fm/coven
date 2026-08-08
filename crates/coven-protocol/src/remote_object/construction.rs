@@ -1,23 +1,53 @@
 use super::ownership::*;
 use super::*;
 
+/// Refuse bytes that are not the ones the exact reference names. The spool
+/// files are content-keyed, so this is the one place the ciphertext a record
+/// names is checked against the bytes a caller hands over.
+/// Pair a record whose plaintext and ciphertext both go to the spool with the
+/// two payloads it will be persisted alongside.
+fn spooled_inline(
+    record: RemoteObjectRecord,
+    canonical_semantic_bytes: &[u8],
+    stored_bytes: &[u8],
+) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+    let mut payloads = BTreeMap::new();
+    if let SemanticPayload::Spooled(hash) = record.semantic_payload() {
+        payloads.insert(hash, canonical_semantic_bytes.to_vec());
+    }
+    if let Some(hash) = record.stored_payload() {
+        payloads.insert(hash, stored_bytes.to_vec());
+    }
+    ClosedRemoteObject::with_payloads(record, payloads)
+}
+
+fn verify_stored_bytes(
+    object: &ExactObjectRef,
+    stored_bytes: &[u8],
+) -> Result<(), RemoteObjectRecordError> {
+    object
+        .verify(stored_bytes)
+        .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))
+}
+
 impl RemoteObjectRecord {
     fn candidate_exclusive_retained_authority(
         family: CandidateFamilyId,
         domain: CandidateExclusiveObjectDomain,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = domain.object().clone();
+        verify_stored_bytes(&object, stored_bytes)?;
         let record = Self::CandidateExclusive(CandidateObjectRecord {
             identity: CandidateExclusiveTarget {
                 family,
                 domain,
-                semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
-                object: object.clone(),
+                semantic_hash: ObjectHash::digest(canonical_signed_bytes),
+                object,
             },
-            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            payloads: RemoteObjectPayloads::SpooledInline,
             state: CandidateObjectState::Prepared {
                 ownership: PendingCandidateOwnership {
                     pending: BTreeSet::from([owner]),
@@ -25,25 +55,26 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        record.validate_payload(canonical_signed_bytes)?;
+        spooled_inline(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub(super) fn candidate_activated_retained_authority(
         domain: RetainedAuthorityObjectDomain,
         semantic_hash: ObjectHash,
         object: ExactObjectRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        verify_stored_bytes(&object, stored_bytes)?;
         let record = Self::RetainedAuthority(RetainedAuthorityRecord {
             identity: RetainedAuthorityObjectRef {
                 domain,
                 semantic_hash,
-                object: object.clone(),
+                object,
             },
-            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            payloads: RemoteObjectPayloads::SpooledInline,
             state: RetainedAuthorityObjectState::Prepared {
                 ownership: PendingCandidateOwnership {
                     pending: BTreeSet::from([owner]),
@@ -51,35 +82,44 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        record.validate_payload(canonical_signed_bytes)?;
+        spooled_inline(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub fn candidate_commit(
         identity: StoreBatchCommitRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let object = identity.object.clone();
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        verify_stored_bytes(&identity.object, stored_bytes)?;
         let record = Self::CandidateCommit(CandidateCommitRecord {
             identity,
-            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            semantic_hash: ObjectHash::digest(canonical_signed_bytes),
+            payloads: RemoteObjectPayloads::SpooledInline,
             state: CandidateCommitState::Prepared,
         });
-        record.validate()?;
-        Ok(record)
+        record.validate_payload(canonical_signed_bytes)?;
+        spooled_inline(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub fn candidate_activated_store_head(
         reference: crate::store_commit::StoreDeviceHeadRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
+        // The head names the commit it publishes; reading it out here is the
+        // one parse, and the record carries the answer from then on.
+        let head: crate::store_commit::StoreDeviceHead =
+            serde_json::from_slice(canonical_signed_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
         Self::candidate_activated_retained_authority(
-            RetainedAuthorityObjectDomain::DeviceHead { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
+            RetainedAuthorityObjectDomain::DeviceHead {
+                reference,
+                head_commit: head.commit.clone(),
+            },
+            ObjectHash::digest(canonical_signed_bytes),
             object,
             canonical_signed_bytes,
             stored_bytes,
@@ -89,14 +129,14 @@ impl RemoteObjectRecord {
 
     pub(crate) fn candidate_activated_store_acknowledgement(
         reference: crate::store_commit::StoreAckRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::Acknowledgement { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
+            ObjectHash::digest(canonical_signed_bytes),
             object,
             canonical_signed_bytes,
             stored_bytes,
@@ -106,14 +146,14 @@ impl RemoteObjectRecord {
 
     pub(crate) fn candidate_activated_circle_acknowledgement(
         reference: CircleAckRef,
-        canonical_semantic_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_semantic_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::CircleAcknowledgement { reference },
-            ObjectHash::digest(&canonical_semantic_bytes),
+            ObjectHash::digest(canonical_semantic_bytes),
             object,
             canonical_semantic_bytes,
             stored_bytes,
@@ -123,11 +163,11 @@ impl RemoteObjectRecord {
 
     pub fn candidate_activated_store_membership_resolution(
         reference: crate::membership::StoreMembershipConflictResolutionRef,
-        canonical_semantic_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_semantic_bytes: &[u8],
+        stored_bytes: &[u8],
         candidate: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
-        let semantic_hash = ObjectHash::digest(&canonical_semantic_bytes);
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
+        let semantic_hash = ObjectHash::digest(canonical_semantic_bytes);
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
@@ -142,10 +182,10 @@ impl RemoteObjectRecord {
     pub fn candidate_exclusive_merge_membership_entry(
         family: CandidateFamilyId,
         reference: crate::membership::MembershipEntryRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         Self::candidate_exclusive_retained_authority(
             family,
             CandidateExclusiveObjectDomain::MergeMembershipEntry { family, reference },
@@ -158,10 +198,10 @@ impl RemoteObjectRecord {
     pub fn candidate_exclusive_merge_membership_head(
         family: CandidateFamilyId,
         reference: crate::membership::MembershipHeadRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         Self::candidate_exclusive_retained_authority(
             family,
             CandidateExclusiveObjectDomain::MergeMembershipHead { family, reference },
@@ -174,10 +214,10 @@ impl RemoteObjectRecord {
     pub(crate) fn candidate_exclusive_merge_membership_wrapped_store_key(
         family: CandidateFamilyId,
         reference: crate::wrapped_store_key::WrappedStoreKeyRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         Self::candidate_exclusive_retained_authority(
             family,
             CandidateExclusiveObjectDomain::MergeMembershipWrappedStoreKey { family, reference },
@@ -189,12 +229,12 @@ impl RemoteObjectRecord {
 
     pub(crate) fn candidate_activated_device_exclusion_proposal(
         reference: crate::store_commit::StoreDeviceExclusionProposalRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
-        let semantic_hash = ObjectHash::digest(&canonical_signed_bytes);
+        let semantic_hash = ObjectHash::digest(canonical_signed_bytes);
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference },
             semantic_hash,
@@ -207,12 +247,12 @@ impl RemoteObjectRecord {
 
     pub(crate) fn candidate_activated_device_exclusion_outcome(
         reference: crate::store_commit::StoreDeviceExclusionOutcomeRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object().clone();
-        let semantic_hash = ObjectHash::digest(&canonical_signed_bytes);
+        let semantic_hash = ObjectHash::digest(canonical_signed_bytes);
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::DeviceExclusionOutcome { reference },
             semantic_hash,
@@ -225,14 +265,14 @@ impl RemoteObjectRecord {
 
     pub fn candidate_activated_reclaim_evidence(
         reference: crate::reclaim::ReclaimEvidenceRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::ReclaimEvidence { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
+            ObjectHash::digest(canonical_signed_bytes),
             object,
             canonical_signed_bytes,
             stored_bytes,
@@ -242,14 +282,14 @@ impl RemoteObjectRecord {
 
     pub fn candidate_activated_reclaim_authorization(
         reference: crate::reclaim::ReclaimAuthorizationRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::ReclaimAuthorization { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
+            ObjectHash::digest(canonical_signed_bytes),
             object,
             canonical_signed_bytes,
             stored_bytes,
@@ -259,14 +299,14 @@ impl RemoteObjectRecord {
 
     pub fn candidate_activated_reclaim_receipt(
         reference: crate::reclaim::ReclaimReceiptRef,
-        canonical_signed_bytes: Vec<u8>,
-        stored_bytes: Vec<u8>,
+        canonical_signed_bytes: &[u8],
+        stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = reference.object.clone();
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::ReclaimReceipt { reference },
-            ObjectHash::digest(&canonical_signed_bytes),
+            ObjectHash::digest(canonical_signed_bytes),
             object,
             canonical_signed_bytes,
             stored_bytes,
@@ -277,7 +317,7 @@ impl RemoteObjectRecord {
     pub fn snapshot_activated_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let locator_bytes = stored.locator().to_bytes();
         let record = Self::SharedLiveSet(SharedObjectRecord {
             identity: SharedLiveSetObjectRef {
@@ -285,7 +325,7 @@ impl RemoteObjectRecord {
                 semantic_hash: ObjectHash::digest(&locator_bytes),
                 object: stored.object().clone(),
             },
-            bytes: RemoteObjectBytes::blob(locator_bytes, stored.object().clone())?,
+            payloads: RemoteObjectPayloads::RowBlob { locator_bytes },
             state: OwnedObjectState::UploadedVerified {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
@@ -294,14 +334,13 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        ClosedRemoteObject::carried(record)
     }
 
     pub fn snapshot_activated_image(
         image: &crate::store_commit::SnapshotImageRef,
         owner: SnapshotObjectOwner,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let record = Self::SharedLiveSet(SharedObjectRecord {
             identity: SharedLiveSetObjectRef {
                 domain: SharedLiveSetObjectDomain::StoreSnapshotImage {
@@ -310,7 +349,7 @@ impl RemoteObjectRecord {
                 semantic_hash: image.image_hash,
                 object: image.object.clone(),
             },
-            bytes: RemoteObjectBytes::external_exact(Vec::new(), image.object.clone())?,
+            payloads: RemoteObjectPayloads::SpooledExternal,
             state: OwnedObjectState::UploadedVerified {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
@@ -319,15 +358,14 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        ClosedRemoteObject::carried(record)
     }
 
     pub fn activated_external_package(
         domain: SharedLiveSetObjectDomain,
         package: &crate::audience_package::AudiencePackage,
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         if !matches!(
             domain,
             SharedLiveSetObjectDomain::StorePackage { .. }
@@ -341,9 +379,9 @@ impl RemoteObjectRecord {
             identity: SharedLiveSetObjectRef {
                 domain,
                 semantic_hash: ObjectHash::digest(&canonical_semantic_bytes),
-                object: object.clone(),
+                object,
             },
-            bytes: RemoteObjectBytes::external_exact(canonical_semantic_bytes, object)?,
+            payloads: RemoteObjectPayloads::SpooledExternal,
             state: OwnedObjectState::UploadedVerified {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
@@ -352,14 +390,18 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        record.validate_payload(&canonical_semantic_bytes)?;
+        let hash = ObjectHash::digest(&canonical_semantic_bytes);
+        ClosedRemoteObject::with_payloads(
+            record,
+            BTreeMap::from([(hash, canonical_semantic_bytes)]),
+        )
     }
 
     pub fn activated_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: StoreBatchCommitRef,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let locator_bytes = stored.locator().to_bytes();
         let record = Self::SharedLiveSet(SharedObjectRecord {
             identity: SharedLiveSetObjectRef {
@@ -367,7 +409,7 @@ impl RemoteObjectRecord {
                 semantic_hash: ObjectHash::digest(&locator_bytes),
                 object: stored.object().clone(),
             },
-            bytes: RemoteObjectBytes::blob(locator_bytes, stored.object().clone())?,
+            payloads: RemoteObjectPayloads::RowBlob { locator_bytes },
             state: OwnedObjectState::UploadedVerified {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
@@ -376,15 +418,14 @@ impl RemoteObjectRecord {
                 },
             },
         });
-        record.validate()?;
-        Ok(record)
+        ClosedRemoteObject::carried(record)
     }
 
     pub fn candidate_owned_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: StoreBatchCommitRef,
         uploaded_verified: bool,
-    ) -> Result<Self, RemoteObjectRecordError> {
+    ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let locator_bytes = stored.locator().to_bytes();
         let ownership = PendingCandidateOwnership {
             pending: BTreeSet::from([owner]),
@@ -407,10 +448,9 @@ impl RemoteObjectRecord {
                 semantic_hash: ObjectHash::digest(&locator_bytes),
                 object: stored.object().clone(),
             },
-            bytes: RemoteObjectBytes::blob(locator_bytes, stored.object().clone())?,
+            payloads: RemoteObjectPayloads::RowBlob { locator_bytes },
             state,
         });
-        record.validate()?;
-        Ok(record)
+        ClosedRemoteObject::carried(record)
     }
 }

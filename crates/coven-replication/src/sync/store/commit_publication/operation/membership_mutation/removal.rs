@@ -450,7 +450,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         for wrapped in &plan.wraps {
             if let Some(remotes) = &remote_objects {
                 let expected = exact_owned_remote(remotes, &wrapped.prepared.reference.object)?;
-                persistence.mark_remote_object_uploaded(expected).await?;
+                persistence
+                    .mark_remote_object_uploaded(expected.into_record())
+                    .await?;
             }
         }
         let prepared_wraps = plan
@@ -472,7 +474,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         }
         if let Some(remotes) = &remote_objects {
             let expected = exact_owned_remote(remotes, &publication.entry_ref.object)?;
-            persistence.mark_remote_object_uploaded(expected).await?;
+            persistence
+                .mark_remote_object_uploaded(expected.into_record())
+                .await?;
         }
         match operation
             .set_membership_access(plan.desired_access.clone())
@@ -530,10 +534,10 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     .await
                     .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
                 persistence
-                    .mark_remote_object_uploaded(exact_owned_remote(
-                        &initial_remotes,
-                        &candidate.reference.object,
-                    )?)
+                    .mark_remote_object_uploaded(
+                        exact_owned_remote(&initial_remotes, &candidate.reference.object)?
+                            .into_record(),
+                    )
                     .await?;
                 loop {
                     let previous_candidate = candidate.as_ref().clone();
@@ -550,7 +554,10 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         }
                         .encode()?,
                         generation: keyring.current_generation(),
-                        remote_objects: current_remotes.clone(),
+                        remote_objects: current_remotes
+                            .iter()
+                            .map(|remote| remote.record().clone())
+                            .collect(),
                     },
                     )
                     .await?;
@@ -594,7 +601,8 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         let (previous_intent_hash, replacement_intent_hash) = persistence
                             .adopt_candidate_head(
                                 plan_bytes,
-                                exact_owned_remote(&previous_remotes, &previous_head.object)?,
+                                exact_owned_remote(&previous_remotes, &previous_head.object)?
+                                    .into_record(),
                                 exact_owned_remote(&replacement_remotes, &replacement_head.object)?,
                                 Some(keyring.current_generation()),
                             )

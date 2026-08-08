@@ -158,6 +158,7 @@ pub fn install_circle_bootstrap_remote_objects_on(
         } else {
             remote_object::RemoteObjectRecord::activated_blob(stored, activation_commit.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?
+                .into_record()
         };
         conn.execute(
             "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)

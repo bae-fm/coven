@@ -195,10 +195,11 @@ fn test_membership_resolution_record(
         RetainedAuthorityObjectDomain::StoreMembershipResolution { reference },
         ObjectHash::digest(&canonical),
         object,
-        canonical.clone(),
-        canonical,
+        &canonical,
+        &canonical,
         candidate,
     )
+    .map(ClosedRemoteObject::into_record)
 }
 
 fn activate_test_retained_authority(
@@ -253,7 +254,8 @@ fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner(
     };
     let mut record =
         RemoteObjectRecord::activated_external_package(domain.clone(), &package, commit.clone())
-            .expect("activate external package");
+            .expect("activate external package")
+            .into_record();
     let replay = RetainedReplayOwner::Commit {
         commit: commit.clone(),
         input_hash: ObjectHash::digest(b"retained input"),
@@ -266,11 +268,8 @@ fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner(
         .merge_retained_replay_owner(replay.clone())
         .expect("repeat exact pin");
 
-    assert!(matches!(
-        record.bytes().stored(),
-        RemoteStoredRepresentation::ExternalExact { object }
-            if object == &reference.object
-    ));
+    assert_eq!(record.payloads(), &RemoteObjectPayloads::SpooledExternal);
+    assert_eq!(record.object(), &reference.object);
     assert_eq!(
         record.retained_replay_owners().collect::<Vec<_>>(),
         vec![&replay]
@@ -283,8 +282,10 @@ fn external_package_keeps_exact_ciphertext_identity_and_idempotent_replay_owner(
     let RemoteObjectRecord::SharedLiveSet(inner) = &mut wrong_plaintext else {
         unreachable!("constructed shared package")
     };
-    inner.bytes.canonical_semantic_bytes.push(b' ');
-    assert!(wrong_plaintext.validate().is_err());
+    inner.identity.semantic_hash = ObjectHash::digest(b"another package");
+    assert!(wrong_plaintext
+        .validate_payload(&package.to_bytes())
+        .is_err());
 
     let mut wrong_reference = record;
     let RemoteObjectRecord::SharedLiveSet(inner) = &mut wrong_reference else {
@@ -308,8 +309,9 @@ fn shared_blob_retains_each_commit_owner_independently() {
         commit: second.clone(),
         input_hash: ObjectHash::digest(b"second retained input"),
     };
-    let mut record =
-        RemoteObjectRecord::activated_blob(&blob, first.clone()).expect("activate shared blob");
+    let mut record = RemoteObjectRecord::activated_blob(&blob, first.clone())
+        .expect("activate shared blob")
+        .into_record();
     record
         .merge_blob_activation(&blob, &second)
         .expect("activate second blob owner");
@@ -393,8 +395,7 @@ fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {
             semantic_hash: ObjectHash::digest(&canonical_semantic_bytes),
             object: object.clone(),
         },
-        bytes: RemoteObjectBytes::inline(canonical_semantic_bytes, stored_bytes, object)
-            .expect("valid stored bytes"),
+        payloads: RemoteObjectPayloads::SpooledInline,
         state: OwnedObjectState::UploadedVerified {
             ownership: SharedObjectOwnership {
                 pending: BTreeSet::new(),
@@ -555,11 +556,12 @@ fn deserialized_device_head_rejects_resolution_cleanup_state() {
             head_hash: head.head_hash(),
             object,
         },
-        bytes.clone(),
-        bytes,
+        &bytes,
+        &bytes,
         candidate,
     )
-    .expect("prepare retained Store head");
+    .expect("prepare retained Store head")
+    .into_record();
     let RemoteObjectRecord::RetainedAuthority(retained) = &mut record else {
         panic!("Store head must use retained authority")
     };

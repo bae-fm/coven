@@ -1722,13 +1722,18 @@ impl DatabaseTestSql<'_> {
 
     pub fn load_retained_merge_replay_inputs(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::OwnedVerifiedMergeMaterialization>, DbError> {
-        crate::StoreDatabase::load_retained_merge_replay_inputs_on(self.connection, root)
+        crate::StoreDatabase::load_retained_merge_replay_inputs_on(
+            crate::payload_spool::StoreRecords::new(self.connection, store_dir),
+            root,
+        )
     }
 
     pub fn record_verified_circle_activations(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
@@ -1736,22 +1741,30 @@ impl DatabaseTestSql<'_> {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::MergeMaterializationTransaction::new(&transaction)
+        crate::MergeMaterializationTransaction::new(&transaction, store_dir)
             .record_verified_circle_activations(commit, activations)?;
         transaction.commit().map_err(DbError::from)
     }
 
     pub fn apply_changeset(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         bytes: &[u8],
         tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<crate::ApplyResult, DbError> {
-        crate::resolve_and_apply_changeset(self.connection, bytes, tables, receiver_wall_ms)
+        crate::resolve_and_apply_changeset(
+            self.connection,
+            store_dir,
+            bytes,
+            tables,
+            receiver_wall_ms,
+        )
     }
 
     pub fn apply_changesets_atomically(
         &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         changesets: Vec<Vec<u8>>,
         tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
@@ -1766,10 +1779,11 @@ impl DatabaseTestSql<'_> {
             let changeset = crate::ValidatedChangeset::new(changeset, schema.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?;
             results.push(
-                crate::MergeMaterializationTransaction::new(&transaction).apply_changeset(
-                    changeset,
-                    crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
-                )?,
+                crate::MergeMaterializationTransaction::new(&transaction, store_dir)
+                    .apply_changeset(
+                        changeset,
+                        crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
+                    )?,
             );
         }
         let foreign_key_violations = transaction

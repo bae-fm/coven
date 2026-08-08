@@ -326,8 +326,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let storage = self.storage.as_ref();
         let store_root_hash = self.store_root().store_root_hash;
         for prepared in database.prepared_remote_objects(write_id).await? {
-            let remote = prepared.record;
-            let prepared_state = match &remote {
+            let remote = prepared.closed;
+            let prepared_state = match &*remote {
                 coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) => {
                     matches!(
                         record.state,
@@ -348,15 +348,24 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 }
                 coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
             };
-            match remote.bytes().stored() {
-                coven_protocol::remote_object::RemoteStoredRepresentation::Inline {
-                    bytes,
-                    object,
-                } => {
-                    let package = coven_protocol::audience_package::AudiencePackage::parse(
-                        remote.bytes().canonical_semantic_bytes(),
-                    )
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            match remote.payloads() {
+                coven_protocol::remote_object::RemoteObjectPayloads::SpooledInline => {
+                    let object = remote.object();
+                    let semantic_bytes = remote.semantic_bytes().ok_or_else(|| {
+                        StoreError::InvalidOutbound(format!(
+                            "prepared outbound object {} names no plaintext",
+                            remote.object_id()
+                        ))
+                    })?;
+                    let stored_bytes = remote.stored_bytes().ok_or_else(|| {
+                        StoreError::InvalidOutbound(format!(
+                            "prepared outbound object {} names no ciphertext",
+                            remote.object_id()
+                        ))
+                    })?;
+                    let package =
+                        coven_protocol::audience_package::AudiencePackage::parse(semantic_bytes)
+                            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     let stream_id = package.commit_coord().stream_id.to_string();
                     let sequence = package.commit_coord().sequence;
                     let (context, prefix) = match package.audience() {
@@ -369,7 +378,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                 package.candidate_family(),
                                 &stream_id,
                                 sequence,
-                                ObjectHash::digest(remote.bytes().canonical_semantic_bytes()),
+                                ObjectHash::digest(semantic_bytes),
                             ),
                         ),
                         coven_protocol::audience_package::PackageAudience::Circle {
@@ -390,42 +399,37 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                                     package.candidate_family(),
                                     &stream_id,
                                     sequence,
-                                    ObjectHash::digest(remote.bytes().canonical_semantic_bytes()),
+                                    ObjectHash::digest(semantic_bytes),
                                 ),
                             )
                         }
                     };
-                    let prepared = PreparedExactObject::new(object.clone(), bytes.clone())
+                    let exact = PreparedExactObject::new(object.clone(), stored_bytes.to_vec())
                         .map_err(StoreObjectError::from)?;
                     if prepared_state {
                         storage
-                            .create_protocol_object(&prepared)
+                            .create_protocol_object(&exact)
                             .await
                             .map_err(StoreObjectError::from)?;
                     }
                     storage
-                        .verify_readback(
-                            &context,
-                            object,
-                            &prefix,
-                            remote.bytes().canonical_semantic_bytes(),
-                        )
+                        .verify_readback(&context, object, &prefix, semantic_bytes)
                         .await
                         .map_err(StoreError::readback)?;
                 }
-                coven_protocol::remote_object::RemoteStoredRepresentation::Blob { object } => {
-                    let locator = coven_protocol::blob::locator::BlobLocator::parse(
-                        remote.bytes().canonical_semantic_bytes(),
-                    )
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { locator_bytes } => {
+                    let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
+                        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     let uploader = locator.uploader().clone();
                     let registration = database
                         .activated_store_device_registration(uploader.clone())
                         .await?;
                     let authority = BlobWriteAuthority::new(&registration);
-                    let blob =
-                        coven_protocol::blob::locator::StoredBlobRef::new(locator, object.clone())
-                            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                    let blob = coven_protocol::blob::locator::StoredBlobRef::new(
+                        locator,
+                        remote.object().clone(),
+                    )
+                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
                     if prepared_state {
                         let path = prepared.spool_path.as_deref().ok_or_else(|| {
                             StoreError::InvalidOutbound(format!(
@@ -455,9 +459,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         }
                     })?;
                 }
-                coven_protocol::remote_object::RemoteStoredRepresentation::ExternalExact {
-                    ..
-                } => {
+                coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal => {
                     return Err(StoreError::InvalidOutbound(format!(
                         "prepared outbound object {} has no locally stored representation",
                         remote.object_id()
@@ -465,7 +467,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 }
             }
             if prepared_state {
-                database.mark_remote_object_uploaded(remote).await?;
+                database
+                    .mark_remote_object_uploaded(remote.into_record())
+                    .await?;
             }
         }
         Ok(())
