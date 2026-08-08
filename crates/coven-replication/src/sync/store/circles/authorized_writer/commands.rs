@@ -330,6 +330,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         self.database
             .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
             .await?;
+        // Finalization replaces the prepared operation, so the superseded one's
+        // objects are owed a deletion.
+        drain_payload_spool(&self.database, self.store_dir).await?;
         Ok(journal.operation_id)
     }
 
@@ -514,7 +517,10 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         superseded,
                         journal.prepared_objects,
                     )
-                    .await?
+                    .await?;
+                // The superseded operation's row is gone, and its objects with
+                // it.
+                drain_payload_spool(&self.database, self.store_dir).await?;
             }
             None => {
                 self.database
@@ -582,6 +588,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), CircleOperationError> {
         let database = self.database.clone();
+        // A crash between an enqueueing commit and its drain leaves the
+        // obligation durable; resuming the work is what finishes it.
+        drain_payload_spool(&database, self.store_dir).await?;
         for operation_id in database.discarding_circle_operations().await? {
             self.history()
                 .cleanup_operation_candidate(&operation_id)
@@ -594,6 +603,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             database
                 .finish_circle_operation_discard(&operation_id)
                 .await?;
+            drain_payload_spool(&database, self.store_dir).await?;
         }
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
             if !journal.is_publishable() {

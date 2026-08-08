@@ -581,6 +581,9 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             self.database
                 .activate_circle_operation(journal, verified)
                 .await?;
+            // Activation drops the operation row, so its objects' spool files
+            // are owed a deletion the moment that transaction commits.
+            super::drain_payload_spool(&self.database, self.store_dir).await?;
         }
         Ok(())
     }

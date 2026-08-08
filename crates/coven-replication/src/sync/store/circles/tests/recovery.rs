@@ -93,6 +93,65 @@ impl RevokedOperation {
             author_grant_id,
         }
     }
+
+    /// Publish a Store commit the removed member can accept as the witness that
+    /// its own membership was revoked — the proof a discard requires.
+    async fn witness_membership_revocation(&self) {
+        let changeset = self
+            .owner_db
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
+                     '0000000001004-0000-founder', '2026-01-01')",
+            ])
+            .await;
+        StoreDatabase::new(&self.owner_db)
+            .enqueue_store_changeset_for_test(changeset)
+            .await
+            .expect("enqueue the membership-revocation witness");
+        let owner_store = self
+            .store
+            .bind_device(&self.owner_db, &self.founder)
+            .await
+            .expect("load the revocation witness Store");
+        let mut writer = owner_store
+            .authorize_writer()
+            .await
+            .expect("authorize the revocation witness writer");
+        assert!(
+            writer
+                .prepare_pending_store_write()
+                .await
+                .expect("prepare the membership-revocation witness"),
+            "membership revocation must be named by a Store commit"
+        );
+        assert_eq!(
+            writer
+                .drain_store_writes()
+                .await
+                .expect("publish the membership-revocation witness"),
+            1,
+            "one accepted Store commit must witness the membership revocation"
+        );
+
+        let member_store = self
+            .store
+            .bind_device(&self.db, &self.successor)
+            .await
+            .expect("load removed member Store");
+        let pull = member_store
+            .authorize_writer()
+            .await
+            .expect("authorize removed member Store pull")
+            .pull(None)
+            .await
+            .expect("pull the accepted membership-revocation witness");
+        assert!(
+            pull.held_positions.is_empty(),
+            "membership-revocation witness must materialize: {:?}",
+            pull.held_positions
+        );
+    }
 }
 
 /// The operation-inspection surface (`Circles::operations`) reports a blocked
@@ -339,60 +398,7 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .await
         .expect("resume blocks the revoked operation");
 
-    let changeset = revoked
-        .owner_db
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
-                     '0000000001004-0000-founder', '2026-01-01')",
-        ])
-        .await;
-    StoreDatabase::new(&revoked.owner_db)
-        .enqueue_store_changeset_for_test(changeset)
-        .await
-        .expect("enqueue the membership-revocation witness");
-    let owner_store = revoked
-        .store
-        .bind_device(&revoked.owner_db, &revoked.founder)
-        .await
-        .expect("load the revocation witness Store");
-    let mut writer = owner_store
-        .authorize_writer()
-        .await
-        .expect("authorize the revocation witness writer");
-    assert!(
-        writer
-            .prepare_pending_store_write()
-            .await
-            .expect("prepare the membership-revocation witness"),
-        "membership revocation must be named by a Store commit"
-    );
-    assert_eq!(
-        writer
-            .drain_store_writes()
-            .await
-            .expect("publish the membership-revocation witness"),
-        1,
-        "one accepted Store commit must witness the membership revocation"
-    );
-
-    let member_store = revoked
-        .store
-        .bind_device(&revoked.db, &revoked.successor)
-        .await
-        .expect("load removed member Store");
-    let pull = member_store
-        .authorize_writer()
-        .await
-        .expect("authorize removed member Store pull")
-        .pull(None)
-        .await
-        .expect("pull the accepted membership-revocation witness");
-    assert!(
-        pull.held_positions.is_empty(),
-        "membership-revocation witness must materialize: {:?}",
-        pull.held_positions
-    );
+    revoked.witness_membership_revocation().await;
 
     revoked
         .store
@@ -732,5 +738,126 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
             }
         ),
         "the retried operation is left blocked, not pending",
+    );
+}
+
+/// An operation's object bytes live in the payload spool, and the transaction
+/// that drops its row records the obligation to delete them. Activation is one
+/// such transaction, so by the time it returns the files are gone and nothing
+/// is still owed — and an operation that has not reached its own completing
+/// transaction keeps every file it prepared.
+#[tokio::test]
+async fn activation_deletes_its_spooled_payloads_and_keeps_a_pending_operation_intact() {
+    let db = open_test_db();
+    let (store, _home, signer, activating) =
+        persist_merge_operation(&db, "circle-spool-activation").await;
+    let pending = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000002000-0000-creator", "Second household")
+        .await
+        .expect("prepare the operation that stays pending");
+    coven_database::StoreDatabase::new(&db)
+        .insert_circle_operation(pending.journal.clone(), pending.prepared_objects)
+        .await
+        .expect("journal the operation that stays pending");
+    let pending = pending.journal;
+
+    let device = store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle test Store");
+    let prepared_steps = activating
+        .operation()
+        .prepared_objects
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spooled_objects(&device, &activating).await,
+        prepared_steps,
+        "preparation spools every object the operation names"
+    );
+
+    device
+        .publish_circle_operation(&activating.operation_id)
+        .await
+        .expect("activate the founder Circle");
+
+    assert_eq!(
+        coven_database::StoreDatabase::new(&db)
+            .owed_payload_spool_cleanup()
+            .await
+            .expect("read the payloads still owed a deletion"),
+        Vec::new(),
+        "activation discharges its own cleanup obligations"
+    );
+    assert_eq!(
+        spooled_objects(&device, &activating).await,
+        Vec::<String>::new(),
+        "the activated operation's payloads are gone from the spool"
+    );
+    assert_eq!(
+        spooled_objects(&device, &pending).await,
+        pending
+            .operation()
+            .prepared_objects
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        "an operation that has not completed keeps the payloads it prepared"
+    );
+}
+
+/// The completing transaction of a discard drops the operation row and records
+/// the same obligation activation does, so a discarded operation leaves nothing
+/// behind either.
+#[tokio::test]
+async fn discard_deletes_its_spooled_payloads() {
+    let revoked = RevokedOperation::prepare("circle-spool-discard").await;
+    let journal = coven_database::StoreDatabase::new(&revoked.db)
+        .circle_operation(&revoked.operation_id)
+        .await
+        .expect("read the operation to discard")
+        .expect("the operation to discard is durable");
+    let device = revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind Circle test Store");
+    assert!(
+        !spooled_objects(&device, &journal).await.is_empty(),
+        "the operation's payloads are spooled before it is discarded"
+    );
+    device
+        .resume_circle_operations()
+        .await
+        .expect("resume blocks the revoked operation");
+
+    revoked.witness_membership_revocation().await;
+
+    revoked
+        .store
+        .bind_device(&revoked.db, &revoked.successor)
+        .await
+        .expect("bind revoked Circle discard Store")
+        .circles()
+        .discard_circle_operation(&revoked.operation_id)
+        .await
+        .expect("the accepted membership revocation permits discard");
+
+    assert_eq!(
+        coven_database::StoreDatabase::new(&revoked.db)
+            .owed_payload_spool_cleanup()
+            .await
+            .expect("read the payloads still owed a deletion"),
+        Vec::new(),
+        "discard discharges its own cleanup obligations"
+    );
+    assert_eq!(
+        spooled_objects(&device, &journal).await,
+        Vec::<String>::new(),
+        "the discarded operation's payloads are gone from the spool"
     );
 }

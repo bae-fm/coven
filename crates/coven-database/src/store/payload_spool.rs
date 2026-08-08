@@ -167,6 +167,13 @@ impl StoreDatabase {
             .await
     }
 
+    /// The payloads still owed a deletion. Empty once every obligation this
+    /// store committed has been discharged.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
+        self.payload_spool_cleanup_hashes().await
+    }
+
     async fn complete_payload_spool_cleanup(&self, hash: ObjectHash) -> Result<(), DbError> {
         self.connection
             .call(move |conn| {

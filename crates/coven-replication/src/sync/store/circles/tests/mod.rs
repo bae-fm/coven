@@ -97,6 +97,18 @@ async fn publish_prepared_objects(
     }
 }
 
+/// Which of an operation's objects still have a payload file in the spool.
+async fn spooled_objects(device: &TestDevice, journal: &CircleOperationJournal) -> Vec<String> {
+    let spool = coven_database::payload_spool::PayloadSpool::new(device.store_dir());
+    let mut present = Vec::new();
+    for (step, object) in &journal.operation().prepared_objects {
+        if spool.read(object.stored_hash()).await.is_ok() {
+            present.push(step.clone());
+        }
+    }
+    present
+}
+
 /// Put a substituted object's bytes where preparation would have put them, so
 /// the publication path finds bytes under the reference a test has just
 /// written into an operation.

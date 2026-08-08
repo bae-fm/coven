@@ -225,6 +225,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.database
                 .begin_circle_operation_finalization(journal.clone(), prepared.prepared_objects)
                 .await?;
+            // Finalization replaces the prepared operation, so the superseded
+            // one's objects are owed a deletion.
+            drain_payload_spool(&self.database, self.store_dir).await?;
             let routing_key = coven_protocol::circle::derive_row_routing_key(
                 routing_encryption,
                 self.root.store_root_hash,
