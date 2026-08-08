@@ -27,6 +27,16 @@ use coven_protocol::store_commit::{
 };
 use coven_storage::SyncStorage;
 
+async fn snapshot_image_bytes(
+    snapshot: &coven_database::CreatedSnapshot,
+) -> Result<Vec<u8>, CircleOperationError> {
+    snapshot
+        .db_image
+        .read()
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+}
+
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: coven_protocol::membership::AuthorStreamId,
     database: StoreDatabase,
@@ -1325,7 +1335,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
                         .await?;
-                    let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
+                    let image_bytes = snapshot_image_bytes(&request.bootstrap.snapshot).await?;
+                    let image_hash = ObjectHash::digest(&image_bytes);
                     let image_prefix =
                         coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
                             request.circle_id,
@@ -1341,12 +1352,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         circle_encryption,
                     );
                     let bootstrap_prepared = self
-                        .prepare_circle_object(
-                            &image_context,
-                            &image_prefix,
-                            ".db",
-                            request.bootstrap.snapshot.db_image.clone(),
-                        )
+                        .prepare_circle_object(&image_context, &image_prefix, ".db", image_bytes)
                         .await?;
                     let bootstrap = coven_protocol::circle::CircleBootstrapRef {
                         coverage: request.bootstrap.coverage.clone(),
@@ -1690,7 +1696,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let bootstrap_blobs = self
                         .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
                         .await?;
-                    let image_hash = ObjectHash::digest(&request.bootstrap.snapshot.db_image);
+                    let image_bytes = snapshot_image_bytes(&request.bootstrap.snapshot).await?;
+                    let image_hash = ObjectHash::digest(&image_bytes);
                     let successor_encryption = EncryptionService::from(
                         MasterKeyring::from_serialized(&draft.keyring).map_err(|error| {
                             CircleOperationError::InvalidState(format!(
@@ -1723,7 +1730,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                     ),
                                     &image_prefix,
                                     ".db",
-                                    request.bootstrap.snapshot.db_image.clone(),
+                                    image_bytes.clone(),
                                 )
                                 .await?;
                             let bootstrap = coven_protocol::circle::CircleBootstrapRef {

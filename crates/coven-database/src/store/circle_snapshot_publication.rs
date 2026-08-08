@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::*;
 use coven_protocol::circle::CircleId;
 use coven_protocol::store_commit::{
@@ -14,8 +16,7 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let pending = self
-            .connection
-            .call(move |conn| load_outbound_circle_snapshot_on(conn, circle_id))
+            .call_records(move |records| load_outbound_circle_snapshot_on(records, circle_id))
             .await?;
         if let Some(pending) = &pending {
             verify_snapshot_blob_spools(&pending.blobs, "prepared Circle").await?;
@@ -36,14 +37,29 @@ impl StoreDatabase {
         &self,
         meta: CircleSnapshotMeta,
         meta_prepared: PreparedExactObject,
-        image_bytes: Vec<u8>,
+        image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
         let synced_tables = self.synced_tables().to_vec();
         let gates = self.gates();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
+                let image_facts =
+                    crate::payload_spool::write_payload_file_blocking(&store_dir, image.path())
+                        .map_err(|error| {
+                            SnapshotImageError::Projection(format!(
+                                "spool Circle snapshot image: {error}"
+                            ))
+                        });
+                let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
+                let image_prepared_hash = crate::payload_spool::write_payload_blocking(
+                    &store_dir,
+                    image_prepared.stored_bytes(),
+                )
+                .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
+                let image_prepared_size = image_prepared.stored_bytes().len() as u64;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let authority = local_store_authority_on(&tx)?;
                 let registration_ref = authority.reference();
@@ -53,7 +69,9 @@ impl StoreDatabase {
                 validate_snapshot_image(
                     &meta.bootstrap.image,
                     &image_prepared,
-                    &image_bytes,
+                    image_hash,
+                    image_prepared_hash,
+                    image_prepared_size,
                     format!(
                         "{}.db",
                         circle_snapshot_image_semantic_prefix(
@@ -152,9 +170,8 @@ impl StoreDatabase {
                 )?;
                 tx.execute(
                     "INSERT INTO outbound_circle_snapshot \
-                 (circle_id, snapshot_ref, meta_prepared, image_ref, image_prepared, \
-                  image_bytes, meta_bytes, blobs) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (circle_id, snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         meta.circle_id.to_string(),
                         serde_json::to_string(&reference).map_err(|error| DbError::Message(
@@ -166,13 +183,6 @@ impl StoreDatabase {
                         serde_json::to_string(&meta.bootstrap.image).map_err(|error| {
                             DbError::context("serialize exact Circle snapshot image ref", error)
                         })?,
-                        serde_json::to_string(&image_prepared).map_err(
-                            |error| DbError::context(
-                                "serialize prepared Circle snapshot image",
-                                error
-                            )
-                        )?,
-                        image_bytes,
                         meta.to_bytes(),
                         serde_json::to_string(&blobs).map_err(|error| DbError::Message(
                             format!("serialize prepared Circle snapshot blobs: {error}")
@@ -180,6 +190,11 @@ impl StoreDatabase {
                     ],
                 )
                 .map_err(DbError::from)?;
+                crate::payload_spool::set_payload_owner_claims_on(
+                    &tx,
+                    &crate::payload_spool::outbound_circle_snapshot_owner_key(meta.circle_id),
+                    &BTreeSet::from([image_hash, image_prepared_hash]),
+                )?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(reference)
             })
@@ -215,10 +230,13 @@ impl StoreDatabase {
                         })?;
                     meta.circle_id
                 };
-                let outbound =
-                    load_outbound_circle_snapshot_on(&tx, circle_id)?.ok_or_else(|| {
-                        DbError::Message("outbound Circle snapshot is absent".to_string())
-                    })?;
+                let outbound = load_outbound_circle_snapshot_on(
+                    crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                    circle_id,
+                )?
+                .ok_or_else(|| {
+                    DbError::Message("outbound Circle snapshot is absent".to_string())
+                })?;
                 if outbound.reference != accepted {
                     return Err(DbError::Message(
                         "accepted Circle snapshot differs from the prepared exact object"
@@ -248,6 +266,10 @@ impl StoreDatabase {
                         "outbound Circle snapshot ownership row is absent or changed".to_string(),
                     ));
                 }
+                crate::payload_spool::release_payload_owner_on(
+                    &tx,
+                    &crate::payload_spool::outbound_circle_snapshot_owner_key(circle_id),
+                )?;
                 let accepted_generation =
                     snapshot_generation_as_i64(accepted.generation, "Circle snapshot")?;
                 tx.execute(

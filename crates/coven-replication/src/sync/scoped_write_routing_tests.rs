@@ -148,6 +148,35 @@ async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
 }
 
 #[tokio::test]
+async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
+    let (_temp, reopened, _) = capture_scoped_write_then_reopen("missing-partition-payload").await;
+    let database = StoreDatabase::new(&reopened);
+    let write_id = database
+        .pending_writes()
+        .await
+        .expect("read captured write")
+        .into_iter()
+        .next()
+        .expect("captured write exists")
+        .write_id;
+    let hash = reopened
+        .test_sql(move |database| database.first_store_write_partition_hash(write_id.as_str()))
+        .await
+        .expect("read partition payload hash");
+    std::fs::remove_file(reopened.store_dir_for_test().payload_spool_path(hash))
+        .expect("remove partition payload");
+
+    let error = match database.prepare_store_write().await {
+        Err(error) => error,
+        Ok(_) => panic!("missing partition payload must fail preparation"),
+    };
+    assert!(
+        error.to_string().contains("absent from the spool"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn preparation_rejects_a_local_partition_with_circle_control() {
     let (_temp, reopened, _expected) =
         capture_scoped_write_then_reopen("controlled-local-restart").await;
@@ -198,10 +227,14 @@ async fn merge_local_only_scoped_write_is_not_pending() {
         .all(|write| write.write_id != receipt.write_id));
     let stored_write_id = receipt.write_id.clone();
     db.test_sql(move |database| {
-        let (affected_rows, store_changeset) =
+        let (affected_rows, captured_changeset) =
             database.store_write_row(stored_write_id.as_str())?;
         assert_eq!(affected_rows, "[]");
-        assert!(store_changeset.is_empty());
+        let raw_changes = coven_database::walk_changeset(&captured_changeset)
+            .expect("walk captured Local-only changeset");
+        assert!(raw_changes.iter().any(|change| {
+            change.table == "accounts" && change.pk() == Some("second-local-account")
+        }));
         let partition = database.only_store_write_partition(stored_write_id.as_str())?;
         assert_eq!(partition.0, "local");
         assert_eq!(partition.1, None);
@@ -210,6 +243,60 @@ async fn merge_local_only_scoped_write_is_not_pending() {
     })
     .await
     .expect("verify durable local-only journal");
+}
+
+#[tokio::test]
+async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
+    let (_temp, db, _) = capture_scoped_write_then_reopen("discard-scoped-routing").await;
+    let circle_id = db
+        .test_sql(|database| {
+            Ok(database
+                .install_test_active_circle("discard-scoped-circle")
+                .0)
+        })
+        .await
+        .expect("install discard test Circle");
+    let write_circle_id = circle_id;
+    let database = StoreDatabase::new(&db);
+    let receipt = database
+        .run_host_store_write_for_test(
+            Some(EncryptionService::from_key([7; 32])),
+            None,
+            move |tx| {
+                tx.execute(
+                    "INSERT INTO accounts (id, audience, _updated_at)
+                     VALUES ('discarded-circle-account', ?1, '0000000003000-0000-discard')",
+                    [write_circle_id.to_string()],
+                )?;
+                Ok::<_, DbError>(())
+            },
+        )
+        .await
+        .expect("capture scoped write to discard");
+    database
+        .set_write_status(
+            &receipt.write_id,
+            WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
+                reason: "discard scoped routing test".to_string(),
+            }),
+        )
+        .await
+        .expect("block scoped write");
+
+    assert_eq!(
+        database
+            .discard_blocked_write(&receipt.write_id)
+            .await
+            .expect("discard scoped write"),
+        coven_database::BlockedWriteDiscard::Discarded(vec![receipt.write_id])
+    );
+    let state = db
+        .test_sql(|database| {
+            database.row_and_private_routing_presence("accounts", "discarded-circle-account")
+        })
+        .await
+        .expect("read discarded scoped state");
+    assert_eq!(state, (false, false, false));
 }
 
 /// A transaction whose rows are all Circle-scoped emits one package per Circle

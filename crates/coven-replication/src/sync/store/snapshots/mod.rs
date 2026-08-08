@@ -330,9 +330,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 .map_err(|error| SnapshotError::Parse(error.to_string()))?,
             generation,
         };
-        let (image_bytes, snapshot_blobs) = self
+        let (db_image, snapshot_blobs) = self
             .prepare_snapshot_blobs(snapshot, snapshot_owner)
             .await?;
+        let image_bytes = db_image
+            .read()
+            .await
+            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = ProtocolObjectContext::store_encrypted(
             store_root_hash,
@@ -344,12 +348,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .await
             .map_err(SnapshotError::Bucket)?;
         let image_prepared = storage
-            .prepare_protocol_object(
-                &image_context,
-                image_slot,
-                &image_prefix,
-                image_bytes.clone(),
-            )
+            .prepare_protocol_object(&image_context, image_slot, &image_prefix, image_bytes)
             .map_err(SnapshotError::Bucket)?;
         let image = SnapshotImageRef {
             image_hash,
@@ -411,7 +410,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .stage_snapshot_publication(
                 meta.clone(),
                 meta_prepared,
-                image_bytes,
+                db_image,
                 image_prepared,
                 snapshot_blobs,
             )
@@ -433,7 +432,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         &self,
         snapshot: CreatedSnapshot,
         owner: coven_protocol::remote_object::SnapshotObjectOwner,
-    ) -> Result<(Vec<u8>, Vec<coven_database::PreparedSnapshotBlob>), SnapshotError> {
+    ) -> Result<
+        (
+            coven_database::SnapshotDatabaseImage,
+            Vec<coven_database::PreparedSnapshotBlob>,
+        ),
+        SnapshotError,
+    > {
         let database = &self.database;
         let storage = self.storage.as_ref();
         let authority = self.local_writer.blob_write_authority();
@@ -579,12 +584,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         if prepared.is_empty() {
             return Ok((db_image, prepared));
         }
-        let image = match coven_database::SnapshotDatabaseImage::replace(
-            self.store_dir.as_ref().join("snapshot-closure.db"),
-            &db_image,
-        )
-        .and_then(|image| image.install_blob_graph(&prepared))
-        {
+        let image = match db_image.install_blob_graph(&prepared) {
             Ok(image) => image,
             Err(error) => {
                 cleanup_snapshot_spools(&prepared)

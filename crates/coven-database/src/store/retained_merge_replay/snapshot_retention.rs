@@ -84,14 +84,18 @@ impl StoreDatabase {
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         let conn = records.transaction();
-        let required = Self::snapshot_required_retained_refs(*records, root)?;
+        let required = Self::snapshot_required_retained_refs(records.records(), root)?;
         let mut retained = Vec::with_capacity(required.len());
         for encoded in required {
             let reference: StoreBatchCommitRef =
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot author exclusion activation commit", error)
                 })?;
-            Self::load_retained_merge_materialization_by_ref_on(*records, root, &reference)?;
+            Self::load_retained_merge_materialization_by_ref_on(
+                records.records(),
+                root,
+                &reference,
+            )?;
             let StoreCommitCoord {
                 stream_id,
                 sequence,
@@ -179,8 +183,11 @@ impl StoreDatabase {
                 serde_json::from_str(&encoded).map_err(|error| {
                     DbError::context("snapshot retained device-state authority", error)
                 })?;
-            let materialization =
-                Self::load_retained_merge_materialization_by_ref_on(*records, root, &reference)?;
+            let materialization = Self::load_retained_merge_materialization_by_ref_on(
+                records.records(),
+                root,
+                &reference,
+            )?;
             required.insert(reference);
             required.extend(materialization.commit().order.predecessor.iter().cloned());
             required.extend(

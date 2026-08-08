@@ -346,7 +346,7 @@ impl RetainedMergeMaterializationCache {
             .collect::<BTreeSet<_>>();
         let write_overlays = if include_local_write_overlays {
             StoreDatabase::load_merge_replay_write_overlays_on(
-                live,
+                StoreRecords::new(live, store_dir),
                 &active_accepted_writes,
                 &retracted_writes,
             )?

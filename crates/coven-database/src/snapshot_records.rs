@@ -59,10 +59,11 @@ pub fn load_published_store_snapshot_on(
 }
 
 pub fn load_outbound_store_snapshot_on(
-    conn: &Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
+    let conn = records.conn();
     conn.query_row(
-        "SELECT snapshot_ref, meta_prepared, image_ref, image_prepared, image_bytes, meta_bytes, blobs \
+        "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs \
          FROM outbound_store_snapshot WHERE singleton = 1",
         [],
         |row| {
@@ -70,36 +71,39 @@ pub fn load_outbound_store_snapshot_on(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
     .map(
-        |(reference, meta_prepared, image_reference, image_prepared, image_bytes, meta_bytes, blobs)| {
-            let reference: StoreSnapshotRef =
-                serde_json::from_str(&reference).map_err(|error| {
-                    DbError::context("outbound Store snapshot ref", error)
-                })?;
+        |(reference, meta_prepared, image_reference, meta_bytes, blobs)| {
+            let reference: StoreSnapshotRef = serde_json::from_str(&reference)
+                .map_err(|error| DbError::context("outbound Store snapshot ref", error))?;
             let meta_prepared: PreparedExactObject =
                 serde_json::from_str(&meta_prepared).map_err(|error| {
                     DbError::context("outbound prepared Store snapshot metadata", error)
                 })?;
             let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
-                .map_err(|error| {
-                    DbError::context("outbound Store snapshot image ref", error)
+                .map_err(|error| DbError::context("outbound Store snapshot image ref", error))?;
+            let image_bytes = records
+                .payload(image_reference.image_hash)
+                .map_err(|error| DbError::context("outbound Store snapshot image", error))?;
+            let image_prepared = PreparedExactObject::new(
+                image_reference.object.clone(),
+                records
+                    .payload(image_reference.object.stored_hash())
+                    .map_err(|error| {
+                        DbError::context("outbound prepared Store snapshot image", error)
+                    })?,
+            )
+            .map_err(|error| DbError::context("outbound prepared Store snapshot image", error))?;
+            let blobs: Vec<PreparedSnapshotBlob> =
+                serde_json::from_str(&blobs).map_err(|error| {
+                    DbError::context("outbound prepared Store snapshot blobs", error)
                 })?;
-            let image_prepared: PreparedExactObject = serde_json::from_str(&image_prepared)
-                .map_err(|error| {
-                    DbError::context("outbound prepared Store snapshot image", error)
-                })?;
-            let blobs: Vec<PreparedSnapshotBlob> = serde_json::from_str(&blobs).map_err(|error| {
-                DbError::context("outbound prepared Store snapshot blobs", error)
-            })?;
             if meta_prepared.reference() != &reference.object
                 || image_prepared.reference() != &image_reference.object
                 || ObjectHash::digest(&image_bytes) != image_reference.image_hash
@@ -118,9 +122,7 @@ pub fn load_outbound_store_snapshot_on(
                 &reference,
                 author,
             )
-                    .map_err(|error| {
-                        DbError::context("outbound Store snapshot", error)
-                    })?;
+            .map_err(|error| DbError::context("outbound Store snapshot", error))?;
             if &meta.author_registration != author_ref || meta.image != image_reference {
                 return Err(DbError::Message(
                     "outbound Store snapshot metadata differs from its exact image".to_string(),

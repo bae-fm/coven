@@ -16,11 +16,35 @@ pub(crate) type StoreWritePartitionRow = (String, Option<String>, Vec<u8>);
 
 pub struct DatabaseTestSql<'connection> {
     connection: &'connection Connection,
+    store_dir: Option<&'connection coven_foundation::store_dir::StoreDir>,
 }
 
 impl DatabaseTestSql<'_> {
     pub fn new(connection: &Connection) -> DatabaseTestSql<'_> {
-        DatabaseTestSql { connection }
+        DatabaseTestSql {
+            connection,
+            store_dir: None,
+        }
+    }
+
+    pub fn for_store<'connection>(
+        connection: &'connection Connection,
+        store_dir: &'connection coven_foundation::store_dir::StoreDir,
+    ) -> DatabaseTestSql<'connection> {
+        DatabaseTestSql {
+            connection,
+            store_dir: Some(store_dir),
+        }
+    }
+
+    fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
+        let store_dir = self.store_dir.ok_or_else(|| {
+            DbError::Message("test payload access requires the Store directory".to_string())
+        })?;
+        let hash = encoded_hash
+            .parse()
+            .map_err(|error| DbError::context("parse test payload hash", error))?;
+        crate::payload_spool::read_payload_blocking(store_dir, hash).map_err(DbError::from)
     }
 
     pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
@@ -57,7 +81,7 @@ impl DatabaseTestSql<'_> {
         &self,
     ) -> Result<Vec<StoreWritePartitionRow>, DbError> {
         self.query(
-            "SELECT audience, control_coord, changeset
+            "SELECT audience, control_coord, changeset_hash
              FROM store_write_partitions
              ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
                       audience, control_coord",
@@ -66,11 +90,14 @@ impl DatabaseTestSql<'_> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(2)?,
                 ))
             },
         )
-        .map_err(DbError::from)
+        .map_err(DbError::from)?
+        .into_iter()
+        .map(|(audience, control, hash)| Ok((audience, control, self.payload(hash)?)))
+        .collect()
     }
 
     /// One write's partitions as `(audience, changeset)`, ordered by audience.
@@ -79,12 +106,15 @@ impl DatabaseTestSql<'_> {
         write_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, DbError> {
         self.query(
-            "SELECT audience, changeset FROM store_write_partitions
+            "SELECT audience, changeset_hash FROM store_write_partitions
              WHERE write_id = ?1 ORDER BY audience",
             [write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .map_err(DbError::from)
+        .map_err(DbError::from)?
+        .into_iter()
+        .map(|(audience, hash)| Ok((audience, self.payload(hash)?)))
+        .collect()
     }
 
     /// The single partition a local-only write records.
@@ -93,9 +123,59 @@ impl DatabaseTestSql<'_> {
         write_id: &str,
     ) -> Result<StoreWritePartitionRow, DbError> {
         self.query_row(
-            "SELECT audience, control_coord, changeset
+            "SELECT audience, control_coord, changeset_hash
              FROM store_write_partitions WHERE write_id = ?1",
             [write_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(DbError::from)
+        .and_then(|(audience, control, hash)| Ok((audience, control, self.payload(hash)?)))
+    }
+
+    pub fn first_store_write_partition_hash(
+        &self,
+        write_id: &str,
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
+        let encoded = self
+            .query_row(
+                "SELECT changeset_hash FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience LIMIT 1",
+                [write_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(DbError::from)?;
+        encoded
+            .parse()
+            .map_err(|error| DbError::context("parse Store write partition hash", error))
+    }
+
+    pub fn row_and_private_routing_presence(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<(bool, bool, bool), DbError> {
+        let table_name = crate::quote_ident(table);
+        self.query_row(
+            &format!(
+                "SELECT
+                   EXISTS(SELECT 1 FROM {table_name} WHERE id = ?1),
+                   EXISTS(
+                       SELECT 1 FROM _coven_row_routes
+                       WHERE table_name = ?2 AND row_id = ?1
+                   ),
+                   EXISTS(
+                       SELECT 1 FROM _coven_audience AS audience
+                       JOIN _coven_row_routes AS route USING (routing_id)
+                       WHERE route.table_name = ?2 AND route.row_id = ?1
+                   )"
+            ),
+            rusqlite::params![row_id, table],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(DbError::from)
@@ -104,11 +184,12 @@ impl DatabaseTestSql<'_> {
     /// A write's recorded affected rows and Store changeset.
     pub fn store_write_row(&self, write_id: &str) -> Result<(String, Vec<u8>), DbError> {
         self.query_row(
-            "SELECT affected_rows, changeset FROM store_writes WHERE write_id = ?1",
+            "SELECT affected_rows, changeset_hash FROM store_writes WHERE write_id = ?1",
             [write_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .map_err(DbError::from)
+        .and_then(|(affected_rows, hash)| Ok((affected_rows, self.payload(hash)?)))
     }
 
     /// Give the Local partition a Circle control coordinate, which the schema's
@@ -890,18 +971,30 @@ impl DatabaseTestSql<'_> {
     }
 
     pub fn latest_local_write_facts(&self) -> Result<(String, i64, i64), DbError> {
-        self.connection
+        let (write_id, status): (String, String) = self
+            .connection
             .query_row(
-                "SELECT status,
-                        (SELECT COUNT(*) FROM store_write_partitions p
-                         WHERE p.write_id = w.write_id),
-                        (SELECT COALESCE(SUM(length(changeset)), 0)
-                         FROM store_write_partitions p WHERE p.write_id = w.write_id)
-                 FROM store_writes w ORDER BY ordinal DESC LIMIT 1",
+                "SELECT write_id, status FROM store_writes ORDER BY ordinal DESC LIMIT 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(DbError::from)
+            .map_err(DbError::from)?;
+        let hashes = self.query(
+            "SELECT changeset_hash FROM store_write_partitions WHERE write_id = ?1",
+            [write_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let partition_count = i64::try_from(hashes.len())
+            .map_err(|error| DbError::context("test partition count", error))?;
+        let mut payload_size = 0_i64;
+        for hash in hashes {
+            let size = i64::try_from(self.payload(hash)?.len())
+                .map_err(|error| DbError::context("test partition payload size", error))?;
+            payload_size = payload_size
+                .checked_add(size)
+                .ok_or_else(|| DbError::Message("test partition payload size overflow".into()))?;
+        }
+        Ok((status, partition_count, payload_size))
     }
 
     pub fn prepared_write_count(
@@ -1251,15 +1344,18 @@ impl DatabaseTestSql<'_> {
 
     pub fn store_partition_changesets(&self) -> Result<Vec<Vec<u8>>, DbError> {
         self.query(
-            "SELECT partition.changeset
+            "SELECT partition.changeset_hash
              FROM store_write_partitions AS partition
              JOIN store_writes AS write USING (write_id)
              WHERE partition.audience = 'store'
              ORDER BY write.ordinal DESC",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, String>(0),
         )
-        .map_err(DbError::from)
+        .map_err(DbError::from)?
+        .into_iter()
+        .map(|hash| self.payload(hash))
+        .collect()
     }
 
     pub fn has_store_partition(&self) -> Result<bool, DbError> {

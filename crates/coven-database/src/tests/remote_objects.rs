@@ -18,6 +18,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         &[],
     )
     .expect("open database");
+    let store_dir = db.store_dir_for_test().clone();
+    let empty_changeset_hash = crate::payload_spool::write_payload_blocking(&store_dir, b"")
+        .expect("install empty captured changeset");
     let write_id = WriteId::from_generated("write-1".to_string());
     let stored_write_id = write_id.clone();
     db.call(move |conn| {
@@ -25,14 +28,25 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             dependencies: BTreeMap::new(),
         })
         .expect("serialize base");
-        conn.execute(
-            "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
-             VALUES (?1, '\"pending\"', '[]', X'', X'', ?2, '{\"blobs\":[]}')",
-            rusqlite::params![stored_write_id.as_str(), base],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+        let transaction = conn.unchecked_transaction().map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO store_writes
+             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+             VALUES (?1, '\"pending\"', '[]', ?2, ?3, '{\"blobs\":[]}')",
+                rusqlite::params![
+                    stored_write_id.as_str(),
+                    empty_changeset_hash.to_string(),
+                    base
+                ],
+            )
+            .map_err(DbError::from)?;
+        crate::payload_spool::set_payload_owner_claims_on(
+            &transaction,
+            &crate::payload_spool::store_write_owner_key(&stored_write_id),
+            &std::collections::BTreeSet::from([empty_changeset_hash]),
+        )?;
+        transaction.commit().map_err(DbError::from)
     })
     .await
     .expect("seed write");
@@ -69,7 +83,6 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     .expect("build package");
     let semantic = package.to_bytes();
     let stored_package = b"stored package representation".to_vec();
-    let store_dir = db.store_dir_for_test().clone();
     let StoreCommitCoord { stream_id, .. } = test_commit_coord();
     let package_slot = coven_protocol::objects::ObjectSlot::logical(format!(
         "{}.pkg",

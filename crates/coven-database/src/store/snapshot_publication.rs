@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::*;
@@ -11,10 +12,7 @@ impl StoreDatabase {
     pub async fn outbound_snapshot_publication(
         &self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-        let pending = self
-            .connection
-            .call(load_outbound_store_snapshot_on)
-            .await?;
+        let pending = self.call_records(load_outbound_store_snapshot_on).await?;
         if let Some(pending) = &pending {
             verify_snapshot_blob_spools(&pending.blobs, "prepared").await?;
         }
@@ -25,14 +23,29 @@ impl StoreDatabase {
         &self,
         meta: SnapshotMeta,
         meta_prepared: PreparedExactObject,
-        image_bytes: Vec<u8>,
+        image: SnapshotDatabaseImage,
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
         let synced_tables = self.synced_tables().to_vec();
         let gates = self.gates();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
+                let image_facts =
+                    crate::payload_spool::write_payload_file_blocking(&store_dir, image.path())
+                        .map_err(|error| {
+                            SnapshotImageError::Projection(format!(
+                                "spool Store snapshot image: {error}"
+                            ))
+                        });
+                let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
+                let image_prepared_hash = crate::payload_spool::write_payload_blocking(
+                    &store_dir,
+                    image_prepared.stored_bytes(),
+                )
+                .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
+                let image_prepared_size = image_prepared.stored_bytes().len() as u64;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let authority = local_store_authority_on(&tx)?;
                 let registration_ref = authority.reference();
@@ -41,7 +54,9 @@ impl StoreDatabase {
                 validate_snapshot_image(
                     &meta.image,
                     &image_prepared,
-                    &image_bytes,
+                    image_hash,
+                    image_prepared_hash,
+                    image_prepared_size,
                     format!(
                         "{}.db",
                         snapshot_image_semantic_prefix(
@@ -130,9 +145,8 @@ impl StoreDatabase {
                 )?;
                 tx.execute(
                     "INSERT INTO outbound_store_snapshot \
-                 (singleton, snapshot_ref, meta_prepared, image_ref, image_prepared, \
-                  image_bytes, meta_bytes, blobs) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (singleton, snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![
                         serde_json::to_string(&reference).map_err(|error| DbError::Message(
                             format!("serialize exact Store snapshot ref: {error}")
@@ -143,13 +157,6 @@ impl StoreDatabase {
                         serde_json::to_string(&meta.image).map_err(|error| DbError::Message(
                             format!("serialize exact Store snapshot image ref: {error}")
                         ))?,
-                        serde_json::to_string(&image_prepared).map_err(
-                            |error| DbError::context(
-                                "serialize prepared Store snapshot image",
-                                error
-                            )
-                        )?,
-                        image_bytes,
                         meta.to_bytes(),
                         serde_json::to_string(&blobs).map_err(|error| DbError::Message(
                             format!("serialize prepared Store snapshot blobs: {error}")
@@ -157,6 +164,11 @@ impl StoreDatabase {
                     ],
                 )
                 .map_err(DbError::from)?;
+                crate::payload_spool::set_payload_owner_claims_on(
+                    &tx,
+                    crate::payload_spool::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
+                    &BTreeSet::from([image_hash, image_prepared_hash]),
+                )?;
                 tx.commit().map_err(DbError::from)?;
                 Ok(reference)
             })
@@ -177,9 +189,10 @@ impl StoreDatabase {
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let outbound = load_outbound_store_snapshot_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("outbound Store snapshot is absent".to_string())
-                })?;
+                let outbound = load_outbound_store_snapshot_on(
+                    crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                )?
+                .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
                 if outbound.reference != accepted {
                     return Err(DbError::Message(
                         "accepted Store snapshot differs from the prepared exact object"
@@ -212,6 +225,10 @@ impl StoreDatabase {
                         "outbound snapshot ownership row is absent or changed".to_string(),
                     ));
                 }
+                crate::payload_spool::release_payload_owner_on(
+                    &tx,
+                    crate::payload_spool::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
+                )?;
                 let accepted_generation =
                     snapshot_generation_as_i64(accepted.generation, "Store snapshot")?;
                 tx.execute(

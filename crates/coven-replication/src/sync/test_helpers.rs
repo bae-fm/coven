@@ -20,6 +20,14 @@ pub use coven_database::synthetic_store::*;
 pub use coven_foundation::store_dir::temp_store_dir;
 pub use coven_storage::cloud::test_utils::{test_cloud_home, test_cloud_home_with_binding};
 
+pub fn staged_snapshot_image(bytes: &[u8]) -> coven_database::SnapshotDatabaseImage {
+    let file = tempfile::NamedTempFile::new().expect("create staged snapshot fixture path");
+    let path = file.path().to_path_buf();
+    file.close().expect("release staged snapshot fixture path");
+    coven_database::SnapshotDatabaseImage::create(path, bytes)
+        .expect("write staged snapshot fixture")
+}
+
 #[cfg(test)]
 pub fn test_cache_locator_hash(label: &str) -> ObjectHash {
     ObjectHash::digest(label.as_bytes())
@@ -2292,7 +2300,7 @@ mod test_device {
             self.store
                 .publish_snapshot_for_test(
                     coven_database::CreatedSnapshot {
-                        db_image,
+                        db_image: staged_snapshot_image(&db_image),
                         blobs: Vec::new(),
                     },
                     coverage,

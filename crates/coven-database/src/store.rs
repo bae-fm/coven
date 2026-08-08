@@ -117,6 +117,7 @@ pub use retained_replay::{
     RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
     GENERATION_ZERO,
 };
+use snapshot_image::snapshot_image_db_error;
 pub use snapshot_image::{
     verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience, SnapshotDatabaseImage,
     SnapshotImageError, SnapshotImageOperationError,
@@ -240,9 +241,17 @@ impl StoreDatabaseConnection {
         let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
-                let outcome = operation(conn)?;
-                payload_spool::pay_owed_payload_deletions_on(conn, &store_dir)?;
-                Ok(outcome)
+                let outcome = operation(conn);
+                let cleanup = payload_spool::pay_owed_payload_deletions_on(conn, &store_dir);
+                match (outcome, cleanup) {
+                    (Ok(value), Ok(())) => Ok(value),
+                    (Err(operation), Ok(())) => Err(operation),
+                    (Ok(_), Err(cleanup)) => Err(cleanup),
+                    (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
             })
             .await
     }

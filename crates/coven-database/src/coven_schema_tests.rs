@@ -116,6 +116,60 @@ fn circle_operation_journal_stores_each_part_where_it_changes() {
 }
 
 #[test]
+fn snapshot_and_write_journals_name_payload_files_instead_of_carrying_bytes() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    let columns = |table: &str| {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table_info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read columns")
+    };
+
+    assert_eq!(
+        columns("outbound_store_snapshot"),
+        [
+            "singleton",
+            "snapshot_ref",
+            "meta_prepared",
+            "image_ref",
+            "meta_bytes",
+            "blobs",
+        ]
+    );
+    assert_eq!(
+        columns("outbound_circle_snapshot"),
+        [
+            "circle_id",
+            "snapshot_ref",
+            "meta_prepared",
+            "image_ref",
+            "meta_bytes",
+            "blobs",
+        ]
+    );
+    assert_eq!(
+        columns("store_writes"),
+        [
+            "ordinal",
+            "write_id",
+            "status",
+            "affected_rows",
+            "changeset_hash",
+            "base",
+            "blob_facts",
+            "prepared",
+        ]
+    );
+    assert_eq!(
+        columns("store_write_partitions"),
+        ["write_id", "audience", "control_coord", "changeset_hash"]
+    );
+}
+
+#[test]
 fn author_exclusion_activation_locator_has_one_exact_row_shape() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");

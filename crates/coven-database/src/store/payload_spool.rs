@@ -21,8 +21,10 @@
 //! deletion rather than losing it.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use coven_foundation::atomic_file::AtomicFileStage;
 use coven_foundation::local_file::AtomicStagedFile;
 use coven_foundation::store_dir::StoreDir;
 use rusqlite::Connection;
@@ -46,6 +48,64 @@ pub enum PayloadSpoolError {
 /// One store's payload files, under `spool/payloads` in its store directory.
 pub struct PayloadSpool<'store> {
     store_dir: &'store StoreDir,
+}
+
+/// One payload being streamed into an unpublished file while its content hash
+/// is computed from the bytes the file accepted.
+pub struct PayloadSpoolWriter<'store> {
+    store_dir: &'store StoreDir,
+    staged: AtomicFileStage,
+    hasher: coven_protocol::blob::ContentHasher,
+    size: u64,
+}
+
+impl<'store> PayloadSpoolWriter<'store> {
+    pub fn create(store_dir: &'store StoreDir) -> Result<Self, PayloadSpoolError> {
+        let directory = store_dir.payload_spool_dir();
+        let staged =
+            AtomicFileStage::create_in(&directory).map_err(|error| PayloadSpoolError::File {
+                path: directory,
+                error: error.to_string(),
+            })?;
+        Ok(Self {
+            store_dir,
+            staged,
+            hasher: coven_protocol::blob::ContentHasher::new(),
+            size: 0,
+        })
+    }
+
+    pub fn commit(self) -> Result<(ObjectHash, u64), PayloadSpoolError> {
+        let hash = self
+            .hasher
+            .finish()
+            .parse::<ObjectHash>()
+            .expect("SHA-256 hex is an ObjectHash");
+        let path = self.store_dir.payload_spool_path(hash);
+        self.staged
+            .commit(&path)
+            .map_err(|error| PayloadSpoolError::File {
+                path,
+                error: error.to_string(),
+            })?;
+        Ok((hash, self.size))
+    }
+}
+
+impl std::io::Write for PayloadSpoolWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.staged.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        self.size = self
+            .size
+            .checked_add(written as u64)
+            .ok_or_else(|| std::io::Error::other("payload size overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.staged.flush()
+    }
 }
 
 impl<'store> PayloadSpool<'store> {
@@ -109,8 +169,7 @@ pub fn pay_owed_payload_deletions_on(
     store_dir: &StoreDir,
 ) -> Result<(), DbError> {
     for hash in payload_spool_cleanup_hashes_on(conn)? {
-        delete_payload_blocking(store_dir, hash)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        delete_payload_blocking(store_dir, hash).map_err(DbError::from)?;
         conn.execute(
             "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
             [hash.to_string()],
@@ -165,7 +224,7 @@ impl<'store> StoreRecords<'store> {
 #[derive(Clone, Copy)]
 pub struct StoreRecordTransaction<'store, 'connection> {
     transaction: &'store rusqlite::Transaction<'connection>,
-    records: StoreRecords<'store>,
+    store_dir: &'store StoreDir,
 }
 
 impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
@@ -175,21 +234,33 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
     ) -> Self {
         Self {
             transaction,
-            records: StoreRecords::new(transaction, store_dir),
+            store_dir,
         }
+    }
+
+    pub fn conn(&self) -> &'store Connection {
+        self.transaction
+    }
+
+    pub fn store_dir(&self) -> &'store StoreDir {
+        self.store_dir
+    }
+
+    pub fn records(&self) -> StoreRecords<'store> {
+        StoreRecords::new(self.transaction, self.store_dir)
+    }
+
+    pub fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
+        read_payload_blocking(self.store_dir, hash)
+    }
+
+    pub fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
+        write_payload_blocking(self.store_dir, bytes)
     }
 
     /// The transaction itself, for the statements that need it named.
     pub fn transaction(&self) -> &'store rusqlite::Transaction<'connection> {
         self.transaction
-    }
-}
-
-impl<'store> std::ops::Deref for StoreRecordTransaction<'store, '_> {
-    type Target = StoreRecords<'store>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.records
     }
 }
 
@@ -205,12 +276,35 @@ pub fn write_payload_blocking(
     store_dir: &StoreDir,
     bytes: &[u8],
 ) -> Result<ObjectHash, PayloadSpoolError> {
-    let hash = ObjectHash::digest(bytes);
-    let path = store_dir.payload_spool_path(hash);
-    coven_foundation::atomic_file::AtomicFile::new(path.clone())
-        .replace(bytes)
-        .map_err(|error| PayloadSpoolError::File { path, error })?;
+    let mut writer = PayloadSpoolWriter::create(store_dir)?;
+    writer
+        .write_all(bytes)
+        .map_err(|error| PayloadSpoolError::File {
+            path: store_dir.payload_spool_dir(),
+            error: error.to_string(),
+        })?;
+    let (hash, size) = writer.commit()?;
+    debug_assert_eq!(size, bytes.len() as u64);
     Ok(hash)
+}
+
+/// Copy an existing file into the payload spool without reading it into one
+/// contiguous buffer. Returns the content hash and byte length naming the
+/// installed payload.
+pub fn write_payload_file_blocking(
+    store_dir: &StoreDir,
+    source: &Path,
+) -> Result<(ObjectHash, u64), PayloadSpoolError> {
+    let mut input = std::fs::File::open(source).map_err(|error| PayloadSpoolError::File {
+        path: source.to_path_buf(),
+        error: error.to_string(),
+    })?;
+    let mut writer = PayloadSpoolWriter::create(store_dir)?;
+    std::io::copy(&mut input, &mut writer).map_err(|error| PayloadSpoolError::File {
+        path: source.to_path_buf(),
+        error: error.to_string(),
+    })?;
+    writer.commit()
 }
 
 /// [`PayloadSpool::read`] for callers on the database's connection thread.
@@ -337,6 +431,20 @@ pub fn release_payload_owner_on(conn: &Connection, owner_key: &str) -> Result<()
 /// The owner key naming the single retained replay baseline row's claim on the
 /// two payloads it names: its database image and its canonical authority bytes.
 pub const RETAINED_REPLAY_BASELINE_OWNER_KEY: &str = "retained-replay-baseline";
+
+/// The singleton outbound Store snapshot row's plaintext and ciphertext image
+/// payloads.
+pub const OUTBOUND_STORE_SNAPSHOT_OWNER_KEY: &str = "outbound-store-snapshot";
+
+/// One outbound Circle snapshot row's plaintext and ciphertext image payloads.
+pub fn outbound_circle_snapshot_owner_key(circle_id: coven_protocol::circle::CircleId) -> String {
+    format!("outbound-circle-snapshot:{circle_id}")
+}
+
+/// One queued Store write's captured SQLite changeset.
+pub fn store_write_owner_key(write_id: &coven_protocol::write::WriteId) -> String {
+    format!("store-write:{write_id}")
+}
 
 /// The owner key naming one Circle operation's claim on its prepared objects.
 pub fn circle_operation_owner_key(operation_id: &str) -> String {
@@ -468,6 +576,28 @@ mod tests {
         assert_eq!(first, third);
         assert_eq!(spool_entries(&store_dir), vec![first.to_string()]);
         assert_eq!(spool.read(first).await.expect("read payload"), bytes);
+    }
+
+    #[tokio::test]
+    async fn abandoning_one_write_keeps_identical_content_available_to_another_writer() {
+        let (_directory, store_dir) = temp_store_dir();
+        let db = crate::synthetic_store::open_test_db();
+        let spool = PayloadSpool::new(&store_dir);
+        let bytes = payload(7, 128);
+
+        let failed_writer_hash = spool.write(&bytes).await.expect("stage failed writer");
+        let surviving_writer_hash = spool.write(&bytes).await.expect("stage live writer");
+        assert_eq!(failed_writer_hash, surviving_writer_hash);
+
+        commit_claims(&db, "live-writer", &[surviving_writer_hash]).await;
+
+        assert_eq!(
+            spool
+                .read(surviving_writer_hash)
+                .await
+                .expect("read live writer payload"),
+            bytes
+        );
     }
 
     /// A payload's file is named for its own content, so a reader that finds
@@ -642,6 +772,30 @@ mod tests {
             .await
             .expect("drain obligations");
 
+        assert_eq!(owed_deletions(&db).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_store_call_pays_existing_deletion_obligations_when_its_operation_fails() {
+        let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir_for_test().clone();
+        let spool = PayloadSpool::new(&store_dir);
+        let hash = spool.write(&payload(9, 64)).await.expect("write payload");
+        commit_claims(&db, "owner-a", &[hash]).await;
+        commit_claims(&db, "owner-a", &[]).await;
+
+        let store = crate::StoreDatabase::new(&db);
+        store
+            .write_status(&coven_protocol::write::WriteId::from_generated(
+                "absent-write".to_string(),
+            ))
+            .await
+            .expect_err("missing write must fail");
+
+        assert!(matches!(
+            spool.read(hash).await,
+            Err(PayloadSpoolError::Missing { hash: missing, .. }) if missing == hash
+        ));
         assert_eq!(owed_deletions(&db).await, Vec::new());
     }
 }

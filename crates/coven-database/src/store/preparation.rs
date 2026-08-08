@@ -107,17 +107,16 @@ impl StoreDatabase {
                 registration,
                 &commit_ref,
             ).map_err(|error| DbError::context("verify prepared Store head", error))?;
-            let (stored_changeset, stored_base, stored_status, stored_preparation): (
-                Vec<u8>,
+            let (stored_base, stored_status, stored_preparation): (
                 String,
                 String,
                 Option<String>,
             ) = tx
                 .query_row(
-                    "SELECT changeset, base, status, prepared
+                    "SELECT base, status, prepared
                      FROM store_writes WHERE write_id = ?1",
                     [stage.write_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(DbError::from)?;
             if stored_status != "\"pending\"" || stored_preparation.is_some() {
@@ -127,9 +126,8 @@ impl StoreDatabase {
                 )));
             }
             let partitions = StoreDatabase::store_write_partitions_on(
-                &tx,
+                crate::payload_spool::StoreRecords::new(&tx, &store_dir),
                 stage.write_id.as_str(),
-                &stored_changeset,
             )?;
             let stored_base: StoreWriteBase =
                 serde_json::from_str(&stored_base).map_err(|error| {
@@ -539,6 +537,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let write_id = self.new_store_write_id();
         let blob_decls = self.blob_decls();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |conn| {
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -549,19 +548,20 @@ impl StoreDatabase {
                         local_stream_id.as_deref(),
                     )?,
                 };
-                let inverse_changeset = StoreDatabase::invert_changeset(&changeset)?;
                 let partitions = vec![crate::AudiencePartition {
                     audience: coven_protocol::circle::Audience::Store,
                     control: None,
-                    changeset,
+                    changeset: changeset.clone(),
                 }];
                 let blob_facts =
                     StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
+                let changeset_hash =
+                    crate::payload_spool::write_payload_blocking(&store_dir, &changeset)?;
                 StoreDatabase::insert_store_write_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
                     &write_id,
                     &partitions,
-                    &inverse_changeset,
+                    changeset_hash,
                     &base,
                     &blob_facts,
                     1,

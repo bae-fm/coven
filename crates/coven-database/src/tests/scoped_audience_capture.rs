@@ -82,6 +82,61 @@ fn inspect_database<R>(
     operation(&database).map_err(crate::DbError::from)
 }
 
+fn payload_bytes(store_dir: &StoreDir, encoded_hash: String) -> Result<Vec<u8>, crate::DbError> {
+    let hash = encoded_hash
+        .parse()
+        .map_err(|error| crate::DbError::context("parse captured payload hash", error))?;
+    crate::payload_spool::read_payload_blocking(store_dir, hash).map_err(crate::DbError::from)
+}
+
+fn audience_partitions(
+    store_dir: &StoreDir,
+    write_id: &str,
+) -> Result<Vec<crate::test_sql::StoreWritePartitionRow>, crate::DbError> {
+    let rows = inspect_database(store_dir, |conn| {
+        conn.query(
+            "SELECT audience, control_coord, changeset_hash
+             FROM store_write_partitions
+             WHERE write_id = ?1
+             ORDER BY audience",
+            [write_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+    })?;
+    rows.into_iter()
+        .map(|(audience, control, hash)| Ok((audience, control, payload_bytes(store_dir, hash)?)))
+        .collect()
+}
+
+fn audience_partition_changesets(
+    store_dir: &StoreDir,
+    write_id: &str,
+) -> Result<Vec<(String, Vec<u8>)>, crate::DbError> {
+    audience_partitions(store_dir, write_id).map(|partitions| {
+        partitions
+            .into_iter()
+            .map(|(audience, _, changeset)| (audience, changeset))
+            .collect()
+    })
+}
+
+fn captured_changeset(store_dir: &StoreDir, write_id: &str) -> Result<Vec<u8>, crate::DbError> {
+    let hash = inspect_database(store_dir, |conn| {
+        conn.query_row(
+            "SELECT changeset_hash FROM store_writes WHERE write_id = ?1",
+            [write_id],
+            |row| row.get::<_, String>(0),
+        )
+    })?;
+    payload_bytes(store_dir, hash)
+}
+
 fn has_change(
     changes: &[coven_foundation::changeset::RowChange],
     table: &str,
@@ -277,23 +332,8 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
 
     let write_id = receipt.write_id.to_string();
     let affected_write_id = write_id.clone();
-    let partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, control_coord, changeset
-                 FROM store_write_partitions
-                 WHERE write_id = ?1
-                 ORDER BY audience",
-            [write_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
-        )
-    })
-    .expect("read durable audience partitions");
+    let partitions =
+        audience_partitions(&store_dir, &write_id).expect("read durable audience partitions");
     let affected_rows = inspect_database(&store_dir, move |conn| {
         conn.query_row(
             "SELECT affected_rows FROM store_writes WHERE write_id = ?1",
@@ -520,33 +560,28 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
     .await
     .expect("move Store row into Circle");
     let move_write_id = moved.write_id.to_string();
-    let (host_audience, child_count, move_partitions, routes, mirror) =
-        inspect_database(&store_dir, move |conn| {
-            let audience = conn.query_row(
-                "SELECT audience FROM accounts WHERE id = 'store-account'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )?;
-            let child_count = conn.query_row(
-                "SELECT count(*) FROM transactions WHERE id = 'store-transaction'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let rows = conn.query(
-                "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-                [move_write_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            let routes = text_triples(
-                conn,
-                "SELECT routing_id, table_name, row_id
-                     FROM _coven_row_routes ORDER BY row_id",
-            )?;
-            let mirror = audience_mirror(conn)?;
-            Ok((audience, child_count, rows, routes, mirror))
-        })
+    let move_partitions = audience_partition_changesets(&store_dir, &move_write_id)
         .expect("read Store to Circle move partitions");
+    let (host_audience, child_count, routes, mirror) = inspect_database(&store_dir, move |conn| {
+        let audience = conn.query_row(
+            "SELECT audience FROM accounts WHERE id = 'store-account'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        let child_count = conn.query_row(
+            "SELECT count(*) FROM transactions WHERE id = 'store-transaction'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let routes = text_triples(
+            conn,
+            "SELECT routing_id, table_name, row_id
+                     FROM _coven_row_routes ORDER BY row_id",
+        )?;
+        let mirror = audience_mirror(conn)?;
+        Ok((audience, child_count, routes, mirror))
+    })
+    .expect("read Store to Circle move partitions");
 
     assert_eq!(host_audience.as_deref(), Some(circle_id.as_str()));
     assert_eq!(child_count, 1);
@@ -862,36 +897,28 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     .await
     .expect("move Circle subtree to Local");
     let local_write_id = local_move.write_id.to_string();
-    let (local_partitions, local_store_bytes, local_routes, local_mirror_count) =
-        inspect_database(&store_dir, move |conn| {
-            let partitions = conn.query(
-                "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                [&local_write_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            let store_bytes = conn.query_row(
-                "SELECT changeset FROM store_writes WHERE write_id = ?1",
-                [&local_write_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            )?;
-            let routes = conn.query(
-                "SELECT routing_id, row_id FROM _coven_row_routes
+    let local_partitions = audience_partition_changesets(&store_dir, &local_write_id)
+        .expect("read Circle-to-Local transition partitions");
+    let local_raw_changeset = captured_changeset(&store_dir, &local_write_id)
+        .expect("read Circle-to-Local captured changeset");
+    let (local_routes, local_mirror_count) = inspect_database(&store_dir, move |conn| {
+        let routes = conn.query(
+            "SELECT routing_id, row_id FROM _coven_row_routes
                      WHERE row_id IN ('local-move-account', 'local-move-transaction')
                      ORDER BY row_id",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?;
-            let mirror_count = conn.query_row(
-                "SELECT count(*) FROM _coven_audience audience
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mirror_count = conn.query_row(
+            "SELECT count(*) FROM _coven_audience audience
                  JOIN _coven_row_routes route USING (routing_id)
                  WHERE route.row_id IN ('local-move-account', 'local-move-transaction')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((partitions, store_bytes, routes, mirror_count))
-        })
-        .expect("read Circle-to-Local transition");
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok((routes, mirror_count))
+    })
+    .expect("read Circle-to-Local transition");
     assert_eq!(local_partitions.len(), 1);
     let local_partition = |audience: &str| {
         local_partitions
@@ -921,12 +948,21 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
             route
         ));
     }
-    assert_eq!(local_store_bytes, local_partition("store").1);
-    assert!(!contains_bytes(&local_store_bytes, b"local-move-account"));
-    assert!(!contains_bytes(
-        &local_store_bytes,
-        b"local-move-transaction"
+    assert_ne!(local_raw_changeset, local_partition("store").1);
+    let raw_changes =
+        crate::walk_changeset(&local_raw_changeset).expect("walk raw Circle-to-Local changeset");
+    assert!(has_change(
+        &raw_changes,
+        "accounts",
+        coven_foundation::changeset::ChangeOp::Update,
+        "local-move-account"
     ));
+    assert!(raw_changes
+        .iter()
+        .any(|change| change.table == "_coven_audience"));
+    assert!(raw_changes
+        .iter()
+        .any(|change| change.table == "_coven_row_routes"));
     assert_eq!(
         local_routes,
         vec![
@@ -953,33 +989,28 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
     .await
     .expect("move Circle subtree to Store");
     let store_write_id = store_move.write_id.to_string();
-    let (store_partitions, store_routes, store_mirror) =
-        inspect_database(&store_dir, move |conn| {
-            let partitions = conn.query(
-                "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                [store_write_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            let routes = conn.query(
-                "SELECT routing_id, row_id FROM _coven_row_routes
+    let store_partitions = audience_partition_changesets(&store_dir, &store_write_id)
+        .expect("read Circle-to-Store transition partitions");
+    let (store_routes, store_mirror) = inspect_database(&store_dir, move |conn| {
+        let routes = conn.query(
+            "SELECT routing_id, row_id FROM _coven_row_routes
                      WHERE row_id IN ('store-move-account', 'store-move-transaction')
                      ORDER BY row_id",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?;
-            let mirror = conn.query(
-                "SELECT audience.routing_id, audience.circle_id
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mirror = conn.query(
+            "SELECT audience.routing_id, audience.circle_id
                      FROM _coven_audience audience
                      JOIN _coven_row_routes route USING (routing_id)
                      WHERE route.row_id IN ('store-move-account', 'store-move-transaction')
                      ORDER BY audience.routing_id",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )?;
-            Ok((partitions, routes, mirror))
-        })
-        .expect("read Circle-to-Store transition");
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?;
+        Ok((routes, mirror))
+    })
+    .expect("read Circle-to-Store transition");
     assert_eq!(store_partitions.len(), 1);
     let store_partition = |audience: &str| {
         store_partitions
@@ -1038,34 +1069,29 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
         deleted_account_route.clone(),
         deleted_transaction_route.clone(),
     ];
-    let (delete_partitions, host_count, route_count, mirror_count) =
-        inspect_database(&store_dir, move |conn| {
-            let partitions = conn.query(
-                "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-                [delete_write_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            let host_count = conn.query_row(
-                "SELECT
+    let delete_partitions = audience_partition_changesets(&store_dir, &delete_write_id)
+        .expect("read Circle delete partitions");
+    let (host_count, route_count, mirror_count) = inspect_database(&store_dir, move |conn| {
+        let host_count = conn.query_row(
+            "SELECT
                     (SELECT count(*) FROM accounts WHERE id = 'deleted-account') +
                     (SELECT count(*) FROM transactions WHERE id = 'deleted-transaction')",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let route_count = conn.query_row(
-                "SELECT count(*) FROM _coven_row_routes WHERE routing_id IN (?1, ?2)",
-                [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let mirror_count = conn.query_row(
-                "SELECT count(*) FROM _coven_audience WHERE routing_id IN (?1, ?2)",
-                [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
-                |row| row.get::<_, i64>(0),
-            )?;
-            Ok((partitions, host_count, route_count, mirror_count))
-        })
-        .expect("read Circle delete transition");
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let route_count = conn.query_row(
+            "SELECT count(*) FROM _coven_row_routes WHERE routing_id IN (?1, ?2)",
+            [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let mirror_count = conn.query_row(
+            "SELECT count(*) FROM _coven_audience WHERE routing_id IN (?1, ?2)",
+            [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok((host_count, route_count, mirror_count))
+    })
+    .expect("read Circle delete transition");
     assert_eq!(delete_partitions.len(), 2);
     let delete_partition = |audience: &str| {
         delete_partitions
@@ -1183,15 +1209,8 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
     .await
     .expect("move one scoped root");
     let write_id = moved.write_id.to_string();
-    let partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read scoped sibling move partitions");
+    let partitions = audience_partition_changesets(&store_dir, &write_id)
+        .expect("read scoped sibling move partitions");
 
     for (audience, changeset) in partitions {
         let changes = crate::walk_changeset(&changeset)
@@ -1522,20 +1541,16 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     .await
     .expect("reparent Store child to Circle B");
     let write_id = moved.write_id.to_string();
-    let (partitions, after_routes) = inspect_database(&store_dir, move |conn| {
-        let partitions = conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-            [write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )?;
+    let partitions = audience_partition_changesets(&store_dir, &write_id)
+        .expect("read inherited reparent partitions");
+    let after_routes = inspect_database(&store_dir, move |conn| {
         let after_routes = text_triples(
             conn,
             "SELECT table_name, row_id, routing_id FROM _coven_row_routes
                      WHERE table_name IN ('transactions', 'line_items')
                      ORDER BY table_name, row_id",
         )?;
-        Ok((partitions, after_routes))
+        Ok(after_routes)
     })
     .expect("read inherited reparent result");
 
@@ -1576,14 +1591,10 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     .await
     .expect("reparent Circle A child to Local with a Local requirement");
     let local_write_id = to_local.write_id.to_string();
-    let (local_partitions, local_state) = inspect_database(&store_dir, move |conn| {
-        let partitions = conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                     WHERE write_id = ?1 ORDER BY audience",
-            [local_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )?;
-        let state = conn.query_row(
+    let local_partitions = audience_partition_changesets(&store_dir, &local_write_id)
+        .expect("read Circle-to-Local reparent partitions");
+    let local_state = inspect_database(&store_dir, move |conn| {
+        conn.query_row(
             "SELECT account_id, requirement_id,
                         (SELECT count(*) FROM line_items
                          WHERE transaction_id = 'to-local-transaction')
@@ -1596,8 +1607,7 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
                     row.get::<_, i64>(2)?,
                 ))
             },
-        )?;
-        Ok((partitions, state))
+        )
     })
     .expect("read Circle-to-Local reparent");
     assert_eq!(
@@ -1635,15 +1645,8 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
     .await
     .expect("reparent Circle A child to Store");
     let store_write_id = to_store.write_id.to_string();
-    let store_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [store_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Circle-to-Store reparent");
+    let store_partitions = audience_partition_changesets(&store_dir, &store_write_id)
+        .expect("read Circle-to-Store reparent");
     let store_partition = |audience: &str| {
         store_partitions
             .iter()
@@ -1812,15 +1815,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("seed Local-only ancestor subtree");
     let seed_write_id = seeded.write_id.to_string();
-    let local_only_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1",
-            [seed_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Local-only ancestor journal");
+    let local_only_partitions = audience_partition_changesets(&store_dir, &seed_write_id)
+        .expect("read Local-only ancestor journal");
     assert_eq!(local_only_partitions.len(), 1);
     assert_eq!(local_only_partitions[0].0, "local");
     let local_seed =
@@ -1849,15 +1845,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("move Local descendant into Circle A");
     let write_id = moved.write_id.to_string();
-    let partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Local-to-Circle ancestor move");
+    let partitions = audience_partition_changesets(&store_dir, &write_id)
+        .expect("read Local-to-Circle ancestor move");
     let partition = |audience: &str| {
         partitions
             .iter()
@@ -1908,15 +1897,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .expect("insert Circle B sibling under required ancestor");
     let sibling_write_id = inserted_sibling.write_id.to_string();
     let sibling_circle = circle_b.clone();
-    let sibling_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [sibling_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Circle B sibling insert");
+    let sibling_partitions = audience_partition_changesets(&store_dir, &sibling_write_id)
+        .expect("read Circle B sibling insert");
     let sibling = sibling_partitions
         .iter()
         .find(|(audience, _)| audience == &sibling_circle)
@@ -1970,15 +1952,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("move Circle A descendant to Local while Circle B remains");
     let local_write_id = moved_local.write_id.to_string();
-    let local_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [local_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Circle A to Local move");
+    let local_partitions = audience_partition_changesets(&store_dir, &local_write_id)
+        .expect("read Circle A to Local move");
     assert!(
         local_partitions
             .iter()
@@ -2052,15 +2027,9 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("move final Circle descendant to Local");
     let sibling_local_write_id = moved_sibling_local.write_id.to_string();
-    let sibling_local_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [sibling_local_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read final Circle descendant move to Local");
+    let sibling_local_partitions =
+        audience_partition_changesets(&store_dir, &sibling_local_write_id)
+            .expect("read final Circle descendant move to Local");
     let store_retraction = sibling_local_partitions
         .iter()
         .find(|(audience, _)| audience == "store")
@@ -2097,15 +2066,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("move selected Local descendant to Store");
     let store_write_id = moved_store.write_id.to_string();
-    let store_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [store_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read Local descendant move to Store");
+    let store_partitions = audience_partition_changesets(&store_dir, &store_write_id)
+        .expect("read Local descendant move to Store");
     let store_destination = store_partitions
         .iter()
         .find(|(audience, _)| audience == "store")
@@ -2138,15 +2100,8 @@ async fn scoped_descendant_keeps_store_ancestor() {
     .await
     .expect("delete final Store descendant");
     let delete_write_id = deleted_store.write_id.to_string();
-    let delete_partitions = inspect_database(&store_dir, move |conn| {
-        conn.query(
-            "SELECT audience, changeset FROM store_write_partitions
-                 WHERE write_id = ?1 ORDER BY audience",
-            [delete_write_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-    })
-    .expect("read final Store descendant delete");
+    let delete_partitions = audience_partition_changesets(&store_dir, &delete_write_id)
+        .expect("read final Store descendant delete");
     let store_delete = delete_partitions
         .iter()
         .find(|(audience, _)| audience == "store")

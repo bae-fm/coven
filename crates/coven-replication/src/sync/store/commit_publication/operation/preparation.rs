@@ -33,17 +33,10 @@ impl AuthorizedWriterOperation<'_> {
         let db = &database;
         let PreparedStoreWrite {
             write_id,
-            changeset,
-            inverse_changeset,
             base,
             blob_facts,
             partitions,
         } = pending;
-        if !changeset.is_empty() && inverse_changeset.is_empty() {
-            return Err(StoreError::InvalidOutbound(
-                "shared Store write has no inverse changeset".to_string(),
-            ));
-        }
         let dependencies =
             coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
                 .map(|frontier| frontier.commits().clone())

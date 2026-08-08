@@ -3,9 +3,7 @@ use coven_protocol::store_commit::VerifiedStoreBatchCommit;
 
 pub struct PreparedStoreWrite {
     pub write_id: WriteId,
-    pub changeset: Vec<u8>,
     pub partitions: PreparedStoreWritePartitions,
-    pub inverse_changeset: Vec<u8>,
     pub base: StoreWriteBase,
     pub blob_facts: StoreWriteBlobFacts,
 }

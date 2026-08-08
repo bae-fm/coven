@@ -450,6 +450,13 @@ pub enum DbError {
     #[error("{0}")]
     SnapshotImage(#[from] crate::store::SnapshotImageError),
     #[error("{0}")]
+    PayloadSpool(#[from] crate::payload_spool::PayloadSpoolError),
+    #[error("{operation}; payload cleanup failed: {cleanup}")]
+    PayloadCleanupFailed {
+        operation: Box<DbError>,
+        cleanup: Box<DbError>,
+    },
+    #[error("{0}")]
     FromSql(#[from] rusqlite::types::FromSqlError),
     #[error("{0}")]
     BlobOpeningAuthority(#[from] coven_protocol::blob::BlobOpeningAuthorityError),

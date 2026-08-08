@@ -990,7 +990,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         )
         .await
         .expect("cut the successor bootstrap from accepted history");
-    let image = coven_database::DatabaseImageTest::from_bytes(&cut.snapshot.db_image)
+    let image = coven_database::DatabaseImageTest::open(cut.snapshot.db_image.path())
         .expect("open the bootstrap image");
     let installed_ids = image
         .query("SELECT id FROM documents ORDER BY id", [], |row| {

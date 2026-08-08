@@ -654,13 +654,14 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     )
     .expect("open");
     let existing_changeset = vec![0x45, 0x58, 0x41, 0x43, 0x54];
-    let existing_for_insert = existing_changeset.clone();
+    let existing_hash = ObjectHash::digest(&existing_changeset).to_string();
+    let existing_for_insert = existing_hash.clone();
     db.call(move |conn| {
         conn.execute(
             "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
              VALUES (
-                'existing-write', '\"pending\"', '[]', ?1, ?1,
+                'existing-write', '\"pending\"', '[]', ?1,
                 '{\"dependencies\":{}}',
                 '{\"blobs\":[]}'
              )",
@@ -693,15 +694,15 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
             .query_row("SELECT COUNT(*) FROM things", [], |row| row.get(0))
             .map_err(DbError::from)?;
         let pending = conn
-            .prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
+            .prepare("SELECT changeset_hash FROM store_writes ORDER BY ordinal")
             .and_then(|mut statement| {
                 statement
-                    .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                    .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(DbError::from)?;
         assert_eq!(row_count, 0);
-        assert_eq!(pending, vec![existing_changeset]);
+        assert_eq!(pending, vec![existing_hash]);
         Ok(())
     })
     .await
@@ -778,10 +779,10 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
 
     let pending_before = db
         .call(|conn| {
-            conn.prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
+            conn.prepare("SELECT changeset_hash FROM store_writes ORDER BY ordinal")
                 .and_then(|mut statement| {
                     statement
-                        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                        .query_map([], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()
                 })
                 .map_err(DbError::from)
@@ -809,10 +810,10 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
             })
             .map_err(DbError::from)?;
         let pending_after = conn
-            .prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
+            .prepare("SELECT changeset_hash FROM store_writes ORDER BY ordinal")
             .and_then(|mut statement| {
                 statement
-                    .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                    .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(DbError::from)?;

@@ -15,11 +15,13 @@ pub enum AuthorExclusionLocatorTamper {
 }
 
 struct PreparedWriteTransfer {
-    write: (String, String, Vec<u8>, Vec<u8>, String, String, String),
-    partitions: Vec<(String, Option<String>, Vec<u8>)>,
+    write: (String, String, String, String, String, String),
+    partitions: Vec<(String, Option<String>, String)>,
     packages: Vec<(String, String)>,
     blobs: Vec<(String, String, String, Option<String>)>,
     remotes: Vec<(String, String)>,
+    payload_claims: Vec<(String, BTreeSet<ObjectHash>)>,
+    payloads: Vec<(ObjectHash, Vec<u8>)>,
 }
 
 impl StoreDatabase {
@@ -293,17 +295,25 @@ impl StoreDatabase {
         let base = serde_json::json!({ "dependencies": {} }).to_string();
         let status = serde_json::to_string(&status)
             .map_err(|error| DbError::context("serialize write status", error))?;
+        let changeset_hash = crate::payload_spool::write_payload_blocking(&self.store_dir, b"")?;
+        let owner_key = crate::payload_spool::store_write_owner_key(&write_id);
         self.connection
             .call(move |connection| {
-                connection
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                transaction
                     .execute(
                         r#"INSERT INTO store_writes
-                         (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
-                         VALUES (?1, ?2, '[]', X'', X'', ?3, '{"blobs":[]}')"#,
-                        (write_id.as_str(), status, base),
+                         (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+                         VALUES (?1, ?2, '[]', ?3, ?4, '{"blobs":[]}')"#,
+                        (write_id.as_str(), status, changeset_hash.to_string(), base),
                     )
-                    .map(|_| ())
-                    .map_err(DbError::from)
+                    .map_err(DbError::from)?;
+                crate::payload_spool::set_payload_owner_claims_on(
+                    &transaction,
+                    &owner_key,
+                    &BTreeSet::from([changeset_hash]),
+                )?;
+                transaction.commit().map_err(DbError::from)
             })
             .await
     }
@@ -311,13 +321,18 @@ impl StoreDatabase {
     pub async fn delete_write_for_test(&self, write_id: WriteId) -> Result<(), DbError> {
         self.connection
             .call(move |connection| {
-                connection
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                crate::payload_spool::release_payload_owner_on(
+                    &transaction,
+                    &crate::payload_spool::store_write_owner_key(&write_id),
+                )?;
+                transaction
                     .execute(
                         "DELETE FROM store_writes WHERE write_id = ?1",
                         [write_id.as_str()],
                     )
-                    .map(|_| ())
-                    .map_err(DbError::from)
+                    .map_err(DbError::from)?;
+                transaction.commit().map_err(DbError::from)
             })
             .await
     }
@@ -334,14 +349,21 @@ impl StoreDatabase {
 
     pub async fn write_changeset_for_test(&self, write_id: &WriteId) -> Result<Vec<u8>, DbError> {
         let write_id = write_id.clone();
+        let store_dir = self.store_dir.clone();
         self.connection
             .call(move |connection| {
-                connection
+                let encoded: String = connection
                     .query_row(
-                        "SELECT changeset FROM store_writes WHERE write_id = ?1",
+                        "SELECT changeset_hash FROM store_writes WHERE write_id = ?1",
                         [write_id.as_str()],
                         |row| row.get(0),
                     )
+                    .map_err(DbError::from)?;
+                let hash = encoded
+                    .parse()
+                    .map_err(|error| DbError::context("parse captured changeset hash", error))?;
+                crate::payload_spool::StoreRecords::new(connection, &store_dir)
+                    .payload(hash)
                     .map_err(DbError::from)
             })
             .await
@@ -532,12 +554,13 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<(), DbError> {
         let source_write_id = write_id.clone();
+        let source_store_dir = self.store_dir.clone();
         let transfer = self
             .connection
             .call(move |connection| {
                 let write = connection
                     .query_row(
-                        "SELECT status, affected_rows, changeset, inverse_changeset,
+                        "SELECT status, affected_rows, changeset_hash,
                                 base, blob_facts, prepared
                          FROM store_writes WHERE write_id = ?1",
                         [source_write_id.as_str()],
@@ -549,7 +572,6 @@ impl StoreDatabase {
                                 row.get(3)?,
                                 row.get(4)?,
                                 row.get(5)?,
-                                row.get(6)?,
                             ))
                         },
                     )
@@ -557,7 +579,7 @@ impl StoreDatabase {
                 let partitions = {
                     let mut statement = connection
                         .prepare(
-                            "SELECT audience, control_coord, changeset
+                            "SELECT audience, control_coord, changeset_hash
                              FROM store_write_partitions WHERE write_id = ?1 ORDER BY audience",
                         )
                         .map_err(DbError::from)?;
@@ -608,22 +630,76 @@ impl StoreDatabase {
                         .prepare("SELECT object_id, state FROM remote_objects ORDER BY object_id")
                         .map_err(DbError::from)?;
                     let rows = statement
-                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
                         .map_err(DbError::from)?
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(DbError::from)?;
                     rows
                 };
+                let mut owner_keys = vec![crate::payload_spool::store_write_owner_key(
+                    &source_write_id,
+                )];
+                for (object_id, _) in &remotes {
+                    let object_id = object_id.parse().map_err(|error| {
+                        DbError::context("parse transferred remote object id", error)
+                    })?;
+                    owner_keys.push(crate::payload_spool::remote_object_owner_key(object_id));
+                }
+                let mut payload_claims = Vec::new();
+                let mut payload_hashes = BTreeSet::new();
+                for owner_key in owner_keys {
+                    let claims = {
+                        let mut statement = connection
+                            .prepare(
+                                "SELECT payload_hash FROM payload_spool_owners
+                                 WHERE owner_key = ?1 ORDER BY payload_hash",
+                            )
+                            .map_err(DbError::from)?;
+                        let claims = statement
+                            .query_map([&owner_key], |row| row.get::<_, String>(0))
+                            .map_err(DbError::from)?
+                            .map(|encoded| {
+                                encoded.map_err(DbError::from)?.parse().map_err(|error| {
+                                    DbError::context("parse transferred payload hash", error)
+                                })
+                            })
+                            .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
+                        claims
+                    };
+                    payload_hashes.extend(claims.iter().copied());
+                    if !claims.is_empty() {
+                        payload_claims.push((owner_key, claims));
+                    }
+                }
+                let records =
+                    crate::payload_spool::StoreRecords::new(connection, &source_store_dir);
+                let payloads = payload_hashes
+                    .into_iter()
+                    .map(|hash| Ok((hash, records.payload(hash)?)))
+                    .collect::<Result<Vec<_>, DbError>>()?;
                 Ok(PreparedWriteTransfer {
                     write,
                     partitions,
                     packages,
                     blobs,
                     remotes,
+                    payload_claims,
+                    payloads,
                 })
             })
             .await?;
 
+        for (expected_hash, bytes) in &transfer.payloads {
+            let actual_hash =
+                crate::payload_spool::write_payload_blocking(&destination.store_dir, bytes)?;
+            if actual_hash != *expected_hash {
+                return Err(DbError::Message(format!(
+                    "transferred payload expected {expected_hash} but stored as {actual_hash}"
+                )));
+            }
+        }
         let destination_write_id = write_id.clone();
         destination
             .connection
@@ -648,9 +724,9 @@ impl StoreDatabase {
                 transaction
                     .execute(
                         "INSERT INTO store_writes
-                         (write_id, status, affected_rows, changeset, inverse_changeset,
+                         (write_id, status, affected_rows, changeset_hash,
                           base, blob_facts, prepared)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         rusqlite::params![
                             destination_write_id.as_str(),
                             transfer.write.0,
@@ -659,21 +735,20 @@ impl StoreDatabase {
                             transfer.write.3,
                             transfer.write.4,
                             transfer.write.5,
-                            transfer.write.6,
                         ],
                     )
                     .map_err(DbError::from)?;
-                for (audience, control, changeset) in transfer.partitions {
+                for (audience, control, changeset_hash) in transfer.partitions {
                     transaction
                         .execute(
                             "INSERT INTO store_write_partitions
-                             (write_id, audience, control_coord, changeset)
+                             (write_id, audience, control_coord, changeset_hash)
                              VALUES (?1, ?2, ?3, ?4)",
                             rusqlite::params![
                                 destination_write_id.as_str(),
                                 audience,
                                 control,
-                                changeset
+                                changeset_hash
                             ],
                         )
                         .map_err(DbError::from)?;
@@ -702,6 +777,13 @@ impl StoreDatabase {
                             ],
                         )
                         .map_err(DbError::from)?;
+                }
+                for (owner_key, claims) in transfer.payload_claims {
+                    crate::payload_spool::set_payload_owner_claims_on(
+                        &transaction,
+                        &owner_key,
+                        &claims,
+                    )?;
                 }
                 transaction.commit().map_err(DbError::from)
             })

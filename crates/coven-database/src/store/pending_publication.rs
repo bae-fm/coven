@@ -40,7 +40,7 @@ impl StoreDatabase {
             .call(move |conn| {
                 let row = conn
                     .query_row(
-                        "SELECT write_id, changeset, base, prepared FROM store_writes
+                        "SELECT write_id, base, prepared FROM store_writes
                  WHERE prepared IS NOT NULL
                    AND status = '\"publishing\"'
                  ORDER BY ordinal LIMIT 1",
@@ -48,15 +48,14 @@ impl StoreDatabase {
                         |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
-                                row.get::<_, Vec<u8>>(1)?,
+                                row.get::<_, String>(1)?,
                                 row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
                             ))
                         },
                     )
                     .optional()
                     .map_err(DbError::from)?;
-                row.map(|(write_id, stored_changeset, base, prepared)| {
+                row.map(|(write_id, base, prepared)| {
                     let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                         .map_err(|error| DbError::context("prepared Store write", error))?;
                     let (commit, head, graph_commit) = match &prepared {
@@ -145,9 +144,8 @@ impl StoreDatabase {
                         ));
                     }
                     let partitions = StoreDatabase::store_write_partitions_on(
-                        conn,
+                        crate::payload_spool::StoreRecords::new(conn, &store_dir),
                         write_id.as_str(),
-                        &stored_changeset,
                     )?;
                     let audiences = load_prepared_audience_objects_on(conn, &store_dir, &write_id)?;
                     let graph_commit = match graph_commit {

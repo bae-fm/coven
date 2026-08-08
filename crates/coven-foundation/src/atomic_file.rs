@@ -84,6 +84,59 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
     flush_directory_blocking(parent).map_err(WriteError::AfterCommit)
 }
 
+/// One unpublished file whose destination is chosen after its bytes have been
+/// written. This is the streaming counterpart to [`write_atomic`]: callers can
+/// compute a content address while implementing [`Write`], then commit the
+/// completed file under that address with the same fsync/rename/fsync sequence.
+pub struct AtomicFileStage {
+    parent: PathBuf,
+    temp: tempfile::NamedTempFile,
+}
+
+impl AtomicFileStage {
+    pub fn create_in(parent: &Path) -> Result<Self, std::io::Error> {
+        std::fs::create_dir_all(parent)?;
+        let temp = tempfile::Builder::new()
+            .prefix(TEMP_FILE_PREFIX)
+            .tempfile_in(parent)?;
+        Ok(Self {
+            parent: parent.to_path_buf(),
+            temp,
+        })
+    }
+
+    pub fn commit(self, destination: &Path) -> Result<(), WriteError<std::io::Error>> {
+        if destination.parent() != Some(self.parent.as_path()) {
+            return Err(WriteError::BeforeCommit(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "atomic stage in {} cannot commit to {}",
+                    self.parent.display(),
+                    destination.display()
+                ),
+            )));
+        }
+        self.temp
+            .as_file()
+            .sync_all()
+            .map_err(WriteError::BeforeCommit)?;
+        self.temp
+            .persist(destination)
+            .map_err(|error| WriteError::BeforeCommit(error.error))?;
+        flush_directory_blocking(&self.parent).map_err(WriteError::AfterCommit)
+    }
+}
+
+impl std::io::Write for AtomicFileStage {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.temp.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.temp.flush()
+    }
+}
+
 /// One local file whose complete contents are installed with a durable rename.
 pub struct AtomicFile {
     path: PathBuf,
@@ -212,6 +265,20 @@ mod tests {
         assert!(!error.committed());
         assert_eq!(error.into_inner().kind(), std::io::ErrorKind::NotFound);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn streaming_stage_commits_only_the_complete_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("payload");
+        let mut stage = AtomicFileStage::create_in(directory.path()).expect("create stage");
+
+        stage.write_all(b"first ").expect("write first part");
+        stage.write_all(b"second").expect("write second part");
+        assert!(!path.exists());
+        stage.commit(&path).expect("commit stage");
+
+        assert_eq!(std::fs::read(path).expect("read payload"), b"first second");
     }
 
     /// The durable-rename tail must succeed on every platform coven supports,

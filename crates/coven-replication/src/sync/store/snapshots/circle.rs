@@ -662,7 +662,11 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .verify_snapshot_blobs(circle_id, &snapshot)
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
-        let image_bytes = snapshot.db_image;
+        let image = snapshot.db_image;
+        let image_bytes = image
+            .read()
+            .await
+            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = access.protocol_context(
             root.store_root_hash,
@@ -676,12 +680,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .await
             .map_err(SnapshotError::Bucket)?;
         let image_prepared = storage
-            .prepare_protocol_object(
-                &image_context,
-                image_slot,
-                &image_prefix,
-                image_bytes.clone(),
-            )
+            .prepare_protocol_object(&image_context, image_slot, &image_prefix, image_bytes)
             .map_err(SnapshotError::Bucket)?;
         let bootstrap = CircleBootstrapRef {
             coverage,
@@ -771,7 +770,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .stage_circle_snapshot_publication(
                 meta.clone(),
                 meta_prepared,
-                image_bytes,
+                image,
                 image_prepared,
                 Vec::new(),
             )

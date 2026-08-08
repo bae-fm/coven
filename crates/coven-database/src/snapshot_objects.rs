@@ -74,12 +74,16 @@ pub fn validate_snapshot_author(
 pub fn validate_snapshot_image(
     image: &SnapshotImageRef,
     prepared: &PreparedExactObject,
-    image_bytes: &[u8],
+    plaintext_hash: ObjectHash,
+    stored_hash: ObjectHash,
+    stored_size: u64,
     expected_slot: String,
     label: &str,
 ) -> Result<(), DbError> {
     if image.object == *prepared.reference()
-        && ObjectHash::digest(image_bytes) == image.image_hash
+        && plaintext_hash == image.image_hash
+        && stored_hash == image.object.stored_hash()
+        && stored_size == image.object.stored_size()
         && image.object.slot().logical_key() == expected_slot
     {
         Ok(())

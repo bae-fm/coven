@@ -202,8 +202,7 @@ macro_rules! coven_tables {
     write_id TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL CHECK (json_valid(status)),
     affected_rows TEXT NOT NULL CHECK (json_valid(affected_rows)),
-    changeset BLOB NOT NULL,
-    inverse_changeset BLOB NOT NULL,
+    changeset_hash TEXT NOT NULL CHECK (length(changeset_hash) = 64),
     base TEXT NOT NULL CHECK (json_valid(base)),
     blob_facts TEXT NOT NULL CHECK (json_valid(blob_facts)),
     prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
@@ -225,7 +224,7 @@ macro_rules! coven_tables {
     write_id TEXT NOT NULL,
     audience TEXT NOT NULL,
     control_coord TEXT,
-    changeset BLOB NOT NULL,
+    changeset_hash TEXT NOT NULL CHECK (length(changeset_hash) = 64),
     PRIMARY KEY (write_id, audience),
     FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE,
     CHECK (
@@ -333,8 +332,6 @@ macro_rules! coven_tables {
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
     image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
-    image_prepared TEXT NOT NULL CHECK (json_valid(image_prepared)),
-    image_bytes BLOB NOT NULL,
     meta_bytes BLOB NOT NULL,
     blobs TEXT NOT NULL CHECK (json_valid(blobs))
 "
@@ -385,8 +382,6 @@ macro_rules! coven_tables {
     snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
     meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
     image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
-    image_prepared TEXT NOT NULL CHECK (json_valid(image_prepared)),
-    image_bytes BLOB NOT NULL,
     meta_bytes BLOB NOT NULL,
     blobs TEXT NOT NULL CHECK (json_valid(blobs))
 "

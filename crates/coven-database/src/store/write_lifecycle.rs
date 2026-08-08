@@ -388,6 +388,7 @@ impl StoreDatabase {
     ) -> Result<BlockedWriteDiscard, DbError> {
         let write_id = write_id.clone();
         let synced_tables = self.synced_tables().to_vec();
+        let gates = self.gates();
         let store_dir = self.store_dir.clone();
         let discarded_ids = self.connection.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -406,7 +407,7 @@ impl StoreDatabase {
 
             let mut statement = tx
                 .prepare(
-                    "SELECT write_id, status, inverse_changeset FROM store_writes
+                    "SELECT write_id, status, changeset_hash FROM store_writes
                      WHERE ordinal >= ?1
                        AND status != '\"local_only\"'
                        AND json_extract(status, '$.published') IS NULL
@@ -419,13 +420,13 @@ impl StoreDatabase {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(2)?,
                     ))
                 })
                 .map_err(DbError::from)?;
             let mut discarded = Vec::new();
             for row in rows {
-                let (stored_id, raw_status, inverse) = row.map_err(DbError::from)?;
+                let (stored_id, raw_status, changeset_hash) = row.map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status)
                     .map_err(|error| DbError::context("discard write status", error))?;
                 if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
@@ -433,7 +434,10 @@ impl StoreDatabase {
                         "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
                     )));
                 }
-                discarded.push((WriteId::from_generated(stored_id), inverse));
+                discarded.push((
+                    WriteId::from_generated(stored_id),
+                    changeset_hash.parse::<coven_protocol::store_commit::ObjectHash>()?,
+                ));
             }
             drop(statement);
             if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
@@ -447,11 +451,11 @@ impl StoreDatabase {
                     return Ok(BlockedWriteDiscard::RemoteResolutionRequired);
                 }
             }
-            let schema = Arc::new(crate::TableSchema::from_db(
-                &tx,
-                &synced_tables,
-            )?);
-            for (_, inverse) in discarded.iter().rev() {
+            let schema = Arc::new(crate::TableSchema::for_apply(&tx, &synced_tables, &gates)?);
+            let records = crate::payload_spool::StoreRecords::new(&tx, &store_dir);
+            for (_, changeset_hash) in discarded.iter().rev() {
+                let changeset = records.payload(*changeset_hash)?;
+                let inverse = StoreDatabase::invert_changeset(&changeset)?;
                 let inverse = crate::ValidatedChangeset::new(
                     inverse,
                     schema.clone(),

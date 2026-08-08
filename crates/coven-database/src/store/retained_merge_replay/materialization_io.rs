@@ -296,7 +296,7 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            *records,
+            records.records(),
             root,
             materialization.commit_ref(),
             &input,
@@ -633,10 +633,11 @@ impl StoreDatabase {
     }
 
     pub fn load_merge_replay_write_overlays_on(
-        conn: &Connection,
+        records: StoreRecords<'_>,
         active_accepted_writes: &BTreeSet<WriteId>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
+        let conn = records.conn();
         if !active_accepted_writes.is_disjoint(retracted_writes) {
             return Err(DbError::Message(
                 "retained replay classifies one write as active and retracted".to_string(),
@@ -644,20 +645,14 @@ impl StoreDatabase {
         }
         let rows = query_mapped_rows(
             conn,
-            "SELECT write_id, status, changeset
+            "SELECT write_id, status
                  FROM store_writes
                  ORDER BY ordinal",
             [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?;
         let mut overlays = Vec::new();
-        for (encoded_write_id, raw_status, stored_store_changeset) in rows {
+        for (encoded_write_id, raw_status) in rows {
             let write_id = WriteId::from_generated(encoded_write_id.clone());
             let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
                 DbError::context(
@@ -665,11 +660,7 @@ impl StoreDatabase {
                     error,
                 )
             })?;
-            let partitions = StoreDatabase::store_write_partitions_on(
-                conn,
-                &encoded_write_id,
-                &stored_store_changeset,
-            )?;
+            let partitions = StoreDatabase::store_write_partitions_on(records, &encoded_write_id)?;
             let active = active_accepted_writes.contains(&write_id);
             let retracted = retracted_writes.contains(&write_id);
             let partitions = match status {

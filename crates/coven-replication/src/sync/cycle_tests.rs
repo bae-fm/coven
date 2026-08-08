@@ -345,7 +345,7 @@ impl CycleTestStoreOps for TestStore {
             .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
-                    db_image: marker.to_vec(),
+                    db_image: staged_snapshot_image(marker),
                     blobs: Vec::new(),
                 },
                 coven_protocol::store_commit::CommitFrontier(BTreeMap::new()),
@@ -3974,7 +3974,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
-                    db_image: b"cadence-snapshot".to_vec(),
+                    db_image: staged_snapshot_image(b"cadence-snapshot"),
                     blobs: Vec::new(),
                 },
                 coven_protocol::store_commit::CommitFrontier(BTreeMap::from([
@@ -4082,7 +4082,7 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
             .snapshots()
             .push_store_snapshot(
                 coven_database::CreatedSnapshot {
-                    db_image: b"time-cadence-snapshot".to_vec(),
+                    db_image: staged_snapshot_image(b"time-cadence-snapshot"),
                     blobs: Vec::new(),
                 },
                 coven_protocol::store_commit::CommitFrontier(BTreeMap::from([(

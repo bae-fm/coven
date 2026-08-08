@@ -515,7 +515,7 @@ pub fn begin_blocked_merge_candidate_nonactivation_on(
 ) -> Result<(), DbError> {
     let tx = records.transaction();
     if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
-        validate_terminal_candidate_authority_on(*records, root, candidate, durable)?;
+        validate_terminal_candidate_authority_on(records.records(), root, candidate, durable)?;
     }
     match nonactivation {
         BlockedMergeCandidateNonactivation::Merge(durable) => {

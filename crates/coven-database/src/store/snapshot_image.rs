@@ -9,7 +9,7 @@ use coven_protocol::synced_schema::SyncedTable;
 use super::*;
 
 pub struct CreatedSnapshot {
-    pub db_image: Vec<u8>,
+    pub db_image: SnapshotDatabaseImage,
     pub blobs: Vec<SnapshotBlobFact>,
 }
 
@@ -171,10 +171,13 @@ impl SnapshotDatabaseImage {
             }
         }
 
-        let plaintext = self.read_and_discard()?;
-        info!(plaintext_size = plaintext.len(), "created snapshot");
+        let plaintext_size = match std::fs::metadata(self.path()) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => return self.finish(Err(SnapshotImageError::Io(error))),
+        };
+        info!(plaintext_size, "created snapshot");
         Ok(CreatedSnapshot {
-            db_image: plaintext,
+            db_image: self,
             blobs,
         })
     }
@@ -202,6 +205,15 @@ impl SnapshotDatabaseImage {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub async fn read(&self) -> Result<Vec<u8>, SnapshotImageError> {
+        tokio::fs::read(&self.path).await.map_err(|error| {
+            SnapshotImageError::Projection(format!(
+                "read staged snapshot database {}: {error}",
+                self.path.display()
+            ))
+        })
     }
 
     pub fn read_and_discard(self) -> Result<Vec<u8>, SnapshotImageError> {
@@ -425,7 +437,7 @@ impl SnapshotDatabaseImage {
     pub fn install_blob_graph(
         self,
         blobs: &[crate::PreparedSnapshotBlob],
-    ) -> Result<Vec<u8>, SnapshotImageError> {
+    ) -> Result<Self, SnapshotImageError> {
         let result = (|| {
             let mut connection = Connection::open(self.path()).map_err(|error| {
                 SnapshotImageError::Projection(format!("open snapshot closure image: {error}"))
@@ -463,9 +475,12 @@ impl SnapshotDatabaseImage {
             connection.close().map_err(|(_, error)| {
                 SnapshotImageError::Projection(format!("close snapshot closure image: {error}"))
             })?;
-            std::fs::read(self.path()).map_err(SnapshotImageError::Io)
+            Ok(())
         })();
-        self.finish(result)
+        match result {
+            Ok(()) => Ok(self),
+            Err(error) => self.finish(Err(error)),
+        }
     }
 
     fn blob_facts(
@@ -747,7 +762,7 @@ impl StoreDatabase {
                         &coven_protocol::circle::Audience::Store,
                     )
                 })
-                .map(|snapshot| snapshot.db_image)
+                .and_then(|snapshot| snapshot.db_image.read_and_discard())
                 .map_err(snapshot_image_db_error)
         })
         .await
@@ -773,14 +788,14 @@ impl StoreDatabase {
                         &coven_protocol::circle::Audience::Circle(circle_id),
                     )
                 })
-                .map(|snapshot| snapshot.db_image)
+                .and_then(|snapshot| snapshot.db_image.read_and_discard())
                 .map_err(snapshot_image_db_error)
         })
         .await
     }
 }
 
-fn snapshot_image_db_error(error: SnapshotImageError) -> DbError {
+pub(super) fn snapshot_image_db_error(error: SnapshotImageError) -> DbError {
     DbError::Message(error.to_string())
 }
 

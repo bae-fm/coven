@@ -66,9 +66,19 @@ async fn successful_cycle_projects_durable_blocked_state() {
             if writes.len() == 1 && writes[0].write_id == write_id
     ));
     database
-        .delete_write_for_test(write_id)
+        .delete_write_for_test(write_id.clone())
         .await
         .expect("remove blocked projection fixture");
+    assert!(
+        database
+            .payload_owner_claims(&coven_database::payload_spool::store_write_owner_key(
+                &write_id
+            ))
+            .await
+            .expect("read deleted write payload claims")
+            .is_empty(),
+        "deleting the fixture must release its payload claim"
+    );
 
     assert!(matches!(
         current_success_status(

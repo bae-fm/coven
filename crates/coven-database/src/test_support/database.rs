@@ -774,8 +774,9 @@ impl Database {
             + 'static,
         R: Send + 'static,
     {
+        let store_dir = self.state.store_dir.clone();
         self.connection
-            .call(move |connection| operation(DatabaseTestSql::new(connection)))
+            .call(move |connection| operation(DatabaseTestSql::for_store(connection, &store_dir)))
             .await
     }
 }

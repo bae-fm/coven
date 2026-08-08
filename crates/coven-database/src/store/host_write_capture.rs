@@ -29,6 +29,16 @@ use super::*;
 /// folding any cleanup failure into the operation error it returns.
 pub type StagedAudienceBlobRollback = Box<dyn FnOnce(DbError) -> DbError + Send>;
 
+fn rollback_staged_audience_blobs(
+    rollback: Option<StagedAudienceBlobRollback>,
+    error: DbError,
+) -> DbError {
+    match rollback {
+        Some(rollback) => rollback(error),
+        None => error,
+    }
+}
+
 /// Staging audience-move blobs into the spool needs the connected staging
 /// owner replication composes. The capture transaction names only this port;
 /// the returned rollback closure is consumed on failure.
@@ -424,14 +434,15 @@ impl StoreDatabase {
     }
 
     pub fn insert_store_write_on(
-        tx: &rusqlite::Transaction<'_>,
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         write_id: &WriteId,
         partitions: &[AudiencePartition],
-        inverse_changeset: &[u8],
+        changeset_hash: ObjectHash,
         base: &StoreWriteBase,
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
+        let tx = records.transaction();
         let remote_partitions = partitions
             .iter()
             .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
@@ -501,26 +512,21 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize affected rows", error))?;
         let blob_facts_json = serde_json::to_string(blob_facts)
             .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
-        let store_changeset = remote_partitions
-            .iter()
-            .find(|partition| partition.audience == coven_protocol::circle::Audience::Store)
-            .map(|partition| partition.changeset.as_slice())
-            .unwrap_or_default();
         tx.execute(
             "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 write_id.as_str(),
                 status_json,
                 affected_rows,
-                store_changeset,
-                inverse_changeset,
+                changeset_hash.to_string(),
                 base,
                 blob_facts_json,
             ],
         )
         .map_err(DbError::from)?;
+        let mut payloads = std::collections::BTreeSet::from([changeset_hash]);
         for partition in partitions {
             let audience = match partition.audience {
                 coven_protocol::circle::Audience::Store => "store".to_string(),
@@ -531,14 +537,26 @@ impl StoreDatabase {
                 .control
                 .as_ref()
                 .map(CirclePartitionControl::stored_json);
+            let partition_hash = records.install_payload(&partition.changeset)?;
+            payloads.insert(partition_hash);
             tx.execute(
                 "INSERT INTO store_write_partitions
-                 (write_id, audience, control_coord, changeset)
+                 (write_id, audience, control_coord, changeset_hash)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![write_id.as_str(), audience, control, partition.changeset,],
+                rusqlite::params![
+                    write_id.as_str(),
+                    audience,
+                    control,
+                    partition_hash.to_string()
+                ],
             )
             .map_err(DbError::from)?;
         }
+        crate::payload_spool::set_payload_owner_claims_on(
+            tx,
+            &crate::payload_spool::store_write_owner_key(write_id),
+            &payloads,
+        )?;
         if status == WriteStatus::Pending {
             for fact in &blob_facts.blobs {
                 if fact.blob.provenance != Provenance::HostProvided {
@@ -556,11 +574,11 @@ impl StoreDatabase {
     }
 
     pub async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.connection
-            .call(move |conn| {
-                let stored = conn
+        self.call_records(move |records| {
+            let conn = records.conn();
+            let stored = conn
                 .query_row(
-                "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
+                    "SELECT write_id, base, blob_facts FROM store_writes
                  WHERE status = '\"pending\"'
                    AND ordinal = (
                        SELECT MIN(ordinal) FROM store_writes
@@ -572,46 +590,41 @@ impl StoreDatabase {
                        SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
                    )
                  ORDER BY ordinal LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
                 .optional()
                 .map_err(DbError::from)?;
-                let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored
-                else {
-                    return Ok(None);
-                };
-                let partitions = Self::store_write_partitions_on(conn, &write_id, &changeset)?;
-                Ok(Some(PreparedStoreWrite {
-                    write_id: WriteId::from_generated(write_id),
-                    changeset,
-                    partitions,
-                    inverse_changeset,
-                    base: serde_json::from_str(&base)
-                        .map_err(|error| DbError::context("pending write base", error))?,
-                    blob_facts: serde_json::from_str(&blob_facts)
-                        .map_err(|error| DbError::context("pending write blob facts", error))?,
-                }))
-            })
-            .await
+            let Some((write_id, base, blob_facts)) = stored else {
+                return Ok(None);
+            };
+            let partitions = Self::store_write_partitions_on(records, &write_id)?;
+            Ok(Some(PreparedStoreWrite {
+                write_id: WriteId::from_generated(write_id),
+                partitions,
+                base: serde_json::from_str(&base)
+                    .map_err(|error| DbError::context("pending write base", error))?,
+                blob_facts: serde_json::from_str(&blob_facts)
+                    .map_err(|error| DbError::context("pending write blob facts", error))?,
+            }))
+        })
+        .await
     }
 
     pub fn store_write_partitions_on(
-        conn: &Connection,
+        records: crate::payload_spool::StoreRecords<'_>,
         write_id: &str,
-        stored_store_changeset: &[u8],
     ) -> Result<PreparedStoreWritePartitions, DbError> {
+        let conn = records.conn();
         let mut statement = conn
             .prepare(
-                "SELECT audience, control_coord, changeset
+                "SELECT audience, control_coord, changeset_hash
                  FROM store_write_partitions
                  WHERE write_id = ?1
                  ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
@@ -623,7 +636,7 @@ impl StoreDatabase {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(2)?,
                 ))
             })
             .map_err(DbError::from)?;
@@ -631,7 +644,8 @@ impl StoreDatabase {
         let mut circles = Vec::new();
         let mut local = None;
         for row in rows {
-            let (audience, control, changeset) = row.map_err(DbError::from)?;
+            let (audience, control, changeset_hash) = row.map_err(DbError::from)?;
+            let changeset = records.payload(changeset_hash.parse()?)?;
             if audience == "store" {
                 if control.is_some() {
                     return Err(DbError::Message(format!(
@@ -694,19 +708,6 @@ impl StoreDatabase {
             });
         }
         drop(statement);
-        match &store {
-            Some(partition) if partition.changeset != stored_store_changeset => {
-                return Err(DbError::Message(format!(
-                    "pending write {write_id} Store partition differs from store_writes.changeset"
-                )));
-            }
-            None if !stored_store_changeset.is_empty() => {
-                return Err(DbError::Message(format!(
-                    "pending write {write_id} has a store_writes.changeset without a Store partition"
-                )));
-            }
-            Some(_) | None => {}
-        }
         Ok(PreparedStoreWritePartitions {
             store,
             circles,
@@ -807,6 +808,14 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         } = self;
         (|| {
             let mut journal = attach_session(&tx, synced_tables).map_err(E::from)?;
+            if gates.has_scoped_graph() {
+                for table in ["_coven_audience", "_coven_row_routes"] {
+                    journal
+                        .attach(Some(table))
+                        .map_err(DbError::from)
+                        .map_err(E::from)?;
+                }
+            }
             let value = f(&tx)?;
             let mut captured =
                 StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
@@ -837,7 +846,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                             .map_err(E::from)?;
                 }
             }
-            drop(journal);
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
                     let store_root_hash = required_store_root_authority_on(&tx)
@@ -916,10 +924,21 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )));
                 }
             };
+            let changeset_hash = match (|| -> Result<ObjectHash, DbError> {
+                let mut changeset_writer =
+                    crate::payload_spool::PayloadSpoolWriter::create(store_dir)?;
+                journal.changeset_strm(&mut changeset_writer)?;
+                Ok(changeset_writer.commit()?.0)
+            })() {
+                Ok(hash) => hash,
+                Err(error) => {
+                    return Err(E::from(rollback_staged_audience_blobs(staged_files, error)));
+                }
+            };
+            drop(journal);
             let committed = (|| {
                 let rows_changed = tx.total_changes().saturating_sub(changes_before);
                 let local_stream_id = local_merge_stream_id_on(&tx)?;
-                let inverse_changeset = StoreDatabase::invert_changeset(&captured)?;
                 let base = StoreWriteBase {
                     dependencies: StoreDatabase::materialized_frontier_on(
                         &tx,
@@ -927,10 +946,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )?,
                 };
                 let status = StoreDatabase::insert_store_write_on(
-                    &tx,
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, store_dir),
                     &write_id,
                     &partitioned.partitions,
-                    &inverse_changeset,
+                    changeset_hash,
                     &base,
                     &blob_facts,
                     rows_changed,
@@ -941,14 +960,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let status = match committed {
                 Ok(status) => status,
                 Err(error) => {
-                    let error = match (&blob_materialization, staged_files) {
-                        (Some(AudienceBlobMoveMaterialization::Host(_)), Some(rollback)) => {
-                            rollback(error)
-                        }
-                        (_, None) => error,
-                        (_, Some(_)) => unreachable!("staged files require host staging"),
-                    };
-                    return Err(E::from(error));
+                    return Err(E::from(rollback_staged_audience_blobs(staged_files, error)));
                 }
             };
             Ok(WriteReceipt {
