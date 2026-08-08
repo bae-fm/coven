@@ -805,20 +805,23 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         "activation drops the operation's own claim on every payload it prepared"
     );
     let surviving = spooled_objects(&device, &activating).await;
+    let mut kept_a_row = false;
     for (step, object) in &activating.operation().prepared_objects {
-        let claimed = !coven_database::StoreDatabase::new(&db)
-            .payload_owner_claims(&coven_database::payload_spool::remote_object_owner_key(
-                coven_protocol::remote_object::remote_object_id(object),
-            ))
+        let row_exists = db
+            .remote_object_exists_for_test(object.clone())
             .await
-            .expect("read a remote object's payload claims")
-            .is_empty();
+            .expect("read whether the activated object kept its row");
+        kept_a_row |= row_exists;
         assert_eq!(
             surviving.contains(step),
-            claimed,
-            "payload for {step} survives exactly while a remote object row claims it"
+            row_exists,
+            "payload for {step} survives exactly while its remote object row does"
         );
     }
+    assert!(
+        kept_a_row && surviving.len() < activating.operation().prepared_objects.len(),
+        "activation must both keep some objects and let the rest of the spool go"
+    );
     assert_eq!(
         spooled_objects(&device, &pending).await,
         pending
@@ -889,17 +892,19 @@ async fn discard_releases_its_payload_claims() {
     );
     let surviving = spooled_objects(&device, &journal).await;
     for (step, object) in &journal.operation().prepared_objects {
-        let claimed = !coven_database::StoreDatabase::new(&revoked.db)
-            .payload_owner_claims(&coven_database::payload_spool::remote_object_owner_key(
-                coven_protocol::remote_object::remote_object_id(object),
-            ))
+        let row_exists = revoked
+            .db
+            .remote_object_exists_for_test(object.clone())
             .await
-            .expect("read a remote object's payload claims")
-            .is_empty();
+            .expect("read whether the discarded object kept its row");
         assert_eq!(
             surviving.contains(step),
-            claimed,
-            "payload for {step} survives exactly while a remote object row claims it"
+            row_exists,
+            "payload for {step} survives exactly while its remote object row does"
         );
     }
+    assert!(
+        surviving.len() < journal.operation().prepared_objects.len(),
+        "discard must let the spool of every object it removed go"
+    );
 }
