@@ -323,15 +323,11 @@ impl<E> From<std::io::Error> for HostWriteError<E> {
 #[derive(Clone)]
 pub struct StoreRowWrites {
     database: StoreDatabase,
-    store_dir: StoreDir,
 }
 
 impl StoreRowWrites {
-    pub fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
-        Self {
-            database,
-            store_dir,
-        }
+    pub fn new(database: StoreDatabase) -> Self {
+        Self { database }
     }
 
     pub fn requires_routing_encryption(&self) -> bool {
@@ -390,14 +386,14 @@ impl StoreRowWrites {
     {
         let database = &self.database;
         let HostWriteOperation { batch, sql } = operation;
-        let staged = StagedBlobBatch::stage(&self.store_dir, batch.new_blobs).await?;
+        let staged = StagedBlobBatch::stage(&database.store_dir, batch.new_blobs).await?;
         let tables = database.synced_tables.to_vec();
         let gates = database.gates.clone();
         let blob_decls = database.blob_decls.clone();
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
-        let store_dir = self.store_dir.clone();
-        let cleanup_store_dir = self.store_dir.clone();
+        let store_dir = database.store_dir.clone();
+        let cleanup_store_dir = database.store_dir.clone();
         let stamper = coven_protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
         let outcome = database
@@ -527,7 +523,7 @@ impl StoreRowWrites {
         };
 
         if let Err(error) =
-            super::local_blob_cleanup::LocalBlobCleanup::new(database, &self.store_dir)
+            super::local_blob_cleanup::LocalBlobCleanup::new(database, &database.store_dir)
                 .drain()
                 .await
         {
@@ -540,11 +536,11 @@ impl StoreRowWrites {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn write_changeset_for_test(
+    pub async fn store_write_partition_for_test(
         &self,
         write_id: &coven_protocol::write::WriteId,
     ) -> Result<Vec<u8>, DbError> {
-        self.database.write_changeset_for_test(write_id).await
+        self.database.store_write_partition_for_test(write_id).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

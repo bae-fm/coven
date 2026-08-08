@@ -32,44 +32,6 @@ where
         })
 }
 
-/// Publication that is not trusted until it has been proven. Every protocol
-/// object this crate writes is read back through its signed semantic prefix and
-/// required to open to the bytes that were sealed into it; a differing readback
-/// is [`StorageError::ReadbackMismatch`], which callers classify as invalid
-/// durable state rather than as a transport failure.
-#[async_trait::async_trait]
-pub trait VerifiedObjectWrites: SyncStorage {
-    async fn verify_readback(
-        &self,
-        context: &ProtocolObjectContext,
-        object: &ExactObjectRef,
-        prefix: &str,
-        expected: &[u8],
-    ) -> Result<(), StorageError> {
-        if self.read_protocol_object(context, object, prefix).await? == expected {
-            return Ok(());
-        }
-        Err(StorageError::ReadbackMismatch(
-            object.slot().logical_key().to_string(),
-        ))
-    }
-
-    async fn create_and_verify(
-        &self,
-        context: &ProtocolObjectContext,
-        prepared: &PreparedExactObject,
-        prefix: &str,
-        expected: &[u8],
-    ) -> Result<(), StorageError> {
-        self.create_protocol_object(prepared).await?;
-        self.verify_readback(context, prepared.reference(), prefix, expected)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<T: SyncStorage + ?Sized> VerifiedObjectWrites for T {}
-
 pub async fn prepare_membership_entry(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,

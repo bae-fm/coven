@@ -231,13 +231,13 @@ impl<'operation, 'storage>
         let prefix =
             coven_protocol::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &grant.to_bytes())
+            .create_verified_protocol_object(&context, &prepared, &prefix, &grant.to_bytes())
             .await
             .map_err(|error| {
-                DeviceJoinError::readback(
+                DeviceJoinError::prepared_object(
                     error,
                     DeviceJoinError::Provider(
-                        "provider access grant exact readback differs from its signed bytes"
+                        "provider access grant prepared object differs from its signed bytes"
                             .to_string(),
                     ),
                 )

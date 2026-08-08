@@ -457,7 +457,7 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
-        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+        coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -502,7 +502,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         &code,
         &tables,
         &test_migrations(),
-        None,
+        coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -688,7 +688,7 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
-        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+        coven_foundation::config::ExactUploadVerification::MetadataHash,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -822,7 +822,10 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let store_dir = layout.store_dir(store_id);
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
-        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+            cloudkit_ops.clone(),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+        ),
     );
     let owner_keypair = UserKeypair::generate();
     let master_key = coven_keys::encryption::MasterKeyring::from(
@@ -888,7 +891,8 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
-            custom_s3_exact_slots: None,
+            exact_upload_verification:
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
             oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: Some(cloudkit_ops.clone()),
@@ -971,7 +975,8 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource {
             join_info: CloudHomeJoinInfo::CloudKit,
-            custom_s3_exact_slots: None,
+            exact_upload_verification:
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
             oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: Some(cloudkit_ops),
@@ -1029,7 +1034,7 @@ impl OwnerRecoveryRestoreFixture {
             &code,
             &tables,
             &migrations,
-            None,
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -1084,7 +1089,10 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let store_id = "owner-recovery-restore";
     let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
     let cloud = Arc::new(
-        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+        coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+            cloudkit_ops.clone(),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+        ),
     );
     let owner = UserKeypair::generate();
     let owner_storage = Arc::new(
@@ -1158,8 +1166,10 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 
         let store_id = "restore-anti-clobber-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
-        let cloud =
-            coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
+        let cloud = coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+            cloudkit_ops.clone(),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+        );
         let cipher = CloudCipher::Plaintext;
         let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
         let tables = test_synced_tables();
@@ -1259,7 +1269,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
                 &restore_code,
                 &restore_tables,
                 &test_migrations(),
-                None,
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
                 coven_keys::custody::KeyCustody::Keyring,
                 coven_keys::identity_custody::IdentityCustody::Keyring,
                 coven_storage::oauth::OAuthClients::empty(),
@@ -1319,7 +1329,12 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 
         // B's first real sync cycle, with no local changes of its own.
         let joiner_storage = CloudSyncStorage::new(
-            Arc::new(coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
+            Arc::new(
+                coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+                    cloudkit_ops,
+                    coven_foundation::config::ExactUploadVerification::MetadataHash,
+                ),
+            ),
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
@@ -1482,7 +1497,10 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let store_id = "restore-blob-backfill-test";
         let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
         let cloud = Arc::new(
-            coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone()),
+            coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
+                cloudkit_ops.clone(),
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
+            ),
         );
         let master_key =
             coven_keys::encryption::MasterKeyring::from(EncryptionService::from_key([7u8; 32]));
@@ -1649,7 +1667,8 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::restoration::RestoreSource {
                 join_info: CloudHomeJoinInfo::CloudKit,
-                custom_s3_exact_slots: None,
+                exact_upload_verification:
+                    coven_foundation::config::ExactUploadVerification::MetadataHash,
                 oauth_clients: coven_storage::oauth::OAuthClients::empty(),
                 oauth_tokens: None,
                 cloudkit_ops: Some(cloudkit_ops),

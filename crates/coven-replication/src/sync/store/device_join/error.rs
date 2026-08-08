@@ -57,12 +57,14 @@ pub enum DeviceJoinError {
 }
 
 impl DeviceJoinError {
-    /// Classify an exact create-and-readback failure: an object that opened to
-    /// other bytes is the caller's `mismatch` verdict; every other failure is
-    /// the storage failure itself.
-    pub(crate) fn readback(error: coven_protocol::objects::StorageError, mismatch: Self) -> Self {
+    /// A retained prepared object that opens to different bytes is the caller's
+    /// `mismatch` verdict; every other failure is the storage failure itself.
+    pub(crate) fn prepared_object(
+        error: coven_protocol::objects::StorageError,
+        mismatch: Self,
+    ) -> Self {
         match error {
-            coven_protocol::objects::StorageError::ReadbackMismatch(_) => mismatch,
+            coven_protocol::objects::StorageError::PreparedObjectMismatch(_) => mismatch,
             error => Self::Storage(error),
         }
     }

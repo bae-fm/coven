@@ -8,6 +8,8 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use coven_foundation::config::ExactUploadVerification;
+
 struct FailingBodyReader {
     emitted: bool,
 }
@@ -94,7 +96,7 @@ async fn test_home(
     region: &str,
     endpoint: String,
     prefix: Option<String>,
-    exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    exact_upload_verification: ExactUploadVerification,
 ) -> S3CloudHome {
     open_cloud_home(
         bucket,
@@ -103,7 +105,7 @@ async fn test_home(
         "access-key".to_string(),
         "secret-key".to_string(),
         prefix,
-        exact_slots,
+        exact_upload_verification,
     )
     .await
     .expect("construct test S3CloudHome")
@@ -117,7 +119,7 @@ async fn standard_test_home(bucket: String, endpoint: String) -> S3CloudHome {
         "us-east-1",
         endpoint,
         None,
-        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+        ExactUploadVerification::UploadChecksum,
     )
     .await
 }
@@ -129,6 +131,136 @@ async fn spawn_fake_s3(app: Router) -> (String, tokio::sync::oneshot::Sender<()>
         app.layer(axum::extract::DefaultBodyLimit::disable()),
     )
     .await
+}
+
+#[derive(Clone)]
+struct FakeChecksumProbeState {
+    bucket: String,
+    enforce_checksum: bool,
+    stored_positive: Arc<std::sync::atomic::AtomicBool>,
+    rejected_mismatches: Arc<AtomicUsize>,
+}
+
+async fn fake_s3_checksum_probe_endpoint(
+    State(state): State<FakeChecksumProbeState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let bucket_path = format!("/{}", state.bucket);
+    if method == Method::HEAD && uri.path().trim_end_matches('/') == bucket_path {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .expect("build bucket probe response");
+    }
+    if method == Method::PUT && uri.path().starts_with(&format!("{bucket_path}/")) {
+        let supplied = headers
+            .get("x-amz-checksum-sha256")
+            .and_then(|value| value.to_str().ok());
+        let expected = sha256_base64(coven_protocol::store_commit::ObjectHash::digest(&body));
+        if state.enforce_checksum && supplied != Some(expected.as_str()) {
+            state.rejected_mismatches.fetch_add(1, Ordering::SeqCst);
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Error><Code>BadDigest</Code><Message>checksum mismatch</Message></Error>",
+                ))
+                .expect("build checksum rejection");
+        }
+        if !uri.path().contains("bad-checksum")
+            && state.stored_positive.swap(true, Ordering::SeqCst)
+        {
+            return Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Error><Code>PreconditionFailed</Code><Message>exists</Message></Error>",
+                ))
+                .expect("build create-only rejection");
+        }
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("etag", "\"probe-etag\"")
+            .body(Body::empty())
+            .expect("build probe upload response");
+    }
+    if method == Method::DELETE && uri.path().starts_with(&format!("{bucket_path}/")) {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .expect("build probe cleanup response");
+    }
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(Body::from(format!(
+            "unexpected checksum probe request: {method} {uri}"
+        )))
+        .expect("build unexpected probe response")
+}
+
+async fn checksum_probe_home(
+    enforce_checksum: bool,
+) -> (
+    S3CloudHome,
+    Arc<AtomicUsize>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let bucket = "checksum-probe-test".to_string();
+    let rejected_mismatches = Arc::new(AtomicUsize::new(0));
+    let (endpoint, shutdown) = spawn_fake_s3(
+        Router::new()
+            .fallback(fake_s3_checksum_probe_endpoint)
+            .with_state(FakeChecksumProbeState {
+                bucket: bucket.clone(),
+                enforce_checksum,
+                stored_positive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                rejected_mismatches: rejected_mismatches.clone(),
+            }),
+    )
+    .await;
+    (
+        test_home(
+            bucket,
+            "us-east-1",
+            endpoint,
+            None,
+            ExactUploadVerification::UploadChecksum,
+        )
+        .await,
+        rejected_mismatches,
+        shutdown,
+    )
+}
+
+#[tokio::test]
+async fn upload_checksum_probe_accepts_matching_bytes_and_rejects_a_bad_digest() {
+    let (home, rejected_mismatches, shutdown) = checksum_probe_home(true).await;
+
+    home.probe().await.expect("checksum capability probe");
+
+    assert_eq!(rejected_mismatches.load(Ordering::SeqCst), 1);
+    shutdown
+        .send(())
+        .expect("shut down checksum probe endpoint");
+}
+
+#[tokio::test]
+async fn upload_checksum_probe_rejects_an_endpoint_that_ignores_a_bad_digest() {
+    let (home, rejected_mismatches, shutdown) = checksum_probe_home(false).await;
+
+    let error = home
+        .probe()
+        .await
+        .expect_err("an endpoint that accepts a bad digest lacks checksum enforcement");
+
+    assert!(matches!(error, CloudHomeError::Configuration(_)), "{error}");
+    assert_eq!(rejected_mismatches.load(Ordering::SeqCst), 0);
+    shutdown
+        .send(())
+        .expect("shut down checksum probe endpoint");
 }
 
 async fn spawn_fake_s3_endpoint(
@@ -446,20 +578,18 @@ async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
         .await
         .expect("generic mutable put");
     let slot = ObjectSlot::logical("immutable/copy".to_string()).unwrap();
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        crate::cloud::BlobBody::from_bytes(b"second".to_vec()),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect("immutable append");
+    crate::cloud::create_exact_bytes(&home, &slot, b"second", &crate::cloud::no_progress())
+        .await
+        .expect("immutable append");
 
     assert_eq!(
         *headers.lock().expect("lock headers"),
         vec![None, Some("*".to_string())]
     );
-    assert!(home.exact_slots);
+    assert_eq!(
+        home.exact_upload_verification,
+        ExactUploadVerification::UploadChecksum
+    );
     shutdown.send(()).expect("shut down fake S3");
 }
 
@@ -545,6 +675,18 @@ async fn fake_s3_multipart_endpoint(
                 }))
                 .expect("build complete response");
     }
+    if method == Method::HEAD && path_ok {
+        let stored = vec![9; MULTIPART_THRESHOLD + 1];
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, stored.len().to_string())
+            .header(
+                "x-amz-checksum-sha256",
+                sha256_base64(coven_protocol::store_commit::ObjectHash::digest(&stored)),
+            )
+            .body(Body::empty())
+            .expect("build exact metadata response");
+    }
     if method == Method::DELETE && path_ok {
         let upload_id = uri
             .query()
@@ -592,25 +734,18 @@ async fn public_immutable_append_streams_parts_and_completes_create_only() {
     let home = standard_test_home(bucket, endpoint).await;
 
     let slot = ObjectSlot::logical("immutable".to_string()).unwrap();
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(vec![9; MULTIPART_THRESHOLD + 1]),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect("append immutable multipart object");
-    let collision = ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(vec![8; MULTIPART_THRESHOLD + 1]),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect_err("second immutable append must collide");
+    let first = vec![9; MULTIPART_THRESHOLD + 1];
+    crate::cloud::create_exact_bytes(&home, &slot, &first, &crate::cloud::no_progress())
+        .await
+        .expect("append immutable multipart object");
+    let second = vec![8; MULTIPART_THRESHOLD + 1];
+    let collision =
+        crate::cloud::create_exact_bytes(&home, &slot, &second, &crate::cloud::no_progress())
+            .await
+            .expect_err("second immutable append must collide");
 
     assert!(
-        matches!(collision, CloudHomeError::AlreadyExists(_)),
+        matches!(collision, CloudHomeError::SlotCollision(_)),
         "{collision}"
     );
     assert_eq!(
@@ -725,7 +860,7 @@ async fn multipart_sink_retains_the_s3_runtime_through_abort() {
     .await;
     let home = standard_test_home(bucket, endpoint).await;
     let sink = home
-        .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
+        .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly, None)
         .await
         .unwrap();
 
@@ -757,7 +892,8 @@ async fn immutable_append_reports_body_and_multipart_abort_failures() {
     let body = BlobBody::from_test_reader((MULTIPART_PART_SIZE + 1) as u64, reader);
 
     let slot = ObjectSlot::logical("immutable/body-failure".to_string()).unwrap();
-    let error = ExactSlotStorage::create_at(&home, &slot, body, &crate::cloud::no_progress())
+    let error = home
+        .create_at_slot(&slot, body, None, &crate::cloud::no_progress())
         .await
         .expect_err("body failure must abort synchronously");
 
@@ -833,7 +969,7 @@ async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_
         "us-east-1",
         "https://objects.example:443".to_string(),
         Some("stores/a/".to_string()),
-        Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+        ExactUploadVerification::MetadataHash,
     )
     .await;
 
@@ -937,7 +1073,7 @@ fn cancellation_abort_failure_does_not_terminate_the_process() {
             .await;
             let home = standard_test_home(bucket, endpoint).await;
             let sink = home
-                .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
+                .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly, None)
                 .await
                 .unwrap();
             drop(sink);
@@ -979,7 +1115,14 @@ async fn read_range_accepts_s3_compatible_full_object_checksum_header() {
     })
     .await;
 
-    let home = test_home(bucket, "us-central1", endpoint, None, None).await;
+    let home = test_home(
+        bucket,
+        "us-central1",
+        endpoint,
+        None,
+        ExactUploadVerification::Unchecked,
+    )
+    .await;
 
     let bytes = home
         .read_range(&key, 0, range_body.len() as u64)
@@ -1006,7 +1149,14 @@ async fn read_range_rejects_full_object_200_response() {
     })
     .await;
 
-    let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
+    let home = test_home(
+        bucket,
+        "us-east-1",
+        endpoint,
+        None,
+        ExactUploadVerification::Unchecked,
+    )
+    .await;
 
     let err = home
         .read_range(&key, 8, 16)
@@ -1028,7 +1178,14 @@ async fn exact_read_streams_object_to_file() {
     })
     .await;
 
-    let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
+    let home = test_home(
+        bucket,
+        "us-east-1",
+        endpoint,
+        None,
+        ExactUploadVerification::Unchecked,
+    )
+    .await;
     let tmp = tempfile::tempdir().expect("temp dir");
     let destination = tmp.path().join("object.bin");
     let slot = ObjectSlot::logical(key).unwrap();
@@ -1063,7 +1220,14 @@ async fn canceling_exact_read_cannot_rename_over_destination_later() {
     })
     .await;
 
-    let home = test_home(bucket, "us-east-1", endpoint, None, None).await;
+    let home = test_home(
+        bucket,
+        "us-east-1",
+        endpoint,
+        None,
+        ExactUploadVerification::Unchecked,
+    )
+    .await;
     let tmp = tempfile::tempdir().expect("temp dir");
     let destination = tmp.path().join("object.bin");
     tokio::fs::write(&destination, b"committed")
@@ -1117,7 +1281,14 @@ async fn list_errors_when_truncated_response_has_no_continuation_token() {
     let (endpoint, shutdown, request_count) =
         spawn_fake_s3_truncated_list_endpoint(bucket.clone()).await;
 
-    let home = test_home(bucket, "us-central1", endpoint, None, None).await;
+    let home = test_home(
+        bucket,
+        "us-central1",
+        endpoint,
+        None,
+        ExactUploadVerification::Unchecked,
+    )
+    .await;
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("objects/"))
         .await
@@ -1144,7 +1315,7 @@ async fn s3_revoke_access_reports_unsupported() {
         "us-east-1",
         "http://127.0.0.1:9".to_string(),
         None,
-        None,
+        ExactUploadVerification::Unchecked,
     )
     .await;
 
@@ -1290,7 +1461,7 @@ async fn read_range_succeeds_against_existing_s3_object() {
         creds.access_key,
         creds.secret_key,
         None,
-        None,
+        ExactUploadVerification::Unchecked,
     )
     .await
     .expect("construct S3CloudHome");
@@ -1328,7 +1499,7 @@ async fn s3_big_stack_reads_real_bytes_from_existing_object() {
         env.access_key,
         env.secret_key,
         None,
-        None,
+        ExactUploadVerification::Unchecked,
     )
     .await
     .expect("construct S3CloudHome");
@@ -1369,7 +1540,7 @@ async fn probe_succeeds_against_existing_bucket() {
         creds.access_key,
         creds.secret_key,
         None,
-        None,
+        ExactUploadVerification::UploadChecksum,
     )
     .await
     .expect("construct S3CloudHome");
@@ -1389,7 +1560,7 @@ async fn probe_fails_for_missing_bucket() {
         creds.access_key,
         creds.secret_key,
         None,
-        None,
+        ExactUploadVerification::UploadChecksum,
     )
     .await
     .expect("construct S3CloudHome");
@@ -1418,7 +1589,7 @@ async fn probe_fails_for_bad_secret_key() {
         creds.access_key.clone(),
         creds.secret_key,
         None,
-        None,
+        ExactUploadVerification::UploadChecksum,
     )
     .await
     .expect("construct good S3CloudHome");
@@ -1431,7 +1602,7 @@ async fn probe_fails_for_bad_secret_key() {
         creds.access_key,
         "wrong-secret".to_string(),
         None,
-        None,
+        ExactUploadVerification::UploadChecksum,
     )
     .await
     .expect("construct bad S3CloudHome");

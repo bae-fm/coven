@@ -31,7 +31,7 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 /// driver).
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
-    pub custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    pub exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     pub oauth_clients: coven_storage::oauth::OAuthClients,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
@@ -47,7 +47,7 @@ impl RestoreSource {
 
         let Self {
             join_info,
-            custom_s3_exact_slots,
+            exact_upload_verification,
             oauth_clients,
             oauth_tokens,
             cloudkit_ops,
@@ -82,7 +82,7 @@ impl RestoreSource {
                     access_key.clone(),
                     secret_key.clone(),
                     key_prefix.clone(),
-                    *custom_s3_exact_slots,
+                    *exact_upload_verification,
                 )
                 .await?,
             ),
@@ -91,7 +91,10 @@ impl RestoreSource {
                 let ops = cloudkit_ops.clone().ok_or_else(|| {
                     BootstrapError::Provider("CloudKit driver not provided".to_string())
                 })?;
-                Arc::new(cloudkit::CloudKitCloudHome::new_private(ops))
+                Arc::new(cloudkit::CloudKitCloudHome::new_private(
+                    ops,
+                    *exact_upload_verification,
+                ))
             }
 
             // Restore recovers your own zone, never one shared to you;
@@ -120,6 +123,7 @@ impl RestoreSource {
                 Arc::new(google_drive::GoogleDriveCloudHome::new(
                     folder_id.clone(),
                     session,
+                    *exact_upload_verification,
                 ))
             }
 
@@ -136,7 +140,11 @@ impl RestoreSource {
                     oauth_config,
                     "Dropbox",
                 );
-                Arc::new(dropbox::DropboxCloudHome::new(folder_path.clone(), session))
+                Arc::new(dropbox::DropboxCloudHome::new(
+                    folder_path.clone(),
+                    session,
+                    *exact_upload_verification,
+                ))
             }
 
             #[cfg(feature = "oauth-providers")]
@@ -159,6 +167,7 @@ impl RestoreSource {
                     drive_id.clone(),
                     folder_id.clone(),
                     session,
+                    *exact_upload_verification,
                 ))
             }
 
@@ -210,10 +219,10 @@ pub async fn restore_from_cloud(
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
     coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &source.join_info,
-        source.custom_s3_exact_slots,
+        source.exact_upload_verification,
     )
     .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
-    let custom_s3_exact_slots = source.custom_s3_exact_slots;
+    let exact_upload_verification = source.exact_upload_verification;
 
     let store_dir = layout.store_dir(store_id);
 
@@ -407,15 +416,7 @@ pub async fn restore_from_cloud(
         let mut config = build_config(
             store_id, &device_id, &store_dir, store_name, join_info, &cipher,
         );
-        if matches!(
-            join_info,
-            CloudHomeJoinInfo::S3 {
-                endpoint: Some(_),
-                ..
-            }
-        ) {
-            config.cloud_home.s3_exact_slots = custom_s3_exact_slots;
-        }
+        config.cloud_home.exact_upload_verification = exact_upload_verification;
         config.save_to_config_yaml()?;
         Ok(config)
     }
@@ -444,7 +445,7 @@ pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
-    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
@@ -460,7 +461,7 @@ pub async fn restore_from_code(
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
     coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,
-        custom_s3_exact_slots,
+        exact_upload_verification,
     )
     .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
     // `decode_restore_code` already validated the field; rebuild this store's
@@ -511,7 +512,7 @@ pub async fn restore_from_code(
     // no per-provider conversion left to do here.
     let source = RestoreSource {
         join_info: parsed.provider.clone(),
-        custom_s3_exact_slots,
+        exact_upload_verification,
         oauth_clients,
         oauth_tokens,
         cloudkit_ops,
@@ -571,7 +572,8 @@ mod tests {
             join_info: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
-            custom_s3_exact_slots: None,
+            exact_upload_verification:
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
             oauth_clients: coven_storage::oauth::OAuthClients::for_tests(),
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
@@ -612,7 +614,8 @@ mod open_cloud_home_tests {
                 secret_key: "sk".to_string(),
                 key_prefix: Some("prefix/".to_string()),
             },
-            custom_s3_exact_slots: None,
+            exact_upload_verification:
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
             oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,
@@ -644,7 +647,8 @@ mod open_cloud_home_tests {
                 owner_name: "owner".to_string(),
                 zone_name: "zone".to_string(),
             },
-            custom_s3_exact_slots: None,
+            exact_upload_verification:
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
             oauth_clients: coven_storage::oauth::OAuthClients::empty(),
             oauth_tokens: None,
             cloudkit_ops: None,

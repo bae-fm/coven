@@ -1,5 +1,4 @@
 use super::error::CircleOperationError;
-use super::exact_object::read_exact_circle_object;
 use coven_database::StoreDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_protocol::circle::{
@@ -656,7 +655,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         bytes: &[u8],
     ) -> Result<(), CircleOperationError> {
         let persisted = self
-            .create_or_read_step(journal, step, context, semantic_prefix)
+            .create_or_open_step(journal, step, context, semantic_prefix)
             .await?;
         if persisted != bytes {
             return Err(CircleOperationError::InvalidState(format!(
@@ -675,7 +674,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         expected_hash: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), CircleOperationError> {
         let persisted = self
-            .create_or_read_step(journal, step, context, semantic_prefix)
+            .create_or_open_step(journal, step, context, semantic_prefix)
             .await?;
         if coven_protocol::store_commit::ObjectHash::digest(&persisted) != expected_hash {
             return Err(CircleOperationError::InvalidState(format!(
@@ -700,7 +699,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         Ok(())
     }
 
-    async fn create_or_read_step(
+    async fn create_or_open_step(
         &self,
         journal: &CircleOperationJournal,
         step: &str,
@@ -717,24 +716,27 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     "Circle upload step {step:?} lacks its prepared exact object"
                 ))
             })?;
+        // The bytes remain in the spool through operation completion. Opening
+        // them locally validates the journal's semantic value without a cloud
+        // body GET; the provider adapter proves the stored representation.
+        let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
+        let stored_bytes = spool.read(object.stored_hash()).await.map_err(|error| {
+            CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
+        })?;
+        let prepared = coven_protocol::objects::PreparedExactObject::new(object, stored_bytes)
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
+        let opened = self
+            .storage
+            .open_prepared_protocol_object(context, &prepared, semantic_prefix)
+            .await
+            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         if !journal.uploaded.contains(step) {
-            // The bytes have been in the spool since preparation, so a resumed
-            // run uploads the same object the first run would have.
-            // `PreparedExactObject` re-checks them against the reference the
-            // journal carries before any of them leave this device.
-            let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
-            let stored_bytes = spool.read(object.stored_hash()).await.map_err(|error| {
-                CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
-            })?;
-            let prepared =
-                coven_protocol::objects::PreparedExactObject::new(object.clone(), stored_bytes)
-                    .map_err(coven_protocol::objects::StoreObjectError::from)?;
             self.storage
                 .create_protocol_object(&prepared)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
         }
-        read_exact_circle_object(self.storage.as_ref(), context, &object, semantic_prefix).await
+        Ok(opened)
     }
 }
 

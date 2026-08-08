@@ -20,13 +20,26 @@ pub enum CloudProvider {
     CloudKit,
 }
 
-/// Local operator assertion required before a custom S3 endpoint may provide
-/// exact protocol and blob slots. This is local configuration and is never
-/// accepted from invite or restore data.
+/// How an exact cloud write proves that the stored bytes match their declared
+/// object reference. This is local host policy and is never accepted from an
+/// invitation or another device.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CustomS3ExactSlots {
-    StandardConditionalRequests,
+pub enum ExactUploadVerification {
+    /// The provider rejects an upload whose request checksum does not match the
+    /// received body.
+    UploadChecksum,
+    /// The provider exposes a content hash and size through object metadata.
+    MetadataHash,
+    /// Coven downloads the complete stored body and compares it locally.
+    Readback,
+    /// Coven trusts the provider's successful create response without checking
+    /// the resulting bytes.
+    Unchecked,
+}
+
+fn default_exact_upload_verification() -> ExactUploadVerification {
+    ExactUploadVerification::MetadataHash
 }
 
 impl CloudProvider {
@@ -94,8 +107,8 @@ pub struct CloudHomeConfig {
     pub s3_endpoint: Option<String>,
     #[serde(default)]
     pub s3_key_prefix: Option<String>,
-    #[serde(default)]
-    pub s3_exact_slots: Option<CustomS3ExactSlots>,
+    #[serde(default = "default_exact_upload_verification")]
+    pub exact_upload_verification: ExactUploadVerification,
     #[serde(default)]
     pub google_drive_folder_id: Option<String>,
     #[serde(default)]
@@ -122,7 +135,7 @@ impl Default for CloudHomeConfig {
             s3_region: None,
             s3_endpoint: None,
             s3_key_prefix: None,
-            s3_exact_slots: None,
+            exact_upload_verification: default_exact_upload_verification(),
             google_drive_folder_id: None,
             dropbox_folder_path: None,
             onedrive_drive_id: None,
@@ -269,7 +282,7 @@ mod tests {
             provider: Some(CloudProvider::S3),
             s3_bucket: Some("bucket".to_string()),
             s3_region: Some("us-east-1".to_string()),
-            s3_exact_slots: Some(CustomS3ExactSlots::StandardConditionalRequests),
+            exact_upload_verification: ExactUploadVerification::Readback,
             storage: HomeStorage::Opaque,
             ..CloudHomeConfig::default()
         };
@@ -277,7 +290,7 @@ mod tests {
         config.save_to_config_yaml().expect("save");
         let config_yaml = std::fs::read_to_string(config.store_dir.config_path())
             .expect("read saved local config");
-        assert!(config_yaml.contains("s3_exact_slots"));
+        assert!(config_yaml.contains("exact_upload_verification: readback"));
         let loaded = Config::load_from_config_yaml(store_dir).expect("load");
 
         assert_eq!(loaded, config);

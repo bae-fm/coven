@@ -78,7 +78,7 @@ impl CloudHomeFactory {
                     access_key,
                     secret_key,
                     config.cloud_home.s3_key_prefix.clone(),
-                    config.cloud_home.s3_exact_slots,
+                    config.cloud_home.exact_upload_verification,
                 )
                 .await?;
                 Ok(Box::new(s3))
@@ -107,7 +107,9 @@ impl CloudHomeFactory {
                     "Google Drive",
                 );
                 Ok(Box::new(super::google_drive::GoogleDriveCloudHome::new(
-                    folder_id, session,
+                    folder_id,
+                    session,
+                    config.cloud_home.exact_upload_verification,
                 )))
             }
             #[cfg(feature = "oauth-providers")]
@@ -137,6 +139,7 @@ impl CloudHomeFactory {
                 Ok(Box::new(super::dropbox::DropboxCloudHome::new(
                     folder_path,
                     session,
+                    config.cloud_home.exact_upload_verification,
                 )))
             }
             #[cfg(feature = "oauth-providers")]
@@ -166,7 +169,10 @@ impl CloudHomeFactory {
                     "OneDrive",
                 );
                 Ok(Box::new(super::onedrive::OneDriveCloudHome::new(
-                    drive_id, folder_id, session,
+                    drive_id,
+                    folder_id,
+                    session,
+                    config.cloud_home.exact_upload_verification,
                 )))
             }
             #[cfg(not(feature = "oauth-providers"))]
@@ -183,12 +189,16 @@ impl CloudHomeFactory {
                 config.cloud_home.cloudkit_owner_name.as_ref(),
                 config.cloud_home.cloudkit_zone_name.as_ref(),
             ) {
-                (None, None) => Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(ops))),
+                (None, None) => Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(
+                    ops,
+                    config.cloud_home.exact_upload_verification,
+                ))),
                 (Some(owner_name), Some(zone_name)) => {
                     Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
                         ops,
                         owner_name.clone(),
                         zone_name.clone(),
+                        config.cloud_home.exact_upload_verification,
                     )))
                 }
                 _ => Err(CloudHomeError::Configuration(

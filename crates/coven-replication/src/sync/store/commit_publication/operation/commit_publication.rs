@@ -1,5 +1,4 @@
 use super::*;
-use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn reject_excluded_merge_candidate(
@@ -273,7 +272,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         match self
             .storage
             .as_ref()
-            .create_protocol_object(&prepared_head)
+            .create_verified_protocol_object(
+                &head_context,
+                &prepared_head,
+                &head_prefix,
+                &head.to_bytes(),
+            )
             .await
         {
             Ok(()) => {}
@@ -293,10 +297,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 return Err(coven_protocol::objects::StoreObjectError::from(error).into());
             }
         }
-        self.storage
-            .verify_readback(&head_context, &head_object, &head_prefix, &head.to_bytes())
-            .await
-            .map_err(StoreError::readback)?;
         let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
             object: head_object.clone(),

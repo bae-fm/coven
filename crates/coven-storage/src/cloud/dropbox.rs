@@ -12,18 +12,27 @@ use reqwest::StatusCode;
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
+#[path = "dropbox/content_hash.rs"]
+mod content_hash;
+
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    combine_cleanup_failure, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, RevokeOutcome, UploadProgress,
 };
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
 use tracing::warn;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DropboxExactMetadata {
+    size: u64,
+    content_hash: String,
+}
 
 const API_BASE: &str = "https://api.dropboxapi.com/2";
 const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
@@ -36,16 +45,22 @@ pub struct DropboxCloudHome {
     content_base: String,
     session: OAuthSession,
     namespace_id: OnceLock<String>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
 
 impl DropboxCloudHome {
-    pub fn new(folder_path: String, session: OAuthSession) -> Self {
+    pub fn new(
+        folder_path: String,
+        session: OAuthSession,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
         Self {
             folder_path,
             api_base: API_BASE.to_string(),
             content_base: CONTENT_BASE.to_string(),
             session,
             namespace_id: OnceLock::new(),
+            exact_upload_verification,
         }
     }
 
@@ -175,14 +190,14 @@ impl DropboxCloudHome {
                 .body(body.clone())
             })
             .await?;
-        self.validate_create_response(key, response).await
+        self.validate_create_response(key, response).await.map(drop)
     }
 
     async fn validate_create_response(
         &self,
         key: &str,
         response: reqwest::Response,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<serde_json::Value, CloudHomeError> {
         let status = response.status();
         let body = http::body_text(response).await;
         if !status.is_success() {
@@ -202,7 +217,7 @@ impl DropboxCloudHome {
                 "append {key}: response identifies another Dropbox path"
             )));
         }
-        Ok(())
+        Ok(json)
     }
 
     async fn send_exact_read(
@@ -247,15 +262,15 @@ impl DropboxCloudHome {
                 slot.logical_key()
             ))
         })?;
-        self.validate_exact_metadata(slot, &metadata)?;
+        self.exact_metadata_from_json(slot, &metadata)?;
         Ok(response)
     }
 
-    fn validate_exact_metadata(
+    fn exact_metadata_from_json(
         &self,
         slot: &ObjectSlot,
         metadata: &serde_json::Value,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<DropboxExactMetadata, CloudHomeError> {
         slot.require_logical_key_for("Dropbox")?;
         let expected_path = Self::namespace_path(slot.logical_key());
         let matches = metadata[".tag"].as_str() == Some("file")
@@ -267,10 +282,29 @@ impl DropboxCloudHome {
                 slot.logical_key(),
             )));
         }
-        Ok(())
+        let size = metadata["size"].as_u64().ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "exact Dropbox metadata for {} omitted size",
+                slot.logical_key()
+            ))
+        })?;
+        let content_hash = metadata["content_hash"]
+            .as_str()
+            .filter(|hash| !hash.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "exact Dropbox metadata for {} omitted content_hash",
+                    slot.logical_key()
+                ))
+            })?
+            .to_string();
+        Ok(DropboxExactMetadata { size, content_hash })
     }
 
-    async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+    async fn exact_metadata(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<DropboxExactMetadata, CloudHomeError> {
         slot.require_logical_key_for("Dropbox")?;
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);
@@ -288,7 +322,47 @@ impl DropboxCloudHome {
         let response = ensure_ok(response, "verify exact Dropbox file", self.not_found()).await?;
         let metadata: serde_json::Value =
             http::ok_json(response, "parse exact Dropbox metadata").await?;
-        self.validate_exact_metadata(slot, &metadata)
+        self.exact_metadata_from_json(slot, &metadata)
+    }
+
+    async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        self.exact_metadata(slot).await.map(drop)
+    }
+
+    async fn verify_exact_upload(
+        &self,
+        upload: &super::ExactUpload<'_>,
+        created_response_was_observed: bool,
+    ) -> Result<(), CloudHomeError> {
+        use coven_foundation::config::ExactUploadVerification;
+
+        match self.exact_upload_verification {
+            ExactUploadVerification::UploadChecksum => Err(CloudHomeError::Configuration(
+                "Dropbox does not accept a caller-supplied upload checksum".to_string(),
+            )),
+            ExactUploadVerification::MetadataHash => {
+                let metadata = self.exact_metadata(upload.object().slot()).await?;
+                let expected_hash = content_hash::for_upload(upload).await?;
+                if metadata.size != upload.object().stored_size()
+                    || metadata.content_hash != expected_hash
+                {
+                    return Err(CloudHomeError::SlotCollision(
+                        upload.object().slot().logical_key().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            ExactUploadVerification::Readback => {
+                let bytes = self.read_at(upload.object().slot()).await?;
+                upload.verify_stored_bytes(&bytes)
+            }
+            ExactUploadVerification::Unchecked => {
+                super::exact_upload::accept_unchecked_create_response(
+                    created_response_was_observed,
+                    upload.object(),
+                )
+            }
+        }
     }
 
     /// Call `share_folder` and resolve the shared_folder_id, handling both
@@ -1169,18 +1243,32 @@ impl ExactSlotStorage for DropboxCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &super::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
+        if matches!(
+            self.exact_upload_verification,
+            coven_foundation::config::ExactUploadVerification::UploadChecksum
+        ) {
+            return Err(CloudHomeError::Configuration(
+                "Dropbox does not expose upload-checksum enforcement for this endpoint".to_string(),
+            ));
+        }
+        let slot = upload.object().slot();
+        let body = upload.body().await?;
         slot.require_logical_key_for("Dropbox")?;
         let key = slot.logical_key();
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
             let length = data.len() as u64;
-            self.append_small(key, data).await?;
-            progress(length);
-            return Ok(());
+            let operation = self.append_small(key, data).await;
+            if operation.is_ok() {
+                progress(length);
+            }
+            return super::exact_upload::settle_exact_create(operation, |observed| {
+                self.verify_exact_upload(upload, observed)
+            })
+            .await;
         }
 
         let session_id = self.start_upload_session(key).await?;
@@ -1192,9 +1280,13 @@ impl ExactSlotStorage for DropboxCloudHome {
             confirmed_offset: 0,
             settled: false,
         };
-        super::blob_body::MultipartUpload::new(key, body, Box::new(sink), progress)
+        let operation = super::blob_body::MultipartUpload::new(key, body, Box::new(sink), progress)
             .run()
-            .await
+            .await;
+        super::exact_upload::settle_exact_create(operation, |observed| {
+            self.verify_exact_upload(upload, observed)
+        })
+        .await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

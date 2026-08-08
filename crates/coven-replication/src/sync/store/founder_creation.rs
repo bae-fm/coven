@@ -836,50 +836,74 @@ impl<'operation> FounderStoreCreation<'operation> {
             &graph.registration.value,
             graph.registration.prepared.reference().clone(),
         );
+        let root_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreProtocolRoot,
+        );
         storage_access
-            .create_protocol_object(&graph.root.prepared)
+            .create_verified_protocol_object(
+                &root_context,
+                &graph.root.prepared,
+                coven_protocol::store_commit::store_protocol_root_logical_key(),
+                &graph.root.bytes,
+            )
             .await
             .map_err(StoreObjectError::from)?;
-        let opened_root =
-            load_exact_store_protocol_root(storage_access, &root, database.sync_routing_hash())
-                .await?;
-        if opened_root.value != protocol_root {
-            return Err(StoreProtocolRootError::Missing(root.store_root_hash));
-        }
-        let verified_root = VerifiedStoreRoot::from_verified_object(root.clone(), opened_root)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        let verified_root = VerifiedStoreRoot::from_verified_object(
+            root.clone(),
+            coven_protocol::objects::VerifiedObject {
+                value: protocol_root.clone(),
+                bytes: graph.root.bytes.clone(),
+                semantic_hash: root.store_root_hash,
+                object: graph.root.prepared.reference().clone(),
+            },
+        )
+        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
         let authority = HistoryConstructionAuthority::founder();
         let commit_verifier = StoreCommitVerifier::from_verified_root(
             authority,
             storage_access,
             verified_root.clone(),
         );
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
+        let registration_prefix = graph
+            .registration
+            .prepared
+            .reference()
+            .slot()
+            .logical_key()
+            .strip_suffix(".json")
+            .ok_or_else(|| {
+                StoreProtocolRootError::Database(
+                    "founder registration slot has no .json suffix".to_string(),
+                )
+            })?;
         storage_access
-            .create_protocol_object(&graph.registration.prepared)
+            .create_verified_protocol_object(
+                &registration_context,
+                &graph.registration.prepared,
+                registration_prefix,
+                &graph.registration.bytes,
+            )
             .await
             .map_err(StoreObjectError::from)?;
-        let registration = commit_verifier
-            .load_registration(&registration_ref)
-            .await?
-            .value;
-        if registration != graph.registration.value {
-            return Err(StoreProtocolRootError::Database(
-                "founder registration readback differs from durable bytes".to_string(),
-            ));
-        }
+        let registration = graph.registration.value.clone();
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
         storage_access
-            .create_protocol_object(&graph.initial_ack.prepared)
+            .create_verified_protocol_object(
+                &ack_context,
+                &graph.initial_ack.prepared,
+                &ack_slot_prefix(&registration.device_id.to_string(), 1),
+                &graph.initial_ack.bytes,
+            )
             .await
             .map_err(StoreObjectError::from)?;
-        let initial_ack = commit_verifier
-            .load_store_ack(&graph.initial_ack_ref, &registration)
-            .await?
-            .value;
-        if initial_ack != graph.initial_ack.value {
-            return Err(StoreProtocolRootError::Database(
-                "founder initial acknowledgement readback differs from durable bytes".to_string(),
-            ));
-        }
         if !matches!(
             &graph.registration_state,
             coven_database::LocalDeviceRegistrationState::Activated { .. }
@@ -894,34 +918,41 @@ impl<'operation> FounderStoreCreation<'operation> {
                 .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
         }
         let membership = &graph.membership;
+        let entry_coord = membership.entry.value.coord();
+        let entry_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreMembershipEntry,
+        );
         storage_access
-            .create_protocol_object(&membership.entry.prepared)
+            .create_verified_protocol_object(
+                &entry_context,
+                &membership.entry.prepared,
+                &coven_protocol::store_commit::membership_entry_semantic_prefix(
+                    &entry_coord.author_pubkey,
+                    &entry_coord.author_owner_grant,
+                    entry_coord.stream_id,
+                    entry_coord.seq,
+                    entry_coord.entry_hash,
+                ),
+                &membership.entry.bytes,
+            )
             .await
             .map_err(StoreObjectError::from)?;
-        let loaded_entry = commit_verifier
-            .membership_objects()
-            .load_entry(&membership.entry_ref)
-            .await?
-            .value;
-        if loaded_entry != membership.entry.value {
-            return Err(StoreProtocolRootError::Database(
-                "founder membership entry readback differs from durable bytes".to_string(),
-            ));
-        }
+        let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
         storage_access
-            .create_protocol_object(&membership.head.prepared)
+            .create_verified_protocol_object(
+                &head_context,
+                &membership.head.prepared,
+                &coven_protocol::store_commit::founder_membership_head_semantic_prefix(
+                    protocol_root.descriptor.creation_id,
+                ),
+                &membership.head.bytes,
+            )
             .await
             .map_err(StoreObjectError::from)?;
-        let loaded_head = commit_verifier
-            .membership_objects()
-            .load_head_for_registration(&membership.head_ref, &registration)
-            .await?
-            .value;
-        if loaded_head != membership.head.value {
-            return Err(StoreProtocolRootError::Database(
-                "founder membership head readback differs from durable bytes".to_string(),
-            ));
-        }
         database
             .complete_store_founder_graph(
                 root.clone(),

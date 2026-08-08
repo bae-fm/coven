@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use coven::{
-    write_cloud_object_stream, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    write_cloud_object_stream, BoxPartSink, CloudAccessOutcome, CloudAccessState,
     CloudFileReadError, CloudHome, CloudHomeError, CloudKitAcceptedShareRecord,
     CloudKitAtomicCreateBatch, CloudKitEnvironment, CloudKitOps, CloudKitProviderIdentity,
     CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudObjectStream,
     CloudVersionedObject, CovenHandle, DeviceJoinCancellation, DeviceJoinError, DeviceJoinProducer,
-    DeviceJoinWriteRevocationExecutor, ExactSlotStorage, JoinerJoinTerminal, ObjectSlot,
-    PhysicalObjectLocator, ProviderAccessLocator, ProviderAccessWithdrawal,
-    ProviderAdminJoinTerminal, ProviderDeviceBinding, ProviderPrincipalId,
-    ProviderWriteAuthorityRef, ResolvedProviderBinding, StoreProviderBinding,
+    DeviceJoinWriteRevocationExecutor, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    JoinerJoinTerminal, ObjectSlot, PhysicalObjectLocator, ProviderAccessLocator,
+    ProviderAccessWithdrawal, ProviderAdminJoinTerminal, ProviderDeviceBinding,
+    ProviderPrincipalId, ProviderWriteAuthorityRef, ResolvedProviderBinding, StoreProviderBinding,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -261,19 +261,19 @@ impl ExactSlotStorage for ExternalProvider {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &ExactUpload<'_>,
         progress: &coven::UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
+        let slot = upload.object().slot();
         assert_eq!(slot.logical_key(), "objects/default-create");
         assert_eq!(
             slot.physical(),
             &PhysicalObjectLocator::Opaque("provider:created-copy".to_string())
         );
-        let data = body.collect().await?;
+        let data = upload.body().await?.collect().await?;
         self.exact_create_called.store(true, Ordering::SeqCst);
         progress(data.len() as u64);
-        Ok(())
+        Ok(ExactCreateOutcome::Created)
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
@@ -336,12 +336,16 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
         .allocate_slot("objects/default-create")
         .await
         .expect("allocate external provider slot");
+    let created_bytes = b"external create-only bytes";
+    let created_object = coven::ExactObjectRef::new(
+        created.clone(),
+        created_bytes.len() as u64,
+        coven::ObjectHash::digest(created_bytes),
+    );
+    let created_upload =
+        ExactUpload::from_bytes(&created_object, created_bytes).expect("valid exact upload");
     exact
-        .create_at(
-            &created,
-            BlobBody::from_bytes(b"external create-only bytes".to_vec()),
-            &|_| {},
-        )
+        .create_at(&created_upload, &|_| {})
         .await
         .expect("provider creates the exact slot");
     assert_eq!(created.logical_key(), "objects/default-create");

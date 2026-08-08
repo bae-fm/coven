@@ -11,8 +11,8 @@ use coven_protocol::synced_schema::BlobDecl;
 use coven_replication::sync::test_helpers::TestStore;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    ExactSlotStorage, UploadProgress,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, UploadProgress,
 };
 use coven_storage::CloudCipher;
 use rusqlite::{params, OptionalExtension};
@@ -258,7 +258,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
         .expect("flip root visible");
     let write_id = published.write_id.clone();
     let changeset = handle
-        .write_changeset_for_test(&write_id)
+        .store_write_partition_for_test(&write_id)
         .await
         .expect("load gated changeset");
     let rows = coven_database::walk_changeset(&changeset).expect("walk gated changeset");
@@ -2690,12 +2690,11 @@ impl ExactSlotStorage for GateCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.gate().await;
-        ExactSlotStorage::create_at(&self.inner, slot, body, progress).await
+        ExactSlotStorage::create_at(&self.inner, upload, progress).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

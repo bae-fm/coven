@@ -10,9 +10,10 @@ The provider boundary has two parts: `CloudHome` supplies flat-key byte
 operations, while
 [`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage),
 which every sync home must also supply, allocates a provider-specific location
-before publication and creates it once. A second create at that location must
-report `AlreadyExists`, never replace the first object. This is collision
-safety for immutable objects, not a mutable global head.
+before publication and creates it once. A repeated create of the same exact
+object reports `AlreadyPresent`; different bytes report `SlotCollision` and
+never replace the first object. This is collision safety for immutable objects,
+not a mutable global head.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
@@ -91,8 +92,8 @@ pub trait ExactSlotStorage: Send + Sync {
         -> Result<CrossPrincipalProviderEvidence, CloudHomeError>;
     async fn allocate_slot(&self, logical_key: &str)
         -> Result<ObjectSlot, CloudHomeError>;
-    async fn create_at(&self, slot: &ObjectSlot, body: BlobBody, progress: &UploadProgress<'_>)
-        -> Result<(), CloudHomeError>;
+    async fn create_at(&self, upload: &ExactUpload<'_>, progress: &UploadProgress<'_>)
+        -> Result<ExactCreateOutcome, CloudHomeError>;
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
     async fn read_range_at(&self, slot: &ObjectSlot, start: u64, end: u64)
         -> Result<Vec<u8>, CloudHomeError>;
@@ -109,8 +110,10 @@ pub trait ExactSlotStorage: Send + Sync {
   Setup flows call it before persisting credentials, so a typo or a missing
   bucket fails at setup instead of via a delayed reconnect banner. The default
   implementation lists a sentinel prefix; backends override it with a cheaper
-  check (S3 uses `HeadBucket`). It does not test durability or infer exact-slot
-  behavior from a trial write.
+  check. S3 uses `HeadBucket`, then creates a probe object twice to prove
+  create-only behavior and runs the configured integrity check. Upload-checksum
+  mode also sends a deliberately wrong SHA-256 and requires the endpoint to
+  reject it.
 - A provider implements two raw upload pieces: `put_object`, one bounded
   single-request upload, and `open_multipart`, a streaming session that accepts
   ordered parts. `multipart_threshold` is the cut between them. The provided
@@ -173,6 +176,7 @@ failure crosses this boundary as a sentence a UI can show verbatim.
 pub enum CloudHomeError {
     NotFound(String),
     AlreadyExists(String),
+    SlotCollision(String),
     Configuration(String),
     Transport(String),
     CleanupFailed {
@@ -181,7 +185,7 @@ pub enum CloudHomeError {
     },
     UnresolvedOutcome {
         operation: Box<CloudHomeError>,
-        readback: Box<CloudHomeError>,
+        settlement: Box<CloudHomeError>,
     },
     Io(#[from] std::io::Error),
 }
@@ -190,9 +194,11 @@ pub enum CloudHomeError {
 - `NotFound(key)`: the key is not there. coven uses it for the expected misses
   (no snapshot yet, a blob not uploaded yet), so a host that maps it to a UI
   state matches the variant directly.
-- `AlreadyExists(key)`: an exact slot is occupied. The protocol reads that slot
-  and decides whether the same immutable object completed an earlier attempt or
-  a competing object won it.
+- `AlreadyExists(key)`: a provider's create-only request reported an occupied
+  destination. Exact-slot adapters settle that response internally and return
+  `ExactCreateOutcome::AlreadyPresent` only when the stored size and hash match.
+- `SlotCollision(key)`: an exact slot contains bytes other than the object the
+  caller named.
 - `Configuration(msg)`: missing or invalid settings, credentials, OAuth
   authorization, or provider capability. Retrying the same request cannot
   succeed until configuration changes.
@@ -200,8 +206,8 @@ pub enum CloudHomeError {
   succeed when the initiating operation retries.
 - `CleanupFailed`: the primary operation and its required cleanup both failed;
   neither cause is discarded.
-- `UnresolvedOutcome`: a create lost its response and the exact readback needed
-  to determine the result also failed.
+- `UnresolvedOutcome`: a create lost its response and the configured metadata,
+  checksum, or readback check needed to determine the result also failed.
 - `Io`: a local filesystem or I/O failure surfaced from `std::io::Error`.
 
 Each driver classifies the failures a user can act on. For example, S3
@@ -229,14 +235,18 @@ Five cloud backends ship, plus an in-memory home for tests. Each maps the same
 flat keys onto its own naming and upload protocol; the differences below are the
 only places a provider deviates from "write opaque bytes by key".
 
-Every built-in backend supplies exact slots internally. AWS S3 is enabled
-directly. A custom S3 endpoint is accepted only when local config sets
-`s3_exact_slots: standard_conditional_requests`, asserting that the endpoint
-implements the standard create-if-absent request semantics. That assertion is
-local operator configuration: invite and restore data cannot enable it on
-another device. Setup still checks that the constructed home exposes the exact
-slot adapter; it does not claim that a reachability probe can prove a
-provider's durability.
+Every built-in backend supplies exact slots internally. The host selects one
+local `exact_upload_verification` policy: `upload_checksum`, `metadata_hash`,
+`readback`, or `unchecked`. Invitations and restore codes do not carry that
+choice. Upload-checksum enforcement is available on S3; Dropbox, Google Drive,
+OneDrive, and CloudKit reject that policy during setup. Metadata mode uses the
+provider's content identity: S3's `HeadObject` SHA-256, Drive's `md5Checksum`,
+Dropbox's `content_hash`, OneDrive's `sha1Hash`, or the hash in CloudKit's
+atomically committed manifest. Readback downloads and verifies the full body.
+Unchecked mode trusts only an observed successful create response. It cannot
+confirm that an occupied slot holds the same bytes or settle a lost response,
+so those cases fail the initiating operation instead of being accepted from
+presence alone.
 
 - **S3** ([`S3CloudHome`](rustdoc:struct:coven::S3CloudHome))
   works against any S3-compatible endpoint (AWS, Backblaze B2, Wasabi, MinIO).
@@ -245,7 +255,9 @@ provider's durability.
   aborting the in-progress upload on failure so the bucket holds no orphaned
   parts. An optional key prefix is prepended to every key (trailing slashes
   normalized), so `changes/dev1/42.enc` can become
-  `libs/abc/changes/dev1/42.enc`.
+  `libs/abc/changes/dev1/42.enc`. Exact uploads send SHA-256 checksums for both
+  bounded and multipart objects when checksum or metadata verification is
+  selected.
 
 - **Google Drive**
   (`GoogleDriveCloudHome`)
@@ -253,25 +265,30 @@ provider's durability.
   slashes, so each key is hex-encoded into a slash-free filename and decoded on
   list; the encoding is exact and reversible, never a lossy substitution. Large
   files use a resumable upload session in 8 MiB chunks (Drive requires 256
-  KiB alignment).
+  KiB alignment). Exact-upload metadata verification compares Drive's
+  `md5Checksum` and size; an ambiguous create response is settled through that
+  metadata without downloading the body.
 
 - **OneDrive**
   (`OneDriveCloudHome`)
   uses the same hex filename encoding and a Microsoft Graph resumable
   upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
+  Metadata verification compares the Graph `sha1Hash` and size.
 
 - **Dropbox**
   (`DropboxCloudHome`)
   uses native Dropbox paths under the store folder (for example
   `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
-  needed. Sharing goes through `share_folder` to get a `shared_folder_id`.
+  needed. Metadata verification computes Dropbox's block-based `content_hash`
+  locally and compares it with the provider's value and size. Sharing goes
+  through `share_folder` to get a `shared_folder_id`.
 
 - **CloudKit**
   (`CloudKitCloudHome`)
   stores files in the user's iCloud private database. A `CKAsset` caps at 50 MB,
   so a file larger than 10 MiB is split into 10 MiB part records and read back
-  by reassembling those parts; a failed multipart upload deletes the part
-  records it wrote. The raw record operations are defined by the
+  by reassembling those parts. Exact parts and their hash-bearing manifest are
+  committed as one atomic record batch. The raw record operations are defined by the
   [`CloudKitOps`](rustdoc:trait:coven::CloudKitOps)
   trait and implemented in Swift through a UniFFI callback interface; coven
   cannot build this one from Rust alone and returns a `Storage` error directing
@@ -336,20 +353,13 @@ choice set when the home is created:
 
 ## Ranged reads
 
-A host that streams a large blob (audio playback, scrubbing) needs byte windows
-from the middle of the file without loading the whole thing into memory for each
-one. [`open_blob_stream`](/docs/cache#reading-a-blob) serves those windows from a
-local plaintext file it opened and proved once — see
-[reading a blob](/docs/cache#reading-a-blob) for why the ranges come off an open
-file rather than a path.
-
-The cloud is read whole, once, when that stream opens over a blob the device has
-no cache copy of: the exact object is downloaded, verified, and decrypted into
-`cache/`, and every range then comes off that file. A blob's identity is its
-whole-content hash, so there is nothing smaller than the whole object to verify
-against — a range fetched straight from the cloud could not be checked at all. The
-blob's [scope](/docs/blobs#encryption-scope) is resolved to its key once, when the
-stream opens, so master-, derived-, and item-key blobs all stream the same way.
+A host that streams a large opaque blob (audio playback, scrubbing) opens a
+`BlobRangeReader`. The stored blob header declares independently authenticated
+chunks. Opening the reader fetches that header; each plaintext range then
+fetches and opens only the sealed chunks that cover it. The chunk tag binds the
+header, blob identity, and chunk index, so a provider cannot substitute a chunk
+from another blob or position. Browsable blobs have no authenticated chunk
+format and therefore require the whole-object materialization path.
 
 ## Lifecycle
 

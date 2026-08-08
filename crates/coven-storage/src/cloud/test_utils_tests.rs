@@ -1,5 +1,8 @@
 use super::*;
-use crate::cloud::{no_progress, BlobBody, CloudHomeJoinInfo, RevokeOutcome, PROGRESS_CHUNK_SIZE};
+use crate::cloud::{
+    create_exact_bytes, no_progress, BlobBody, CloudHomeJoinInfo, RevokeOutcome,
+    PROGRESS_CHUNK_SIZE,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -151,13 +154,7 @@ async fn exact_create_is_visible_before_a_lost_response() {
     let writer = h.clone();
     let writer_slot = slot.clone();
     let task = tokio::spawn(async move {
-        writer
-            .create_at(
-                &writer_slot,
-                BlobBody::from_bytes(b"first".to_vec()),
-                &no_progress(),
-            )
-            .await
+        create_exact_bytes(&writer, &writer_slot, b"first", &no_progress()).await
     });
 
     reached.notified().await;
@@ -171,22 +168,13 @@ async fn exact_create_is_visible_before_a_lost_response() {
 async fn exact_create_never_overwrites() {
     let h = InMemoryCloudHome::new();
     let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
-    h.create_at(
-        &slot,
-        BlobBody::from_bytes(b"winner".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    create_exact_bytes(&h, &slot, b"winner", &no_progress())
+        .await
+        .unwrap();
 
     assert!(matches!(
-        h.create_at(
-            &slot,
-            BlobBody::from_bytes(b"loser".to_vec()),
-            &no_progress(),
-        )
-        .await,
-        Err(CloudHomeError::AlreadyExists(_))
+        create_exact_bytes(&h, &slot, b"loser", &no_progress()).await,
+        Err(CloudHomeError::SlotCollision(_))
     ));
     assert_eq!(h.read_at(&slot).await.unwrap(), b"winner");
 }
@@ -200,13 +188,9 @@ async fn exact_slot_observation_identifies_present_bytes_and_absence() {
         .unwrap();
     assert_eq!(h.observe_at(&slot).await.unwrap(), None);
 
-    h.create_at(
-        &slot,
-        BlobBody::from_bytes(b"observed".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    create_exact_bytes(&h, &slot, b"observed", &no_progress())
+        .await
+        .unwrap();
 
     assert_eq!(
         h.observe_at(&slot).await.unwrap(),
@@ -224,13 +208,9 @@ async fn exact_slot_delete_confirms_present_and_already_absent_slots() {
     let slot = h.allocate_slot("store-v1/test/deleted.json").await.unwrap();
     h.delete_and_verify_absent(&slot).await.unwrap();
 
-    h.create_at(
-        &slot,
-        BlobBody::from_bytes(b"delete-me".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    create_exact_bytes(&h, &slot, b"delete-me", &no_progress())
+        .await
+        .unwrap();
     h.delete_and_verify_absent(&slot).await.unwrap();
 
     assert!(matches!(
@@ -259,20 +239,12 @@ async fn google_drive_exact_slots_with_one_logical_key_remain_independent() {
     let first = h.allocate_slot("store-v1/test/one.json").await.unwrap();
     let second = h.allocate_slot("store-v1/test/one.json").await.unwrap();
     assert_ne!(first, second);
-    h.create_at(
-        &first,
-        BlobBody::from_bytes(b"first".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
-    h.create_at(
-        &second,
-        BlobBody::from_bytes(b"second".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    create_exact_bytes(&h, &first, b"first", &no_progress())
+        .await
+        .unwrap();
+    create_exact_bytes(&h, &second, b"second", &no_progress())
+        .await
+        .unwrap();
     assert_eq!(h.read_at(&first).await.unwrap(), b"first");
     assert_eq!(h.read_at(&second).await.unwrap(), b"second");
     h.delete_at(&first).await.unwrap();

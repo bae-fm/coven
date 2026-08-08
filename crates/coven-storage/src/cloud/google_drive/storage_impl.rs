@@ -524,11 +524,28 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &crate::cloud::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        GoogleDriveCloudHome::create_at_slot(self, slot, body, progress).await
+    ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
+        if matches!(
+            self.exact_upload_verification,
+            coven_foundation::config::ExactUploadVerification::UploadChecksum
+        ) {
+            return Err(CloudHomeError::Configuration(
+                "Google Drive does not accept a caller-supplied upload checksum".to_string(),
+            ));
+        }
+        let operation = GoogleDriveCloudHome::create_at_slot(
+            self,
+            upload.object().slot(),
+            upload.body().await?,
+            progress,
+        )
+        .await;
+        settle_exact_create(operation, |observed| {
+            self.verify_exact_upload(upload, observed)
+        })
+        .await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         GoogleDriveCloudHome::read_at_slot(self, slot).await

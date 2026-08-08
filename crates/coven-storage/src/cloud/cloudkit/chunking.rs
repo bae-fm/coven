@@ -207,7 +207,7 @@ impl Drop for CloudKitStagingCleanup {
 }
 
 pub(crate) enum AtomicCreateReadback {
-    Created(Vec<CloudKitRecordVersion>),
+    Created,
     Absent,
 }
 

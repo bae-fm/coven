@@ -12,7 +12,7 @@ use coven_database::StoreDatabase;
 use coven_protocol::objects::StoreObjectError;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{ack_slot_prefix, CommitFrontier, StoreAck, SuccessorLink};
-use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use coven_storage::SyncStorage;
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
@@ -242,9 +242,15 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 outbound.ack.value.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
             );
+            let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);
             if let Err(error) = self
                 .storage
-                .create_protocol_object(&outbound.ack.prepared)
+                .create_verified_protocol_object(
+                    &context,
+                    &outbound.ack.prepared,
+                    &semantic_prefix,
+                    &outbound.ack.bytes,
+                )
                 .await
             {
                 if !matches!(
@@ -253,7 +259,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 ) {
                     return Err(StoreObjectError::from(error).into());
                 }
-                let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);
                 let (winner_bytes, winner_prepared) = self
                     .storage
                     .read_prepared_protocol_slot(
@@ -272,15 +277,6 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                     .await?;
                 continue;
             }
-            self.storage
-                .verify_readback(
-                    &context,
-                    &outbound.reference.object,
-                    &ack_slot_prefix(&device_id, outbound.reference.sequence),
-                    &outbound.ack.bytes,
-                )
-                .await
-                .map_err(|error| StoreAckError::Outbound(StoreError::readback(error)))?;
             let acknowledgement_remote = candidate
                 .acknowledgement_remote_objects(&outbound.ack)?
                 .into_iter()

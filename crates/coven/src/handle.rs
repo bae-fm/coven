@@ -182,7 +182,7 @@ impl CovenHandle {
             local_blob_transitions,
         );
         let rows = StoreRows::new(
-            coven_database::StoreRowWrites::new(database.clone(), store_dir.clone()),
+            coven_database::StoreRowWrites::new(database.clone()),
             read_database,
             security.clone(),
             sync.clone(),
@@ -1144,11 +1144,11 @@ impl CovenHandle {
     }
 
     #[cfg(test)]
-    pub(crate) async fn write_changeset_for_test(
+    pub(crate) async fn store_write_partition_for_test(
         &self,
         write_id: &crate::WriteId,
     ) -> Result<Vec<u8>, coven_database::DbError> {
-        self.rows.write_changeset_for_test(write_id).await
+        self.rows.store_write_partition_for_test(write_id).await
     }
 
     #[cfg(test)]

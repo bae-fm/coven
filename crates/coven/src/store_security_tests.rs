@@ -122,7 +122,7 @@ fn store_security(
 }
 
 #[test]
-fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
+fn local_exact_upload_verification_stays_out_of_restore_wire() {
     coven_keys::keys::test_keyring::install();
     let dir = tempfile::tempdir().expect("store directory");
     let mut config = Config::with_defaults(
@@ -136,7 +136,7 @@ fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
     config.cloud_home.s3_bucket = Some("bucket".to_string());
     config.cloud_home.s3_region = Some("region".to_string());
     config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
-    config.cloud_home.s3_exact_slots = Some(crate::CustomS3ExactSlots::StandardConditionalRequests);
+    config.cloud_home.exact_upload_verification = crate::ExactUploadVerification::UploadChecksum;
     let key_service = StoreKeys::bind(config.store_id.clone());
     key_service
         .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
@@ -161,11 +161,11 @@ fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
     let decoded = decode_restore_code(&encoded).expect("decode restore code");
     let provider_wire = serde_json::to_string(&decoded.provider).expect("serialize provider");
 
-    assert!(!provider_wire.contains("s3_exact_slots"));
+    assert!(!provider_wire.contains("exact_upload_verification"));
     assert!(!provider_wire.contains("strong_reads"));
     assert_eq!(
-        config.cloud_home.s3_exact_slots,
-        Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
+        config.cloud_home.exact_upload_verification,
+        crate::ExactUploadVerification::UploadChecksum,
     );
 }
 

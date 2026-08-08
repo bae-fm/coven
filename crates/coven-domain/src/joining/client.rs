@@ -192,7 +192,7 @@ async fn build_cloud_home_for_join(
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
-    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
     use coven_storage::cloud::*;
 
@@ -215,7 +215,7 @@ async fn build_cloud_home_for_join(
                 access_key.clone(),
                 secret_key.clone(),
                 key_prefix.clone(),
-                custom_s3_exact_slots,
+                exact_upload_verification,
             )
             .await?;
             Ok(Arc::new(s3))
@@ -238,6 +238,7 @@ async fn build_cloud_home_for_join(
             Ok(Arc::new(google_drive::GoogleDriveCloudHome::new(
                 folder_id.clone(),
                 session,
+                exact_upload_verification,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -258,6 +259,7 @@ async fn build_cloud_home_for_join(
             Ok(Arc::new(dropbox::DropboxCloudHome::new(
                 folder_path.clone(),
                 session,
+                exact_upload_verification,
             )))
         }
         #[cfg(feature = "oauth-providers")]
@@ -282,6 +284,7 @@ async fn build_cloud_home_for_join(
                 drive_id.clone(),
                 folder_id.clone(),
                 session,
+                exact_upload_verification,
             )))
         }
         #[cfg(not(feature = "oauth-providers"))]
@@ -294,7 +297,10 @@ async fn build_cloud_home_for_join(
             let ops = cloudkit_ops.ok_or_else(|| {
                 BootstrapError::Provider("CloudKit driver not provided".to_string())
             })?;
-            Ok(Arc::new(cloudkit::CloudKitCloudHome::new_private(ops)))
+            Ok(Arc::new(cloudkit::CloudKitCloudHome::new_private(
+                ops,
+                exact_upload_verification,
+            )))
         }
         CloudHomeJoinInfo::CloudKitShare {
             share_url,
@@ -315,6 +321,7 @@ async fn build_cloud_home_for_join(
                 ops.clone(),
                 owner_name.clone(),
                 zone_name.clone(),
+                exact_upload_verification,
             ));
             Ok(home)
         }
@@ -330,7 +337,7 @@ pub struct DeviceJoinClient {
     layout: StoreLayout,
     synced_tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
-    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
@@ -355,7 +362,7 @@ impl DeviceJoinClient {
         layout: StoreLayout,
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
-        custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
         key_custody: coven_keys::custody::KeyCustody,
         identity_custody: IdentityCustody,
         oauth_clients: coven_storage::oauth::OAuthClients,
@@ -370,7 +377,7 @@ impl DeviceJoinClient {
             .public_key;
         coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
             &code.join_info,
-            custom_s3_exact_slots,
+            exact_upload_verification,
         )
         .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
         coven_foundation::store_dir::validate_path_token(&code.store_id)
@@ -385,7 +392,7 @@ impl DeviceJoinClient {
             layout,
             synced_tables,
             migrations,
-            custom_s3_exact_slots,
+            exact_upload_verification,
             store_keys,
             custody,
             identity_custody,
@@ -736,15 +743,7 @@ impl DeviceJoinClient {
             &self.code.join_info,
             &cipher,
         );
-        if matches!(
-            self.code.join_info,
-            CloudHomeJoinInfo::S3 {
-                endpoint: Some(_),
-                ..
-            }
-        ) {
-            config.cloud_home.s3_exact_slots = self.custom_s3_exact_slots;
-        }
+        config.cloud_home.exact_upload_verification = self.exact_upload_verification;
         config.save_to_config_yaml()?;
         joining.complete(activation).await?;
         coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
@@ -783,7 +782,7 @@ impl DeviceJoinClient {
             self.oauth_tokens.clone(),
             self.cloudkit_ops.clone(),
             self.clock.clone(),
-            self.custom_s3_exact_slots,
+            self.exact_upload_verification,
         )
         .await
     }

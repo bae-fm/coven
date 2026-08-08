@@ -2259,7 +2259,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // the metadata upload is interrupted before its bytes land. The publication is
     // left durable and pending with no completed snapshot; the cycle logs the
     // failure and continues. The next run resumes it and completes it exactly once,
-    // the exact readback accepting the image already uploaded.
+    // reopening the retained image spool while its upload marker skips publication.
     {
         let fixture = RotationFixture::build("snapshot-resume-image-meta").await;
         let circle_id = fixture.circle_id;
@@ -2301,8 +2301,9 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
 
     // Boundary — metadata publication to completion: the metadata bytes are durable
     // but the upload response is lost before the publication is recorded complete.
-    // The exact readback settles the lost upload within the run, so the publication
-    // completes without duplication and a re-run opens no new generation.
+    // The provider's exact-upload verification settles the lost upload within the
+    // run, so the publication completes without duplication and a re-run opens no
+    // new generation.
     {
         let fixture = RotationFixture::build("snapshot-resume-meta-complete").await;
         let circle_id = fixture.circle_id;
@@ -2310,7 +2311,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
         fixture
             .drive_circle_snapshots("2026-07-23T00:00:00Z")
             .await
-            .expect("the lost metadata-upload response is settled by exact readback");
+            .expect("the lost metadata-upload response is settled by provider verification");
         assert_eq!(
             fixture
                 .latest_circle_snapshot(circle_id)

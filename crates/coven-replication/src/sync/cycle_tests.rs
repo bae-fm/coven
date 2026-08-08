@@ -535,7 +535,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                     .expect("resume provider access grant creation")
             }
             ExactCreateInterruption::AfterVisibility => {
-                first.expect("lost create response settles through exact readback")
+                first.expect("lost create response settles through provider verification")
             }
         };
         let retry = owner_device

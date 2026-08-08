@@ -1,5 +1,6 @@
 use super::*;
-use crate::cloud::PartSink;
+use crate::cloud::{create_exact_bytes, PartSink};
+use coven_foundation::config::ExactUploadVerification;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
@@ -29,7 +30,11 @@ fn home_with_folder(folder_path: &str) -> DropboxCloudHome {
         config,
         "Dropbox",
     );
-    DropboxCloudHome::new(folder_path.to_string(), session)
+    DropboxCloudHome::new(
+        folder_path.to_string(),
+        session,
+        ExactUploadVerification::MetadataHash,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +101,8 @@ async fn immutable_copy_endpoint(
                     ".tag": "file",
                     "id": "id:copy",
                     "path_display": "/protocol/copy",
+                    "size": 10,
+                    "content_hash": "8e59e665d837edb9abe693bc6c919a14fc6745c9df04a06aa573a5ab9f295d59",
                 })
                 .to_string(),
             )
@@ -109,6 +116,8 @@ async fn immutable_copy_endpoint(
                     ".tag": "file",
                     "id": "id:copy",
                     "path_display": "/protocol/copy",
+                    "size": 10,
+                    "content_hash": "8e59e665d837edb9abe693bc6c919a14fc6745c9df04a06aa573a5ab9f295d59",
                 })
                 .to_string(),
             ))
@@ -148,14 +157,9 @@ async fn exact_slot_requests_use_create_only_and_the_logical_path() {
     let slot = ExactSlotStorage::allocate_slot(&home, "protocol/copy")
         .await
         .expect("allocate Dropbox slot");
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(b"copy-bytes".to_vec()),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect("create Dropbox slot");
+    create_exact_bytes(&home, &slot, b"copy-bytes", &crate::cloud::no_progress())
+        .await
+        .expect("create Dropbox slot");
     assert_eq!(
         ExactSlotStorage::read_at(&home, &slot)
             .await
@@ -167,7 +171,7 @@ async fn exact_slot_requests_use_create_only_and_the_logical_path() {
         .expect("delete exact slot");
 
     let requests = requests.lock().expect("lock requests");
-    assert_eq!(requests.len(), 5, "{requests:?}");
+    assert_eq!(requests.len(), 6, "{requests:?}");
     let upload_arg: serde_json::Value = serde_json::from_str(
         requests[1]
             .api_arg
@@ -182,19 +186,20 @@ async fn exact_slot_requests_use_create_only_and_the_logical_path() {
     assert_eq!(upload_arg["strict_conflict"], true);
     assert_eq!(requests[1].body, b"copy-bytes");
     let read_arg: serde_json::Value = serde_json::from_str(
-        requests[2]
+        requests[3]
             .api_arg
             .as_deref()
             .expect("read carries Dropbox-API-Arg"),
     )
     .expect("parse read arg");
     assert_eq!(read_arg["path"], "/protocol/copy");
+    assert_eq!(requests[2].path, "/files/get_metadata");
     let metadata_body: serde_json::Value =
-        serde_json::from_slice(&requests[3].body).expect("parse metadata body");
-    assert_eq!(requests[3].path, "/files/get_metadata");
+        serde_json::from_slice(&requests[4].body).expect("parse metadata body");
+    assert_eq!(requests[4].path, "/files/get_metadata");
     assert_eq!(metadata_body["path"], "/protocol/copy");
     let delete_body: serde_json::Value =
-        serde_json::from_slice(&requests[4].body).expect("parse delete body");
+        serde_json::from_slice(&requests[5].body).expect("parse delete body");
     assert_eq!(delete_body["path"], "/protocol/copy");
     drop(requests);
     shutdown.send(()).expect("shut down Dropbox endpoint");

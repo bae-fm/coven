@@ -6,6 +6,7 @@ use axum::Router;
 use std::sync::{Arc, Mutex};
 
 use crate::oauth::OAuthTokens;
+use coven_foundation::config::ExactUploadVerification;
 use coven_keys::keys::StoreKeys;
 
 fn home() -> GoogleDriveCloudHome {
@@ -23,7 +24,11 @@ fn home() -> GoogleDriveCloudHome {
         config,
         "Google Drive",
     );
-    GoogleDriveCloudHome::new("folder123".to_string(), session)
+    GoogleDriveCloudHome::new(
+        "folder123".to_string(),
+        session,
+        ExactUploadVerification::MetadataHash,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +89,7 @@ async fn immutable_copy_endpoint(
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
-                    r#"{{"id":"generated-id","name":"{}","parents":["folder123"],"trashed":false,"appProperties":{{"covenLogicalKey":"protocol/copy"}}}}"#,
+                    r#"{{"id":"generated-id","name":"{}","parents":["folder123"],"trashed":false,"size":"10","md5Checksum":"2f4c3c1992f3016909827d43b8267ae4","appProperties":{{"covenLogicalKey":"protocol/copy"}}}}"#,
                     encode_key("protocol/copy"),
                 )))
                 .expect("build metadata response");
@@ -137,13 +142,9 @@ async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
         .allocate_slot("protocol/copy")
         .await
         .expect("allocate Drive slot");
-    home.create_at(
-        &slot,
-        BlobBody::from_bytes(b"copy-bytes".to_vec()),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect("create exact Drive object");
+    crate::cloud::create_exact_bytes(&home, &slot, b"copy-bytes", &crate::cloud::no_progress())
+        .await
+        .expect("create exact Drive object");
     assert_eq!(
         slot,
         ObjectSlot::opaque("protocol/copy".to_string(), "generated-id".to_string())
@@ -156,7 +157,7 @@ async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
     home.delete_at(&slot).await.expect("delete Drive copy");
 
     let requests = requests.lock().expect("lock requests");
-    assert_eq!(requests.len(), 6, "{requests:?}");
+    assert_eq!(requests.len(), 7, "{requests:?}");
     assert_eq!(requests[0].path, "/files/generateIds");
     let upload = String::from_utf8(requests[1].body.clone()).expect("multipart body is UTF-8");
     assert_eq!(requests[1].method, "POST");
@@ -182,8 +183,14 @@ async fn immutable_copy_uses_preallocated_id_for_create_read_and_delete() {
     assert_eq!(requests[3].path, "/files/generated-id");
     assert_eq!(requests[4].method, "GET");
     assert_eq!(requests[4].path, "/files/generated-id");
-    assert_eq!(requests[5].method, "DELETE");
+    assert!(requests[4]
+        .query
+        .as_deref()
+        .is_some_and(|query| query.contains("alt=media")));
+    assert_eq!(requests[5].method, "GET");
     assert_eq!(requests[5].path, "/files/generated-id");
+    assert_eq!(requests[6].method, "DELETE");
+    assert_eq!(requests[6].path, "/files/generated-id");
     for request in requests.iter().skip(1) {
         let query = request.query.as_deref().expect("Drive file request query");
         assert!(query.contains("supportsAllDrives=true"), "{request:?}");
@@ -790,6 +797,24 @@ async fn generated_id_collision_endpoint(
             .status(StatusCode::CONFLICT)
             .body(Body::from("generated id already exists"))
             .expect("build collision response"),
+        ("GET", "/files/generated-id") => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": "generated-id",
+                    "name": encode_key("protocol/collision"),
+                    "parents": ["folder123"],
+                    "trashed": false,
+                    "size": "8",
+                    "md5Checksum": "00000000000000000000000000000000",
+                    "appProperties": {
+                        (LOGICAL_KEY_PROPERTY): "protocol/collision",
+                    },
+                })
+                .to_string(),
+            ))
+            .expect("build collision metadata response"),
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("unexpected request"))
@@ -812,16 +837,12 @@ async fn generated_id_collision_preserves_the_pre_existing_file() {
         .allocate_slot("protocol/collision")
         .await
         .expect("allocate collision slot");
-    let error = home
-        .create_at(
-            &slot,
-            BlobBody::from_bytes(b"new bytes".to_vec()),
-            &crate::cloud::no_progress(),
-        )
-        .await
-        .expect_err("generated-id collision must fail");
+    let error =
+        crate::cloud::create_exact_bytes(&home, &slot, b"new bytes", &crate::cloud::no_progress())
+            .await
+            .expect_err("generated-id collision must fail");
 
-    assert!(matches!(error, CloudHomeError::AlreadyExists(_)), "{error}");
+    assert!(matches!(error, CloudHomeError::SlotCollision(_)), "{error}");
     assert!(
         !requests
             .lock()
@@ -836,7 +857,7 @@ async fn generated_id_collision_preserves_the_pre_existing_file() {
 #[derive(Clone, Default)]
 struct AmbiguousCreateState {
     committed: Arc<Mutex<bool>>,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
 async fn ambiguous_create_endpoint(
@@ -845,6 +866,7 @@ async fn ambiguous_create_endpoint(
 ) -> Response<Body> {
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
+    let query = request.uri().query().map(str::to_string);
     let body = to_bytes(request.into_body(), usize::MAX)
         .await
         .expect("read request body");
@@ -852,7 +874,12 @@ async fn ambiguous_create_endpoint(
         .requests
         .lock()
         .expect("lock requests")
-        .push(format!("{method} {path}"));
+        .push(RecordedRequest {
+            method: method.clone(),
+            path: path.clone(),
+            query,
+            body: body.to_vec(),
+        });
     match (method.as_str(), path.as_str()) {
         ("GET", "/files/generateIds") => Response::builder()
             .status(StatusCode::OK)
@@ -883,8 +910,10 @@ async fn ambiguous_create_endpoint(
                         "id": "generated-id",
                         "name": encode_key("protocol/ambiguous"),
                         "parents": ["folder123"],
-                        "trashed": false,
-                        "appProperties": {
+                    "trashed": false,
+                    "size": "15",
+                    "md5Checksum": "321235422fa8fa518e07c432c452473c",
+                    "appProperties": {
                             (LOGICAL_KEY_PROPERTY): "protocol/ambiguous",
                         },
                     })
@@ -918,9 +947,10 @@ async fn ambiguous_exact_create_preserves_the_logical_key_matched_commit() {
         .allocate_slot("protocol/ambiguous")
         .await
         .expect("allocate ambiguous slot");
-    home.create_at(
+    crate::cloud::create_exact_bytes(
+        &home,
         &slot,
-        BlobBody::from_bytes(b"committed bytes".to_vec()),
+        b"committed bytes",
         &crate::cloud::no_progress(),
     )
     .await
@@ -937,8 +967,20 @@ async fn ambiguous_exact_create_preserves_the_logical_key_matched_commit() {
             .lock()
             .expect("lock requests")
             .iter()
-            .any(|request| request.starts_with("DELETE ")),
+            .any(|request| request.method == "DELETE"),
         "ambiguous committed file was deleted"
+    );
+    assert!(
+        !state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .iter()
+            .any(|request| request
+                .query
+                .as_deref()
+                .is_some_and(|query| query.contains("alt=media"))),
+        "ambiguous create settlement downloaded the object body"
     );
     shutdown.send(()).expect("shut down test endpoint");
 }

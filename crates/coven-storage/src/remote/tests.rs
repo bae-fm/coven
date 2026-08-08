@@ -231,8 +231,8 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
     )
     .await;
 
-    // Publishing the blob read it back to verify it; the receipt below is
-    // about what the *reads* cost, so it is measured from here.
+    // Keep publication's whole-read counters as the baseline so the receipt
+    // below detects any whole-object fetch introduced on the range path.
     let published_whole_reads = (home.exact_full_read_count(), home.exact_stream_read_count());
     home.clear_exact_range_reads();
 
@@ -285,7 +285,7 @@ async fn ranged_reads_transfer_only_the_chunks_they_cover() {
     assert_eq!(
         (home.exact_full_read_count(), home.exact_stream_read_count()),
         published_whole_reads,
-        "no read fetched a whole object; only publication ever did",
+        "neither publication nor ranged reading fetched a whole object",
     );
 }
 
@@ -1059,6 +1059,103 @@ async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
 
     assert_eq!(opened, b"signed successor bytes");
     assert_eq!(&completed, prepared.reference());
+}
+
+#[tokio::test]
+async fn protocol_publication_verifies_local_bytes_without_a_provider_body_read() {
+    let home = InMemoryCloudHome::new();
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+        BlobPathScheme::Hashed,
+        "local-protocol-verification",
+        UserKeypair::generate(),
+    )
+    .expect("test cloud storage supports exact slots");
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+        ObjectHash::digest(b"local protocol verification root"),
+        ProtocolObjectDomain::StoreHead,
+    );
+    let semantic = "store-v1/heads/device-a/1";
+    let slot = storage
+        .allocate_protocol_slot(&context, semantic, ".json")
+        .await
+        .expect("reserve protocol slot");
+    let canonical = b"canonical protocol bytes";
+    let prepared = storage
+        .prepare_protocol_object(&context, slot, semantic, canonical.to_vec())
+        .expect("prepare protocol object");
+
+    storage
+        .create_verified_protocol_object(&context, &prepared, semantic, canonical)
+        .await
+        .expect("verify and publish protocol object");
+
+    assert!(home.contains_exact_object(prepared.reference()));
+    assert_eq!(home.exact_full_read_count(), 0);
+    assert_eq!(home.exact_stream_read_count(), 0);
+}
+
+#[tokio::test]
+async fn protocol_publication_refuses_local_semantic_mismatch_before_upload() {
+    let home = InMemoryCloudHome::new();
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+        BlobPathScheme::Hashed,
+        "local-protocol-mismatch",
+        UserKeypair::generate(),
+    )
+    .expect("test cloud storage supports exact slots");
+    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+        ObjectHash::digest(b"local protocol mismatch root"),
+        ProtocolObjectDomain::StoreHead,
+    );
+    let semantic = "store-v1/heads/device-a/1";
+    let slot = storage
+        .allocate_protocol_slot(&context, semantic, ".json")
+        .await
+        .expect("reserve protocol slot");
+    let prepared = storage
+        .prepare_protocol_object(
+            &context,
+            slot,
+            semantic,
+            b"different retained bytes".to_vec(),
+        )
+        .expect("prepare internally valid competing bytes");
+
+    assert!(matches!(
+        storage
+            .create_verified_protocol_object(
+                &context,
+                &prepared,
+                semantic,
+                b"canonical journal bytes",
+            )
+            .await,
+        Err(StorageError::PreparedObjectMismatch(_))
+    ));
+    assert!(!home.contains_exact_object(prepared.reference()));
+    assert_eq!(home.exact_full_read_count(), 0);
+    assert_eq!(home.exact_stream_read_count(), 0);
+}
+
+#[tokio::test]
+async fn blob_publication_uses_the_spool_without_a_provider_body_read() {
+    let home = InMemoryCloudHome::new();
+    let (_storage, blob, _key, _temp) = publish_sealed_blob(
+        &home,
+        "local-blob-verification",
+        "published-track",
+        b"blob bytes retained in the local spool",
+        small_chunking(4096),
+    )
+    .await;
+
+    assert!(home.contains_exact_object(blob.object()));
+    assert_eq!(home.exact_full_read_count(), 0);
+    assert_eq!(home.exact_stream_read_count(), 0);
 }
 
 #[test]

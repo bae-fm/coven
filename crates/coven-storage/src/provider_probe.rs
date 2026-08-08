@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::cloud::{BlobBody, CloudHomeError, ExactSlotStorage};
+use crate::cloud::{CloudHomeError, ExactCreateOutcome, ExactSlotStorage, ExactUpload};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
 use coven_protocol::provider::*;
@@ -364,12 +364,13 @@ impl ProviderProbeStorage {
         match self.primary.read_at(slot).await {
             Ok(bytes) if bytes == payload => Ok(()),
             Ok(_) => invalid("durable provider probe slot contains different bytes"),
-            Err(CloudHomeError::NotFound(_)) => self
-                .primary
-                .create_at(slot, BlobBody::from_bytes(payload.to_vec()), &|_| {})
-                .await
-                .map_err(StorageError::from)
-                .map_err(ProviderProbeError::Storage),
+            Err(CloudHomeError::NotFound(_)) => {
+                create_exact_bytes(self.primary.as_ref(), slot, payload)
+                    .await
+                    .map(drop)
+                    .map_err(StorageError::from)
+                    .map_err(ProviderProbeError::Storage)
+            }
             Err(error) => Err(ProviderProbeError::Storage(StorageError::from(error))),
         }
     }
@@ -435,16 +436,14 @@ impl ProviderProbeStorage {
             let (outcomes, _winner) = match first.read_at(&slot).await {
                 Err(CloudHomeError::NotFound(_)) => {
                     let (left, right) = tokio::join!(
-                        first.create_at(&slot, BlobBody::from_bytes(payloads[0].clone()), &|_| {}),
-                        second.create_at(&slot, BlobBody::from_bytes(payloads[1].clone()), &|_| {}),
+                        create_exact_bytes(first, &slot, &payloads[0]),
+                        create_exact_bytes(second, &slot, &payloads[1]),
                     );
                     classify_exact_create_race(left, right)?
                 }
                 Ok(bytes) if bytes == payloads[0] => {
                     require_occupied_rejection(
-                        second
-                            .create_at(&slot, BlobBody::from_bytes(payloads[1].clone()), &|_| {})
-                            .await,
+                        create_exact_bytes(second, &slot, &payloads[1]).await,
                     )?;
                     (
                         [
@@ -456,9 +455,7 @@ impl ProviderProbeStorage {
                 }
                 Ok(bytes) if bytes == payloads[1] => {
                     require_occupied_rejection(
-                        first
-                            .create_at(&slot, BlobBody::from_bytes(payloads[0].clone()), &|_| {})
-                            .await,
+                        create_exact_bytes(first, &slot, &payloads[0]).await,
                     )?;
                     (
                         [
@@ -528,14 +525,11 @@ impl ProviderProbeStorage {
             match first.read_at(&lost_slot).await {
                 Ok(bytes) if bytes == lost_payload => {}
                 Ok(_) => return invalid("lost-response slot contains unknown bytes"),
-                Err(CloudHomeError::NotFound(_)) => first
-                    .create_at(
-                        &lost_slot,
-                        BlobBody::from_bytes(lost_payload.clone()),
-                        &|_| {},
-                    )
-                    .await
-                    .map_err(StorageError::from)?,
+                Err(CloudHomeError::NotFound(_)) => {
+                    create_exact_bytes(first, &lost_slot, &lost_payload)
+                        .await
+                        .map_err(StorageError::from)?;
+                }
                 Err(error) => return Err(ProviderProbeError::Storage(StorageError::from(error))),
             }
             advance_exact(
@@ -714,18 +708,24 @@ fn exact_race_state(
 }
 
 fn classify_exact_create_race(
-    left: Result<(), CloudHomeError>,
-    right: Result<(), CloudHomeError>,
+    left: Result<ExactCreateOutcome, CloudHomeError>,
+    right: Result<ExactCreateOutcome, CloudHomeError>,
 ) -> Result<([ProbeCreateOutcome; 2], usize), ProviderProbeError> {
     match (left, right) {
-        (Ok(()), Err(CloudHomeError::AlreadyExists(_))) => Ok((
+        (
+            Ok(ExactCreateOutcome::Created),
+            Err(CloudHomeError::SlotCollision(_) | CloudHomeError::AlreadyExists(_)),
+        ) => Ok((
             [
                 ProbeCreateOutcome::Created,
                 ProbeCreateOutcome::RejectedOccupied,
             ],
             0,
         )),
-        (Err(CloudHomeError::AlreadyExists(_)), Ok(())) => Ok((
+        (
+            Err(CloudHomeError::SlotCollision(_) | CloudHomeError::AlreadyExists(_)),
+            Ok(ExactCreateOutcome::Created),
+        ) => Ok((
             [
                 ProbeCreateOutcome::RejectedOccupied,
                 ProbeCreateOutcome::Created,
@@ -739,11 +739,25 @@ fn classify_exact_create_race(
 }
 
 fn require_occupied_rejection(
-    result: Result<(), CloudHomeError>,
+    result: Result<ExactCreateOutcome, CloudHomeError>,
 ) -> Result<(), ProviderProbeError> {
     match result {
-        Err(CloudHomeError::AlreadyExists(_)) => Ok(()),
-        Ok(()) => invalid("settled exact probe contender unexpectedly created a second object"),
-        Err(error) => Err(ProviderProbeError::Storage(StorageError::from(error))),
+        Err(CloudHomeError::SlotCollision(_) | CloudHomeError::AlreadyExists(_)) => Ok(()),
+        Ok(ExactCreateOutcome::Created) => {
+            invalid("settled exact probe contender unexpectedly created a second object")
+        }
+        result => invalid(&format!(
+            "settled exact probe contender was not rejected as occupied: result={result:?}"
+        )),
     }
+}
+
+async fn create_exact_bytes(
+    storage: &dyn ExactSlotStorage,
+    slot: &ObjectSlot,
+    bytes: &[u8],
+) -> Result<ExactCreateOutcome, CloudHomeError> {
+    let object = ExactObjectRef::new(slot.clone(), bytes.len() as u64, ObjectHash::digest(bytes));
+    let upload = ExactUpload::from_bytes(&object, bytes).map_err(CloudHomeError::from)?;
+    storage.create_at(&upload, &|_| {}).await
 }

@@ -6,7 +6,7 @@ use coven_protocol::objects::StoreObjectError;
 use coven_protocol::store_commit::{
     ack_slot_prefix, registration_semantic_prefix, StoreDeviceRegistration,
 };
-use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use coven_storage::SyncStorage;
 
 pub(crate) struct RegistrationOutbox<'storage> {
     database: StoreDatabase,
@@ -49,7 +49,7 @@ impl<'storage> RegistrationOutbox<'storage> {
             );
             let semantic_prefix = registration_semantic_prefix(&outbound.device_id.to_string());
             self.storage
-                .create_and_verify(
+                .create_verified_protocol_object(
                     &context,
                     &outbound.prepared,
                     &semantic_prefix,
@@ -62,18 +62,14 @@ impl<'storage> RegistrationOutbox<'storage> {
                 ProtocolObjectDomain::StoreAck,
             );
             self.storage
-                .create_protocol_object(&outbound.initial_ack.prepared)
-                .await
-                .map_err(StoreObjectError::from)?;
-            self.storage
-                .verify_readback(
+                .create_verified_protocol_object(
                     &ack_context,
-                    &outbound.initial_ack_ref.object,
+                    &outbound.initial_ack.prepared,
                     &ack_slot_prefix(&outbound.device_id.to_string(), 1),
                     &outbound.initial_ack.bytes,
                 )
                 .await
-                .map_err(publication_error)?;
+                .map_err(StoreObjectError::from)?;
             self.database
                 .mark_local_store_device_registration_created(
                     coven_protocol::objects::ExactProtocolObject {
@@ -104,8 +100,8 @@ fn database_error(error: coven_database::DbError) -> StoreRegistrationError {
 /// durable state, not a transport failure.
 fn publication_error(error: StorageError) -> StoreRegistrationError {
     match error {
-        StorageError::ReadbackMismatch(key) => StoreRegistrationError::Invalid(format!(
-            "exact readback of {key} differs from its durable bytes"
+        StorageError::PreparedObjectMismatch(key) => StoreRegistrationError::Invalid(format!(
+            "prepared exact object {key} differs from its durable bytes"
         )),
         error => StoreObjectError::from(error).into(),
     }

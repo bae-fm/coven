@@ -46,11 +46,35 @@ pub(crate) use google_drive::{folder_search_query, supports_all_drives};
 pub use setup::SetupError;
 
 mod blob_body;
+mod exact_upload;
 pub use blob_body::no_progress;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
 pub(crate) use blob_body::{combine_cleanup_failure, MultipartUpload};
 pub use blob_body::{BlobBody, BoxPartSink, PartSink, UploadProgress};
+pub use exact_upload::{ExactUpload, ExactUploadSource};
+
+#[cfg(test)]
+pub(crate) async fn create_exact_bytes(
+    storage: &dyn ExactSlotStorage,
+    slot: &ObjectSlot,
+    bytes: &[u8],
+    progress: &UploadProgress<'_>,
+) -> Result<ExactCreateOutcome, CloudHomeError> {
+    let object = coven_protocol::objects::ExactObjectRef::new(
+        slot.clone(),
+        bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(bytes),
+    );
+    let upload = ExactUpload::from_bytes(&object, bytes).map_err(CloudHomeError::from)?;
+    storage.create_at(&upload, progress).await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactCreateOutcome {
+    Created,
+    AlreadyPresent,
+}
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -71,6 +95,8 @@ pub enum CloudHomeError {
     NotFound(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    #[error("exact slot contains different bytes: {0}")]
+    SlotCollision(String),
     /// The cloud home is misconfigured or its credentials are missing or invalid:
     /// a bucket/folder/drive that isn't set, credentials absent from the keyring, a
     /// provider unsupported by this build, OAuth that needs re-authorization. The
@@ -87,11 +113,11 @@ pub enum CloudHomeError {
         operation: Box<CloudHomeError>,
         cleanup: Box<CloudHomeError>,
     },
-    #[error("{operation}; exact response-loss readback failed: {readback}")]
+    #[error("{operation}; exact response settlement failed: {settlement}")]
     UnresolvedOutcome {
         #[source]
         operation: Box<CloudHomeError>,
-        readback: Box<CloudHomeError>,
+        settlement: Box<CloudHomeError>,
     },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -179,6 +205,7 @@ impl CloudHomeError {
             | CloudHomeError::UnresolvedOutcome { operation, .. } => operation.is_retryable(),
             CloudHomeError::NotFound(_)
             | CloudHomeError::AlreadyExists(_)
+            | CloudHomeError::SlotCollision(_)
             | CloudHomeError::Configuration(_) => false,
         }
     }
@@ -416,10 +443,9 @@ pub trait ExactSlotStorage: Send + Sync {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError>;
+    ) -> Result<ExactCreateOutcome, CloudHomeError>;
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
 
@@ -571,6 +597,9 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
             CloudHomeError::AlreadyExists(key) => {
                 coven_protocol::objects::StorageError::AlreadyExists(key)
             }
+            CloudHomeError::SlotCollision(key) => {
+                coven_protocol::objects::StorageError::SlotCollision(key)
+            }
             CloudHomeError::Configuration(msg) => {
                 coven_protocol::objects::StorageError::Configuration(msg)
             }
@@ -583,10 +612,10 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
             }
             CloudHomeError::UnresolvedOutcome {
                 operation,
-                readback,
+                settlement,
             } => coven_protocol::objects::StorageError::UnresolvedOutcome {
                 operation: Box::new(Self::from(*operation)),
-                readback: Box::new(Self::from(*readback)),
+                settlement: Box::new(Self::from(*settlement)),
             },
             CloudHomeError::Io(io_err) => {
                 coven_protocol::objects::StorageError::Storage(format!("I/O error: {io_err}"))

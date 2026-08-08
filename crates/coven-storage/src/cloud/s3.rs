@@ -21,6 +21,7 @@ use super::{
     CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage, MultipartUpload, RevokeOutcome,
     UploadProgress,
 };
+use coven_foundation::id_provider::{IdRef, UuidProvider};
 use coven_protocol::objects::ObjectSlot;
 use runtime::S3Runtime;
 
@@ -36,7 +37,25 @@ pub struct S3CloudHome {
     access_key: String,
     secret_key: String,
     key_prefix: Option<String>,
-    exact_slots: bool,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ids: IdRef,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct S3ExactMetadata {
+    size: u64,
+    sha256: String,
+}
+
+fn sha256_base64(hash: coven_protocol::store_commit::ObjectHash) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(hash.as_bytes())
+}
+
+fn sha256_bytes_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes))
 }
 
 fn create_only_put_failed(
@@ -49,6 +68,32 @@ fn create_only_put_failed(
     )
 }
 
+fn checksum_put_failed(
+    error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+) -> bool {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    matches!(
+        error.code(),
+        Some("BadDigest" | "InvalidDigest" | "XAmzContentSHA256Mismatch")
+    )
+}
+
+enum S3CreateOnlyPutError {
+    AlreadyExists(String),
+    ChecksumRejected(String),
+    Other(CloudHomeError),
+}
+
+impl S3CreateOnlyPutError {
+    fn into_cloud_error(self) -> CloudHomeError {
+        match self {
+            Self::AlreadyExists(key) => CloudHomeError::AlreadyExists(key),
+            Self::ChecksumRejected(message) => CloudHomeError::Transport(message),
+            Self::Other(error) => error,
+        }
+    }
+}
+
 impl S3CloudHome {
     #[allow(clippy::too_many_arguments)]
     async fn new(
@@ -59,11 +104,8 @@ impl S3CloudHome {
         access_key: String,
         secret_key: String,
         key_prefix: Option<String>,
-        custom_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     ) -> Result<Self, CloudHomeError> {
-        let exact_slots = endpoint.is_none()
-            || custom_exact_slots
-                == Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests);
         let credentials =
             Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
@@ -138,7 +180,8 @@ impl S3CloudHome {
             // Normalize once here (trim trailing slash, drop empty), so neither
             // full_key nor list re-trims it.
             key_prefix: normalize_prefix(key_prefix),
-            exact_slots,
+            exact_upload_verification,
+            ids: std::sync::Arc::new(UuidProvider),
         })
     }
 
@@ -151,8 +194,10 @@ impl S3CloudHome {
         &self,
         key: &str,
         completion: MultipartCompletion,
+        exact_sha256: Option<String>,
     ) -> Result<Box<S3PartSink>, CloudHomeError> {
         let full = self.full_key(key);
+        let uses_checksum = exact_sha256.is_some();
         let upload_id = {
             let key = key.to_string();
             let full = full.clone();
@@ -160,15 +205,15 @@ impl S3CloudHome {
             let bucket = self.bucket.clone();
             self.runtime
                 .run(async move {
-                    let create = client
-                        .create_multipart_upload()
-                        .bucket(&bucket)
-                        .key(&full)
-                        .send()
-                        .await
-                        .map_err(|error| {
-                            CloudHomeError::Transport(format!("multipart create {key}: {error}"))
-                        })?;
+                    let mut request = client.create_multipart_upload().bucket(&bucket).key(&full);
+                    if uses_checksum {
+                        request = request
+                            .checksum_algorithm(aws_sdk_s3::types::ChecksumAlgorithm::Sha256)
+                            .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
+                    }
+                    let create = request.send().await.map_err(|error| {
+                        CloudHomeError::Transport(format!("multipart create {key}: {error}"))
+                    })?;
                     create
                         .upload_id()
                         .ok_or_else(|| {
@@ -190,6 +235,7 @@ impl S3CloudHome {
             completed: Vec::new(),
             next_part_number: 1,
             completion,
+            exact_sha256,
         };
         Ok(Box::new(S3PartSink {
             commands: Some(commands),
@@ -197,48 +243,75 @@ impl S3CloudHome {
         }))
     }
 
-    async fn put_create_only(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+    async fn put_create_only_raw(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        checksum_sha256: Option<String>,
+    ) -> Result<(), S3CreateOnlyPutError> {
         let full = self.full_key(key);
         let logical_key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(async move {
-                client
+            .spawn(async move {
+                let mut request = client
                     .put_object()
                     .bucket(&bucket)
                     .key(&full)
                     .if_none_match("*")
-                    .body(data.into())
-                    .send()
-                    .await
-                    .map_err(|error| {
-                        if create_only_put_failed(&error) {
-                            CloudHomeError::AlreadyExists(logical_key.clone())
-                        } else {
-                            put_object_error(&logical_key, error)
-                        }
-                    })?;
+                    .body(data.into());
+                if let Some(checksum) = checksum_sha256 {
+                    request = request.checksum_sha256(checksum);
+                }
+                request.send().await.map_err(|error| {
+                    if create_only_put_failed(&error) {
+                        S3CreateOnlyPutError::AlreadyExists(logical_key.clone())
+                    } else if checksum_put_failed(&error) {
+                        S3CreateOnlyPutError::ChecksumRejected(format!(
+                            "S3 rejected the SHA-256 request checksum for {logical_key}: {error}"
+                        ))
+                    } else {
+                        S3CreateOnlyPutError::Other(put_object_error(&logical_key, error))
+                    }
+                })?;
                 Ok(())
             })
             .await
+            .map_err(|error| {
+                S3CreateOnlyPutError::Other(CloudHomeError::Transport(format!(
+                    "S3 task aborted: {error}"
+                )))
+            })?
+    }
+
+    async fn put_create_only(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        checksum_sha256: Option<String>,
+    ) -> Result<(), CloudHomeError> {
+        self.put_create_only_raw(key, data, checksum_sha256)
+            .await
+            .map_err(S3CreateOnlyPutError::into_cloud_error)
     }
 
     async fn append_create_only(
         &self,
         key: &str,
         body: BlobBody,
+        exact_sha256: Option<String>,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
             let length = data.len() as u64;
-            self.put_create_only(key, data).await?;
+            self.put_create_only(key, data, exact_sha256).await?;
             progress(length);
             return Ok(());
         }
         let sink = self
-            .open_multipart_sink(key, MultipartCompletion::CreateOnly)
+            .open_multipart_sink(key, MultipartCompletion::CreateOnly, exact_sha256)
             .await?;
         MultipartUpload::new(key, body, sink, progress).run().await
     }
@@ -248,11 +321,12 @@ impl S3CloudHome {
         &self,
         slot: &ObjectSlot,
         body: BlobBody,
+        exact_sha256: Option<String>,
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")
             .map_err(CloudHomeError::from)?;
-        self.append_create_only(slot.logical_key(), body, progress)
+        self.append_create_only(slot.logical_key(), body, exact_sha256, progress)
             .await
     }
 
@@ -294,6 +368,187 @@ impl S3CloudHome {
             .await
     }
 
+    async fn exact_metadata(&self, slot: &ObjectSlot) -> Result<S3ExactMetadata, CloudHomeError> {
+        slot.require_logical_key_for("S3")?;
+        let full = self.full_key(slot.logical_key());
+        let key = slot.logical_key().to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        self.runtime
+            .run(async move {
+                use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+                let response = client
+                    .head_object()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        let status = match &error {
+                            SdkError::ServiceError(service) => {
+                                Some(service.raw().status().as_u16())
+                            }
+                            _ => None,
+                        };
+                        if is_not_found_code(error.code()) || status == Some(404) {
+                            CloudHomeError::NotFound(key.clone())
+                        } else {
+                            CloudHomeError::Transport(format!(
+                                "head exact S3 object {key}: {error}"
+                            ))
+                        }
+                    })?;
+                let size = response
+                    .content_length()
+                    .and_then(|size| u64::try_from(size).ok())
+                    .ok_or_else(|| {
+                        CloudHomeError::Transport(format!(
+                            "head exact S3 object {key}: missing content length"
+                        ))
+                    })?;
+                let sha256 = response
+                    .checksum_sha256()
+                    .filter(|checksum| !checksum.is_empty())
+                    .ok_or_else(|| {
+                        CloudHomeError::Transport(format!(
+                            "head exact S3 object {key}: missing SHA-256 checksum"
+                        ))
+                    })?
+                    .to_string();
+                Ok(S3ExactMetadata { size, sha256 })
+            })
+            .await
+    }
+
+    async fn verify_exact_upload(
+        &self,
+        upload: &super::ExactUpload<'_>,
+        created_response_was_observed: bool,
+    ) -> Result<(), CloudHomeError> {
+        use coven_foundation::config::ExactUploadVerification;
+
+        match self.exact_upload_verification {
+            ExactUploadVerification::UploadChecksum if created_response_was_observed => Ok(()),
+            ExactUploadVerification::UploadChecksum | ExactUploadVerification::MetadataHash => {
+                let metadata = self.exact_metadata(upload.object().slot()).await?;
+                if metadata.size != upload.object().stored_size()
+                    || metadata.sha256 != sha256_base64(upload.object().stored_hash())
+                {
+                    return Err(CloudHomeError::SlotCollision(
+                        upload.object().slot().logical_key().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            ExactUploadVerification::Readback => {
+                let bytes = self.read_at(upload.object().slot()).await?;
+                upload.verify_stored_bytes(&bytes)
+            }
+            ExactUploadVerification::Unchecked => {
+                super::exact_upload::accept_unchecked_create_response(
+                    created_response_was_observed,
+                    upload.object(),
+                )
+            }
+        }
+    }
+
+    async fn probe_exact_slots(&self) -> Result<(), CloudHomeError> {
+        use coven_foundation::config::ExactUploadVerification;
+
+        let suffix = self.ids.new_id();
+        let key = format!("__coven_probe__/exact-{suffix}");
+        let bad_key = format!("__coven_probe__/bad-checksum-{suffix}");
+        let bytes = b"coven exact-slot checksum probe".to_vec();
+        let checksum = sha256_bytes_base64(&bytes);
+        let sends_checksum = matches!(
+            self.exact_upload_verification,
+            ExactUploadVerification::UploadChecksum | ExactUploadVerification::MetadataHash
+        );
+        let operation = async {
+            self.put_create_only(
+                &key,
+                bytes.clone(),
+                sends_checksum.then(|| checksum.clone()),
+            )
+            .await?;
+
+            match self
+                .put_create_only(
+                    &key,
+                    bytes.clone(),
+                    sends_checksum.then(|| checksum.clone()),
+                )
+                .await
+            {
+                Err(CloudHomeError::AlreadyExists(_)) => {}
+                Ok(()) => {
+                    return Err(CloudHomeError::Configuration(
+                        "S3 endpoint did not enforce If-None-Match on exact-slot creation"
+                            .to_string(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+
+            match self.exact_upload_verification {
+                ExactUploadVerification::UploadChecksum => {
+                    let wrong = sha256_bytes_base64(b"different bytes");
+                    match self
+                        .put_create_only_raw(&bad_key, bytes.clone(), Some(wrong))
+                        .await
+                    {
+                        Err(S3CreateOnlyPutError::ChecksumRejected(_)) => {}
+                        Ok(()) => {
+                            return Err(CloudHomeError::Configuration(
+                                "S3 endpoint accepted an object whose SHA-256 request checksum was wrong"
+                                    .to_string(),
+                            ));
+                        }
+                        Err(error) => return Err(error.into_cloud_error()),
+                    }
+                }
+                ExactUploadVerification::MetadataHash => {
+                    let slot = ObjectSlot::logical(key.clone())?;
+                    let metadata = self.exact_metadata(&slot).await?;
+                    if metadata.size != bytes.len() as u64 || metadata.sha256 != checksum {
+                        return Err(CloudHomeError::Configuration(
+                            "S3 endpoint did not return the uploaded SHA-256 through HeadObject"
+                                .to_string(),
+                        ));
+                    }
+                }
+                ExactUploadVerification::Readback => {
+                    if self.read(&key).await? != bytes {
+                        return Err(CloudHomeError::Configuration(
+                            "S3 exact-slot readback returned different bytes".to_string(),
+                        ));
+                    }
+                }
+                ExactUploadVerification::Unchecked => {}
+            }
+            Ok(())
+        }
+        .await;
+
+        let cleanup_key = self.delete(&key).await;
+        let cleanup_bad = self.delete(&bad_key).await;
+        let cleanup = match (cleanup_key, cleanup_bad) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(first), Err(second)) => Err(CloudHomeError::CleanupFailed {
+                operation: Box::new(first),
+                cleanup: Box::new(second),
+            }),
+        };
+        match (operation, cleanup) {
+            (Ok(()), cleanup) => cleanup,
+            (Err(operation), Ok(())) => Err(operation),
+            (Err(operation), Err(cleanup)) => Err(combine_cleanup_failure(operation, Err(cleanup))),
+        }
+    }
+
     #[cfg(test)]
     async fn provision_test_bucket(&self) {
         let client = self.client.clone();
@@ -325,7 +580,7 @@ pub async fn open_cloud_home(
     access_key: String,
     secret_key: String,
     key_prefix: Option<String>,
-    custom_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 ) -> Result<S3CloudHome, CloudHomeError> {
     S3CloudHome::new(
         S3Runtime::new()?,
@@ -335,7 +590,7 @@ pub async fn open_cloud_home(
         access_key,
         secret_key,
         key_prefix,
-        custom_exact_slots,
+        exact_upload_verification,
     )
     .await
 }
@@ -375,6 +630,7 @@ struct S3MultipartOwner {
     completed: Vec<aws_sdk_s3::types::CompletedPart>,
     next_part_number: i32,
     completion: MultipartCompletion,
+    exact_sha256: Option<String>,
 }
 
 impl S3MultipartOwner {
@@ -400,28 +656,34 @@ impl S3MultipartOwner {
     async fn send_part(&mut self, part: bytes::Bytes) -> Result<(), CloudHomeError> {
         let part_number = self.next_part_number;
         self.next_part_number += 1;
-        let uploaded = self
+        let part_sha256 = self
+            .exact_sha256
+            .as_ref()
+            .map(|_| sha256_bytes_base64(&part));
+        let mut request = self
             .client
             .upload_part()
             .bucket(&self.bucket)
             .key(&self.key)
             .upload_id(&self.upload_id)
             .part_number(part_number)
-            .body(part.into())
-            .send()
-            .await
-            .map_err(|error| {
-                CloudHomeError::Transport(format!(
-                    "multipart part {part_number} {}: {error}",
-                    self.key
-                ))
-            })?;
-        self.completed.push(
-            aws_sdk_s3::types::CompletedPart::builder()
-                .part_number(part_number)
-                .set_e_tag(uploaded.e_tag().map(str::to_string))
-                .build(),
-        );
+            .body(part.into());
+        if let Some(checksum) = part_sha256.as_ref() {
+            request = request.checksum_sha256(checksum);
+        }
+        let uploaded = request.send().await.map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "multipart part {part_number} {}: {error}",
+                self.key
+            ))
+        })?;
+        let mut completed = aws_sdk_s3::types::CompletedPart::builder()
+            .part_number(part_number)
+            .set_e_tag(uploaded.e_tag().map(str::to_string));
+        if let Some(checksum) = part_sha256 {
+            completed = completed.checksum_sha256(checksum);
+        }
+        self.completed.push(completed.build());
         Ok(())
     }
 
@@ -450,10 +712,15 @@ impl S3MultipartOwner {
             .key(&self.key)
             .upload_id(&self.upload_id)
             .multipart_upload(completed_upload);
-        let request = match self.completion {
+        let mut request = match self.completion {
             MultipartCompletion::Mutable => request,
             MultipartCompletion::CreateOnly => request.if_none_match("*"),
         };
+        if let Some(checksum) = self.exact_sha256.as_ref() {
+            request = request
+                .checksum_sha256(checksum)
+                .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
+        }
         let operation = request.send().await.map(|_| ()).map_err(|error| {
             use aws_sdk_s3::error::ProvideErrorMetadata;
             if self.completion == MultipartCompletion::CreateOnly
@@ -701,7 +968,7 @@ impl CloudHome for S3CloudHome {
     fn exact_slot_storage(
         self: std::sync::Arc<Self>,
     ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        self.exact_slots.then_some(self)
+        Some(self)
     }
 
     async fn probe(&self) -> Result<(), CloudHomeError> {
@@ -723,7 +990,8 @@ impl CloudHome for S3CloudHome {
                     Err(e) => Err(CloudHomeError::Transport(format!("S3 probe failed: {e}"))),
                 }
             })
-            .await
+            .await?;
+        self.probe_exact_slots().await
     }
 
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -752,7 +1020,7 @@ impl CloudHome for S3CloudHome {
         _total_len: u64,
     ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
         Ok(self
-            .open_multipart_sink(key, MultipartCompletion::Mutable)
+            .open_multipart_sink(key, MultipartCompletion::Mutable, None)
             .await?)
     }
 
@@ -1058,11 +1326,27 @@ impl ExactSlotStorage for S3CloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &super::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        S3CloudHome::create_at_slot(self, slot, body, progress).await
+    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
+        let checksum = matches!(
+            self.exact_upload_verification,
+            coven_foundation::config::ExactUploadVerification::UploadChecksum
+                | coven_foundation::config::ExactUploadVerification::MetadataHash
+        )
+        .then(|| sha256_base64(upload.object().stored_hash()));
+        let operation = S3CloudHome::create_at_slot(
+            self,
+            upload.object().slot(),
+            upload.body().await?,
+            checksum,
+            progress,
+        )
+        .await;
+        super::exact_upload::settle_exact_create(operation, |observed| {
+            self.verify_exact_upload(upload, observed)
+        })
+        .await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("S3")?;

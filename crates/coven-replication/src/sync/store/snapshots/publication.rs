@@ -2,22 +2,9 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, snapshot_slot_prefix, CircleSnapshotMeta, SnapshotMeta,
 };
-use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use coven_storage::SyncStorage;
 
 use super::{remove_snapshot_spool, SnapshotError};
-
-/// A snapshot object that opened to bytes other than the prepared ones is
-/// invalid publication state, not a storage failure.
-fn snapshot_readback_error(error: coven_protocol::objects::StorageError) -> SnapshotError {
-    match error {
-        coven_protocol::objects::StorageError::ReadbackMismatch(key) => {
-            SnapshotError::PublicationState(format!(
-                "exact readback of {key} differs from its prepared bytes"
-            ))
-        }
-        error => SnapshotError::Bucket(error),
-    }
-}
 
 /// One exclusive Store-or-Circle snapshot publication operation.
 ///
@@ -62,11 +49,6 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
     ) -> Result<SnapshotMeta, SnapshotError> {
         let meta = &pending.meta.value;
         let device_id = meta.author_registration.device_id.to_string();
-        let image_context = ProtocolObjectContext::store_encrypted(
-            meta.store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotImage,
-        );
-        let image_prefix = snapshot_image_semantic_prefix(&device_id, meta.image.image_hash);
         for prepared in &pending.blobs {
             let blob = prepared.bindings[0].blob();
             let uploader = blob.locator().uploader().clone();
@@ -93,37 +75,29 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 .map_err(SnapshotError::Bucket)?;
         }
         self.storage
-            .create_protocol_object(&pending.image.prepared)
-            .await
-            .map_err(SnapshotError::Bucket)?;
-        self.storage
-            .verify_readback(
-                &image_context,
-                &meta.image.object,
-                &image_prefix,
+            .create_verified_protocol_object(
+                &ProtocolObjectContext::store_encrypted(
+                    meta.store_root_hash,
+                    ProtocolObjectDomain::StoreSnapshotImage,
+                ),
+                &pending.image.prepared,
+                &snapshot_image_semantic_prefix(&device_id, meta.image.image_hash),
                 &pending.image.bytes,
             )
             .await
-            .map_err(snapshot_readback_error)?;
-
-        let meta_context = ProtocolObjectContext::signed_plaintext(
-            meta.store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotMeta,
-        );
-        let meta_prefix = snapshot_slot_prefix(&device_id, pending.reference.generation);
-        self.storage
-            .create_protocol_object(&pending.meta.prepared)
-            .await
             .map_err(SnapshotError::Bucket)?;
         self.storage
-            .verify_readback(
-                &meta_context,
-                &pending.reference.object,
-                &meta_prefix,
+            .create_verified_protocol_object(
+                &ProtocolObjectContext::signed_plaintext(
+                    meta.store_root_hash,
+                    ProtocolObjectDomain::StoreSnapshotMeta,
+                ),
+                &pending.meta.prepared,
+                &snapshot_slot_prefix(&device_id, pending.reference.generation),
                 &pending.meta.bytes,
             )
             .await
-            .map_err(snapshot_readback_error)?;
+            .map_err(SnapshotError::Bucket)?;
         self.database
             .complete_snapshot_publication(pending.reference)
             .await

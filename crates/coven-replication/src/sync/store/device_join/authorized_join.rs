@@ -3,7 +3,6 @@ use super::journal::{database_error, provider_error};
 use super::*;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
-use coven_storage::VerifiedObjectWrites;
 
 mod provider_administrator;
 
@@ -267,9 +266,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::JournalConflict),
         }
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &abandonment_object.to_bytes())
+            .create_verified_protocol_object(
+                &context,
+                &prepared,
+                &prefix,
+                &abandonment_object.to_bytes(),
+            )
             .await
-            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
+            .map_err(|error| {
+                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
+            })?;
         self.local_writer
             .verify_device_join_abandonment(&abandonment_ref, &abandonment_object)?;
         let plan = self.writer.prepare_plan().await?;
@@ -387,9 +393,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             attempt.to_bytes(),
         )?;
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &attempt.to_bytes())
+            .create_verified_protocol_object(&context, &prepared, &prefix, &attempt.to_bytes())
             .await
-            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
+            .map_err(|error| {
+                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
+            })?;
         let attempt_ref = DeviceJoinAttemptRef {
             attempt_id: offer.attempt_id,
             attempt_hash: attempt.attempt_hash(),
@@ -499,9 +507,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::JournalConflict),
         }
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &outcome.to_bytes())
+            .create_verified_protocol_object(&context, &prepared, &prefix, &outcome.to_bytes())
             .await
-            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
+            .map_err(|error| {
+                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
+            })?;
         let local_writer = std::sync::Arc::clone(&self.local_writer);
         let verified_outcome = local_writer
             .load_own_device_join_outcome(&self.writer.join_history(), &outcome_ref)
@@ -693,9 +703,11 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::JournalConflict),
         };
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &outcome.to_bytes())
+            .create_verified_protocol_object(&context, &prepared, &prefix, &outcome.to_bytes())
             .await
-            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::AttemptMismatch))?;
+            .map_err(|error| {
+                DeviceJoinError::prepared_object(error, DeviceJoinError::AttemptMismatch)
+            })?;
         let activated_registration =
             coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
@@ -925,9 +937,16 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
         }
         self.storage
-            .create_and_verify(&context, &prepared, &prefix, &receipt_object.to_bytes())
+            .create_verified_protocol_object(
+                &context,
+                &prepared,
+                &prefix,
+                &receipt_object.to_bytes(),
+            )
             .await
-            .map_err(|error| DeviceJoinError::readback(error, DeviceJoinError::CleanupMismatch))?;
+            .map_err(|error| {
+                DeviceJoinError::prepared_object(error, DeviceJoinError::CleanupMismatch)
+            })?;
         let receipt = DeviceJoinCleanupReceipt {
             receipt: receipt_ref,
         };

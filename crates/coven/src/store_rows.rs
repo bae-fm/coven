@@ -164,11 +164,11 @@ impl StoreRows {
     }
 
     #[cfg(test)]
-    pub(crate) async fn write_changeset_for_test(
+    pub(crate) async fn store_write_partition_for_test(
         &self,
         write_id: &crate::WriteId,
     ) -> Result<Vec<u8>, coven_database::DbError> {
-        self.writes.write_changeset_for_test(write_id).await
+        self.writes.store_write_partition_for_test(write_id).await
     }
 
     #[cfg(test)]

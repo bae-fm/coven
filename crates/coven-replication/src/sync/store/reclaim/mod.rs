@@ -19,7 +19,7 @@ use coven_protocol::store_commit::{
     snapshot_image_semantic_prefix, CommitFrontier, ObjectHash, StoreAckRef, StoreBatchCommitRef,
     StoreRootRef, StoreSnapshotLocator, VerifiedStoreBatchCommit,
 };
-use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use coven_storage::SyncStorage;
 pub(crate) use history::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSnapshot};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -684,7 +684,7 @@ pub(crate) async fn create_reclaim_exact_objects(
             ..
         } => {
             storage
-                .create_and_verify(
+                .create_verified_protocol_object(
                     &ProtocolObjectContext::store_encrypted(
                         evidence.store_root_hash,
                         ProtocolObjectDomain::StoreReclaimEvidence,
@@ -695,7 +695,7 @@ pub(crate) async fn create_reclaim_exact_objects(
                 )
                 .await?;
             storage
-                .create_and_verify(
+                .create_verified_protocol_object(
                     &ProtocolObjectContext::signed_plaintext(
                         authorization.store_root_hash,
                         ProtocolObjectDomain::StoreReclaimAuthorization,
@@ -705,14 +705,14 @@ pub(crate) async fn create_reclaim_exact_objects(
                     &authorization.to_bytes(),
                 )
                 .await
-                .map_err(StoreReclaimJournalError::from)
+                .map_err(StoreReclaimJournalError::Storage)
         }
         coven_database::DurableStoreReclaimObject::Receipt {
             receipt,
             receipt_prepared,
             ..
         } => storage
-            .create_and_verify(
+            .create_verified_protocol_object(
                 &ProtocolObjectContext::signed_plaintext(
                     receipt.store_root_hash,
                     ProtocolObjectDomain::StoreReclaimReceipt,
@@ -722,6 +722,6 @@ pub(crate) async fn create_reclaim_exact_objects(
                 &receipt.to_bytes(),
             )
             .await
-            .map_err(StoreReclaimJournalError::from),
+            .map_err(StoreReclaimJournalError::Storage),
     }
 }

@@ -23,7 +23,7 @@ use coven_protocol::store_commit::{
     StoreDeviceExclusionProposalRef, StoreDeviceProposalState, StoreDeviceStatus, StoreHistoryCut,
     StoreProtocolError,
 };
-use coven_storage::{SyncStorage, VerifiedObjectWrites};
+use coven_storage::SyncStorage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreDeviceExclusionResult {
@@ -211,13 +211,9 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
         let context = operation.object().context();
         let prefix = operation.object().semantic_prefix()?;
         self.storage
-            .create_protocol_object(operation.object().prepared())
-            .await
-            .map_err(StoreDeviceExclusionJournalError::Storage)?;
-        self.storage
-            .verify_readback(
+            .create_verified_protocol_object(
                 &context,
-                operation.object().object(),
+                operation.object().prepared(),
                 prefix,
                 &operation.object().semantic_bytes(),
             )

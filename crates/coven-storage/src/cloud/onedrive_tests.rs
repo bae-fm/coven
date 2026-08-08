@@ -6,6 +6,7 @@ use axum::Router;
 use std::sync::{Arc, Mutex};
 
 use crate::oauth::OAuthTokens;
+use coven_foundation::config::ExactUploadVerification;
 use coven_keys::keys::StoreKeys;
 
 #[test]
@@ -29,7 +30,12 @@ fn home() -> OneDriveCloudHome {
         config,
         "OneDrive",
     );
-    OneDriveCloudHome::new("drive123".to_string(), "folder456".to_string(), session)
+    OneDriveCloudHome::new(
+        "drive123".to_string(),
+        "folder456".to_string(),
+        session,
+        ExactUploadVerification::MetadataHash,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +95,26 @@ async fn exact_create_endpoint(
             .body(Body::from(r#"{"id":"item-1"}"#))
             .expect("build commit response");
     }
+    if method == "GET" && path.contains("/items/folder456:/") {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": "item-1",
+                    "name": encode_key("protocol/copy"),
+                    "parentReference": { "id": "folder456" },
+                    "file": {
+                        "hashes": {
+                            "sha1Hash": "994b62b0e47abf4768a374def3bf8b963eab4abd",
+                        },
+                    },
+                    "size": 10,
+                })
+                .to_string(),
+            ))
+            .expect("build metadata response");
+    }
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Body::from(format!("unexpected request: {method} {path}")))
@@ -135,20 +161,16 @@ async fn exact_create_defers_publication_then_commits_the_destination() {
         .allocate_slot("protocol/copy")
         .await
         .expect("allocate OneDrive slot");
-    home.create_at(
-        &slot,
-        BlobBody::from_bytes(b"copy-bytes".to_vec()),
-        &crate::cloud::no_progress(),
-    )
-    .await
-    .expect("create exact OneDrive object");
+    crate::cloud::create_exact_bytes(&home, &slot, b"copy-bytes", &crate::cloud::no_progress())
+        .await
+        .expect("create exact OneDrive object");
     assert_eq!(
         slot,
         ObjectSlot::logical("protocol/copy".to_string()).expect("logical OneDrive slot")
     );
 
     let requests = requests.lock().expect("lock requests");
-    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests.len(), 4, "{requests:?}");
     let session: serde_json::Value =
         serde_json::from_slice(&requests[0].body).expect("parse session body");
     assert_eq!(requests[0].method, "POST");
@@ -165,6 +187,7 @@ async fn exact_create_defers_publication_then_commits_the_destination() {
     assert!(commit["@microsoft.graph.sourceUrl"]
         .as_str()
         .is_some_and(|url| url.ends_with("/upload/session")));
+    assert_eq!(requests[3].method, "GET");
     drop(requests);
     shutdown.send(()).expect("shut down OneDrive endpoint");
 }
@@ -230,7 +253,20 @@ async fn ambiguous_commit_endpoint(
         return Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"id":"pre-existing-item"}"#))
+            .body(Body::from(
+                serde_json::json!({
+                    "id": "pre-existing-item",
+                    "name": encode_key("protocol/copy"),
+                    "parentReference": { "id": "folder456" },
+                    "file": {
+                        "hashes": {
+                            "sha1Hash": "0000000000000000000000000000000000000000",
+                        },
+                    },
+                    "size": 10,
+                })
+                .to_string(),
+            ))
             .expect("build occupant response");
     }
     if method == "DELETE" && path == "/upload/session" {
@@ -265,16 +301,12 @@ async fn ambiguous_commit_does_not_adopt_the_current_path_occupant() {
         .allocate_slot("protocol/copy")
         .await
         .expect("allocate OneDrive slot");
-    let error = home
-        .create_at(
-            &slot,
-            BlobBody::from_bytes(b"copy-bytes".to_vec()),
-            &crate::cloud::no_progress(),
-        )
-        .await
-        .expect_err("ambiguous commit must remain unresolved");
+    let error =
+        crate::cloud::create_exact_bytes(&home, &slot, b"copy-bytes", &crate::cloud::no_progress())
+            .await
+            .expect_err("ambiguous commit must remain unresolved");
 
-    assert!(matches!(error, CloudHomeError::Transport(_)), "{error}");
+    assert!(matches!(error, CloudHomeError::SlotCollision(_)), "{error}");
     server.abort();
 }
 

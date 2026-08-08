@@ -118,48 +118,43 @@ impl SyncStorage for CloudSyncStorage {
         PreparedExactObject::new(reference, stored)
     }
 
+    async fn open_prepared_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        context.validate_reference(prepared.reference(), semantic_prefix)?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let cipher = self.protocol_cipher_for_open(context);
+        let object = prepared.reference().clone();
+        let stored = prepared.stored_bytes().to_vec();
+        run_storage_cpu(
+            "verify and open prepared protocol object",
+            Box::new(move || {
+                object.verify(&stored)?;
+                cipher.open(stored, &aad).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "protocol object {}: {error}",
+                        object.slot().logical_key()
+                    ))
+                })
+            }),
+        )
+        .await
+    }
+
     async fn create_protocol_object(
         &self,
         prepared: &PreparedExactObject,
     ) -> Result<(), StorageError> {
-        let create_error = self
-            .exact
-            .create_at(
-                prepared.reference().slot(),
-                BlobBody::from_bytes(prepared.stored_bytes().to_vec()),
-                &crate::cloud::no_progress(),
-            )
+        let upload =
+            crate::cloud::ExactUpload::from_bytes(prepared.reference(), prepared.stored_bytes())?;
+        self.exact
+            .create_at(&upload, &crate::cloud::no_progress())
             .await
-            .err();
-        if let Some(error) = &create_error {
-            if !matches!(error, crate::cloud::CloudHomeError::AlreadyExists(_))
-                && !error.is_retryable()
-            {
-                return Err(create_error.expect("create error exists").into());
-            }
-        }
-        let observed = match self.exact.read_at(prepared.reference().slot()).await {
-            Ok(observed) => observed,
-            Err(crate::cloud::CloudHomeError::NotFound(_)) if create_error.is_some() => {
-                return Err(create_error.expect("create error exists").into())
-            }
-            Err(readback) => {
-                return match create_error {
-                    Some(operation) => Err(StorageError::UnresolvedOutcome {
-                        operation: Box::new(operation.into()),
-                        readback: Box::new(readback.into()),
-                    }),
-                    None => Err(readback.into()),
-                }
-            }
-        };
-        if observed != prepared.stored_bytes() {
-            return Err(StorageError::SlotCollision(
-                prepared.reference().slot().logical_key().to_string(),
-            ));
-        }
-        prepared.reference().verify(&observed)?;
-        Ok(())
+            .map(drop)
+            .map_err(Into::into)
     }
 
     async fn read_protocol_object(
@@ -260,7 +255,7 @@ impl SyncStorage for CloudSyncStorage {
             Err(readback) => match delete_error {
                 Some(operation) => Err(StorageError::UnresolvedOutcome {
                     operation: Box::new(operation.into()),
-                    readback: Box::new(readback.into()),
+                    settlement: Box::new(readback.into()),
                 }),
                 None => Err(readback.into()),
             },
@@ -515,46 +510,12 @@ impl SyncStorage for CloudSyncStorage {
                 object.slot().logical_key()
             )));
         }
-        {
-            let (size, digest) = coven_foundation::local_file::file_facts(stored_file)
-                .await
-                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
-            object.verify_stored_facts(
-                stored_file,
-                size,
-                coven_protocol::store_commit::ObjectHash::from_digest(digest),
-            )?;
-        }
-        let body = BlobBody::from_file(stored_file)
+        let upload = crate::cloud::ExactUpload::from_file(object, stored_file).await?;
+        self.exact
+            .create_at(&upload, progress)
             .await
-            .map_err(StorageError::LocalFilesystem)?;
-        let create_error = self
-            .exact
-            .create_at(object.slot(), body, progress)
-            .await
-            .err();
-        if let Some(error) = &create_error {
-            if !matches!(error, crate::cloud::CloudHomeError::AlreadyExists(_))
-                && !error.is_retryable()
-            {
-                return Err(create_error.expect("create error exists").into());
-            }
-        }
-        match self.exact.read_at(object.slot()).await {
-            Ok(stored) => object
-                .verify(&stored)
-                .map_err(|_| StorageError::SlotCollision(object.slot().logical_key().to_string())),
-            Err(crate::cloud::CloudHomeError::NotFound(_)) if create_error.is_some() => {
-                Err(create_error.expect("create error exists").into())
-            }
-            Err(readback) => match create_error {
-                Some(operation) => Err(StorageError::UnresolvedOutcome {
-                    operation: Box::new(operation.into()),
-                    readback: Box::new(readback.into()),
-                }),
-                None => Err(readback.into()),
-            },
-        }
+            .map(drop)
+            .map_err(Into::into)
     }
 
     async fn verify_blob_object(

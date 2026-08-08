@@ -28,11 +28,7 @@ pub fn require_exact_slot_capabilities_config(config: &Config) -> Result<(), Sto
             "sync requires a cloud provider with exact-slot storage".to_string(),
         )
     })?;
-    if exact_slot_capabilities_supported(
-        &provider,
-        config.cloud_home.s3_endpoint.is_some(),
-        config.cloud_home.s3_exact_slots,
-    ) {
+    if exact_slot_capabilities_supported(&provider, config.cloud_home.exact_upload_verification) {
         Ok(())
     } else {
         Err(StorageSetupError::ExactSlotsUnavailable { provider })
@@ -41,17 +37,10 @@ pub fn require_exact_slot_capabilities_config(config: &Config) -> Result<(), Sto
 
 pub fn require_exact_slot_capabilities_join_info(
     join_info: &crate::cloud::CloudHomeJoinInfo,
-    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    verification: coven_foundation::config::ExactUploadVerification,
 ) -> Result<(), CloudProvider> {
     let provider = join_info.cloud_provider();
-    let custom_endpoint = matches!(
-        join_info,
-        crate::cloud::CloudHomeJoinInfo::S3 {
-            endpoint: Some(_),
-            ..
-        }
-    );
-    if exact_slot_capabilities_supported(&provider, custom_endpoint, custom_s3_exact_slots) {
+    if exact_slot_capabilities_supported(&provider, verification) {
         Ok(())
     } else {
         Err(provider)
@@ -77,20 +66,12 @@ pub fn require_exact_slot_capabilities_home(
 
 fn exact_slot_capabilities_supported(
     provider: &CloudProvider,
-    custom_s3_endpoint: bool,
-    custom_s3_exact_slots: Option<coven_foundation::config::CustomS3ExactSlots>,
+    verification: coven_foundation::config::ExactUploadVerification,
 ) -> bool {
-    match provider {
-        CloudProvider::S3 if !custom_s3_endpoint => true,
-        CloudProvider::S3 => {
-            custom_s3_exact_slots
-                == Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests)
-        }
-        CloudProvider::GoogleDrive
-        | CloudProvider::Dropbox
-        | CloudProvider::OneDrive
-        | CloudProvider::CloudKit => true,
-    }
+    !matches!(
+        verification,
+        coven_foundation::config::ExactUploadVerification::UploadChecksum
+    ) || matches!(provider, CloudProvider::S3)
 }
 
 /// Cloud provider setup error.
@@ -105,7 +86,7 @@ mod tests {
     use coven_foundation::store_dir::StoreDir;
 
     #[test]
-    fn exact_slot_admission_is_universal_and_uses_local_s3_assertions() {
+    fn exact_slot_admission_rejects_upload_checksums_where_the_provider_cannot_enforce_them() {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
@@ -114,18 +95,9 @@ mod tests {
         );
 
         config.cloud_home.provider = Some(CloudProvider::S3);
-        config.cloud_home.s3_endpoint = None;
-        assert!(require_exact_slot_capabilities_config(&config).is_ok());
-
         config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
-        assert!(matches!(
-            require_exact_slot_capabilities_config(&config),
-            Err(StorageSetupError::ExactSlotsUnavailable {
-                provider: CloudProvider::S3
-            })
-        ));
-        config.cloud_home.s3_exact_slots =
-            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests);
+        config.cloud_home.exact_upload_verification =
+            coven_foundation::config::ExactUploadVerification::UploadChecksum;
         assert!(require_exact_slot_capabilities_config(&config).is_ok());
 
         for provider in [
@@ -135,12 +107,21 @@ mod tests {
             CloudProvider::CloudKit,
         ] {
             config.cloud_home.provider = Some(provider.clone());
+            assert!(matches!(
+                require_exact_slot_capabilities_config(&config),
+                Err(StorageSetupError::ExactSlotsUnavailable { provider: rejected })
+                    if rejected == provider
+            ));
+            config.cloud_home.exact_upload_verification =
+                coven_foundation::config::ExactUploadVerification::MetadataHash;
             assert!(require_exact_slot_capabilities_config(&config).is_ok());
+            config.cloud_home.exact_upload_verification =
+                coven_foundation::config::ExactUploadVerification::UploadChecksum;
         }
     }
 
     #[test]
-    fn custom_s3_join_requires_the_local_exact_slot_assertion() {
+    fn join_admission_uses_the_local_verification_policy() {
         let join_info = CloudHomeJoinInfo::S3 {
             bucket: "bucket".to_string(),
             region: "region".to_string(),
@@ -150,13 +131,9 @@ mod tests {
             key_prefix: None,
         };
 
-        assert_eq!(
-            require_exact_slot_capabilities_join_info(&join_info, None),
-            Err(CloudProvider::S3),
-        );
         assert!(require_exact_slot_capabilities_join_info(
             &join_info,
-            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+            coven_foundation::config::ExactUploadVerification::UploadChecksum,
         )
         .is_ok());
     }

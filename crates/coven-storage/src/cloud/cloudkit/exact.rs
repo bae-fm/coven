@@ -1,22 +1,31 @@
 use super::chunking::*;
 use super::*;
 
-const EXACT_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-exact-manifest-v1\0";
+const EXACT_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-exact-manifest-v2\0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExactManifest {
+    pub(crate) part_count: usize,
+    pub(crate) total_len: usize,
+    pub(crate) stored_hash: coven_protocol::store_commit::ObjectHash,
+}
 
 pub(crate) fn exact_part_key(logical_key: &str, index: usize) -> String {
     format!("{logical_key}.exact-part{index}")
 }
 
-pub(crate) fn encode_exact_manifest(part_count: usize, total_len: usize) -> Vec<u8> {
+pub(crate) fn encode_exact_manifest(manifest: ExactManifest) -> Vec<u8> {
     let mut bytes = EXACT_MANIFEST_MAGIC.to_vec();
-    bytes.extend_from_slice(part_count.to_string().as_bytes());
+    bytes.extend_from_slice(manifest.part_count.to_string().as_bytes());
     bytes.push(b'\n');
-    bytes.extend_from_slice(total_len.to_string().as_bytes());
+    bytes.extend_from_slice(manifest.total_len.to_string().as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(manifest.stored_hash.to_string().as_bytes());
     bytes.push(b'\n');
     bytes
 }
 
-pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<(usize, usize), CloudHomeError> {
+pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, CloudHomeError> {
     let text = std::str::from_utf8(bytes.strip_prefix(EXACT_MANIFEST_MAGIC).ok_or_else(|| {
         CloudHomeError::Transport("CloudKit exact object has an invalid manifest".to_string())
     })?)
@@ -40,12 +49,25 @@ pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<(usize, usize), Clou
         .map_err(|error| {
             CloudHomeError::Transport(format!("CloudKit exact manifest length: {error}"))
         })?;
+    let stored_hash = lines
+        .next()
+        .ok_or_else(|| {
+            CloudHomeError::Transport("CloudKit exact manifest omitted stored hash".to_string())
+        })?
+        .parse()
+        .map_err(|error| {
+            CloudHomeError::Transport(format!("CloudKit exact manifest stored hash: {error}"))
+        })?;
     if lines.next().is_some() || part_count != total_len.div_ceil(CHUNK_SIZE) {
         return Err(CloudHomeError::Transport(
             "CloudKit exact manifest shape does not match its length".to_string(),
         ));
     }
-    Ok((part_count, total_len))
+    Ok(ExactManifest {
+        part_count,
+        total_len,
+        stored_hash,
+    })
 }
 
 pub(crate) fn read_exact_cloudkit_object(
@@ -54,16 +76,24 @@ pub(crate) fn read_exact_cloudkit_object(
     logical_key: &str,
 ) -> Result<(Vec<u8>, Vec<CloudKitRecordVersion>), CloudHomeError> {
     let manifest = ops.read_versioned_record(scope, logical_key)?;
-    let (part_count, total_len) = decode_exact_manifest(&manifest.bytes)?;
-    let mut bytes = Vec::with_capacity(total_len);
-    let mut records = Vec::with_capacity(part_count + 1);
+    let manifest_data = decode_exact_manifest(&manifest.bytes)?;
+    let mut bytes = Vec::with_capacity(manifest_data.total_len);
+    let mut records = Vec::with_capacity(manifest_data.part_count + 1);
     records.push(CloudKitRecordVersion {
         key: logical_key.to_string(),
         version: manifest.version,
     });
-    for index in 0..part_count {
+    for index in 0..manifest_data.part_count {
         let key = exact_part_key(logical_key, index);
-        let part = read_exact_part(ops, scope, logical_key, part_count, total_len, index, &key)?;
+        let part = read_exact_part(
+            ops,
+            scope,
+            logical_key,
+            manifest_data.part_count,
+            manifest_data.total_len,
+            index,
+            &key,
+        )?;
         bytes.extend_from_slice(&part.bytes);
         records.push(CloudKitRecordVersion {
             key,
@@ -122,23 +152,33 @@ pub(crate) fn read_exact_cloudkit_range(
     end: usize,
 ) -> Result<Vec<u8>, CloudHomeError> {
     let manifest = ops.read_versioned_record(scope, logical_key)?;
-    let (part_count, total_len) = decode_exact_manifest(&manifest.bytes)?;
-    if end > total_len {
+    let manifest_data = decode_exact_manifest(&manifest.bytes)?;
+    if end > manifest_data.total_len {
         return Err(CloudHomeError::Transport(format!(
-            "range {start}..{end} exceeds CloudKit exact object {logical_key:?} size {total_len}"
+            "range {start}..{end} exceeds CloudKit exact object {logical_key:?} size {}",
+            manifest_data.total_len
         )));
     }
     let first = start / CHUNK_SIZE;
     let last = (end - 1) / CHUNK_SIZE;
-    if last >= part_count {
+    if last >= manifest_data.part_count {
         return Err(CloudHomeError::Transport(format!(
-            "range {start}..{end} needs part {last} of CloudKit exact object {logical_key:?}, which has {part_count}"
+            "range {start}..{end} needs part {last} of CloudKit exact object {logical_key:?}, which has {}",
+            manifest_data.part_count
         )));
     }
     let mut bytes = Vec::with_capacity(end - start);
     for index in first..=last {
         let key = exact_part_key(logical_key, index);
-        let part = read_exact_part(ops, scope, logical_key, part_count, total_len, index, &key)?;
+        let part = read_exact_part(
+            ops,
+            scope,
+            logical_key,
+            manifest_data.part_count,
+            manifest_data.total_len,
+            index,
+            &key,
+        )?;
         let part_start = index * CHUNK_SIZE;
         let from = start.saturating_sub(part_start);
         let to = (end - part_start).min(part.bytes.len());
@@ -261,10 +301,19 @@ impl ExactSlotStorage for CloudKitCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        mut body: BlobBody,
+        upload: &crate::cloud::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
+        if matches!(
+            self.exact_upload_verification,
+            coven_foundation::config::ExactUploadVerification::UploadChecksum
+        ) {
+            return Err(CloudHomeError::Configuration(
+                "CloudKit does not accept a caller-supplied upload checksum".to_string(),
+            ));
+        }
+        let slot = upload.object().slot();
+        let mut body = upload.body().await?;
         slot.require_logical_key_for("CloudKit")?;
         let total_len = usize::try_from(body.len()).map_err(|_| {
             CloudHomeError::Transport(format!(
@@ -322,28 +371,55 @@ impl ExactSlotStorage for CloudKitCloudHome {
             .clone()
             .stage_record(CloudKitRecordCreate {
                 key: slot.logical_key().to_string(),
-                data: encode_exact_manifest(part_count, total_len),
+                data: encode_exact_manifest(ExactManifest {
+                    part_count,
+                    total_len,
+                    stored_hash: upload.object().stored_hash(),
+                }),
             })
             .await
         {
             return Err(staging.cleanup_failure(error));
         }
         requested_keys.push(slot.logical_key().to_string());
-        let created = match staging.clone().commit().await {
-            Ok(created) => created,
+        let outcome = match staging.clone().commit().await {
+            Ok(created) => {
+                if created.len() != requested_keys.len()
+                    || created
+                        .iter()
+                        .zip(&requested_keys)
+                        .any(|(record, requested)| &record.key != requested)
+                {
+                    self.exact_manifest(slot).await?;
+                }
+                crate::cloud::ExactCreateOutcome::Created
+            }
             Err(CloudHomeError::AlreadyExists(_)) => {
-                return Err(staging.cleanup_failure(CloudHomeError::AlreadyExists(
+                let collision = staging.cleanup_failure(CloudHomeError::AlreadyExists(
                     slot.logical_key().to_string(),
-                )));
+                ));
+                if !matches!(collision, CloudHomeError::AlreadyExists(_)) {
+                    return Err(collision);
+                }
+                return match self.verify_exact_upload(upload, false).await {
+                    Ok(()) => Ok(crate::cloud::ExactCreateOutcome::AlreadyPresent),
+                    Err(CloudHomeError::NotFound(_)) => Err(collision),
+                    Err(CloudHomeError::AlreadyExists(_)) => Err(collision),
+                    Err(slot_collision @ CloudHomeError::SlotCollision(_)) => Err(slot_collision),
+                    Err(settlement) => Err(CloudHomeError::UnresolvedOutcome {
+                        operation: Box::new(collision),
+                        settlement: Box::new(settlement),
+                    }),
+                };
             }
             Err(operation) => {
                 match self
-                    .settle_atomic_create_response_loss(requested_keys.clone())
+                    .settle_atomic_create_response_loss(slot.logical_key().to_string())
                     .await
                 {
-                    Ok(AtomicCreateReadback::Created(created)) => {
+                    Ok(AtomicCreateReadback::Created) => {
                         staging.disarm();
-                        created
+                        crate::cloud::ExactCreateOutcome::AlreadyPresent
                     }
                     Ok(AtomicCreateReadback::Absent) => {
                         return Err(staging.cleanup_failure(operation))
@@ -352,22 +428,19 @@ impl ExactSlotStorage for CloudKitCloudHome {
                         staging.disarm();
                         return Err(CloudHomeError::UnresolvedOutcome {
                             operation: Box::new(operation),
-                            readback: Box::new(readback),
+                            settlement: Box::new(readback),
                         });
                     }
                 }
             }
         };
-        if created.len() != requested_keys.len()
-            || created
-                .iter()
-                .zip(&requested_keys)
-                .any(|(record, requested)| &record.key != requested)
-        {
-            self.authoritative_created_records(requested_keys).await?;
-        }
+        self.verify_exact_upload(
+            upload,
+            matches!(outcome, crate::cloud::ExactCreateOutcome::Created),
+        )
+        .await?;
         progress(total_len as u64);
-        Ok(())
+        Ok(outcome)
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

@@ -536,6 +536,7 @@ fn make_cloud_home() -> CloudKitCloudHome {
     CloudKitCloudHome::new_private_with_ids(
         Arc::new(MockCloudKitOps::new()),
         Arc::new(SequentialIdProvider::new("cloudkit-upload")),
+        coven_foundation::config::ExactUploadVerification::MetadataHash,
     )
 }
 
@@ -545,6 +546,7 @@ fn make_cloud_home_with_ops() -> (CloudKitCloudHome, Arc<MockCloudKitOps>) {
         CloudKitCloudHome::new_private_with_ids(
             ops.clone(),
             Arc::new(SequentialIdProvider::new("cloudkit-upload")),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
         ),
         ops,
     )
@@ -1327,14 +1329,9 @@ async fn exact_ranged_read_fetches_only_the_parts_it_covers() {
     let data: Vec<u8> = (0..3 * CHUNK_SIZE + 1024)
         .map(|value| (value % 251) as u8)
         .collect();
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .unwrap();
 
     // A range wholly inside part 2.
     ops.clear_versioned_reads();
@@ -1419,24 +1416,14 @@ async fn exact_ranged_read_fetches_only_the_parts_it_covers() {
 async fn exact_bounded_records_are_create_only() {
     let (home, ops) = make_cloud_home_with_ops();
     let slot = exact_slot("copies/bounded");
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(b"first".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    crate::cloud::create_exact_bytes(&home, &slot, b"first", &no_progress())
+        .await
+        .unwrap();
 
-    let collision = ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(b"second".to_vec()),
-        &no_progress(),
-    )
-    .await
-    .expect_err("an immutable record must never overwrite an existing key");
-    assert!(matches!(collision, CloudHomeError::AlreadyExists(key) if key == "copies/bounded"));
+    let collision = crate::cloud::create_exact_bytes(&home, &slot, b"second", &no_progress())
+        .await
+        .expect_err("an immutable record must never overwrite an existing key");
+    assert!(matches!(collision, CloudHomeError::SlotCollision(key) if key == "copies/bounded"));
     assert_eq!(
         ExactSlotStorage::read_at(&home, &slot).await.unwrap(),
         b"first"
@@ -1460,14 +1447,9 @@ async fn exact_multipart_stages_one_bounded_part_at_a_time_and_manifest_last() {
     let data = vec![7u8; CHUNK_SIZE + 13];
     let slot = exact_slot("copies/chunked");
 
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .unwrap();
 
     assert_eq!(
         ops.calls(),
@@ -1487,25 +1469,24 @@ async fn exact_multipart_stages_one_bounded_part_at_a_time_and_manifest_last() {
         .unwrap();
     assert_eq!(
         decode_exact_manifest(&manifest_bytes).unwrap(),
-        (2, data.len())
+        ExactManifest {
+            part_count: 2,
+            total_len: data.len(),
+            stored_hash: coven_protocol::store_commit::ObjectHash::digest(&data),
+        }
     );
 }
 
 #[tokio::test]
-async fn lost_atomic_commit_response_is_settled_by_readback() {
+async fn lost_atomic_commit_response_is_settled_by_manifest() {
     let (home, ops) = make_cloud_home_with_ops();
     ops.lose_commit_response();
     let data = vec![2u8; CHUNK_SIZE + 1];
     let slot = exact_slot("copies/ambiguous");
 
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .expect("authoritative readback settles a committed create");
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .expect("the committed manifest settles the create");
 
     assert_eq!(ExactSlotStorage::read_at(&home, &slot).await.unwrap(), data);
 }
@@ -1518,24 +1499,19 @@ async fn concurrent_immutable_creates_have_one_winner() {
     let right_progress = no_progress();
 
     let (left, right) = tokio::join!(
-        ExactSlotStorage::create_at(
-            &home,
-            &slot,
-            BlobBody::from_bytes(b"left".to_vec()),
-            &left_progress,
-        ),
-        ExactSlotStorage::create_at(
-            &home,
-            &slot,
-            BlobBody::from_bytes(b"right".to_vec()),
-            &right_progress,
-        ),
+        crate::cloud::create_exact_bytes(&home, &slot, b"left", &left_progress),
+        crate::cloud::create_exact_bytes(&home, &slot, b"right", &right_progress),
     );
 
     assert!(matches!(
         (&left, &right),
-        (Ok(()), Err(CloudHomeError::AlreadyExists(_)))
-            | (Err(CloudHomeError::AlreadyExists(_)), Ok(()))
+        (
+            Ok(crate::cloud::ExactCreateOutcome::Created),
+            Err(CloudHomeError::SlotCollision(_)),
+        ) | (
+            Err(CloudHomeError::SlotCollision(_)),
+            Ok(crate::cloud::ExactCreateOutcome::Created),
+        )
     ));
     let expected = if left.is_ok() {
         b"left".as_slice()
@@ -1555,14 +1531,9 @@ async fn mismatched_commit_keys_are_checked_against_authoritative_records() {
     let data = vec![3u8; CHUNK_SIZE + 1];
     let slot = exact_slot("copies/locator-mismatch");
 
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(data.clone()),
-        &no_progress(),
-    )
-    .await
-    .expect("authoritative reads verify committed records");
+    crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .expect("the committed manifest verifies the exact object");
 
     assert_eq!(ExactSlotStorage::read_at(&home, &slot).await.unwrap(), data);
 }
@@ -1576,10 +1547,9 @@ async fn immutable_atomic_multipart_failure_and_collision_create_no_partial_layo
     let data = vec![3u8; CHUNK_SIZE + 1];
     let slot = exact_slot("copies/failed");
 
-    let error =
-        ExactSlotStorage::create_at(&home, &slot, BlobBody::from_bytes(data), &no_progress())
-            .await
-            .expect_err("part creation failure must abort the append");
+    let error = crate::cloud::create_exact_bytes(&home, &slot, &data, &no_progress())
+        .await
+        .expect_err("part creation failure must abort the append");
     assert!(matches!(error, CloudHomeError::Transport(_)));
     assert!(!ops
         .record_exists(&CloudKitScope::Private, &first_part)
@@ -1595,14 +1565,10 @@ async fn immutable_atomic_multipart_failure_and_collision_create_no_partial_layo
     ops.write_record(&CloudKitScope::Private, &second_part, b"existing".to_vec())
         .unwrap();
     let slot = exact_slot("copies/collision");
-    let error = ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(vec![3u8; CHUNK_SIZE + 1]),
-        &no_progress(),
-    )
-    .await
-    .expect_err("a batch collision must reject the whole append");
+    let collision_bytes = vec![3u8; CHUNK_SIZE + 1];
+    let error = crate::cloud::create_exact_bytes(&home, &slot, &collision_bytes, &no_progress())
+        .await
+        .expect_err("a batch collision must reject the whole append");
     assert!(matches!(error, CloudHomeError::AlreadyExists(key) if key == "copies/collision"));
     assert!(!ops
         .record_exists(&CloudKitScope::Private, &first_part)
@@ -1624,14 +1590,10 @@ async fn immutable_staging_cleanup_failure_is_typed_and_remote_state_stays_empty
     ops.fail_discard();
     let slot = exact_slot("copies/discard");
 
-    let error = ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(vec![4u8; CHUNK_SIZE + 1]),
-        &no_progress(),
-    )
-    .await
-    .expect_err("failed staging discard must be returned with the commit error");
+    let bytes = vec![4u8; CHUNK_SIZE + 1];
+    let error = crate::cloud::create_exact_bytes(&home, &slot, &bytes, &no_progress())
+        .await
+        .expect_err("failed staging discard must be returned with the commit error");
 
     assert!(matches!(error, CloudHomeError::CleanupFailed { .. }));
     assert!(error.to_string().contains("batch-0"), "{error}");
@@ -1667,7 +1629,10 @@ fn cancellation_discard_failure_terminates_the_process() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let ops = Arc::new(MockCloudKitOps::new());
-            let home = CloudKitCloudHome::new_private(ops.clone());
+            let home = CloudKitCloudHome::new_private(
+                ops.clone(),
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
+            );
             let staging = home.begin_atomic_create().await.unwrap();
             staging
                 .clone()
@@ -1715,14 +1680,10 @@ fn cancellation_discard_failure_terminates_the_process() {
 async fn exact_delete_removes_the_manifest_and_every_part() {
     let (home, ops) = make_cloud_home_with_ops();
     let slot = exact_slot("copies/delete");
-    ExactSlotStorage::create_at(
-        &home,
-        &slot,
-        BlobBody::from_bytes(vec![5u8; CHUNK_SIZE + 1]),
-        &no_progress(),
-    )
-    .await
-    .unwrap();
+    let bytes = vec![5u8; CHUNK_SIZE + 1];
+    crate::cloud::create_exact_bytes(&home, &slot, &bytes, &no_progress())
+        .await
+        .unwrap();
 
     ExactSlotStorage::delete_at(&home, &slot)
         .await

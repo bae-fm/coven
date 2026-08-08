@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
     CloudHomeError, ExactSlotStorage, PartSink, UploadProgress,
 };
 use coven_protocol::objects::ObjectSlot;
@@ -65,7 +65,6 @@ pub struct InMemoryCloudHome {
     exact_create_count: Arc<AtomicUsize>,
     fail_exact_create_before: Arc<AtomicUsize>,
     fail_exact_create_after: Arc<AtomicUsize>,
-    corrupt_exact_readback: Arc<AtomicUsize>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
     probe_pause: Arc<Mutex<Option<ProbePause>>>,
     exact_full_read_count: Arc<AtomicUsize>,
@@ -121,7 +120,6 @@ impl InMemoryCloudHome {
             exact_create_count: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
-            corrupt_exact_readback: Arc::new(AtomicUsize::new(0)),
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
@@ -185,13 +183,6 @@ impl InMemoryCloudHome {
         assert!(call > 0, "create call numbers are 1-based");
         self.exact_create_count.store(0, Ordering::SeqCst);
         self.fail_exact_create_after.store(call, Ordering::SeqCst);
-    }
-
-    /// Replace the selected exact object's bytes before its verification read.
-    pub fn corrupt_exact_readback_on_call(&self, call: usize) {
-        assert!(call > 0, "create call numbers are 1-based");
-        self.exact_create_count.store(0, Ordering::SeqCst);
-        self.corrupt_exact_readback.store(call, Ordering::SeqCst);
     }
 
     /// Pause after the selected exact create is physically visible.
@@ -446,15 +437,15 @@ impl InMemoryCloudHome {
 
     async fn create_at_slot(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &super::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed write failure".into(),
             ));
         }
+        let slot = upload.object().slot();
         let key = Self::exact_storage_key(slot)?;
         let call = self.exact_create_count.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_exact_create_before.load(Ordering::SeqCst) == call {
@@ -463,21 +454,18 @@ impl InMemoryCloudHome {
                 "InMemoryCloudHome: forced failure before exact create call {call}"
             )));
         }
-        let bytes = body.collect().await?;
+        let bytes = upload.body().await?.collect().await?;
         progress(bytes.len() as u64);
         {
             let mut writes = self.writes.lock().unwrap();
-            if writes.contains_key(&key) {
-                return Err(CloudHomeError::AlreadyExists(key));
+            if let Some(existing) = writes.get(&key) {
+                return if upload.object().verify(existing).is_ok() {
+                    Ok(super::ExactCreateOutcome::AlreadyPresent)
+                } else {
+                    Err(CloudHomeError::SlotCollision(key))
+                };
             }
             writes.insert(key.clone(), bytes);
-        }
-        if self.corrupt_exact_readback.load(Ordering::SeqCst) == call {
-            self.corrupt_exact_readback.store(0, Ordering::SeqCst);
-            self.writes
-                .lock()
-                .unwrap()
-                .insert(key.clone(), b"corrupt readback".to_vec());
         }
         let pause = self
             .exact_create_pause
@@ -492,11 +480,28 @@ impl InMemoryCloudHome {
         }
         if self.fail_exact_create_after.load(Ordering::SeqCst) == call {
             self.fail_exact_create_after.store(0, Ordering::SeqCst);
-            return Err(CloudHomeError::Transport(format!(
-                "InMemoryCloudHome: forced failure after exact create call {call}"
-            )));
+            let stored_matches = self
+                .writes
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|stored| upload.object().verify(stored).is_ok());
+            if !stored_matches {
+                return Err(CloudHomeError::Transport(format!(
+                    "InMemoryCloudHome: forced failure after exact create call {call}"
+                )));
+            }
         }
-        Ok(())
+        let stored_matches = self
+            .writes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .is_some_and(|stored| upload.object().verify(stored).is_ok());
+        if !stored_matches {
+            return Err(CloudHomeError::SlotCollision(key));
+        }
+        Ok(super::ExactCreateOutcome::Created)
     }
 
     async fn read_exact(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
@@ -775,11 +780,10 @@ impl ExactSlotStorage for InMemoryCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &super::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        InMemoryCloudHome::create_at_slot(self, slot, body, progress).await
+    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
+        InMemoryCloudHome::create_at_slot(self, upload, progress).await
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

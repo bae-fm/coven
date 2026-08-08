@@ -223,13 +223,6 @@ impl AuthorizedWriterOperation<'_> {
             .await
     }
 
-    async fn verify_blob_upload_object(
-        &self,
-        stored: &StoredBlobRef,
-    ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.storage.verify_blob_object(stored).await
-    }
-
     async fn mark_blob_upload_created(&self, entry: &OutboxEntry) -> Result<(), DbError> {
         self.database.mark_blob_upload_created(entry).await
     }
@@ -462,9 +455,6 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 .create_with_progress(&stored, &spool_path, &file_id)
                 .await
             {
-                return self.storage_failure(&file_id, error).await;
-            }
-            if let Err(error) = self.writer.verify_blob_upload_object(&stored).await {
                 return self.storage_failure(&file_id, error).await;
             }
             if let Err(error) = self.writer.mark_blob_upload_created(&self.entry).await {

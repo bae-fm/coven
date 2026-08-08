@@ -317,11 +317,11 @@ pub enum StorageError {
         operation: Box<StorageError>,
         cleanup: Box<StorageError>,
     },
-    #[error("{operation}; exact response-loss readback failed: {readback}")]
+    #[error("{operation}; exact response settlement failed: {settlement}")]
     UnresolvedOutcome {
         #[source]
         operation: Box<StorageError>,
-        readback: Box<StorageError>,
+        settlement: Box<StorageError>,
     },
     #[error("storage configuration is invalid: {0}")]
     Configuration(String),
@@ -333,10 +333,10 @@ pub enum StorageError {
     AlreadyExists(String),
     #[error("reserved storage slot contains different bytes: {0}")]
     SlotCollision(String),
-    /// The object read back from its exact reference opened to bytes other than
-    /// the ones the caller sealed into it.
-    #[error("exact readback differs from the sealed bytes: {0}")]
-    ReadbackMismatch(String),
+    /// A retained prepared object opened to bytes other than its durable
+    /// journal records.
+    #[error("prepared exact object differs from its durable bytes: {0}")]
+    PreparedObjectMismatch(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
     #[error("remote blob content is invalid: {0}")]
@@ -536,11 +536,9 @@ pub fn verify_membership_head_reference(
 /// the bytes that go to storage.
 ///
 /// `bytes` and `prepared` are not the same thing wherever the object is
-/// encrypted — a snapshot image uploads its ciphertext through `prepared` and
-/// compares its plaintext through `bytes` on readback — so both stay. The
-/// object's reference lives on `prepared` alone; a separate copy beside it was
-/// always assigned from `prepared.reference()` and only gave the two a way to
-/// disagree.
+/// encrypted: `bytes` is the canonical semantic value retained by durable
+/// validation, while `prepared` holds the exact provider representation. The
+/// object's reference lives on `prepared` alone.
 #[derive(Debug, Clone)]
 pub struct ExactProtocolObject<T> {
     pub value: T,

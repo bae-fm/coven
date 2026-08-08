@@ -18,7 +18,7 @@ use coven_replication::sync::store::{
     DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportTiming,
 };
 use coven_replication::sync::test_helpers::*;
-use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
+use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
 use coven_storage::join_code::encode;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
@@ -243,7 +243,7 @@ impl TransportFixture {
             self.layout.clone(),
             self.tables.clone(),
             test_migrations(),
-            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -1347,9 +1347,16 @@ async fn tampered_slot_bytes_refuse_to_open() {
             .delete_at(target)
             .await
             .expect("clear the slot for the tampered bytes");
+        let tampered_object = coven_protocol::objects::ExactObjectRef::new(
+            target.clone(),
+            sealed.len() as u64,
+            coven_protocol::store_commit::ObjectHash::digest(&sealed),
+        );
+        let tampered_upload = ExactUpload::from_bytes(&tampered_object, &sealed)
+            .expect("tampered bytes match their replacement exact reference");
         fixture
             .home
-            .create_at(target, BlobBody::from_bytes(sealed), &no_progress())
+            .create_at(&tampered_upload, &no_progress())
             .await
             .expect("plant the tampered bytes");
 

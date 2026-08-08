@@ -1,5 +1,4 @@
 use super::*;
-use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
@@ -74,18 +73,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     commit.commit_hash(),
                 );
                 storage
-                    .create_protocol_object(&batch.commit.prepared)
-                    .await
-                    .map_err(StoreObjectError::from)?;
-                storage
-                    .verify_readback(
+                    .create_verified_protocol_object(
                         &commit_context,
-                        batch.commit.prepared.reference(),
+                        &batch.commit.prepared,
                         &commit_prefix,
                         &batch.commit.bytes,
                     )
                     .await
-                    .map_err(StoreError::readback)?;
+                    .map_err(StoreError::prepared_object)?;
                 database
                     .mark_candidate_commit_uploaded(head.commit.clone())
                     .await?;
@@ -188,7 +183,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     || observation.winner_prepared().reference() != batch.head.prepared.reference()
                 {
                     return Err(StoreError::InvalidOutbound(
-                        "prepared head exact readback differs from its signed bytes".to_string(),
+                        "occupied Merge head body differs from the prepared signed bytes"
+                            .to_string(),
                     ));
                 }
                 let registration = database
@@ -406,16 +402,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     };
                     let exact = PreparedExactObject::new(object.clone(), stored_bytes.to_vec())
                         .map_err(StoreObjectError::from)?;
+                    storage
+                        .verify_prepared_protocol_object(&context, &exact, &prefix, semantic_bytes)
+                        .await
+                        .map_err(StoreError::prepared_object)?;
                     if prepared_state {
                         storage
                             .create_protocol_object(&exact)
                             .await
                             .map_err(StoreObjectError::from)?;
                     }
-                    storage
-                        .verify_readback(&context, object, &prefix, semantic_bytes)
-                        .await
-                        .map_err(StoreError::readback)?;
                 }
                 coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { locator_bytes } => {
                     let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)

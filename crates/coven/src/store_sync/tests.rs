@@ -324,9 +324,9 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
 
     {
         let mut config = config.write().expect("write config");
-        config.cloud_home.provider = Some(CloudProvider::S3);
-        config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
-        config.cloud_home.s3_exact_slots = None;
+        config.cloud_home.provider = Some(CloudProvider::Dropbox);
+        config.cloud_home.exact_upload_verification =
+            coven_foundation::config::ExactUploadVerification::UploadChecksum;
     }
     let error = sync
         .connect()
@@ -335,7 +335,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     assert!(matches!(
         error,
         SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
-            provider: CloudProvider::S3,
+            provider: CloudProvider::Dropbox,
         })
     ));
     assert!(sync.is_syncing());
@@ -351,7 +351,7 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     assert!(matches!(
         error,
         SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
-            provider: CloudProvider::S3,
+            provider: CloudProvider::Dropbox,
         })
     ));
     assert!(sync.is_syncing());

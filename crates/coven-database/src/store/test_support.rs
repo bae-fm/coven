@@ -347,14 +347,18 @@ impl StoreDatabase {
         self.test_access.arm(point)
     }
 
-    pub async fn write_changeset_for_test(&self, write_id: &WriteId) -> Result<Vec<u8>, DbError> {
+    pub async fn store_write_partition_for_test(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<Vec<u8>, DbError> {
         let write_id = write_id.clone();
         let store_dir = self.store_dir.clone();
         self.connection
             .call(move |connection| {
                 let encoded: String = connection
                     .query_row(
-                        "SELECT changeset_hash FROM store_writes WHERE write_id = ?1",
+                        "SELECT changeset_hash FROM store_write_partitions
+                         WHERE write_id = ?1 AND audience = 'store'",
                         [write_id.as_str()],
                         |row| row.get(0),
                     )

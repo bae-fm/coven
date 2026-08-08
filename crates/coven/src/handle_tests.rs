@@ -7,7 +7,7 @@ use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{test_keyring, StoreKeys};
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_replication::sync::test_helpers::{
-    open_test_db_with_blob, read_test_db, temp_store_dir, TestStore,
+    read_test_db, temp_store_dir, test_migrations, test_synced_tables_with_blob, TestStore,
 };
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
@@ -63,15 +63,24 @@ fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     )
 }
 
-fn host_blob_test_db(namespace: &str) -> Database {
-    open_test_db_with_blob(
-        coven_protocol::synced_schema::BlobDecl::new(
-            namespace,
-            Provenance::HostProvided,
-            CacheFill::CacheLazy,
-        )
-        .with_cloud_path_column("cloud_path"),
+fn host_blob_test_db(namespace: &str, store_dir: &StoreDir) -> Database {
+    Database::open(
+        &store_dir.db_path(),
+        test_synced_tables_with_blob(
+            coven_protocol::synced_schema::BlobDecl::new(
+                namespace,
+                Provenance::HostProvided,
+                CacheFill::CacheLazy,
+            )
+            .with_cloud_path_column("cloud_path"),
+        ),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        "test-device".to_string(),
+        Arc::new(SystemClock),
+        &test_migrations(),
     )
+    .expect("open host blob test database")
 }
 
 struct PausedUploadDrain {
@@ -216,7 +225,7 @@ impl HostBlobTestOps for CovenHandle {
 #[tokio::test]
 async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
     let (_tmp, store_dir) = temp_store_dir();
-    let db = host_blob_test_db("images");
+    let db = host_blob_test_db("images", &store_dir);
     let mut config = Config::with_defaults(
         "lib-setup-error".to_string(),
         "device".to_string(),
@@ -230,9 +239,7 @@ async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let handle = CovenHandle::new(
         db.clone(),
-        // `read_db`: these tests never call `sql_read`, and the test db is
-        // `:memory:` (unique per connection, no shareable read-only companion),
-        // so the writer clone stands in.
+        // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
         db.clone(),
         store_dir.clone(),
         config_provider,
@@ -570,7 +577,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
             // `note_photos` carries a blob in the `images` namespace so the read path can
             // resolve a planted row up to its gated `notes` root (the gate that decides
             // Local vs Remote).
-            let db = host_blob_test_db("images");
+            let db = host_blob_test_db("images", &store_dir);
 
             // Pre-create the exact Store in the same home the handle will connect to,
             // with the same signing identity and cipher.
@@ -597,9 +604,7 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
 
             let handle = CovenHandle::new(
                 db.clone(),
-                // `read_db`: this test never calls `sql_read`, and the test db is
-                // `:memory:` (no shareable read-only companion), so the writer clone
-                // stands in.
+                // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
                 db.clone(),
                 store_dir.clone(),
                 config_provider,
@@ -712,7 +717,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
             test_keyring::install();
 
             let (_tmp, store_dir) = temp_store_dir();
-            let db = host_blob_test_db("images");
+            let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
                 "lib-caller-driven".to_string(),
@@ -736,9 +741,7 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
 
             let handle = CovenHandle::new(
                 db.clone(),
-                // `read_db`: this test never calls `sql_read`, and the test db is
-                // `:memory:` (no shareable read-only companion), so the writer clone
-                // stands in.
+                // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
                 db.clone(),
                 store_dir.clone(),
                 config_provider,
@@ -856,7 +859,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
             );
 
             let (_tmp, store_dir) = temp_store_dir();
-            let db = host_blob_test_db("images");
+            let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
                 "lib-chunking".to_string(),
@@ -883,9 +886,7 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
 
             let handle = CovenHandle::new(
                 db.clone(),
-                // `read_db`: this test never calls `sql_read`, and the test db is
-                // `:memory:` (no shareable read-only companion), so the writer clone
-                // stands in.
+                // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
                 db.clone(),
                 store_dir.clone(),
                 config_provider,
@@ -979,7 +980,7 @@ async fn connected_sync_reuses_connection_storage_for_loop() {
     test_keyring::install();
 
     let (_tmp, store_dir) = temp_store_dir();
-    let db = host_blob_test_db("images");
+    let db = host_blob_test_db("images", &store_dir);
 
     let mut config = Config::with_defaults(
         "lib-cloudkit-home-reuse".to_string(),
@@ -996,9 +997,7 @@ async fn connected_sync_reuses_connection_storage_for_loop() {
 
     let handle = CovenHandle::new(
         db.clone(),
-        // `read_db`: these tests never call `sql_read`, and the test db is
-        // `:memory:` (unique per connection, no shareable read-only companion),
-        // so the writer clone stands in.
+        // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
         db.clone(),
         store_dir.clone(),
         config_provider,
@@ -1038,7 +1037,7 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
 
             let store_id = "ro-encrypted-custody-test";
             let (_tmp, store_dir) = temp_store_dir();
-            let db = host_blob_test_db("images");
+            let db = host_blob_test_db("images", &store_dir);
 
             let mut config = Config::with_defaults(
                 store_id.to_string(),
@@ -1184,7 +1183,7 @@ async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back()
             test_keyring::install();
 
             let (_tmp, store_dir) = temp_store_dir();
-            let db = host_blob_test_db("images");
+            let db = host_blob_test_db("images", &store_dir);
             let store_id = "lib-init-master-key-seals-traffic";
 
             // Opaque storage: the master key established below seals every object at
@@ -2002,7 +2001,7 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
                 test_keyring::install();
 
                 let (tmp, store_dir) = temp_store_dir();
-                let db = host_blob_test_db("images");
+                let db = host_blob_test_db("images", &store_dir);
 
                 let config = Config::with_defaults(
                     "lib-test".to_string(),
@@ -2023,9 +2022,7 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
 
                 let handle = CovenHandle::new(
                     db.clone(),
-                    // `read_db`: these tests never call `sql_read`, and the test db is
-                    // `:memory:` (unique per connection, no shareable read-only companion),
-                    // so the writer clone stands in.
+                    // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
                     db.clone(),
                     store_dir.clone(),
                     config_provider,

@@ -522,33 +522,15 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
 }
 
 #[tokio::test]
-async fn exact_create_readback_mismatch_retains_the_prepared_write_for_retry() {
-    let fixture = PreparedWriteFixture::prepare().await;
-    fixture.corrupt_exact_readback_on_call(1);
-
-    let result = fixture.drain_store_writes().await;
-
-    assert!(matches!(
-        result,
-        Err(StoreError::Object(StoreObjectError::Storage(_)))
-    ));
-    assert_eq!(
-        fixture.write_status().await,
-        coven_protocol::write::WriteStatus::Publishing,
-        "a provider readback mismatch retains the exact prepared write for retry",
-    );
-    assert!(fixture.prepared_write_exists().await);
-}
-
-#[tokio::test]
-async fn lost_exact_head_response_is_settled_by_readback_and_completion_is_idempotent() {
+async fn lost_exact_head_response_is_settled_by_provider_verification_and_completion_is_idempotent()
+{
     let fixture = PreparedWriteFixture::prepare().await;
     fixture.fail_exact_create_after_call(3);
     assert_eq!(
         fixture
             .drain_store_writes()
             .await
-            .expect("settle lost head response by exact readback"),
+            .expect("settle lost head response through exact-upload verification"),
         1
     );
     assert!(fixture.contains_exact_object(&fixture.package_object));

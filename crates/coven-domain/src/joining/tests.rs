@@ -7,7 +7,7 @@ use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_replication::sync::test_helpers::*;
-use coven_storage::cloud::{no_progress, BlobBody, ExactSlotStorage};
+use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
 use coven_storage::join_code::encode;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
@@ -93,7 +93,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             layout.clone(),
             tables.clone(),
             test_migrations(),
-            Some(coven_foundation::config::CustomS3ExactSlots::StandardConditionalRequests),
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -233,13 +233,16 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             activation.clone()
         )],
     );
-    home.create_at(
-        activation_slot,
-        BlobBody::from_bytes(activation_bytes),
-        &no_progress(),
-    )
-    .await
-    .expect("restore activation commit after interruption");
+    let activation_object = coven_protocol::objects::ExactObjectRef::new(
+        activation_slot.clone(),
+        activation_bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(&activation_bytes),
+    );
+    let activation_upload = ExactUpload::from_bytes(&activation_object, &activation_bytes)
+        .expect("activation bytes match their exact reference");
+    home.create_at(&activation_upload, &no_progress())
+        .await
+        .expect("restore activation commit after interruption");
     let config = new_client()
         .complete_device_join(activation.clone(), |_status| {})
         .await

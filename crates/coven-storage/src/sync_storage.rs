@@ -82,8 +82,53 @@ pub trait SyncStorage: Send + Sync {
         data: Vec<u8>,
     ) -> Result<PreparedExactObject, StorageError>;
 
-    /// Create the prepared bytes at their reserved slot, settling lost responses
-    /// by exact readback and refusing different bytes at an occupied slot.
+    /// Open a locally retained prepared object without fetching it from the
+    /// provider. This verifies spool bytes at publication boundaries while the
+    /// provider adapter separately proves the stored representation.
+    async fn open_prepared_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError>;
+
+    /// Verify that a locally retained prepared object opens to the canonical
+    /// bytes its durable journal records.
+    async fn verify_prepared_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+        expected: &[u8],
+    ) -> Result<(), StorageError> {
+        if self
+            .open_prepared_protocol_object(context, prepared, semantic_prefix)
+            .await?
+            == expected
+        {
+            return Ok(());
+        }
+        Err(StorageError::PreparedObjectMismatch(
+            prepared.reference().slot().logical_key().to_string(),
+        ))
+    }
+
+    /// Verify the retained semantic bytes before creating their exact stored
+    /// representation at the provider.
+    async fn create_verified_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+        expected: &[u8],
+    ) -> Result<(), StorageError> {
+        self.verify_prepared_protocol_object(context, prepared, semantic_prefix, expected)
+            .await?;
+        self.create_protocol_object(prepared).await
+    }
+
+    /// Create the prepared bytes at their reserved slot, settling ambiguous
+    /// responses through the provider's configured exact-upload verification.
     async fn create_protocol_object(
         &self,
         prepared: &PreparedExactObject,
@@ -278,6 +323,17 @@ where
         data: Vec<u8>,
     ) -> Result<PreparedExactObject, StorageError> {
         (**self).prepare_protocol_object(context, slot, semantic_prefix, data)
+    }
+
+    async fn open_prepared_protocol_object(
+        &self,
+        context: &ProtocolObjectContext,
+        prepared: &PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        (**self)
+            .open_prepared_protocol_object(context, prepared, semantic_prefix)
+            .await
     }
 
     async fn create_protocol_object(

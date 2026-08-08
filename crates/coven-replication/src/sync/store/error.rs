@@ -119,14 +119,15 @@ pub enum StoreError {
 }
 
 impl StoreError {
-    /// Classify an exact create-and-readback failure: an object that opened to
-    /// bytes other than the ones sealed into it is an invalid outbound object,
-    /// not a storage failure.
-    pub(crate) fn readback(error: coven_protocol::objects::StorageError) -> Self {
+    /// A retained prepared object that opens to different bytes is invalid
+    /// outbound state, not a provider failure.
+    pub(crate) fn prepared_object(error: coven_protocol::objects::StorageError) -> Self {
         match error {
-            coven_protocol::objects::StorageError::ReadbackMismatch(key) => Self::InvalidOutbound(
-                format!("exact readback of {key} differs from its signed bytes"),
-            ),
+            coven_protocol::objects::StorageError::PreparedObjectMismatch(key) => {
+                Self::InvalidOutbound(format!(
+                    "prepared exact object {key} differs from its signed bytes"
+                ))
+            }
             error => StoreObjectError::from(error).into(),
         }
     }

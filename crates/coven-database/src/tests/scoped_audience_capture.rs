@@ -37,7 +37,7 @@ fn scoped_store(
         &migrations,
     )
     .expect("open scoped Store");
-    let writes = StoreRowWrites::new(StoreDatabase::new(&database), store_dir.clone());
+    let writes = StoreRowWrites::new(StoreDatabase::new(&database));
     (database, writes)
 }
 

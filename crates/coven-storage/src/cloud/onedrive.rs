@@ -22,6 +22,15 @@ use super::{
 use crate::oauth::OAuthConfig;
 use coven_protocol::objects::ObjectSlot;
 
+#[path = "onedrive/content_hash.rs"]
+mod content_hash;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OneDriveExactMetadata {
+    size: u64,
+    sha1_hash: String,
+}
+
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
 fn onedrive_upload_cancellation_succeeded(status: reqwest::StatusCode) -> bool {
@@ -34,6 +43,7 @@ pub struct OneDriveCloudHome {
     folder_id: String,
     graph_api: String,
     session: OAuthSession,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
 
 enum UploadSessionCompletion {
@@ -42,12 +52,18 @@ enum UploadSessionCompletion {
 }
 
 impl OneDriveCloudHome {
-    pub fn new(drive_id: String, folder_id: String, session: OAuthSession) -> Self {
+    pub fn new(
+        drive_id: String,
+        folder_id: String,
+        session: OAuthSession,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
         Self {
             drive_id,
             folder_id,
             graph_api: GRAPH_API.to_string(),
             session,
+            exact_upload_verification,
         }
     }
 
@@ -160,14 +176,17 @@ impl OneDriveCloudHome {
         Ok(())
     }
 
-    async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+    async fn exact_metadata(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<OneDriveExactMetadata, CloudHomeError> {
         slot.require_logical_key_for("OneDrive")?;
         let response = self
             .session
             .api_call(|oauth| {
                 oauth
                     .get(self.item_path_url(slot.logical_key()))
-                    .query(&[("$select", "id,name,parentReference,deleted,file")])
+                    .query(&[("$select", "id,name,parentReference,deleted,file,size")])
             })
             .await?;
         let response = ensure_ok(response, "verify exact OneDrive item", NotFound::Status).await?;
@@ -186,7 +205,64 @@ impl OneDriveCloudHome {
                 self.folder_id
             )));
         }
-        Ok(())
+        let size = metadata["size"].as_u64().ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "exact OneDrive metadata for {} omitted size",
+                slot.logical_key()
+            ))
+        })?;
+        let sha1_hash = metadata["file"]["hashes"]["sha1Hash"]
+            .as_str()
+            .filter(|hash| !hash.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "exact OneDrive metadata for {} omitted file.hashes.sha1Hash",
+                    slot.logical_key()
+                ))
+            })?
+            .to_string();
+        Ok(OneDriveExactMetadata { size, sha1_hash })
+    }
+
+    async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        self.exact_metadata(slot).await.map(drop)
+    }
+
+    async fn verify_exact_upload(
+        &self,
+        upload: &super::ExactUpload<'_>,
+        created_response_was_observed: bool,
+    ) -> Result<(), CloudHomeError> {
+        use coven_foundation::config::ExactUploadVerification;
+
+        match self.exact_upload_verification {
+            ExactUploadVerification::UploadChecksum => Err(CloudHomeError::Configuration(
+                "OneDrive does not expose upload-checksum enforcement for this endpoint"
+                    .to_string(),
+            )),
+            ExactUploadVerification::MetadataHash => {
+                let metadata = self.exact_metadata(upload.object().slot()).await?;
+                let expected_sha1 = content_hash::sha1(upload).await?;
+                if metadata.size != upload.object().stored_size()
+                    || !metadata.sha1_hash.eq_ignore_ascii_case(&expected_sha1)
+                {
+                    return Err(CloudHomeError::SlotCollision(
+                        upload.object().slot().logical_key().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            ExactUploadVerification::Readback => {
+                let bytes = self.read_at(upload.object().slot()).await?;
+                upload.verify_stored_bytes(&bytes)
+            }
+            ExactUploadVerification::Unchecked => {
+                super::exact_upload::accept_unchecked_create_response(
+                    created_response_was_observed,
+                    upload.object(),
+                )
+            }
+        }
     }
 
     async fn create_at_slot(
@@ -635,11 +711,29 @@ impl ExactSlotStorage for OneDriveCloudHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &super::ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
-        OneDriveCloudHome::create_at_slot(self, slot, body, progress).await
+    ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
+        if matches!(
+            self.exact_upload_verification,
+            coven_foundation::config::ExactUploadVerification::UploadChecksum
+        ) {
+            return Err(CloudHomeError::Configuration(
+                "OneDrive does not expose upload-checksum enforcement for this endpoint"
+                    .to_string(),
+            ));
+        }
+        let operation = OneDriveCloudHome::create_at_slot(
+            self,
+            upload.object().slot(),
+            upload.body().await?,
+            progress,
+        )
+        .await;
+        super::exact_upload::settle_exact_create(operation, |observed| {
+            self.verify_exact_upload(upload, observed)
+        })
+        .await
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.verify_slot(slot).await?;

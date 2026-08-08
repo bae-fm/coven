@@ -33,10 +33,6 @@ impl PreparedWriteFixture {
         self.home.fail_exact_delete_on_call(call);
     }
 
-    pub(super) fn corrupt_exact_readback_on_call(&self, call: usize) {
-        self.home.corrupt_exact_readback_on_call(call);
-    }
-
     pub(super) fn contains_exact_object(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,

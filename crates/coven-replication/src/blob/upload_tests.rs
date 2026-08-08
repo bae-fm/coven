@@ -18,8 +18,8 @@ use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{
-    BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudFileReadError, CloudHome, CloudHomeError, CloudHomeJoinInfo, ExactSlotStorage,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
     RevokeOutcome, UploadProgress,
 };
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
@@ -91,6 +91,10 @@ impl InstrumentedHome {
 
     fn create_calls(&self) -> usize {
         self.create_calls.load(Ordering::SeqCst)
+    }
+
+    fn exact_reads(&self) -> Vec<ObjectSlot> {
+        self.inner.exact_reads()
     }
 
     fn max_inflight(&self) -> usize {
@@ -182,10 +186,9 @@ impl ExactSlotStorage for InstrumentedHome {
 
     async fn create_at(
         &self,
-        slot: &ObjectSlot,
-        body: BlobBody,
+        upload: &ExactUpload<'_>,
         progress: &UploadProgress<'_>,
-    ) -> Result<(), CloudHomeError> {
+    ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.create_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_creates.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
@@ -203,9 +206,9 @@ impl ExactSlotStorage for InstrumentedHome {
         }
         let chunk = self.slow_chunk.load(Ordering::SeqCst);
         let result = if chunk == 0 {
-            ExactSlotStorage::create_at(&self.inner, slot, body, progress).await
+            ExactSlotStorage::create_at(&self.inner, upload, progress).await
         } else {
-            let bytes = body.collect().await?;
+            let bytes = upload.body().await?.collect().await?;
             let mut sent = 0;
             while sent < bytes.len() {
                 sent = (sent + chunk).min(bytes.len());
@@ -215,20 +218,15 @@ impl ExactSlotStorage for InstrumentedHome {
                 .await;
                 progress(sent as u64);
             }
-            ExactSlotStorage::create_at(
-                &self.inner,
-                slot,
-                ExactBlobBody::from_bytes(bytes),
-                &coven_storage::cloud::no_progress(),
-            )
-            .await
+            ExactSlotStorage::create_at(&self.inner, upload, &coven_storage::cloud::no_progress())
+                .await
         };
         self.inflight.fetch_sub(1, Ordering::SeqCst);
         if result.is_ok() {
             self.keys
                 .lock()
                 .unwrap()
-                .push(slot.logical_key().to_string());
+                .push(upload.object().slot().logical_key().to_string());
         }
         result
     }
@@ -555,6 +553,28 @@ async fn empty_queue_reports_itself_rather_than_a_zero_count() {
         .unwrap();
     assert!(matches!(outcome, DrainOutcome::QueueEmpty));
     assert_eq!(fixture.home.create_calls(), 0);
+}
+
+#[tokio::test]
+async fn successful_drain_does_not_read_uploaded_body_from_provider() {
+    let fixture = UploadFixture::new(1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    fixture
+        .plant_uploads(&store_dir, &[("noread01", b"retained spool bytes")], false)
+        .await;
+    let reads_before = fixture.home.exact_reads().len();
+
+    let outcome = fixture
+        .drain(&store_dir, &fixed_clock(T0), None)
+        .await
+        .expect("publish queued blob");
+
+    assert_eq!(outcome.uploaded(), 1);
+    let entry = fixture.journal("noread01").await;
+    assert!(
+        !fixture.home.exact_reads()[reads_before..].contains(created_slot(&entry)),
+        "the successful create response verifies the exact blob without fetching its body",
+    );
 }
 
 /// A pass that finishes what an earlier pass created counts no upload — the

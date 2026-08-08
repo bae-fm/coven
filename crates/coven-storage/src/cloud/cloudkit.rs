@@ -16,9 +16,9 @@ use bytes::Bytes;
 use coven_foundation::id_provider::{IdRef, UuidProvider};
 
 use super::{
-    combine_cleanup_failure, BlobBody, CloudAccessOutcome, CloudAccessState, CloudHome,
-    CloudHomeError, CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage,
-    RevokeOutcome, UploadProgress,
+    combine_cleanup_failure, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudObjectVersion, CloudVersionedObject, ExactSlotStorage, RevokeOutcome,
+    UploadProgress,
 };
 use coven_protocol::objects::ObjectSlot;
 
@@ -201,22 +201,36 @@ pub struct CloudKitCloudHome {
     ops: Arc<dyn CloudKitOps>,
     ids: IdRef,
     scope: CloudKitScope,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
 
 impl CloudKitCloudHome {
-    pub fn new_private(ops: Arc<dyn CloudKitOps>) -> Self {
-        Self::new_private_with_ids(ops, Arc::new(UuidProvider))
+    pub fn new_private(
+        ops: Arc<dyn CloudKitOps>,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
+        Self::new_private_with_ids(ops, Arc::new(UuidProvider), exact_upload_verification)
     }
 
-    pub(crate) fn new_private_with_ids(ops: Arc<dyn CloudKitOps>, ids: IdRef) -> Self {
+    pub(crate) fn new_private_with_ids(
+        ops: Arc<dyn CloudKitOps>,
+        ids: IdRef,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
         Self {
             ops,
             ids,
             scope: CloudKitScope::Private,
+            exact_upload_verification,
         }
     }
 
-    pub fn new_shared(ops: Arc<dyn CloudKitOps>, owner_name: String, zone_name: String) -> Self {
+    pub fn new_shared(
+        ops: Arc<dyn CloudKitOps>,
+        owner_name: String,
+        zone_name: String,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
         Self {
             ops,
             ids: Arc::new(UuidProvider),
@@ -224,6 +238,7 @@ impl CloudKitCloudHome {
                 owner_name,
                 zone_name,
             },
+            exact_upload_verification,
         }
     }
 
@@ -247,58 +262,79 @@ impl CloudKitCloudHome {
         })?
     }
 
-    async fn authoritative_created_records(
+    async fn settle_atomic_create_response_loss(
         &self,
-        keys: Vec<String>,
-    ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+        manifest_key: String,
+    ) -> Result<AtomicCreateReadback, CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
+        blocking(
+            move || match ops.read_versioned_record(&scope, &manifest_key) {
+                Ok(record) => {
+                    exact::decode_exact_manifest(&record.bytes)?;
+                    Ok(AtomicCreateReadback::Created)
+                }
+                Err(CloudHomeError::NotFound(_)) => Ok(AtomicCreateReadback::Absent),
+                Err(error) => Err(error),
+            },
+        )
+        .await
+    }
+
+    async fn exact_manifest(
+        &self,
+        slot: &ObjectSlot,
+    ) -> Result<exact::ExactManifest, CloudHomeError> {
+        slot.require_logical_key_for("CloudKit")?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = slot.logical_key().to_string();
         blocking(move || {
-            keys.into_iter()
-                .map(|key| {
-                    let record = ops.read_versioned_record(&scope, &key).map_err(|error| {
-                        CloudHomeError::Transport(format!(
-                            "read committed CloudKit atomic-create record {key:?}: {error}"
-                        ))
-                    })?;
-                    Ok(CloudKitRecordVersion {
-                        key,
-                        version: record.version,
-                    })
-                })
-                .collect()
+            let record = ops.read_versioned_record(&scope, &key)?;
+            exact::decode_exact_manifest(&record.bytes)
         })
         .await
     }
 
-    async fn settle_atomic_create_response_loss(
+    async fn verify_exact_upload(
         &self,
-        keys: Vec<String>,
-    ) -> Result<AtomicCreateReadback, CloudHomeError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        blocking(move || {
-            let mut created = Vec::with_capacity(keys.len());
-            let mut missing = 0usize;
-            for key in keys {
-                match ops.read_versioned_record(&scope, &key) {
-                    Ok(record) => created.push(CloudKitRecordVersion {
-                        key,
-                        version: record.version,
-                    }),
-                    Err(CloudHomeError::NotFound(_)) => missing += 1,
-                    Err(error) => return Err(error),
+        upload: &super::ExactUpload<'_>,
+        created_response_was_observed: bool,
+    ) -> Result<(), CloudHomeError> {
+        use coven_foundation::config::ExactUploadVerification;
+
+        match self.exact_upload_verification {
+            ExactUploadVerification::UploadChecksum => Err(CloudHomeError::Configuration(
+                "CloudKit does not accept a caller-supplied upload checksum".to_string(),
+            )),
+            ExactUploadVerification::MetadataHash => {
+                let manifest = self.exact_manifest(upload.object().slot()).await?;
+                if manifest.total_len as u64 != upload.object().stored_size()
+                    || manifest.stored_hash != upload.object().stored_hash()
+                {
+                    return Err(CloudHomeError::SlotCollision(
+                        upload.object().slot().logical_key().to_string(),
+                    ));
                 }
+                Ok(())
             }
-            match (created.is_empty(), missing) {
-                (true, _) => Ok(AtomicCreateReadback::Absent),
-                (false, 0) => Ok(AtomicCreateReadback::Created(created)),
-                (false, _) => Err(CloudHomeError::Transport(
-                    "CloudKit atomic create exposed only part of its record batch".to_string(),
-                )),
+            ExactUploadVerification::Readback => {
+                let ops = self.ops.clone();
+                let scope = self.scope.clone();
+                let key = upload.object().slot().logical_key().to_string();
+                let bytes = blocking(move || {
+                    exact::read_exact_cloudkit_object(&*ops, &scope, &key).map(|value| value.0)
+                })
+                .await?;
+                upload.verify_stored_bytes(&bytes)
             }
-        })
-        .await
+            ExactUploadVerification::Unchecked => {
+                super::exact_upload::accept_unchecked_create_response(
+                    created_response_was_observed,
+                    upload.object(),
+                )
+            }
+        }
     }
 }
 

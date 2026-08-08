@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use super::exact_upload::settle_exact_create;
 use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
@@ -31,6 +32,7 @@ const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
 const LOGICAL_KEY_PROPERTY: &str = "covenLogicalKey";
 const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 
+mod content_hash;
 mod storage_impl;
 use storage_impl::*;
 
@@ -128,6 +130,7 @@ pub struct GoogleDriveCloudHome {
     upload_api: String,
     ids: IdRef,
     session: OAuthSession,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 }
 
 /// One Drive file named by the provider id it was given and the create token
@@ -152,18 +155,29 @@ enum DriveAppendAttemptState {
 
 enum DriveSlotState {
     Absent,
-    Exact,
+    Exact(DriveExactMetadata),
     Foreign,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DriveExactMetadata {
+    size: u64,
+    md5_checksum: String,
+}
+
 impl GoogleDriveCloudHome {
-    pub fn new(folder_id: String, session: OAuthSession) -> Self {
+    pub fn new(
+        folder_id: String,
+        session: OAuthSession,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Self {
         Self {
             folder_id,
             drive_api: DRIVE_API.to_string(),
             upload_api: UPLOAD_API.to_string(),
             ids: std::sync::Arc::new(UuidProvider),
             session,
+            exact_upload_verification,
         }
     }
 
@@ -519,13 +533,16 @@ impl GoogleDriveCloudHome {
 
     async fn inspect_slot(&self, slot: &ObjectSlot) -> Result<DriveSlotState, CloudHomeError> {
         let file_id = self.validate_slot(slot)?;
-        let response = self
-            .session
-            .api_call(|oauth| {
-                supports_all_drives(oauth.get(format!("{}/files/{file_id}", self.drive_api)))
-                    .query(&[("fields", "id,name,parents,trashed,appProperties")])
-            })
-            .await?;
+        let response =
+            self.session
+                .api_call(|oauth| {
+                    supports_all_drives(oauth.get(format!("{}/files/{file_id}", self.drive_api)))
+                        .query(&[(
+                            "fields",
+                            "id,name,parents,trashed,appProperties,size,md5Checksum",
+                        )])
+                })
+                .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(DriveSlotState::Absent);
         }
@@ -549,7 +566,29 @@ impl GoogleDriveCloudHome {
             metadata["appProperties"][LOGICAL_KEY_PROPERTY].as_str() == Some(slot.logical_key());
         let is_live = metadata["trashed"].as_bool() == Some(false);
         if id_matches && name_matches && parent_matches && logical_key_matches && is_live {
-            Ok(DriveSlotState::Exact)
+            let size = metadata["size"]
+                .as_str()
+                .and_then(|size| size.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    CloudHomeError::Transport(format!(
+                        "exact Drive metadata for {} omitted size",
+                        slot.logical_key()
+                    ))
+                })?;
+            let md5_checksum = metadata["md5Checksum"]
+                .as_str()
+                .filter(|hash| !hash.is_empty())
+                .ok_or_else(|| {
+                    CloudHomeError::Transport(format!(
+                        "exact Drive metadata for {} omitted md5Checksum",
+                        slot.logical_key()
+                    ))
+                })?
+                .to_string();
+            Ok(DriveSlotState::Exact(DriveExactMetadata {
+                size,
+                md5_checksum,
+            }))
         } else {
             Ok(DriveSlotState::Foreign)
         }
@@ -557,7 +596,7 @@ impl GoogleDriveCloudHome {
 
     async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         match self.inspect_slot(slot).await? {
-            DriveSlotState::Exact => Ok(()),
+            DriveSlotState::Exact(_) => Ok(()),
             DriveSlotState::Absent => Err(CloudHomeError::NotFound(slot.logical_key().to_string())),
             DriveSlotState::Foreign => Err(CloudHomeError::Transport(format!(
                 "exact Drive slot for {} does not identify its allocated file in folder {}",
@@ -567,21 +606,51 @@ impl GoogleDriveCloudHome {
         }
     }
 
-    async fn resolve_failed_exact_create(
+    async fn verify_exact_upload(
         &self,
-        slot: &ObjectSlot,
-        operation: CloudHomeError,
+        upload: &super::ExactUpload<'_>,
+        created_response_was_observed: bool,
     ) -> Result<(), CloudHomeError> {
-        match self.inspect_slot(slot).await {
-            Ok(DriveSlotState::Exact) => Ok(()),
-            Ok(DriveSlotState::Absent) => Err(operation),
-            Ok(DriveSlotState::Foreign) => Err(CloudHomeError::AlreadyExists(
-                slot.logical_key().to_string(),
+        use coven_foundation::config::ExactUploadVerification;
+
+        match self.exact_upload_verification {
+            ExactUploadVerification::UploadChecksum => Err(CloudHomeError::Configuration(
+                "Google Drive does not accept a caller-supplied upload checksum".to_string(),
             )),
-            Err(verification) => Err(CloudHomeError::CleanupFailed {
-                operation: Box::new(operation),
-                cleanup: Box::new(verification),
-            }),
+            ExactUploadVerification::MetadataHash => {
+                let metadata = match self.inspect_slot(upload.object().slot()).await? {
+                    DriveSlotState::Absent => {
+                        return Err(CloudHomeError::NotFound(
+                            upload.object().slot().logical_key().to_string(),
+                        ));
+                    }
+                    DriveSlotState::Foreign => {
+                        return Err(CloudHomeError::SlotCollision(
+                            upload.object().slot().logical_key().to_string(),
+                        ));
+                    }
+                    DriveSlotState::Exact(metadata) => metadata,
+                };
+                let expected_md5 = content_hash::md5(upload).await?;
+                if metadata.size != upload.object().stored_size()
+                    || metadata.md5_checksum != expected_md5
+                {
+                    return Err(CloudHomeError::SlotCollision(
+                        upload.object().slot().logical_key().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            ExactUploadVerification::Readback => {
+                let bytes = self.read_at_slot(upload.object().slot()).await?;
+                upload.verify_stored_bytes(&bytes)
+            }
+            ExactUploadVerification::Unchecked => {
+                super::exact_upload::accept_unchecked_create_response(
+                    created_response_was_observed,
+                    upload.object(),
+                )
+            }
         }
     }
 
@@ -624,7 +693,7 @@ impl GoogleDriveCloudHome {
             .await
         {
             Ok(response) => response,
-            Err(operation) => return self.resolve_failed_exact_create(slot, operation).await,
+            Err(operation) => return Err(operation),
         };
         let status = response.status();
         if !status.is_success() {
@@ -639,9 +708,6 @@ impl GoogleDriveCloudHome {
                 slot.logical_key(),
                 "create exact",
             );
-            if status.is_server_error() {
-                return self.resolve_failed_exact_create(slot, operation).await;
-            }
             return Err(operation);
         }
         Ok(())

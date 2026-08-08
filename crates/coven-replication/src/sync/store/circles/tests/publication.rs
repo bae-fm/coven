@@ -220,7 +220,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     .resume_circle_operations()
                     .await;
                 if after_visible_write {
-                    first.expect("lost exact-create response is settled by exact readback");
+                    first.expect("lost exact-create response is settled by provider verification");
                 } else {
                     let error =
                         first.expect_err("failure before exact create interrupts activation");
@@ -1962,7 +1962,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
 }
 
 #[tokio::test]
-async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
+async fn uploaded_circle_steps_reopen_the_local_spool_after_restart_before_activation() {
     for corrupt in [false, true] {
         let temp = tempfile::tempdir().expect("create database directory");
         let path = temp.path().join(if corrupt {
@@ -1993,10 +1993,15 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .prepared_objects
             .get("metadata")
             .expect("operation carries exact metadata object");
+        let payload_path = db
+            .store_dir_for_test()
+            .payload_spool_path(metadata.stored_hash());
+        let exact_reads = _home.exact_reads().len();
         if corrupt {
-            _home.replace_exact_object(metadata.slot(), b"corrupt metadata bytes".to_vec());
+            std::fs::write(&payload_path, b"corrupt metadata bytes")
+                .expect("corrupt retained Circle payload");
         } else {
-            _home.remove_exact_object(metadata.slot());
+            std::fs::remove_file(&payload_path).expect("remove retained Circle payload");
         }
         std::thread::spawn(move || drop(db))
             .join()
@@ -2009,7 +2014,13 @@ async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
             .expect("bind Circle test Store")
             .resume_circle_operations()
             .await
-            .expect_err("durable upload marker must not bypass readback");
+            .expect_err("durable upload marker must not bypass local spool verification");
+        assert!(
+            _home.exact_reads()[exact_reads..]
+                .iter()
+                .all(|slot| slot != metadata.slot()),
+            "restart downloaded an uploaded Circle step",
+        );
         assert_eq!(
             StoreDatabase::new(&reopened)
                 .circle_control_activation_count_for_test(expected.circle_id())

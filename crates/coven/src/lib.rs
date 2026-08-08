@@ -52,7 +52,7 @@ pub use coven_foundation::changeset::{ChangeOp, RowChange};
 pub use coven_foundation::clock::FixedClock;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::config::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, HomeStorage,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, ExactUploadVerification, HomeStorage,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_foundation::id_provider::SequentialIdProvider;
@@ -80,7 +80,9 @@ pub use coven_protocol::blob::{
     UploadFailures,
 };
 pub use coven_protocol::hlc::Timestamp;
-pub use coven_protocol::objects::{ObjectSlot, PhysicalObjectLocator, StorageError};
+pub use coven_protocol::objects::{
+    ExactObjectRef, ObjectSlot, PhysicalObjectLocator, StorageError,
+};
 pub use coven_protocol::synced_schema::{BlobDecl, RowIdentity, SyncedTable};
 pub use coven_protocol::write::{
     AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt,
@@ -133,7 +135,8 @@ pub use coven_storage::{
     CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
     CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ExactSlotStorage, PartSink, S3CloudHome, UploadProgress,
+    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, S3CloudHome,
+    UploadProgress,
 };
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;

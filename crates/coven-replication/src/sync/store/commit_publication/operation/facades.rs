@@ -1,5 +1,4 @@
 use super::*;
-use coven_storage::VerifiedObjectWrites;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) fn membership_objects(&self) -> StoreMembershipObjectVerifier<'_, 'storage> {
@@ -251,18 +250,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         );
         self.storage
             .as_ref()
-            .create_protocol_object(&candidate.prepared_commit()?)
-            .await
-            .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        self.storage
-            .verify_readback(
+            .create_verified_protocol_object(
                 &context,
-                &candidate.reference.object,
+                &candidate.prepared_commit()?,
                 &prefix,
                 &candidate.commit.to_bytes(),
             )
             .await
-            .map_err(StoreError::readback)
+            .map_err(StoreError::prepared_object)
     }
 
     pub async fn pull(

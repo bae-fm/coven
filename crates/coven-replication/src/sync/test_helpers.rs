@@ -4661,6 +4661,17 @@ where
             .prepare_protocol_object(context, slot, semantic_prefix, data)
     }
 
+    async fn open_prepared_protocol_object(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        prepared: &coven_protocol::objects::PreparedExactObject,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
+        self.inner
+            .open_prepared_protocol_object(context, prepared, semantic_prefix)
+            .await
+    }
+
     async fn create_protocol_object(
         &self,
         prepared: &coven_protocol::objects::PreparedExactObject,
