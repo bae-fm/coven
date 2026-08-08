@@ -90,6 +90,7 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     ("outbound_store_snapshot", ReplayTableDisposition::Preserve),
+    ("payload_spool_cleanup", ReplayTableDisposition::Preserve),
     (
         "protocol_inert_objects",
         ReplayTableDisposition::ExactTransition,

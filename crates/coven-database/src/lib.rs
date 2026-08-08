@@ -205,6 +205,7 @@ pub use schema_introspection::{
 };
 pub use store::device_join_journal;
 pub use store::device_join_journal::DeviceJoinJournalError;
+pub use store::payload_spool;
 pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,

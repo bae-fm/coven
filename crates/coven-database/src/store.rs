@@ -29,6 +29,7 @@ use materialized_commit_index::record_activated_store_device_registrations_on;
 mod membership_mutations;
 mod merge_materialization_transaction;
 mod owner_promotion;
+pub mod payload_spool;
 mod pending_publication;
 mod preparation;
 mod prepared_remote_objects;

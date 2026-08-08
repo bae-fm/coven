@@ -368,6 +368,21 @@ impl StoreDir {
             .join(locator_hash.to_string())
     }
 
+    /// The directory holding every internal payload file.
+    pub fn payload_spool_dir(&self) -> PathBuf {
+        self.path.join("spool").join("payloads")
+    }
+
+    /// The file holding one internal payload — bytes a database row owns,
+    /// stored beside the database rather than inside it. The file is named for
+    /// the digest of the bytes it holds, so a retry of a failed insert rewrites
+    /// the same path with the same contents. Unlike a blob, a payload is never
+    /// leased, packaged for an audience, or evicted: it is deleted by the flow
+    /// that deletes the row referencing it.
+    pub fn payload_spool_path(&self, payload_hash: crate::object_hash::ObjectHash) -> PathBuf {
+        self.payload_spool_dir().join(payload_hash.to_string())
+    }
+
     pub async fn remove_outbound_blob_spool(
         &self,
         locator_hash: crate::object_hash::ObjectHash,

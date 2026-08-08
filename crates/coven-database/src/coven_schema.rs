@@ -355,6 +355,16 @@ macro_rules! coven_tables {
     path TEXT PRIMARY KEY
 "
         );
+        // A payload file the owning row no longer needs. The row keys the file
+        // by its content hash and the store directory turns that into a path,
+        // so the obligation is recorded as the hash: a store directory that
+        // moves would leave a recorded path naming nothing.
+        $visit!(
+            payload_spool_cleanup,
+            "
+    payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64)
+"
+        );
         $visit!(
             outbound_circle_snapshot,
             "
