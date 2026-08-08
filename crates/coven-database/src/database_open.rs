@@ -1,24 +1,6 @@
 use super::*;
 use coven_foundation::store_dir::StoreDir;
 
-/// The directory a database's payload spool lives in: the one holding the
-/// database file.
-///
-/// An in-memory database has no directory of its own, so its payloads go to a
-/// fresh temporary one — it holds no durable state for them to stay consistent
-/// with, and the directory outlives the process's use of it.
-fn store_dir_of(path: &Path) -> StoreDir {
-    match path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => StoreDir::new(parent),
-        None => StoreDir::new(
-            std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
-        ),
-    }
-}
-
 pub(crate) enum CovenMetadataOpen<'a> {
     Detect,
     /// A borrowed install authority. Borrowed, not owned, so one verified install
@@ -192,6 +174,7 @@ fn validate_durable_coven_state(conn: &Connection) -> Result<(), DbError> {
 impl DatabaseCore {
     pub(crate) fn open(
         path: &Path,
+        store_dir: StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
@@ -202,8 +185,6 @@ impl DatabaseCore {
         let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
-        let store_dir = store_dir_of(path);
-
         let initialized = match &metadata_open {
             CovenMetadataOpen::VerifiedSnapshot(_) => false,
             CovenMetadataOpen::Detect => {
@@ -304,7 +285,7 @@ impl DatabaseCore {
         gate::attach_empty_clone(&conn, &gates)
             .map_err(|error| DbError::context("install host transaction gate", error))?;
         let core = DatabaseCore {
-            store_dir: store_dir_of(path),
+            store_dir,
             conn,
             hlc,
             synced_tables,
@@ -328,6 +309,7 @@ impl DatabaseCore {
     /// [`Database::open_read_only`]; see it for why a reader takes no store lock.
     pub(crate) fn open_read_only(
         path: &Path,
+        store_dir: StoreDir,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
@@ -372,7 +354,7 @@ impl DatabaseCore {
                 .map_err(|e| DbError::Message(e.to_string()))?,
         );
         let core = DatabaseCore {
-            store_dir: store_dir_of(path),
+            store_dir,
             conn,
             hlc,
             synced_tables,
@@ -413,5 +395,37 @@ impl DatabaseCore {
         F: FnOnce(&Connection) -> R,
     {
         operation(&self.conn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_core_retains_the_injected_store_directory() {
+        let temporary = tempfile::tempdir().expect("temporary store directory");
+        let store_dir = StoreDir::new(temporary.path());
+        let hlc = Arc::new(
+            Hlc::try_new(
+                "injected-store-directory".to_string(),
+                Arc::new(coven_foundation::clock::SystemClock),
+            )
+            .expect("test clock"),
+        );
+
+        let (_core, state) = DatabaseCore::open(
+            Path::new(":memory:"),
+            store_dir.clone(),
+            Vec::new(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            hlc,
+            &[],
+            CovenMetadataOpen::Detect,
+        )
+        .expect("open database core");
+
+        assert_eq!(state.store_dir, store_dir);
     }
 }

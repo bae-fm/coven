@@ -1,5 +1,22 @@
 use super::*;
 
+/// Bind a database to the store directory that owns its payload files.
+///
+/// Production databases live under their store directory. In-memory databases
+/// have no parent path, so the database opening boundary creates their
+/// process-local directory once and passes that dependency into the core.
+fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => coven_foundation::store_dir::StoreDir::new(parent),
+        None => coven_foundation::store_dir::StoreDir::new(
+            std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
+        ),
+    }
+}
+
 impl Database {
     /// Open and own the connection at `path`.
     ///
@@ -61,8 +78,10 @@ impl Database {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Database, OpenError> {
+        let store_dir = store_dir_of(path);
         let (core, state) = DatabaseCore::open(
             path,
+            store_dir,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
@@ -104,8 +123,10 @@ impl Database {
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
+        let store_dir = store_dir_of(path);
         let (core, state) = DatabaseCore::open_read_only(
             path,
+            store_dir,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,

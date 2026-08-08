@@ -17,28 +17,6 @@ pub struct CandidateObjectGraph {
     objects: Vec<CandidateExclusiveObjectDomain>,
 }
 
-/// Pair one closed candidate object with the payloads its row will name. An
-/// image names neither — its plaintext does not exist and its ciphertext is
-/// staged by the flow that built it — so it closes with an empty set.
-fn closed_candidate_object(
-    record: RemoteObjectRecord,
-    canonical_semantic_bytes: &[u8],
-    stored_bytes: &[u8],
-) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-    let mut payloads = std::collections::BTreeMap::new();
-    if let SemanticPayload::Spooled(hash) = record.semantic_payload() {
-        payloads.insert(hash, canonical_semantic_bytes.to_vec());
-    }
-    if let Some(hash) = record.stored_payload() {
-        record
-            .object()
-            .verify(stored_bytes)
-            .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))?;
-        payloads.insert(hash, stored_bytes.to_vec());
-    }
-    ClosedRemoteObject::with_payloads(record, payloads)
-}
-
 impl CandidateObjectGraph {
     pub fn from_commit(
         commit: &crate::store_commit::StoreBatchCommit,
@@ -178,7 +156,7 @@ impl CandidateObjectGraph {
                 },
             });
             record.validate_payload(&material.canonical_semantic_bytes)?;
-            records.push(closed_candidate_object(
+            records.push(ClosedRemoteObject::with_spooled_payloads(
                 record,
                 &material.canonical_semantic_bytes,
                 &material.stored_bytes,

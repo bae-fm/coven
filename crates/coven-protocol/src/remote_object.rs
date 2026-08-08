@@ -185,6 +185,28 @@ impl ClosedRemoteObject {
         Self::with_payloads(record, BTreeMap::new())
     }
 
+    /// Close a record with the plaintext and ciphertext its spool claims name.
+    /// The exact object verifies the ciphertext here, so every constructor uses
+    /// the same payload assembly and stored-byte check.
+    fn with_spooled_payloads(
+        record: RemoteObjectRecord,
+        canonical_semantic_bytes: &[u8],
+        stored_bytes: &[u8],
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let mut payloads = BTreeMap::new();
+        if let SemanticPayload::Spooled(hash) = record.semantic_payload() {
+            payloads.insert(hash, canonical_semantic_bytes.to_vec());
+        }
+        if let Some(hash) = record.stored_payload() {
+            record
+                .object()
+                .verify(stored_bytes)
+                .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))?;
+            payloads.insert(hash, stored_bytes.to_vec());
+        }
+        Self::with_payloads(record, payloads)
+    }
+
     /// A record and the bytes for exactly the payloads it claims.
     ///
     /// Used both when a record is first closed and when one is read back from

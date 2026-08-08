@@ -1,35 +1,6 @@
 use super::ownership::*;
 use super::*;
 
-/// Refuse bytes that are not the ones the exact reference names. The spool
-/// files are content-keyed, so this is the one place the ciphertext a record
-/// names is checked against the bytes a caller hands over.
-/// Pair a record whose plaintext and ciphertext both go to the spool with the
-/// two payloads it will be persisted alongside.
-fn spooled_inline(
-    record: RemoteObjectRecord,
-    canonical_semantic_bytes: &[u8],
-    stored_bytes: &[u8],
-) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-    let mut payloads = BTreeMap::new();
-    if let SemanticPayload::Spooled(hash) = record.semantic_payload() {
-        payloads.insert(hash, canonical_semantic_bytes.to_vec());
-    }
-    if let Some(hash) = record.stored_payload() {
-        payloads.insert(hash, stored_bytes.to_vec());
-    }
-    ClosedRemoteObject::with_payloads(record, payloads)
-}
-
-fn verify_stored_bytes(
-    object: &ExactObjectRef,
-    stored_bytes: &[u8],
-) -> Result<(), RemoteObjectRecordError> {
-    object
-        .verify(stored_bytes)
-        .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))
-}
-
 impl RemoteObjectRecord {
     fn candidate_exclusive_retained_authority(
         family: CandidateFamilyId,
@@ -39,7 +10,6 @@ impl RemoteObjectRecord {
         owner: StoreBatchCommitRef,
     ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
         let object = domain.object().clone();
-        verify_stored_bytes(&object, stored_bytes)?;
         let record = Self::CandidateExclusive(CandidateObjectRecord {
             identity: CandidateExclusiveTarget {
                 family,
@@ -56,7 +26,7 @@ impl RemoteObjectRecord {
             },
         });
         record.validate_payload(canonical_signed_bytes)?;
-        spooled_inline(record, canonical_signed_bytes, stored_bytes)
+        ClosedRemoteObject::with_spooled_payloads(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub(super) fn candidate_activated_retained_authority(
@@ -67,7 +37,6 @@ impl RemoteObjectRecord {
         stored_bytes: &[u8],
         owner: StoreBatchCommitRef,
     ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        verify_stored_bytes(&object, stored_bytes)?;
         let record = Self::RetainedAuthority(RetainedAuthorityRecord {
             identity: RetainedAuthorityObjectRef {
                 domain,
@@ -83,7 +52,7 @@ impl RemoteObjectRecord {
             },
         });
         record.validate_payload(canonical_signed_bytes)?;
-        spooled_inline(record, canonical_signed_bytes, stored_bytes)
+        ClosedRemoteObject::with_spooled_payloads(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub fn candidate_commit(
@@ -91,7 +60,6 @@ impl RemoteObjectRecord {
         canonical_signed_bytes: &[u8],
         stored_bytes: &[u8],
     ) -> Result<ClosedRemoteObject, RemoteObjectRecordError> {
-        verify_stored_bytes(&identity.object, stored_bytes)?;
         let record = Self::CandidateCommit(CandidateCommitRecord {
             identity,
             semantic_hash: ObjectHash::digest(canonical_signed_bytes),
@@ -99,7 +67,7 @@ impl RemoteObjectRecord {
             state: CandidateCommitState::Prepared,
         });
         record.validate_payload(canonical_signed_bytes)?;
-        spooled_inline(record, canonical_signed_bytes, stored_bytes)
+        ClosedRemoteObject::with_spooled_payloads(record, canonical_signed_bytes, stored_bytes)
     }
 
     pub fn candidate_activated_store_head(

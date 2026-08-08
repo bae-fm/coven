@@ -600,11 +600,6 @@ impl PreparedStoreOperationCommit {
         self.validate_closed_shape().map_err(PreparedCommitError)?;
         Ok(())
     }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn publication_for_test(&self) -> (&StoreDeviceHead, &ExactObjectRef) {
-        self.publication()
-    }
 }
 
 /// One Circle acknowledgement object riding an activating Store commit: its
