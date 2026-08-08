@@ -894,11 +894,20 @@ async fn ambiguous_create_endpoint(
                 "{body}"
             );
             assert!(!body.contains(CREATE_TOKEN_PROPERTY), "{body}");
-            *state.committed.lock().expect("lock commit state") = true;
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("response lost after commit"))
-                .expect("build ambiguous response")
+            let mut committed = state.committed.lock().expect("lock commit state");
+            if *committed {
+                Response::builder()
+                    .status(StatusCode::CONFLICT)
+                    .body(Body::from("allocated id already committed"))
+                    .expect("build occupied response")
+            } else {
+                *committed = true;
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(reqwest::header::RETRY_AFTER, "0")
+                    .body(Body::from("response lost after commit"))
+                    .expect("build ambiguous response")
+            }
         }
         ("GET", "/files/generated-id") => {
             assert!(*state.committed.lock().expect("lock commit state"));
@@ -955,6 +964,18 @@ async fn ambiguous_exact_create_preserves_the_logical_key_matched_commit() {
     )
     .await
     .expect("logical-key-matched commit resolves ambiguous create");
+
+    assert_eq!(
+        state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .iter()
+            .filter(|request| request.method == "POST")
+            .count(),
+        2,
+        "the lost response is retried once and observes the committed id",
+    );
 
     assert_eq!(
         slot,
