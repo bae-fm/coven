@@ -741,13 +741,14 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
 }
 
-/// An operation's object bytes live in the payload spool, and the transaction
-/// that drops its row records the obligation to delete them. Activation is one
-/// such transaction, so by the time it returns the files are gone and nothing
-/// is still owed — and an operation that has not reached its own completing
-/// transaction keeps every file it prepared.
+/// An operation's object bytes live in the payload spool, claimed by the
+/// operation row while it exists. Activation drops that row, so the operation's
+/// claim goes with it — and a payload is deleted exactly when no other row
+/// still names it. The objects activation keeps as `remote_objects` rows keep
+/// their payloads under those rows' claims; an operation that has not reached
+/// its own completing transaction keeps every file it prepared.
 #[tokio::test]
-async fn activation_deletes_its_spooled_payloads_and_keeps_a_pending_operation_intact() {
+async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_intact() {
     let db = open_test_db();
     let (store, _home, signer, activating) =
         persist_merge_operation(&db, "circle-spool-activation").await;
@@ -794,10 +795,30 @@ async fn activation_deletes_its_spooled_payloads_and_keeps_a_pending_operation_i
         "activation discharges its own cleanup obligations"
     );
     assert_eq!(
-        spooled_objects(&device, &activating).await,
-        Vec::<String>::new(),
-        "the activated operation's payloads are gone from the spool"
+        coven_database::StoreDatabase::new(&db)
+            .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
+                &activating.operation_id.to_string()
+            ))
+            .await
+            .expect("read the activated operation's payload claims"),
+        Vec::new(),
+        "activation drops the operation's own claim on every payload it prepared"
     );
+    let surviving = spooled_objects(&device, &activating).await;
+    for (step, object) in &activating.operation().prepared_objects {
+        let claimed = !coven_database::StoreDatabase::new(&db)
+            .payload_owner_claims(&coven_database::payload_spool::remote_object_owner_key(
+                coven_protocol::remote_object::remote_object_id(object),
+            ))
+            .await
+            .expect("read a remote object's payload claims")
+            .is_empty();
+        assert_eq!(
+            surviving.contains(step),
+            claimed,
+            "payload for {step} survives exactly while a remote object row claims it"
+        );
+    }
     assert_eq!(
         spooled_objects(&device, &pending).await,
         pending
@@ -810,11 +831,12 @@ async fn activation_deletes_its_spooled_payloads_and_keeps_a_pending_operation_i
     );
 }
 
-/// The completing transaction of a discard drops the operation row and records
-/// the same obligation activation does, so a discarded operation leaves nothing
-/// behind either.
+/// The completing transaction of a discard drops the operation row, and with it
+/// the operation's claim on every payload it prepared. A payload goes when its
+/// last claim does, so what survives is exactly what a remaining `remote_objects`
+/// row still names.
 #[tokio::test]
-async fn discard_deletes_its_spooled_payloads() {
+async fn discard_releases_its_payload_claims() {
     let revoked = RevokedOperation::prepare("circle-spool-discard").await;
     let journal = coven_database::StoreDatabase::new(&revoked.db)
         .circle_operation(&revoked.operation_id)
@@ -856,8 +878,28 @@ async fn discard_deletes_its_spooled_payloads() {
         "discard discharges its own cleanup obligations"
     );
     assert_eq!(
-        spooled_objects(&device, &journal).await,
-        Vec::<String>::new(),
-        "the discarded operation's payloads are gone from the spool"
+        coven_database::StoreDatabase::new(&revoked.db)
+            .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
+                &revoked.operation_id.to_string()
+            ))
+            .await
+            .expect("read the discarded operation's payload claims"),
+        Vec::new(),
+        "discard drops the operation's own claim on every payload it prepared"
     );
+    let surviving = spooled_objects(&device, &journal).await;
+    for (step, object) in &journal.operation().prepared_objects {
+        let claimed = !coven_database::StoreDatabase::new(&revoked.db)
+            .payload_owner_claims(&coven_database::payload_spool::remote_object_owner_key(
+                coven_protocol::remote_object::remote_object_id(object),
+            ))
+            .await
+            .expect("read a remote object's payload claims")
+            .is_empty();
+        assert_eq!(
+            surviving.contains(step),
+            claimed,
+            "payload for {step} survives exactly while a remote object row claims it"
+        );
+    }
 }

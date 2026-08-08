@@ -392,6 +392,8 @@ impl SnapshotDatabaseImage {
         let transaction = connection
             .transaction()
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        // These rows are the copy's, describing the spool of the device that
+        // built it, so they are deleted without releasing any payload claim.
         transaction
             .execute_batch(
                 "DELETE FROM row_blob_locators;
@@ -867,6 +869,8 @@ fn scope_authenticated_blob_graph(
                 ))
             })?;
     }
+    // As above: the projection prunes the copy's rows, never this device's
+    // payload claims.
     connection
         .execute_batch(
             "DELETE FROM row_blob_locators

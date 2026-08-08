@@ -382,18 +382,11 @@ impl StoreDatabase {
                                 ..
                             }
                         )
-                    ) {
-                        let removed = tx
-                            .execute(
-                                "DELETE FROM remote_objects WHERE object_id = ?1",
-                                [object_id.to_string()],
-                            )
-                            .map_err(crate::DbError::from)?;
-                        if removed != 1 {
-                            return Err(crate::DbError::Message(format!(
-                                "Circle discard object {object_id} disappeared during finalization"
-                            )));
-                        }
+                    ) && !crate::remote_object_records::delete_remote_object_on(&tx, object_id)?
+                    {
+                        return Err(crate::DbError::Message(format!(
+                            "Circle discard object {object_id} disappeared during finalization"
+                        )));
                     }
                 }
                 super::circle_controls::release_operation_payloads_on(&tx, &journal.operation_id)?;

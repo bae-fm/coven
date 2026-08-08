@@ -223,11 +223,7 @@ impl StoreDatabase {
                     )
                 );
                 if absent {
-                    tx.execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?;
+                    crate::remote_object_records::delete_remote_object_on(tx, object_id)?;
                 }
             }
             tx.execute(

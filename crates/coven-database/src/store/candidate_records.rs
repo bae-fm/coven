@@ -127,14 +127,7 @@ pub fn delete_remote_objects_on(
                 "{context} repeats remote object {object_id}"
             )));
         }
-        if tx
-            .execute(
-                "DELETE FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
+        if !crate::remote_object_records::delete_remote_object_on(tx, object_id)? {
             return Err(DbError::Message(format!(
                 "{context} object {object_id} disappeared during cleanup"
             )));
@@ -874,18 +867,11 @@ pub fn finish_merge_retraction_cleanup_on(
                     ..
                 }
             )
-        ) {
-            let removed = tx
-                .execute(
-                    "DELETE FROM remote_objects WHERE object_id = ?1",
-                    [object_id.to_string()],
-                )
-                .map_err(DbError::from)?;
-            if removed != 1 {
-                return Err(DbError::Message(format!(
-                    "Merge retraction object {object_id} disappeared during finalization"
-                )));
-            }
+        ) && !crate::remote_object_records::delete_remote_object_on(tx, object_id)?
+        {
+            return Err(DbError::Message(format!(
+                "Merge retraction object {object_id} disappeared during finalization"
+            )));
         }
     }
     let StoreCommitCoord {
@@ -981,13 +967,7 @@ pub fn remove_cleaned_merge_authority_on(
                 "losing Merge abandonment cleanup is incomplete".to_string(),
             ));
         }
-        let removed = tx
-            .execute(
-                "DELETE FROM remote_objects WHERE object_id = ?1",
-                [object_id.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if removed != 1 {
+        if !crate::remote_object_records::delete_remote_object_on(tx, object_id)? {
             return Err(DbError::Message(format!(
                 "abandoned authority object {object_id} disappeared during removal"
             )));
@@ -1015,13 +995,7 @@ pub fn remove_cleaned_author_excluded_merge_authority_on(
             "excluded Merge abandonment commit cleanup is incomplete".to_string(),
         ));
     }
-    let removed = tx
-        .execute(
-            "DELETE FROM remote_objects WHERE object_id = ?1",
-            [commit_object_id.to_string()],
-        )
-        .map_err(DbError::from)?;
-    if removed != 1 {
+    if !crate::remote_object_records::delete_remote_object_on(tx, commit_object_id)? {
         return Err(DbError::Message(
             "excluded Merge abandonment commit disappeared during removal".to_string(),
         ));
@@ -1037,13 +1011,7 @@ pub fn remove_cleaned_author_excluded_merge_authority_on(
             ));
         }
         let head_object_id = remote_object_id(head);
-        let removed = tx
-            .execute(
-                "DELETE FROM remote_objects WHERE object_id = ?1",
-                [head_object_id.to_string()],
-            )
-            .map_err(DbError::from)?;
-        if removed != 1 {
+        if !crate::remote_object_records::delete_remote_object_on(tx, head_object_id)? {
             return Err(DbError::Message(
                 "excluded Merge abandonment head disappeared during removal".to_string(),
             ));

@@ -131,13 +131,10 @@ impl StoreDatabase {
                     }
                 }
                 for expected_record in expected_records {
-                    let removed = tx
-                        .execute(
-                            "DELETE FROM remote_objects WHERE object_id = ?1",
-                            [expected_record.object_id().to_string()],
-                        )
-                        .map_err(DbError::from)?;
-                    if removed != 1 {
+                    if !crate::remote_object_records::delete_remote_object_on(
+                        &tx,
+                        expected_record.object_id(),
+                    )? {
                         return Err(DbError::Message(
                             "losing acknowledgement candidate object disappeared".to_string(),
                         ));

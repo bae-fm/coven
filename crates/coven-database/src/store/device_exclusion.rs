@@ -386,14 +386,7 @@ impl StoreDatabase {
                         "outcome-slot loss cannot discard uploaded exclusion object {object_id}"
                     )));
                 }
-                if tx
-                    .execute(
-                        "DELETE FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
+                if !crate::remote_object_records::delete_remote_object_on(&tx, object_id)? {
                     return Err(DbError::Message(format!(
                         "unuploaded exclusion object {object_id} disappeared during slot resolution"
                     )));
