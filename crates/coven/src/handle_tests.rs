@@ -2157,6 +2157,37 @@ fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
     (tmp, handle)
 }
 
+#[tokio::test]
+async fn sync_now_interrupts_the_startup_delay() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            tokio::task::spawn_local(async {
+                test_keyring::install();
+
+                let (_tmp, handle) = status_test_handle("lib-sync-now-startup");
+                let home = InMemoryCloudHome::new();
+                let (probe_reached, release_probe) = home.pause_next_probe();
+                handle
+                    .connect_sync_with_test_home(Arc::new(home), CloudCipher::Plaintext)
+                    .await
+                    .expect("connect over injected home");
+
+                handle.sync_now();
+                let reached =
+                    tokio::time::timeout(Duration::from_secs(1), probe_reached.notified()).await;
+                release_probe.notify_one();
+                assert!(
+                    reached.is_ok(),
+                    "an explicit sync request must start a cycle without waiting for startup"
+                );
+            })
+            .await
+            .expect("startup trigger test task");
+        })
+        .await;
+}
+
 /// The current state starts offline, moves through storage checking and
 /// publication, then reports synchronization.
 #[tokio::test]

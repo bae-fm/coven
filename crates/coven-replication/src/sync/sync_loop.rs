@@ -267,6 +267,13 @@ impl SyncLoopHandle {
                                     return;
                                 }
                             }
+                            msg = trigger_rx.recv() => {
+                                if msg.is_none() {
+                                    info!("Sync trigger channel closed before first cycle");
+                                    return;
+                                }
+                                break;
+                            }
                             command = command_rx.recv() => {
                                 let Some(command) = command else {
                                     info!("Sync command channel closed before first cycle");

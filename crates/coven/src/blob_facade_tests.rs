@@ -273,7 +273,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         .await
         .expect("create the Store");
     handle
-        .connect_sync_with_test_home(
+        .connect_sync_with_test_home_caller_driven(
             home.clone(),
             coven_storage::CloudCipher::Encrypted(encryption),
         )
