@@ -515,6 +515,13 @@ its plaintext and ciphertext are content-addressed spool payloads claimed by
 the snapshot journal. Whole-image encryption remains the one buffered image
 operation because changing it requires a chunked protocol format.
 
+The final audit removed the loader's second in-memory copy: outbound snapshot
+images use `PreparedProtocolObject<Vec<u8>>`, where the value is the one image
+buffer and `prepared` is its exact provider representation. `ExactProtocolObject`
+still carries canonical bytes for typed protocol values whose parsers and durable
+validation bind the typed value to those bytes; a raw database image already is
+its byte value and has no second semantic representation to retain.
+
 The raw Store write changeset is streamed into the spool and now includes the
 private audience and row-route tables needed for exact rollback. Its inverse
 is generated at discard time. Exact audience partitions are also spooled:

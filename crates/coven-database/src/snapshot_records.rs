@@ -135,9 +135,8 @@ pub fn load_outbound_store_snapshot_on(
                     bytes: meta_bytes,
                     prepared: meta_prepared,
                 },
-                image: ExactProtocolObject {
-                    value: image_bytes.clone(),
-                    bytes: image_bytes,
+                image: PreparedProtocolObject {
+                    value: image_bytes,
                     prepared: image_prepared,
                 },
                 blobs,

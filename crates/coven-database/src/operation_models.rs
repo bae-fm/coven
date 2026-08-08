@@ -53,11 +53,10 @@ pub enum MembershipMutationActivation {
     Rotation { generation: u64 },
 }
 
-#[derive(Debug, Clone)]
 pub struct DurableSnapshotPublication {
     pub reference: StoreSnapshotRef,
     pub meta: ExactProtocolObject<SnapshotMeta>,
-    pub image: ExactProtocolObject<Vec<u8>>,
+    pub image: PreparedProtocolObject<Vec<u8>>,
     pub blobs: Vec<PreparedSnapshotBlob>,
 }
 
@@ -77,11 +76,10 @@ pub struct PublishedStoreSnapshot {
     pub meta: SnapshotMeta,
 }
 
-#[derive(Debug, Clone)]
 pub struct DurableCircleSnapshotPublication {
     pub reference: coven_protocol::store_commit::CircleSnapshotRef,
     pub meta: ExactProtocolObject<coven_protocol::store_commit::CircleSnapshotMeta>,
-    pub image: ExactProtocolObject<Vec<u8>>,
+    pub image: PreparedProtocolObject<Vec<u8>>,
     pub blobs: Vec<PreparedSnapshotBlob>,
 }
 

@@ -82,7 +82,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                 ),
                 &pending.image.prepared,
                 &snapshot_image_semantic_prefix(&device_id, meta.image.image_hash),
-                &pending.image.bytes,
+                &pending.image.value,
             )
             .await
             .map_err(SnapshotError::Bucket)?;
