@@ -2,7 +2,7 @@ use coven_database::StoreDatabase;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::membership::MembershipGrantId;
-use coven_protocol::objects::{ExactObjectRef, PreparedExactObject};
+use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::store_commit::ObjectHash;
 
 use super::journal::target_key;
@@ -324,12 +324,10 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     };
     let bytes = b"another exact prepared object".to_vec();
     let reference = ExactObjectRef::new(
-        candidate.prepared.reference().slot().clone(),
+        candidate.reference.object.slot().clone(),
         bytes.len() as u64,
         ObjectHash::digest(&bytes),
     );
-    candidate.prepared = PreparedExactObject::new(reference.clone(), bytes)
-        .expect("prepare substituted exact object");
     candidate.reference.object = reference;
     let encoded = serde_json::to_string(&substituted_bytes)
         .expect("serialize substituted prepared bytes journal");

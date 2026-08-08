@@ -104,13 +104,16 @@ impl LosingAckFixture {
             .await
             .expect("prepare competing candidate");
         assert_ne!(competing.reference, losing.reference);
-        let (_, competing_head) = competing.publication_for_test();
         storage
-            .create_protocol_object(&competing.prepared)
+            .create_protocol_object(
+                &competing
+                    .prepared_commit()
+                    .expect("prepare competing commit"),
+            )
             .await
             .expect("publish competing commit");
         storage
-            .create_protocol_object(competing_head)
+            .create_protocol_object(&competing.prepared_head().expect("prepare competing head"))
             .await
             .expect("publish competing head");
         Self {
@@ -694,10 +697,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             .await
             .is_err());
 
-        let head = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: losing.head.head_hash(),
-            object: losing.prepared_head.reference().clone(),
-        };
+        let head = losing.head_ref();
         let mut remote = db
             .remote_object_for_test(head.object.clone())
             .await
@@ -771,7 +771,7 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         .prepare_acknowledgement_candidate_for_test(&outbound)
         .await;
     let expected_head = candidate.head.clone();
-    let expected_prepared = candidate.prepared_head.clone();
+    let expected_head_object = candidate.head_object.clone();
     let alternate_next = coven_protocol::objects::ObjectSlot::opaque(
         expected_head.successor.next_slot.logical_key().to_string(),
         "alternate-next-slot".to_string(),
@@ -800,15 +800,12 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let alternate_prepared = storage
         .prepare_protocol_object(
             &head_context,
-            expected_prepared.reference().slot().clone(),
+            expected_head_object.slot().clone(),
             &head_prefix,
             alternate_head.to_bytes(),
         )
         .expect("prepare alternate head at the same slot");
-    assert_ne!(
-        alternate_prepared.reference(),
-        expected_prepared.reference()
-    );
+    assert_ne!(alternate_prepared.reference(), &expected_head_object);
     storage
         .create_protocol_object(&alternate_prepared)
         .await

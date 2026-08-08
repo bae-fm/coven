@@ -181,7 +181,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .retained_operation_objects()
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head = candidate.head.clone();
-        let prepared_head = candidate.prepared_head.clone();
+        let head_object = candidate.head_object.clone();
         let history_summary = candidate.history_summary.clone();
         self.publish(
             commit_plan::PreparedStoreOperationActivation {
@@ -189,7 +189,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 retained_operation_objects,
             },
             head,
-            prepared_head,
+            head_object,
             history_summary,
             membership_objects,
             membership_completion,
@@ -201,7 +201,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         mut activation: commit_plan::PreparedStoreOperationActivation,
         head: coven_protocol::store_commit::StoreDeviceHead,
-        prepared_head: coven_protocol::objects::PreparedExactObject,
+        head_object: coven_protocol::objects::ExactObjectRef,
         history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
         membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
@@ -264,6 +264,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             &commit.author_registration.device_id.to_string(),
             commit.seq(),
         );
+        // The head's bytes are what it serializes to, so the upload rebuilds
+        // them under the object the candidate names; `new` re-checks them
+        // against that reference before any of them leave this device.
+        let prepared_head =
+            coven_protocol::objects::PreparedExactObject::new(head_object.clone(), head.to_bytes())
+                .map_err(coven_protocol::objects::StoreObjectError::from)?;
         match self
             .storage
             .as_ref()
@@ -278,7 +284,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         verified_commit,
                         reference,
                         head,
-                        prepared_head,
+                        head_object,
                         head_prefix,
                     )
                     .await;
@@ -288,17 +294,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             }
         }
         self.storage
-            .verify_readback(
-                &head_context,
-                prepared_head.reference(),
-                &head_prefix,
-                &head.to_bytes(),
-            )
+            .verify_readback(&head_context, &head_object, &head_prefix, &head.to_bytes())
             .await
             .map_err(StoreError::readback)?;
         let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: head.head_hash(),
-            object: prepared_head.reference().clone(),
+            object: head_object.clone(),
         };
         let operation_object_ids = if has_tracked_remote_objects {
             database
@@ -318,7 +319,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .map(coven_protocol::remote_object::remote_object_id),
                 )
                 .chain(std::iter::once(
-                    coven_protocol::remote_object::remote_object_id(prepared_head.reference()),
+                    coven_protocol::remote_object::remote_object_id(&head_object),
                 ))
                 .collect::<Vec<_>>()
             })
@@ -336,7 +337,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     &reference.object,
                 ))
                 || !completion_ids.contains(&coven_protocol::remote_object::remote_object_id(
-                    prepared_head.reference(),
+                    &head_object,
                 ))
             {
                 return Err(StoreError::InvalidOutbound(
@@ -430,7 +431,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let common = commit_plan::PreparedStoreOperationCommon {
             reference: verified_commit.reference().clone(),
             commit,
-            prepared,
             registration_activation,
         };
         let acknowledgement = match acknowledgement_evidence {
@@ -523,7 +523,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(commit_plan::PreparedStoreOperationCommit {
             common,
             head,
-            prepared_head,
+            head_object: prepared_head.reference().clone(),
             history_summary: successor.summary,
         })
     }
@@ -554,19 +554,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
         head: coven_protocol::store_commit::StoreDeviceHead,
-        prepared_head: coven_protocol::objects::PreparedExactObject,
+        head_object: coven_protocol::objects::ExactObjectRef,
         head_prefix: String,
     ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
         let database = self.database.clone();
         let observation = self
             .history
             .merge_conflict()
-            .observe_occupied_merge_head(
-                &head,
-                &commit,
-                prepared_head.reference().slot(),
-                &head_prefix,
-            )
+            .observe_occupied_merge_head(&head, &commit, head_object.slot(), &head_prefix)
             .await?;
         if observation.winner().commit == reference {
             let (winner, winner_prepared) = observation.into_head();
@@ -576,7 +571,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .await?;
                 return Ok(commit_plan::StoreOperationPublicationOutcome::Reprepared);
             }
-            candidate.adopt_merge_head(winner, winner_prepared)?;
+            candidate.adopt_merge_head(winner, winner_prepared.reference().clone())?;
             return Ok(
                 commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(candidate),
             );

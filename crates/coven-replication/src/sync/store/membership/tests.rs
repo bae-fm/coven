@@ -991,6 +991,57 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
 /// occupant, verifies it is a real winner, and ends the removal on that evidence:
 /// the staged mutation is cleared rather than retried against a position that is
 /// gone, and the initiator's next removal composes at the position that follows.
+/// The mutation journal names the objects it publishes and does not carry their
+/// bytes: every entry, head, commit, and resolution in it sits beside the exact
+/// reference the upload rebuilds it under. The one payload it does carry is the
+/// sealed keyring inside each replacement wrapped key, which no other field
+/// holds.
+#[tokio::test]
+async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
+    let fixture = MergeFixture::new("mutation-journal-names-its-objects").await;
+    let member = UserKeypair::generate();
+    fixture.invite_member(&member, MemberRole::Member).await;
+    let member_db = open_test_db();
+    fixture
+        .store
+        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .await
+        .expect("activate the member's device");
+
+    // Stop the removal before it publishes, leaving its plan durable to read.
+    fixture.home.fail_exact_create_before_call(1);
+    Box::pin(fixture.try_remove_member(&member))
+        .await
+        .expect_err("the interrupted removal cannot publish its membership authority");
+    let staged = fixture
+        .database
+        .outbound_membership_mutation()
+        .await
+        .expect("read the staged removal")
+        .expect("the interrupted removal stays durable");
+    let plan = String::from_utf8(staged.plan_bytes).expect("the plan is JSON");
+
+    for carried in [
+        "entry_object",
+        "head_object",
+        "resolution_object",
+        "prepared_head",
+    ] {
+        assert!(
+            !plan.contains(carried),
+            "the journal carries {carried}, whose bytes its own reference already names"
+        );
+    }
+    // One replacement wrapped key, for the one member who remains, and its
+    // sealed keyring is the only value in the plan without a sibling field the
+    // upload could rebuild it from.
+    assert_eq!(
+        plan.matches("stored_bytes").count(),
+        1,
+        "the journal's only carried payload is the replacement wrapped key"
+    );
+}
+
 #[tokio::test]
 async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     let fixture = MergeFixture::new("removal-loses-its-position").await;

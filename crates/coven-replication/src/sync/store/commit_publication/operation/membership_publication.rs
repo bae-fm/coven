@@ -67,7 +67,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
         self.storage
             .as_ref()
-            .create_protocol_object(&publication.entry_object)
+            .create_protocol_object(&publication.prepared_entry()?)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         self.membership_objects()
@@ -84,7 +84,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<(), InviteError> {
         self.storage
             .as_ref()
-            .create_protocol_object(&publication.head_object)
+            .create_protocol_object(&publication.prepared_head()?)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         self.membership_objects()
@@ -101,7 +101,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<PreparedMembershipTransition, InviteError> {
         let root = self.store_root().clone();
         let storage = self.storage.as_ref();
-        let (entry_object, entry_ref) =
+        let (_, entry_ref) =
             store_objects::prepare_membership_entry(storage, root.store_root_hash, &entry)
                 .await
                 .map_err(|error| InviteError::Crypto(error.to_string()))?;
@@ -181,7 +181,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(PreparedMembershipTransition {
             entry,
             entry_ref,
-            entry_object,
             transition,
         })
     }
@@ -233,10 +232,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let publication = PreparedMembershipPublication {
             entry: prepared.entry,
             entry_ref: prepared.entry_ref,
-            entry_object: prepared.entry_object,
             head,
             head_ref,
-            head_object,
         };
         publication.validate()?;
         Ok(publication)
@@ -281,7 +278,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
         self.storage
             .as_ref()
-            .create_protocol_object(&transition.entry_object)
+            .create_protocol_object(&transition.prepared_entry()?)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         self.membership_objects()
@@ -324,7 +321,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         }
         self.storage
             .as_ref()
-            .create_protocol_object(&publication.head_object)
+            .create_protocol_object(&publication.prepared_head()?)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         self.writer

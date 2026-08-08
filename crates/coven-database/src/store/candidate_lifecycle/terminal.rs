@@ -263,7 +263,7 @@ impl StoreDatabase {
                     &store_dir,
                     &publication.head_object,
                     &winner,
-                    &winner_prepared,
+                    winner_prepared.reference(),
                     &candidate,
                 )?;
                 let replacement_head =

@@ -141,9 +141,7 @@ fn same_prepared_candidate(
     previous: &PreparedStoreOperationCommit,
     next: &PreparedStoreOperationCommit,
 ) -> bool {
-    previous.reference == next.reference
-        && previous.commit.to_bytes() == next.commit.to_bytes()
-        && previous.prepared.reference() == next.prepared.reference()
+    previous.reference == next.reference && previous.commit.to_bytes() == next.commit.to_bytes()
 }
 
 fn request_activation_matches_candidate(
@@ -312,7 +310,6 @@ fn finalization_receipt_matches_acceptance(
         let prepared_transition = PreparedMembershipTransition {
             entry: publication.entry.clone(),
             entry_ref: publication.entry_ref.clone(),
-            entry_object: publication.entry_object.clone(),
             transition: transition.clone(),
         };
         publication.validate().is_ok()
@@ -368,12 +365,8 @@ fn receipt_matches_merge_preparation(
         } if same_prepared_candidate(candidate, receipt_candidate)
             && publication.entry == receipt_publication.entry
             && publication.entry_ref == receipt_publication.entry_ref
-            && publication.entry_object.reference()
-                == receipt_publication.entry_object.reference()
             && publication.head == receipt_publication.head
             && publication.head_ref == receipt_publication.head_ref
-            && publication.head_object.reference()
-                == receipt_publication.head_object.reference()
     )
 }
 

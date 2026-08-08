@@ -560,11 +560,10 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     let prepared_candidate = candidate
         .candidate()
         .expect("reclaim operation has a candidate");
-    let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
-        head_hash: prepared_candidate.head.head_hash(),
-        object: prepared_candidate.prepared_head.reference().clone(),
-    };
-    let activation_head_prepared = prepared_candidate.prepared_head.clone();
+    let activation_head = prepared_candidate.head_ref();
+    let activation_head_prepared = prepared_candidate
+        .prepared_head()
+        .expect("prepare reclaim activation head");
     reclaim
         .drive_candidate(candidate)
         .await

@@ -64,15 +64,10 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     let mut substituted_entry = prepared.clone();
     let substituted_bytes = b"substituted exact membership entry".to_vec();
     let substituted_ref = coven_protocol::objects::ExactObjectRef::new(
-        substituted_entry.entry_object.reference().slot().clone(),
+        substituted_entry.entry_ref.object.slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_entry.entry_object = coven_protocol::objects::PreparedExactObject::new(
-        substituted_ref.clone(),
-        substituted_bytes,
-    )
-    .expect("prepare substituted membership entry object");
     substituted_entry.entry_ref.object = substituted_ref.clone();
     substituted_entry.transition.body.entry.object = substituted_ref;
     assert!(substituted_entry.validate().is_err());
@@ -86,15 +81,10 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
         .expect("finish membership transition");
     let substituted_bytes = b"substituted exact membership head".to_vec();
     let substituted_ref = coven_protocol::objects::ExactObjectRef::new(
-        substituted_head.head_object.reference().slot().clone(),
+        substituted_head.head_ref.object.slot().clone(),
         substituted_bytes.len() as u64,
         ObjectHash::digest(&substituted_bytes),
     );
-    substituted_head.head_object = coven_protocol::objects::PreparedExactObject::new(
-        substituted_ref.clone(),
-        substituted_bytes,
-    )
-    .expect("prepare substituted membership head object");
     substituted_head.head_ref.object = substituted_ref;
     assert!(substituted_head.validate().is_err());
 }

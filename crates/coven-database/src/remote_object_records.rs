@@ -675,11 +675,15 @@ pub fn replace_prepared_merge_head_remote_on(
     store_dir: &StoreDir,
     current: &ExactObjectRef,
     winner: &StoreDeviceHead,
-    winner_prepared: &PreparedExactObject,
+    winner_object: &ExactObjectRef,
     candidate: &StoreBatchCommitRef,
 ) -> Result<(), DbError> {
-    if winner_prepared.reference().slot() != current.slot()
-        || winner_prepared.reference() == current
+    // A Store head is signed plaintext, so the object it is published as names
+    // the digest of the head's own canonical bytes.
+    let winner_bytes = winner.to_bytes();
+    if winner_object.verify(&winner_bytes).is_err()
+        || winner_object.slot() != current.slot()
+        || winner_object == current
         || winner.commit != *candidate
     {
         return Err(DbError::Message(
@@ -711,12 +715,12 @@ pub fn replace_prepared_merge_head_remote_on(
     }
     let winner_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
         head_hash: winner.head_hash(),
-        object: winner_prepared.reference().clone(),
+        object: winner_object.clone(),
     };
     let winner_closed = RemoteObjectRecord::candidate_activated_store_head(
         winner_ref,
-        &winner.to_bytes(),
-        winner_prepared.stored_bytes(),
+        &winner_bytes,
+        &winner_bytes,
         candidate.clone(),
     )
     .map_err(|error| DbError::context("alternate Merge head", error))?;

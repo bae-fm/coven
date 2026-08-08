@@ -9,21 +9,48 @@ use crate::membership::{
 use crate::objects::{ExactObjectRef, PreparedExactObject};
 use crate::store_commit::ObjectHash;
 
+/// One value prepared for upload: its canonical bytes under the exact object its
+/// reference names.
+///
+/// The bytes are not carried beside the value — they are what the value
+/// serializes to — so both the validators and the upload paths re-derive them
+/// here. [`PreparedExactObject::new`] checks them against the reference, so a
+/// value that does not serialize to what its reference names fails at this call
+/// rather than reaching storage.
+pub fn prepare_exact_object(
+    object: &ExactObjectRef,
+    value: &impl serde::Serialize,
+) -> Result<PreparedExactObject, MembershipPreparationError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| MembershipPreparationError(error.to_string()))?;
+    PreparedExactObject::new(object.clone(), bytes)
+        .map_err(|error| MembershipPreparationError(error.to_string()))
+}
+
+fn binds_exact_object(object: &ExactObjectRef, value: &impl serde::Serialize) -> bool {
+    prepare_exact_object(object, value).is_ok()
+}
+
 /// A prepared membership mutation whose parts do not bind one exact entry and
 /// head. Workflow errors wrap it at the operation boundary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid prepared membership mutation: {0}")]
 pub struct MembershipPreparationError(pub(crate) String);
 
+/// One membership entry and the head that publishes it, each named by its exact
+/// reference.
+///
+/// The entry and head values are here, and `entry_ref.object` / `head_ref.object`
+/// name the objects they serialize to, so nothing carries their bytes a second
+/// time: the upload rebuilds them from the value and the reference re-checks
+/// them on the way out.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedMembershipPublication {
     pub entry: MembershipEntry,
     pub entry_ref: MembershipEntryRef,
-    pub entry_object: PreparedExactObject,
     pub head: AuthorHead,
     pub head_ref: MembershipHeadRef,
-    pub head_object: PreparedExactObject,
 }
 
 impl PreparedMembershipPublication {
@@ -31,7 +58,6 @@ impl PreparedMembershipPublication {
         PreparedMembershipTransition {
             entry: self.entry.clone(),
             entry_ref: self.entry_ref.clone(),
-            entry_object: self.entry_object.clone(),
             transition: membership::MergeMembershipHeadTransition {
                 body: self.head.body.clone(),
                 head_slot: self.head_ref.object.slot().clone(),
@@ -40,15 +66,11 @@ impl PreparedMembershipPublication {
         .validate()?;
         let coord = self.entry.coord();
         if self.entry_ref.coord != coord
-            || self.entry_ref.object != *self.entry_object.reference()
             || self.head.body.entry != self.entry_ref
             || self.head.entry_coord() != coord
             || self.head_ref.coord != coord
             || self.head_ref.head_hash != self.head.head_hash()
-            || self.head_ref.object != *self.head_object.reference()
-            || self.head_object.stored_bytes()
-                != serde_json::to_vec(&self.head)
-                    .map_err(|error| MembershipPreparationError(error.to_string()))?
+            || !binds_exact_object(&self.head_ref.object, &self.head)
         {
             return Err(MembershipPreparationError(
                 "prepared membership publication does not bind one exact entry and head"
@@ -57,6 +79,16 @@ impl PreparedMembershipPublication {
         }
         Ok(())
     }
+
+    /// The entry object this publication uploads.
+    pub fn prepared_entry(&self) -> Result<PreparedExactObject, MembershipPreparationError> {
+        prepare_exact_object(&self.entry_ref.object, &self.entry)
+    }
+
+    /// The head object this publication uploads.
+    pub fn prepared_head(&self) -> Result<PreparedExactObject, MembershipPreparationError> {
+        prepare_exact_object(&self.head_ref.object, &self.head)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -64,15 +96,12 @@ impl PreparedMembershipPublication {
 pub struct PreparedMembershipTransition {
     pub entry: MembershipEntry,
     pub entry_ref: MembershipEntryRef,
-    pub entry_object: PreparedExactObject,
     pub transition: MergeMembershipHeadTransition,
 }
 
 impl PreparedMembershipTransition {
     pub fn validate(&self) -> Result<(), MembershipPreparationError> {
         let coord = self.entry.coord();
-        let entry_bytes = serde_json::to_vec(&self.entry)
-            .map_err(|error| MembershipPreparationError(error.to_string()))?;
         let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
             MembershipPreparationError("membership sequence is exhausted".to_string())
         })?;
@@ -105,8 +134,7 @@ impl PreparedMembershipTransition {
             )
         );
         if self.entry_ref.coord != self.entry.coord()
-            || self.entry_ref.object != *self.entry_object.reference()
-            || self.entry_object.stored_bytes() != entry_bytes
+            || !binds_exact_object(&self.entry_ref.object, &self.entry)
             || self.entry_ref.object.slot().logical_key() != entry_key
             || self.transition.body.entry != self.entry_ref
             || self.transition.body.resolutions != self.entry.resolution_dependencies
@@ -118,6 +146,11 @@ impl PreparedMembershipTransition {
             ));
         }
         Ok(())
+    }
+
+    /// The entry object this transition uploads.
+    pub fn prepared_entry(&self) -> Result<PreparedExactObject, MembershipPreparationError> {
+        prepare_exact_object(&self.entry_ref.object, &self.entry)
     }
 }
 

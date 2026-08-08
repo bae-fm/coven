@@ -208,7 +208,6 @@ impl RevokeMutationPlan {
                     .map_err(InviteError::InvalidDurableMutation)?;
                 if transition.entry != publication.entry
                     || transition.entry_ref != publication.entry_ref
-                    || transition.entry_object != publication.entry_object
                     || retirement_device_state.as_ref() != Some(&candidate.commit.device_state)
                     || !retirement_barriers.values().any(|barrier| {
                         matches!(
@@ -303,13 +302,22 @@ impl RevokeMutationPlan {
 pub(super) struct ResolveMutationPlan {
     pub(super) resolution: StoreMembershipConflictResolution,
     pub(super) reference: StoreMembershipConflictResolutionRef,
-    pub(super) resolution_object: PreparedExactObject,
     pub(super) transition: Box<PreparedMembershipTransition>,
     pub(super) candidate: Box<PreparedStoreOperationCommit>,
     pub(super) publication: Box<PreparedMembershipPublication>,
 }
 
 impl ResolveMutationPlan {
+    /// The resolution object this plan uploads: the resolution's canonical bytes
+    /// under the exact object its reference names.
+    pub(super) fn prepared_resolution(&self) -> Result<PreparedExactObject, InviteError> {
+        coven_protocol::membership_mutation::prepare_exact_object(
+            &self.reference.object,
+            &self.resolution,
+        )
+        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+    }
+
     pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
         (
             vec![
@@ -331,7 +339,6 @@ impl ResolveMutationPlan {
                 &self.publication,
                 &self.resolution,
                 &self.reference,
-                &self.resolution_object,
             )
             .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
     }
@@ -343,16 +350,10 @@ impl ResolveMutationPlan {
             || self.reference
                 != self
                     .resolution
-                    .resolution_ref(self.resolution_object.reference().clone())
-            || self.resolution_object.stored_bytes()
-                != serde_json::to_vec(&self.resolution).map_err(|error| {
-                    InviteError::InvalidDurableMutation(format!(
-                        "serialize membership resolution: {error}"
-                    ))
-                })?
+                    .resolution_ref(self.reference.object.clone())
+            || self.prepared_resolution().is_err()
             || self.transition.entry != self.publication.entry
             || self.transition.entry_ref != self.publication.entry_ref
-            || self.transition.entry_object != self.publication.entry_object
             || self.candidate.commit.control()
                 != Some(&store_commit::StoreControl {
                     transition: self.transition.transition.clone(),

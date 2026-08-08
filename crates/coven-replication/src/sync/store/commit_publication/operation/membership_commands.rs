@@ -187,7 +187,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             })?;
         storage
             .as_ref()
-            .create_protocol_object(&plan.publication.entry_object)
+            .create_protocol_object(&plan.publication.prepared_entry()?)
             .await
             .map_err(|error| {
                 crate::sync::store::membership::InviteError::Crypto(error.to_string())
@@ -200,7 +200,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             })?;
         storage
             .as_ref()
-            .create_protocol_object(&plan.publication.head_object)
+            .create_protocol_object(&plan.publication.prepared_head()?)
             .await
             .map_err(|error| {
                 crate::sync::store::membership::InviteError::Crypto(error.to_string())
@@ -491,7 +491,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let plan = ResolveMutationPlan {
             resolution,
             reference,
-            resolution_object,
             transition: Box::new(transition),
             candidate: Box::new(candidate),
             publication: Box::new(publication),
@@ -652,7 +651,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let remotes = plan.remote_objects()?;
         self.storage
             .as_ref()
-            .create_protocol_object(&plan.resolution_object)
+            .create_protocol_object(&plan.prepared_resolution()?)
             .await
             .map_err(|error| InviteError::Crypto(error.to_string()))?;
         self.membership_objects()

@@ -116,10 +116,7 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
-                let head = StoreDeviceHeadRef {
-                    head_hash: candidate.head.head_hash(),
-                    object: candidate.prepared_head.reference().clone(),
-                };
+                let head = candidate.head_ref();
                 if already_nonactivating {
                     let commit = load_remote_object_on(
                         &tx,
@@ -227,10 +224,7 @@ impl StoreDatabase {
                         "Store acknowledgement has no prepared Merge candidate".to_string(),
                     ));
                 };
-                let current = StoreDeviceHeadRef {
-                    head_hash: candidate.head.head_hash(),
-                    object: candidate.prepared_head.reference().clone(),
-                };
+                let current = candidate.head_ref();
                 let root = required_store_root_authority_on(&tx)?;
                 let registration = load_activated_registration_on(
                     &tx,
@@ -254,12 +248,12 @@ impl StoreDatabase {
                     &store_dir,
                     &current.object,
                     &winner,
-                    &winner_prepared,
+                    winner_prepared.reference(),
                     &candidate.reference,
                 )?;
                 let mut candidate = candidate;
                 candidate
-                    .adopt_merge_head(winner, winner_prepared)
+                    .adopt_merge_head(winner, winner_prepared.reference().clone())
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 set_outbound_store_ack_activation_on(
                     &tx,
@@ -318,10 +312,7 @@ impl StoreDatabase {
                         "Store acknowledgement activation is not nonactivating Merge".to_string(),
                     ));
                 };
-                let head = StoreDeviceHeadRef {
-                    head_hash: candidate.head.head_hash(),
-                    object: candidate.prepared_head.reference().clone(),
-                };
+                let head = candidate.head_ref();
                 if !super::candidate_records::candidate_cleanup_targets_on(
                     &tx,
                     &candidate.reference,

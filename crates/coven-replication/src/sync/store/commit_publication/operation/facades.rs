@@ -251,7 +251,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         );
         self.storage
             .as_ref()
-            .create_protocol_object(&candidate.prepared)
+            .create_protocol_object(&candidate.prepared_commit()?)
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         self.storage

@@ -63,7 +63,7 @@ use coven_protocol::remote_object::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 use coven_protocol::store_commit::StoreBatchCommitRef;
-use coven_protocol::store_commit::{StoreAckRef, StoreDeviceHead, StoreDeviceHeadRef};
+use coven_protocol::store_commit::{StoreAckRef, StoreDeviceHead};
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 

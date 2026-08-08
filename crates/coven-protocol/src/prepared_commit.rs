@@ -4,7 +4,8 @@
 
 use crate::membership_mutation::{PreparedMembershipPublication, PreparedMembershipTransition};
 use crate::objects::{
-    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError,
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
+    StoreObjectError,
 };
 use crate::store_commit::head_slot_prefix;
 use crate::store_commit::{
@@ -31,13 +32,27 @@ impl From<StoreObjectError> for PreparedCommitError {
     }
 }
 
+/// A signed commit and the exact object it is published as.
+///
+/// `reference.object` names that object; the commit's bytes are what `commit`
+/// serializes to, so they are not carried beside it. Whoever uploads rebuilds
+/// them through [`PreparedExactObject::new`], which re-checks them against the
+/// reference on the way out.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedStoreOperationCommon {
     pub commit: StoreBatchCommit,
-    pub prepared: PreparedExactObject,
     pub reference: StoreBatchCommitRef,
     pub registration_activation: Option<ActivatedStoreDeviceRegistration>,
+}
+
+impl PreparedStoreOperationCommon {
+    /// The commit prepared for upload: its canonical bytes, re-derived from the
+    /// value, under the exact reference the operation names.
+    pub fn prepared_commit(&self) -> Result<PreparedExactObject, PreparedCommitError> {
+        PreparedExactObject::new(self.reference.object.clone(), self.commit.to_bytes())
+            .map_err(PreparedCommitError::from)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,7 +60,7 @@ pub struct PreparedStoreOperationCommon {
 pub struct PreparedStoreOperationCommit {
     pub common: PreparedStoreOperationCommon,
     pub head: StoreDeviceHead,
-    pub prepared_head: PreparedExactObject,
+    pub head_object: ExactObjectRef,
     pub history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
 }
 
@@ -67,20 +82,21 @@ impl PreparedStoreOperationCommit {
     fn candidate_remote_objects(
         &self,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
+        let commit_bytes = self.commit.to_bytes();
+        let head_bytes = self.head.to_bytes();
+        // A Store commit and a Store head are signed plaintext: what goes to
+        // storage is the canonical value, so both arguments are the same bytes.
         let mut objects = vec![crate::remote_object::RemoteObjectRecord::candidate_commit(
             self.reference.clone(),
-            &self.commit.to_bytes(),
-            self.prepared.stored_bytes(),
+            &commit_bytes,
+            &commit_bytes,
         )
         .map_err(|error| PreparedCommitError(error.to_string()))?];
         objects.push(
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_head(
-                super::store_commit::StoreDeviceHeadRef {
-                    head_hash: self.head.head_hash(),
-                    object: self.prepared_head.reference().clone(),
-                },
-                &self.head.to_bytes(),
-                self.prepared_head.stored_bytes(),
+                self.head_ref(),
+                &head_bytes,
+                &head_bytes,
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -158,22 +174,20 @@ impl PreparedStoreOperationCommit {
         publication: &PreparedMembershipPublication,
         resolution: &super::membership::StoreMembershipConflictResolution,
         reference: &super::membership::StoreMembershipConflictResolutionRef,
-        prepared: &PreparedExactObject,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
+        let resolution_bytes = serde_json::to_vec(resolution).map_err(|error| {
+            PreparedCommitError(format!("serialize Store membership resolution: {error}"))
+        })?;
         if !matches!(
             &transition.entry.change,
             super::membership::MembershipChange::ResolutionActivation {
                 resolution: introduced,
             } if introduced == reference
-        ) || reference.object != *prepared.reference()
+        ) || reference.object.verify(&resolution_bytes).is_err()
             || reference.resolution_hash != resolution.resolution_hash()
             || reference.conflict_hash != resolution.conflict_hash
             || reference.resolver_pubkey != resolution.resolver_pubkey
-            || prepared.stored_bytes()
-                != serde_json::to_vec(resolution).map_err(|error| {
-                    PreparedCommitError(format!("serialize Store membership resolution: {error}"))
-                })?
         {
             return Err(PreparedCommitError(
                 "Merge membership resolution graph differs from its activating Store candidate"
@@ -183,12 +197,8 @@ impl PreparedStoreOperationCommit {
         let authority =
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_membership_resolution(
                 reference.clone(),
-                &serde_json::to_vec(resolution).map_err(|error| {
-                    PreparedCommitError(format!(
-                        "serialize Store membership resolution: {error}"
-                    ))
-                })?,
-                prepared.stored_bytes(),
+                &resolution_bytes,
+                &resolution_bytes,
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?;
@@ -234,12 +244,19 @@ impl PreparedStoreOperationCommit {
                 "serialize Merge membership candidate entry: {error}"
             ))
         })?;
+        let head_bytes = serde_json::to_vec(&publication.head).map_err(|error| {
+            PreparedCommitError(format!(
+                "serialize Merge membership candidate head: {error}"
+            ))
+        })?;
+        // Membership entries and heads are signed plaintext, so the canonical
+        // value is also what goes to storage.
         objects.push(
             crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_entry(
                 family,
                 transition.entry_ref.clone(),
                 &entry_bytes,
-                transition.entry_object.stored_bytes(),
+                &entry_bytes,
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -248,12 +265,8 @@ impl PreparedStoreOperationCommit {
             crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
                 family,
                 publication.head_ref.clone(),
-                &serde_json::to_vec(&publication.head).map_err(|error| {
-                    PreparedCommitError(format!(
-                        "serialize Merge membership candidate head: {error}"
-                    ))
-                })?,
-                publication.head_object.stored_bytes(),
+                &head_bytes,
+                &head_bytes,
                 self.reference.clone(),
             )
             .map_err(|error| PreparedCommitError(error.to_string()))?,
@@ -293,15 +306,18 @@ impl PreparedStoreOperationCommit {
         self.reference
             .verify_commit(&self.commit)
             .map_err(|error| error.to_string())?;
-        if self.prepared.reference() != &self.reference.object
-            || self.prepared.stored_bytes() != self.commit.to_bytes()
+        if self
+            .reference
+            .object
+            .verify(&self.commit.to_bytes())
+            .is_err()
         {
             return Err(
                 "prepared Store operation does not bind its exact commit bytes".to_string(),
             );
         }
         if self.head.commit != self.reference
-            || self.prepared_head.stored_bytes() != self.head.to_bytes()
+            || self.head_object.verify(&self.head.to_bytes()).is_err()
             || self.head.history_summary != self.history_summary.digest()
             || self.history_summary.causal_cut.get(&self.reference.coord) != Some(&self.reference)
             || self.history_summary.validate_shape().is_err()
@@ -321,21 +337,27 @@ impl PreparedStoreOperationCommit {
     pub(crate) fn has_same_durable_activation_as(&self, other: &Self) -> bool {
         self.reference == other.reference
             && self.commit.to_bytes() == other.commit.to_bytes()
-            && self.prepared.reference() == other.prepared.reference()
             && self.registration_activation == other.registration_activation
             && self.head.to_bytes() == other.head.to_bytes()
-            && self.prepared_head.reference() == other.prepared_head.reference()
+            && self.head_object == other.head_object
             && self.history_summary == other.history_summary
     }
 
-    pub fn publication(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
-        (&self.head, &self.prepared_head)
+    /// The activation head prepared for upload: its canonical bytes, re-derived
+    /// from the value, under the exact object the operation names.
+    pub fn prepared_head(&self) -> Result<PreparedExactObject, PreparedCommitError> {
+        PreparedExactObject::new(self.head_object.clone(), self.head.to_bytes())
+            .map_err(PreparedCommitError::from)
+    }
+
+    pub fn publication(&self) -> (&StoreDeviceHead, &ExactObjectRef) {
+        (&self.head, &self.head_object)
     }
 
     pub fn head_ref(&self) -> StoreDeviceHeadRef {
         StoreDeviceHeadRef {
             head_hash: self.head.head_hash(),
-            object: self.prepared_head.reference().clone(),
+            object: self.head_object.clone(),
         }
     }
 
@@ -437,14 +459,14 @@ impl PreparedStoreOperationCommit {
     pub fn adopt_merge_head(
         &mut self,
         winner: StoreDeviceHead,
-        prepared: PreparedExactObject,
+        object: ExactObjectRef,
     ) -> Result<(), PreparedCommitError> {
         let current = &mut self.head;
-        let current_prepared = &mut self.prepared_head;
+        let current_object = &mut self.head_object;
         let history_summary = &self.history_summary;
         if winner.commit != self.common.reference
-            || prepared.reference().slot() != current_prepared.reference().slot()
-            || prepared.reference() == current_prepared.reference()
+            || object.slot() != current_object.slot()
+            || object == *current_object
             || winner.author_registration != current.author_registration
             || winner.successor.activation != current.successor.activation
             || winner.successor.predecessor != current.successor.predecessor
@@ -455,7 +477,7 @@ impl PreparedStoreOperationCommit {
             ));
         }
         *current = winner;
-        *current_prepared = prepared;
+        *current_object = object;
         Ok(())
     }
 
@@ -477,7 +499,7 @@ impl PreparedStoreOperationCommit {
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();
         let head = &mut self.head;
-        let prepared = &mut self.prepared_head;
+        let head_object = &mut self.head_object;
         let history_summary = &mut self.history_summary;
         let Some(StoreControl { transition }) = commit.control() else {
             return Err(PreparedCommitError(
@@ -566,19 +588,21 @@ impl PreparedStoreOperationCommit {
             &head.author_registration.device_id.to_string(),
             head.commit.coord.sequence(),
         );
-        *prepared = prepare_head(
+        *head_object = prepare_head(
             &context,
-            prepared.reference().slot().clone(),
+            head_object.slot().clone(),
             &prefix,
             replacement.to_bytes(),
-        )?;
+        )?
+        .reference()
+        .clone();
         *head = replacement;
         self.validate_closed_shape().map_err(PreparedCommitError)?;
         Ok(())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn publication_for_test(&self) -> (&StoreDeviceHead, &PreparedExactObject) {
+    pub fn publication_for_test(&self) -> (&StoreDeviceHead, &ExactObjectRef) {
         self.publication()
     }
 }
