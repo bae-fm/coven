@@ -859,7 +859,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             identity,
         )
         .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
-        prepare_registration_object(storage, &registration, registration_slot.clone())?;
+        prepare_registration_object(storage.as_ref(), &registration, registration_slot.clone())?;
         if access_request != *approval.request {
             return Err(DeviceJoinError::JournalConflict);
         }
