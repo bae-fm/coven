@@ -108,20 +108,6 @@ impl CloudSyncCipherStateAccess for CloudCipherState {
     }
 }
 
-impl<T: CloudSyncCipherStateAccess + ?Sized> CloudSyncCipherStateAccess for Arc<T> {
-    fn snapshot(&self) -> CloudCipher {
-        (**self).snapshot()
-    }
-
-    fn merge_key_rotation(
-        &self,
-        new_encryption: &EncryptionService,
-        custody: &dyn coven_keys::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
-        (**self).merge_key_rotation(new_encryption, custody)
-    }
-}
-
 /// Adopt `new_encryption`'s generations into the live keyring, or report that
 /// it held them all already.
 ///
