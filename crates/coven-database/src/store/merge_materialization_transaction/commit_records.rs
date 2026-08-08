@@ -331,7 +331,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 &materialization,
             )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
-            self.records(),
+            self.record_transaction(),
             &root,
             materialization.commit_ref(),
             materialization.circle_activations(),

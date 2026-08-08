@@ -40,7 +40,6 @@ macro_rules! coven_tables {
     activation_commit TEXT NOT NULL CHECK (json_valid(activation_commit)),
     exact_cut TEXT NOT NULL CHECK (json_valid(exact_cut)),
     image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
-    image_bytes BLOB NOT NULL CHECK (length(image_bytes) > 0),
     bootstrap_ref BLOB NOT NULL CHECK (length(bootstrap_ref) > 0)
 "
         );

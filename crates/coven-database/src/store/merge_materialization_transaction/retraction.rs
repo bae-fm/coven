@@ -90,12 +90,23 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         let encoded = serde_json::to_string(activation_commit).map_err(|error| {
             DbError::context("serialize retracted Circle bootstrap activation", error)
         })?;
-        self.transaction
-            .execute(
-                "DELETE FROM circle_bootstrap_coverage WHERE activation_commit = ?1",
-                [encoded],
-            )
-            .map_err(DbError::from)
+        let circle_ids = crate::query_mapped_rows(
+            self.transaction,
+            "SELECT circle_id FROM circle_bootstrap_coverage
+             WHERE activation_commit = ?1 ORDER BY circle_id",
+            [encoded],
+            |row| row.get::<_, String>(0),
+        )?;
+        for encoded_circle_id in &circle_ids {
+            let circle_id = encoded_circle_id
+                .parse()
+                .map_err(|error| DbError::context("parse retracted Circle bootstrap id", error))?;
+            StoreDatabase::clear_circle_bootstrap_coverage_on(
+                self.record_transaction(),
+                circle_id,
+            )?;
+        }
+        Ok(circle_ids.len())
     }
 
     pub fn retract_verified_merge_materializations(

@@ -795,17 +795,17 @@ struct DatabaseCore {
     transfer_limits: coven_protocol::blob::TransferLimits,
 }
 
-/// One Circle's staged restore outcome, decided by selection against the
-/// restoring identity's re-resolved access. `Install` carries a verified image to
-/// project and record coverage for; `ClearCoverage` names a Circle the identity
-/// cannot decrypt, whose preserved coverage row must be deleted so replay never
-/// reconstructs an image the identity has no access to.
-pub enum StagedCircleDecision {
-    Install {
-        activation_commit: StoreBatchCommitRef,
-        image: coven_protocol::circle_activation::VerifiedCircleImage,
-    },
-    ClearCoverage(coven_protocol::circle::CircleId),
+/// One Circle image selected against the restoring identity's re-resolved
+/// access. Coverage references imported from the Store snapshot are removed as
+/// a set before these locally verified images are installed.
+pub struct StagedCircleInstall {
+    pub activation_commit: StoreBatchCommitRef,
+    pub image: coven_protocol::circle_activation::VerifiedCircleImage,
+}
+
+enum CircleRestoreSelection {
+    Pending,
+    Selected(Vec<StagedCircleInstall>),
 }
 
 pub struct VerifiedSnapshotBootstrapInstall {
@@ -815,8 +815,8 @@ pub struct VerifiedSnapshotBootstrapInstall {
     stability: RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
     routing_key: Option<coven_protocol::circle::RowRoutingKey>,
-    circle_decisions: Vec<StagedCircleDecision>,
-    /// Fail the Circle-decision step of the install transaction, after the Store
+    circle_selection: CircleRestoreSelection,
+    /// Fail the Circle-install step of the install transaction, after the Store
     /// image has been installed within it — a test's stand-in for a crash between
     /// the Store and Circle installs, exercising the single-transaction rollback.
     #[cfg(any(test, feature = "test-utils"))]
@@ -831,7 +831,6 @@ impl VerifiedSnapshotBootstrapInstall {
         stability: crate::VerifiedStoreSnapshotStability,
         membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,
-        circle_decisions: Vec<StagedCircleDecision>,
     ) -> Result<Self, DbError> {
         if store_root.value.to_bytes() != store_root.bytes
             || store_root.value.object_hash() != store_root.semantic_hash
@@ -877,24 +876,24 @@ impl VerifiedSnapshotBootstrapInstall {
             stability,
             membership,
             routing_key,
-            circle_decisions,
+            circle_selection: CircleRestoreSelection::Pending,
             #[cfg(any(test, feature = "test-utils"))]
             fail_circle_install: false,
         })
     }
 
-    /// Attach the Circle install/clear decisions selected against a throwaway
-    /// query copy opened through this same authority. Kept separate from `new` so
-    /// one verified install can first query (with no decisions) and then install
-    /// for real (with them), without re-verifying the Store authority.
-    pub fn with_circle_decisions(mut self, circle_decisions: Vec<StagedCircleDecision>) -> Self {
-        self.circle_decisions = circle_decisions;
+    /// Attach the Circle images selected against a throwaway query copy opened
+    /// through this same authority. Kept separate from `new` so one verified
+    /// install can first query and then install for real without re-verifying the
+    /// Store authority.
+    pub fn with_circle_installs(mut self, circle_installs: Vec<StagedCircleInstall>) -> Self {
+        self.circle_selection = CircleRestoreSelection::Selected(circle_installs);
         self
     }
 
     fn install_on(
         &self,
-        records: crate::payload_spool::StoreRecords<'_>,
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         synced_tables: &[SyncedTable],
@@ -951,77 +950,70 @@ impl VerifiedSnapshotBootstrapInstall {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            records,
+            records.records(),
             schema_version,
             routing_hash,
             self.stability.clone(),
         )?;
-        self.install_circle_decisions_on(records, &root, synced_tables)
+        self.install_selected_circles_on(records, &root, synced_tables)
     }
 
-    /// Apply the staged Circle decisions inside the Store install's single
-    /// transaction: each `Install` projects the verified image and records its
-    /// coverage row (accepting a strictly newer cut, refusing a regression); each
-    /// `ClearCoverage` deletes the preserved row for a Circle the restoring
-    /// identity cannot decrypt. The whole set commits or rolls back with the Store
-    /// image — a partially installed union is never exposed.
-    fn install_circle_decisions_on(
+    /// Replace the snapshot's cloud-reference-only Circle coverage with the
+    /// locally selected images inside the Store install transaction. The
+    /// throwaway selection database keeps those references because selection has
+    /// not completed there; the final database removes every imported row before
+    /// installing payload-backed coverage.
+    fn install_selected_circles_on(
         &self,
-        records: crate::payload_spool::StoreRecords<'_>,
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
         use crate::StoreDatabase;
-        let conn = records.conn();
+        let CircleRestoreSelection::Selected(circle_installs) = &self.circle_selection else {
+            return Ok(());
+        };
+        let conn = records.transaction();
         #[cfg(any(test, feature = "test-utils"))]
         if self.fail_circle_install {
             return Err(DbError::Message(
                 "injected Circle install failure after Store install".to_string(),
             ));
         }
-        for decision in &self.circle_decisions {
-            match decision {
-                StagedCircleDecision::Install {
-                    activation_commit,
-                    image,
-                } => {
-                    let activation = StoreDatabase::verified_circle_activation_on(
-                        records,
-                        root,
-                        image.circle_id(),
-                        image.control(),
-                    )?
-                    .ok_or_else(|| {
-                        DbError::Message(format!(
-                            "restored Circle {} image names a control absent from the installed \
-                             control indexes",
-                            image.circle_id()
-                        ))
-                    })?;
-                    crate::install_circle_bootstrap_image_on(
-                        conn,
-                        synced_tables,
-                        activation_commit,
-                        image,
-                    )?;
-                    StoreDatabase::record_one_circle_bootstrap_coverage_on(
-                        records,
-                        root,
-                        activation_commit,
-                        image,
-                        &activation.control,
-                    )?;
-                }
-                StagedCircleDecision::ClearCoverage(circle_id) => {
-                    StoreDatabase::clear_circle_bootstrap_coverage_on(conn, *circle_id)?;
-                }
-            }
+        StoreDatabase::clear_imported_circle_bootstrap_coverage_on(records)?;
+        for install in circle_installs {
+            let activation = StoreDatabase::verified_circle_activation_on(
+                records.records(),
+                root,
+                install.image.circle_id(),
+                install.image.control(),
+            )?
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "restored Circle {} image names a control absent from the installed control \
+                     indexes",
+                    install.image.circle_id()
+                ))
+            })?;
+            crate::install_circle_bootstrap_image_on(
+                conn,
+                synced_tables,
+                &install.activation_commit,
+                &install.image,
+            )?;
+            StoreDatabase::record_one_circle_bootstrap_coverage_on(
+                records,
+                root,
+                &install.activation_commit,
+                &install.image,
+                &activation.control,
+            )?;
         }
         Ok(())
     }
 
     /// Arm the Circle-install failure injection: the install transaction rolls
-    /// back after the Store image is installed but before any Circle decision
+    /// back after the Store image is installed but before any Circle image
     /// commits, standing in for a crash between the two installs.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_circle_install_for_test(mut self) -> Self {

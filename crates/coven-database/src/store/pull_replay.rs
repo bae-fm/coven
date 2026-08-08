@@ -19,6 +19,24 @@ pub fn install_circle_bootstrap_image_on(
 ) -> Result<(), DbError> {
     let source = crate::open_database_image(bootstrap.image_bytes())
         .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
+    install_circle_bootstrap_connection_on(
+        conn,
+        &source,
+        synced_tables,
+        activation_commit,
+        bootstrap.circle_id(),
+        bootstrap.reference(),
+    )
+}
+
+pub fn install_circle_bootstrap_connection_on(
+    conn: &rusqlite::Connection,
+    source: &rusqlite::Connection,
+    synced_tables: &[SyncedTable],
+    activation_commit: &StoreBatchCommitRef,
+    circle_id: coven_protocol::circle::CircleId,
+    reference: &coven_protocol::circle::CircleBootstrapRef,
+) -> Result<(), DbError> {
     let mut projection_tables = synced_tables
         .iter()
         .map(|table| table.name().to_string())
@@ -38,20 +56,17 @@ pub fn install_circle_bootstrap_image_on(
         // installs onto an empty replay base, where nothing conflicts. Data tables
         // carry no circle rows on a Store image, so they insert exactly once.
         let ignore_existing = table == "_coven_audience" || table == "_coven_row_routes";
-        crate::copy_table_with_conflicts(&source, conn, table, ignore_existing).map_err(
+        crate::copy_table_with_conflicts(source, conn, table, ignore_existing).map_err(
             |error| {
                 DbError::context(
-                    format!(
-                        "install exact Circle {} bootstrap table {table}",
-                        bootstrap.circle_id()
-                    ),
+                    format!("install exact Circle {} bootstrap table {table}", circle_id),
                     error,
                 )
             },
         )?;
     }
-    install_circle_bootstrap_remote_objects_on(conn, activation_commit, bootstrap)?;
-    for binding in &bootstrap.reference().blobs {
+    install_circle_bootstrap_remote_objects_from_reference_on(conn, activation_commit, reference)?;
+    for binding in &reference.blobs {
         let stored = binding.stored().ok_or_else(|| {
             DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
         })?;
@@ -137,7 +152,19 @@ pub fn install_circle_bootstrap_remote_objects_on(
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,
 ) -> Result<(), DbError> {
-    for binding in &bootstrap.reference().blobs {
+    install_circle_bootstrap_remote_objects_from_reference_on(
+        conn,
+        activation_commit,
+        bootstrap.reference(),
+    )
+}
+
+fn install_circle_bootstrap_remote_objects_from_reference_on(
+    conn: &rusqlite::Connection,
+    activation_commit: &StoreBatchCommitRef,
+    reference: &coven_protocol::circle::CircleBootstrapRef,
+) -> Result<(), DbError> {
+    for binding in &reference.blobs {
         let stored = binding.stored().ok_or_else(|| {
             DbError::Message("Circle bootstrap row blob has no exact locator".to_string())
         })?;

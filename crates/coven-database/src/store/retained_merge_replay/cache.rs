@@ -253,40 +253,43 @@ impl RetainedMergeMaterializationCache {
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
         let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
-        let circle_bootstraps = StoreDatabase::circle_bootstrap_replay_inputs_on(live)?;
+        let records = StoreRecords::new(live, store_dir);
+        let circle_bootstraps = StoreDatabase::claimed_circle_bootstrap_coverage_refs_on(records)?;
         let mut circle_bootstrap_cuts = BTreeMap::new();
-        for (activation_commit, bootstrap) in &circle_bootstraps {
-            crate::verify_circle_bootstrap_image(
-                bootstrap.image_bytes(),
-                bootstrap.reference(),
-                bootstrap.circle_id(),
+        for coverage in &circle_bootstraps {
+            let source = records
+                .open_database_payload(coverage.bootstrap.image.image_hash)
+                .map_err(DbError::from)?;
+            crate::store::verify_circle_bootstrap_connection(
+                &source,
+                &coverage.bootstrap,
+                coverage.circle_id,
                 synced_tables,
                 routing_key,
             )
             .map_err(|error| {
                 DbError::context(
-                    format!("verify retained Circle {} bootstrap", bootstrap.circle_id()),
+                    format!("verify retained Circle {} bootstrap", coverage.circle_id),
                     error,
                 )
             })?;
             let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-            crate::install_circle_bootstrap_image_on(
+            crate::store::install_circle_bootstrap_connection_on(
                 &tx,
+                &source,
                 synced_tables,
-                activation_commit,
-                bootstrap,
+                &coverage.activation_commit,
+                coverage.circle_id,
+                &coverage.bootstrap,
             )?;
             tx.commit().map_err(DbError::from)?;
             if circle_bootstrap_cuts
-                .insert(
-                    bootstrap.circle_id(),
-                    bootstrap.reference().coverage.clone(),
-                )
+                .insert(coverage.circle_id, coverage.bootstrap.coverage.clone())
                 .is_some()
             {
                 return Err(DbError::Message(format!(
                     "retained replay has duplicate Circle {} bootstraps",
-                    bootstrap.circle_id()
+                    coverage.circle_id
                 )));
             }
         }
@@ -664,10 +667,7 @@ pub struct CircleRestoreSelectionIndex {
         coven_protocol::circle::CircleId,
         Vec<coven_protocol::circle::CircleControlCoord>,
     )>,
-    pub preserved_images: Vec<(
-        StoreBatchCommitRef,
-        coven_protocol::circle_activation::VerifiedCircleImage,
-    )>,
+    pub preserved_bootstraps: Vec<coven_protocol::circle::CircleBootstrapCoverageRef>,
 }
 
 impl CircleReplayEpochIndex {

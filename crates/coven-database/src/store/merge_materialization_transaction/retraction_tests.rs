@@ -65,23 +65,30 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     database
         .call(move |connection| {
             let store_dir = store_dir;
+            let image = b"Circle bootstrap retraction image";
+            let image_hash = crate::payload_spool::write_payload_blocking(&store_dir, image)?;
+            let circle_id = coven_protocol::circle::CircleId::from_bytes([1; 16]);
             connection
                 .execute(
                     "INSERT INTO circle_bootstrap_coverage
                          (circle_id, control_coord, activation_commit, exact_cut, image_hash,
-                          image_bytes, bootstrap_ref)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                          bootstrap_ref)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
-                        "00000000-0000-4000-8000-000000000001",
+                        circle_id.to_string(),
                         "{}",
                         encoded_activation,
                         "{}",
-                        ObjectHash::digest(b"Circle bootstrap retraction image").to_string(),
-                        b"Circle bootstrap retraction image".as_slice(),
+                        image_hash.to_string(),
                         b"{}".as_slice(),
                     ],
                 )
                 .map_err(DbError::from)?;
+            crate::payload_spool::set_payload_owner_claims_on(
+                connection,
+                &crate::payload_spool::circle_bootstrap_coverage_owner_key(circle_id),
+                &BTreeSet::from([image_hash]),
+            )?;
             let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
             assert_eq!(
                 MergeMaterializationTransaction::new(&transaction, &store_dir)
@@ -105,6 +112,16 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                 )
                 .map_err(DbError::from)?;
             assert_eq!(retained, 1);
+            let claims: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM payload_spool_owners WHERE owner_key = ?1",
+                    [crate::payload_spool::circle_bootstrap_coverage_owner_key(
+                        circle_id,
+                    )],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            assert_eq!(claims, 1);
             let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
             assert_eq!(
                 MergeMaterializationTransaction::new(&transaction, &store_dir)
@@ -120,6 +137,19 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                 )
                 .map_err(DbError::from)?;
             assert_eq!(retained, 0);
+            let (claims, cleanup): (i64, i64) = connection
+                .query_row(
+                    "SELECT
+                         (SELECT COUNT(*) FROM payload_spool_owners WHERE owner_key = ?1),
+                         (SELECT COUNT(*) FROM payload_spool_cleanup WHERE payload_hash = ?2)",
+                    rusqlite::params![
+                        crate::payload_spool::circle_bootstrap_coverage_owner_key(circle_id),
+                        image_hash.to_string(),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            assert_eq!((claims, cleanup), (0, 1));
             Ok(())
         })
         .await

@@ -165,13 +165,13 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         Ok(snapshots)
     }
 
-    pub(crate) async fn select_staged_decisions(
+    pub(crate) async fn select_staged_installs(
         &mut self,
         store_frontier: &CommitFrontier,
         restorer_identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
-    ) -> Result<Vec<coven_database::StagedCircleDecision>, SnapshotError> {
-        use coven_database::StagedCircleDecision;
+    ) -> Result<Vec<coven_database::StagedCircleInstall>, SnapshotError> {
+        use coven_database::StagedCircleInstall;
         let root = self.root().clone();
         // The stream-activation index the control-stream authority resolves against is
         // written by the pull, which has not run on a freshly restored device; seed it
@@ -187,7 +187,8 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .await
             .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
 
-        let mut decisions = Vec::new();
+        let mut installs = Vec::new();
+        let preserved_bootstraps = selection.preserved_bootstraps;
         for (circle_id, controls) in selection.circles {
             let head = self
                 .database
@@ -195,8 +196,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 .await
                 .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             let Some((head_control, head_commit)) = head else {
-                warn!(%circle_id, "restore selection: Circle has no head control; clearing coverage");
-                decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
+                warn!(%circle_id, "restore selection: Circle has no head control");
                 continue;
             };
 
@@ -210,11 +210,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 )
                 .await?;
             let (epoch_encryption, leaf_bootstrap) = match access {
-                // The restoring identity cannot decrypt this Circle — delete any
-                // preserved coverage row so replay never reconstructs an image it has
-                // no access to.
                 crate::sync::store::circles::activation::LocalCircleAccess::NoAccess => {
-                    decisions.push(StagedCircleDecision::ClearCoverage(circle_id));
                     continue;
                 }
                 crate::sync::store::circles::activation::LocalCircleAccess::Active {
@@ -233,13 +229,71 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                     image,
                 });
             }
-            for (activation_commit, image) in &selection.preserved_images {
-                if image.circle_id() == circle_id {
-                    candidates.push(StagedCircleImageCandidate {
-                        activation_commit: activation_commit.clone(),
-                        image: image.clone(),
-                    });
-                }
+            for coverage in preserved_bootstraps
+                .iter()
+                .filter(|coverage| coverage.circle_id == circle_id)
+            {
+                let access = self
+                    .resolve_restorer_access(
+                        restorer_identity,
+                        routing_key,
+                        circle_id,
+                        &coverage.control,
+                        &coverage.activation_commit,
+                    )
+                    .await?;
+                let crate::sync::store::circles::activation::LocalCircleAccess::Active {
+                    epoch_encryption,
+                    ..
+                } = access
+                else {
+                    tracing::debug!(
+                        %circle_id,
+                        control = ?coverage.control,
+                        "restore selection: retained Circle bootstrap is not decryptable by the restoring identity"
+                    );
+                    continue;
+                };
+                let image_context = ProtocolObjectContext::circle(
+                    root.store_root_hash,
+                    ProtocolObjectDomain::CircleBootstrapImage,
+                    epoch_encryption,
+                );
+                let image_prefix = coven_protocol::store_commit::semantic_prefix_from_exact_object(
+                    &coverage.bootstrap.image.object,
+                    coven_protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
+                        .extension(),
+                )
+                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                let image_bytes = self
+                    .storage
+                    .read_protocol_object(
+                        &image_context,
+                        &coverage.bootstrap.image.object,
+                        &image_prefix,
+                    )
+                    .await
+                    .map_err(SnapshotError::Bucket)?;
+                verify_circle_bootstrap_image(
+                    &image_bytes,
+                    &coverage.bootstrap,
+                    circle_id,
+                    self.database.synced_tables(),
+                    routing_key,
+                )
+                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                let image =
+                    coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
+                        circle_id,
+                        coverage.control.clone(),
+                        coverage.bootstrap.clone(),
+                        image_bytes,
+                    )
+                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                candidates.push(StagedCircleImageCandidate {
+                    activation_commit: coverage.activation_commit.clone(),
+                    image,
+                });
             }
             // Standalone Circle snapshots are sealed under the Circle epoch key the
             // identity's active leaf carries, not the Store routing key.
@@ -257,7 +311,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             }
 
             match choose_maximal_installable_candidate(circle_id, store_frontier, candidates)? {
-                Some(candidate) => decisions.push(StagedCircleDecision::Install {
+                Some(candidate) => installs.push(StagedCircleInstall {
                     activation_commit: candidate.activation_commit,
                     image: candidate.image,
                 }),
@@ -270,7 +324,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 }
             }
         }
-        Ok(decisions)
+        Ok(installs)
     }
 
     async fn resolve_restorer_access(
@@ -278,10 +332,10 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
         restorer_identity: &UserKeypair,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         circle_id: CircleId,
-        head_control: &CircleControlCoord,
-        head_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
+        control: &CircleControlCoord,
+        activation_commit: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<crate::sync::store::circles::activation::LocalCircleAccess, SnapshotError> {
-        let commit_lookup = head_commit.clone();
+        let commit_lookup = activation_commit.clone();
         let root = self.root().clone();
         let owned = self
             .database
@@ -294,13 +348,13 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .circles()
             .iter()
             .find(|reference| {
-                reference.circle_id == circle_id && reference.control.coord == *head_control
+                reference.circle_id == circle_id && reference.control.coord == *control
             })
             .ok_or_else(|| {
                 SnapshotError::BootstrapState(format!(
-                "restore selection: Circle {circle_id} head control is absent from its retained \
+                    "restore selection: Circle {circle_id} control is absent from its retained \
                  activation"
-            ))
+                ))
             })?;
         crate::sync::store::circles::activation::CircleActivationVerifier::new(
             self.database,

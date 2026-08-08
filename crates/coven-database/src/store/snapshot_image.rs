@@ -931,6 +931,16 @@ pub fn verify_circle_bootstrap_image(
     }
     let connection = crate::open_database_image(image)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+    verify_circle_bootstrap_connection(&connection, reference, circle_id, tables, routing_key)
+}
+
+pub fn verify_circle_bootstrap_connection(
+    connection: &Connection,
+    reference: &coven_protocol::circle::CircleBootstrapRef,
+    circle_id: coven_protocol::circle::CircleId,
+    tables: &[SyncedTable],
+    routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+) -> Result<(), SnapshotImageError> {
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
@@ -943,14 +953,14 @@ pub fn verify_circle_bootstrap_image(
             reference.schema_version
         )));
     }
-    let routing_contract = crate::SyncRoutingContract::from_connection(&connection, tables)
+    let routing_contract = crate::SyncRoutingContract::from_connection(connection, tables)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     if routing_contract.hash() != reference.sync_routing_hash {
         return Err(SnapshotImageError::Projection(
             "Circle bootstrap routing contract differs from its signed hash".to_string(),
         ));
     }
-    let gates = crate::Gates::from_tables(&connection, tables)
+    let gates = crate::Gates::from_tables(connection, tables)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     if gates.has_scoped_graph() {
         let routing_key = routing_key.ok_or_else(|| {
@@ -960,17 +970,17 @@ pub fn verify_circle_bootstrap_image(
             )
         })?;
         crate::validate_snapshot_routing_state(
-            &connection,
+            connection,
             &gates,
             routing_key,
             &coven_protocol::circle::Audience::Circle(circle_id),
         )
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     }
-    let declarations = crate::BlobDecls::from_tables(&connection, tables)
+    let declarations = crate::BlobDecls::from_tables(connection, tables)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     let rows = declarations
-        .publication_blobs_in_db(&connection)
+        .publication_blobs_in_db(connection)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     if rows.len() != reference.blobs.len() {
         return Err(SnapshotImageError::Projection(
@@ -1009,7 +1019,7 @@ pub fn verify_circle_bootstrap_image(
             ));
         }
     }
-    for table in crate::user_table_names(&connection)
+    for table in crate::user_table_names(connection)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
     {
         if tables.iter().any(|synced| synced.name() == table)

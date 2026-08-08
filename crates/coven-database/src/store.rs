@@ -105,7 +105,8 @@ pub use merge_materialization_transaction::{
 };
 pub use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
 pub use pull_replay::{
-    install_circle_bootstrap_image_on, install_circle_bootstrap_remote_objects_on,
+    install_circle_bootstrap_connection_on, install_circle_bootstrap_image_on,
+    install_circle_bootstrap_remote_objects_on,
 };
 pub use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
@@ -119,8 +120,8 @@ pub use retained_replay::{
 };
 use snapshot_image::snapshot_image_db_error;
 pub use snapshot_image::{
-    verify_circle_bootstrap_image, CreatedSnapshot, SnapshotBlobAudience, SnapshotDatabaseImage,
-    SnapshotImageError, SnapshotImageOperationError,
+    verify_circle_bootstrap_connection, verify_circle_bootstrap_image, CreatedSnapshot,
+    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
 };
 use store_device_state::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
@@ -772,8 +773,7 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call(Self::circle_bootstrap_replay_inputs_on)
+        self.call_records(Self::circle_bootstrap_replay_inputs_on)
             .await
     }
 

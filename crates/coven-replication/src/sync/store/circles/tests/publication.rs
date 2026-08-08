@@ -1051,6 +1051,11 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("read durable recipient Circle bootstrap coverage");
     assert_eq!(coverage_count, 1);
+    let error = member_database
+        .reject_missing_circle_bootstrap_payload_claim_for_test(circle_id)
+        .await
+        .expect("reject Circle bootstrap coverage without its payload claim");
+    assert!(error.contains("payload claims differ"), "{error}");
     let (current, member_bootstrap_commit) = StoreDatabase::new(&member_db)
         .circle_authoring_context(circle_id, &member_pubkey)
         .await

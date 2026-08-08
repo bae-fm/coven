@@ -268,9 +268,9 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
     /// install: a throwaway copy of the raw image is opened through the same
     /// verified install authority so the identity's own access can be re-resolved
     /// from the verified control chain (never the snapshot author's preserved
-    /// caches), producing per-Circle install/clear decisions. The real install
-    /// then applies the Store image and every decision inside one transaction, so
-    /// a partially installed union is never exposed.
+    /// caches), selecting the Circle images the restored database can use. The
+    /// real install then applies the Store image and every selection inside one
+    /// transaction, so a partially installed union is never exposed.
     #[allow(clippy::too_many_arguments)]
     pub async fn install(
         self,
@@ -315,11 +315,10 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                     head_refs: membership.head_refs().to_vec(),
                 },
                 routing_encryption,
-                Vec::new(),
             )
             .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
 
-            let decisions = match routing_encryption {
+            let circle_installs = match routing_encryption {
                 // Circles exist only in a scoped (Circle-routing) Store; without
                 // routing encryption there are no Circle images to stage.
                 Some(encryption) => {
@@ -354,7 +353,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                             storage.as_ref(),
                             &mut history_verifier,
                         )
-                        .select_staged_decisions(
+                        .select_staged_installs(
                             &store_frontier,
                             &restorer_identity,
                             Some(&routing_key),
@@ -368,7 +367,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 }
                 None => Vec::new(),
             };
-            let install = install.with_circle_decisions(decisions);
+            let install = install.with_circle_installs(circle_installs);
             #[cfg(any(test, feature = "test-utils"))]
             let install = if fail_circle_install {
                 install.fail_circle_install_for_test()

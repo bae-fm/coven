@@ -512,6 +512,32 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn reject_missing_circle_bootstrap_payload_claim_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<String, DbError> {
+        let store_dir = self.store_dir.clone();
+        self.connection
+            .call(move |connection| {
+                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
+                transaction
+                    .execute(
+                        "DELETE FROM payload_spool_owners WHERE owner_key = ?1",
+                        [crate::payload_spool::circle_bootstrap_coverage_owner_key(
+                            circle_id,
+                        )],
+                    )
+                    .map_err(DbError::from)?;
+                let error = StoreDatabase::circle_bootstrap_replay_inputs_on(
+                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
+                )
+                .expect_err("Circle bootstrap replay must require its payload claim");
+                transaction.rollback().map_err(DbError::from)?;
+                Ok(error.to_string())
+            })
+            .await
+    }
+
     pub async fn reject_changed_circle_bootstrap_image_hash_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
@@ -540,7 +566,7 @@ impl StoreDatabase {
                     &activation_commit,
                 )?;
                 let error = StoreDatabase::record_circle_bootstrap_coverage_on(
-                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
+                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
                     &root,
                     &activation_commit,
                     retained.circle_activations(),

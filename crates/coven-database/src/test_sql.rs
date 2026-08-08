@@ -1804,7 +1804,12 @@ impl DatabaseTestSql<'_> {
         )>,
         DbError,
     > {
-        crate::StoreDatabase::circle_bootstrap_replay_inputs_on(self.connection)
+        let store_dir = self.store_dir.ok_or_else(|| {
+            DbError::Message("test Circle bootstrap access requires the Store directory".into())
+        })?;
+        crate::StoreDatabase::circle_bootstrap_replay_inputs_on(
+            crate::payload_spool::StoreRecords::new(self.connection, store_dir),
+        )
     }
 
     pub fn materialized_frontier(
