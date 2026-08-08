@@ -365,6 +365,20 @@ macro_rules! coven_tables {
     payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64)
 "
         );
+        // One owner's claim on one payload file. Two rows can name the same
+        // payload — a Circle operation and the remote object it prepared both
+        // need the bytes — so a payload is deleted when its last claim goes,
+        // not when any one owner is done with it. `owner_key` names the row
+        // holding the claim ('circle-operation:<id>', 'remote-object:<id>'),
+        // so an orphan is traceable to the flow that leaked it.
+        $visit!(
+            payload_spool_owners,
+            "
+    payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+    owner_key TEXT NOT NULL CHECK (length(owner_key) > 0),
+    PRIMARY KEY (payload_hash, owner_key)
+"
+        );
         $visit!(
             outbound_circle_snapshot,
             "

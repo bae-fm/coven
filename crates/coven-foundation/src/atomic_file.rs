@@ -140,7 +140,7 @@ pub async fn sync_parent_dir(path: &Path) -> Result<(), String> {
 }
 
 /// [`sync_parent_dir`] for callers that are not on the async runtime.
-pub(crate) fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
+pub fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
     let parent = parent_of(path)?;
     flush_directory_blocking(parent)
         .map_err(|error| format!("fsync parent directory {}: {error}", parent.display()))

@@ -391,10 +391,7 @@ impl StoreDatabase {
                         }
                     }
                 }
-                super::circle_controls::enqueue_operation_payload_cleanup_on(
-                    &tx,
-                    journal.operation(),
-                )?;
+                super::circle_controls::release_operation_payloads_on(&tx, &journal.operation_id)?;
                 let deleted = tx
                     .execute(
                         "DELETE FROM circle_operations WHERE operation_id = ?1",

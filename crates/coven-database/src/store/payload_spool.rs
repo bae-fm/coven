@@ -7,13 +7,17 @@
 //! the same contents and a file whose insert never committed is inert garbage
 //! bounded by that one operation's content.
 //!
-//! Deletion rides row deletion. The transaction that drops a referencing row
-//! records the obligation with [`enqueue_payload_spool_cleanup_on`]; once that
-//! transaction commits, [`PayloadSpool::drain_cleanup`] removes each file and
-//! clears its obligation. A failure between the two leaves the obligation
+//! Deletion rides row deletion, counted by owner. Rows of different kinds can
+//! name the same payload — a Circle operation and the remote object it prepared
+//! both need one object's bytes — so a row does not delete the file it is done
+//! with; it drops its claim with [`set_payload_owner_claims_on`], and the
+//! transaction that drops the last claim records the deletion obligation. Once
+//! that transaction commits, [`PayloadSpool::drain_cleanup`] removes each file
+//! and clears its obligation. A failure between the two leaves the obligation
 //! durable, so the next drain finishes the deletion rather than losing it.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use coven_foundation::local_file::AtomicStagedFile;
 use coven_foundation::store_dir::StoreDir;
@@ -85,78 +89,209 @@ impl<'store> PayloadSpool<'store> {
         let path = self.store_dir.payload_spool_path(hash);
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(PayloadSpoolError::Missing { hash, path })
-            }
-            Err(error) => Err(PayloadSpoolError::File {
-                path,
-                error: error.to_string(),
-            }),
-        }
-    }
-
-    /// Remove the payload stored under `hash`. An absent file is success: the
-    /// obligation this discharges says the payload must not be there, and a
-    /// drain that failed after the removal retries the whole deletion.
-    pub async fn delete(&self, hash: ObjectHash) -> Result<(), PayloadSpoolError> {
-        let path = self.store_dir.payload_spool_path(hash);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => coven_foundation::atomic_file::sync_parent_dir(&path)
-                .await
-                .map_err(|error| PayloadSpoolError::File {
-                    path: path.clone(),
-                    error,
-                }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                debug!(payload = %hash, "payload spool file is already absent");
-                Ok(())
-            }
-            Err(error) => Err(PayloadSpoolError::File {
-                path,
-                error: error.to_string(),
-            }),
+            Err(error) => Err(read_error(hash, path, error)),
         }
     }
 
     /// Delete the payload behind every committed cleanup obligation, clearing
     /// each obligation once its file is gone. A filesystem or database failure
     /// leaves the obligation durable and fails the drain.
+    ///
+    /// The deletions run on the database's connection thread, alongside the
+    /// transactions that register claims, so a payload cannot be re-claimed and
+    /// rewritten between this drain reading its obligation and removing its
+    /// file.
     pub async fn drain_cleanup(&self, database: &StoreDatabase) -> Result<(), PayloadSpoolError> {
-        for hash in database.payload_spool_cleanup_hashes().await? {
-            self.delete(hash).await?;
-            database.complete_payload_spool_cleanup(hash).await?;
-        }
-        Ok(())
+        let store_dir = self.store_dir.clone();
+        database
+            .connection
+            .call(move |conn| {
+                for hash in payload_spool_cleanup_hashes_on(conn)? {
+                    delete_payload_blocking(&store_dir, hash)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    conn.execute(
+                        "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
+                        [hash.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(PayloadSpoolError::Database)
     }
 }
 
-/// Record that the payload stored under `hash` is owed a deletion. Called in
-/// the transaction that drops the row referencing it, so the row's absence and
-/// the file's deletion obligation commit together.
-pub fn enqueue_payload_spool_cleanup_on(
-    conn: &Connection,
+/// Install `bytes` as one payload from a caller that owns its thread, and
+/// return the hash naming the file they were installed as.
+///
+/// The rows that name payloads are written on the database's own connection
+/// thread, and a payload has to be on disk before the row naming it commits, so
+/// the write that installs it runs there too — the same blocking-IO position
+/// SQLite's own writes occupy. The async [`PayloadSpool::write`] is for callers
+/// that reach the spool from a task instead.
+pub fn write_payload_blocking(
+    store_dir: &StoreDir,
+    bytes: &[u8],
+) -> Result<ObjectHash, PayloadSpoolError> {
+    let hash = ObjectHash::digest(bytes);
+    let path = store_dir.payload_spool_path(hash);
+    coven_foundation::atomic_file::AtomicFile::new(path.clone())
+        .replace(bytes)
+        .map_err(|error| PayloadSpoolError::File { path, error })?;
+    Ok(hash)
+}
+
+/// [`PayloadSpool::read`] for callers on the database's connection thread.
+pub fn read_payload_blocking(
+    store_dir: &StoreDir,
     hash: ObjectHash,
+) -> Result<Vec<u8>, PayloadSpoolError> {
+    let path = store_dir.payload_spool_path(hash);
+    std::fs::read(&path).map_err(|error| read_error(hash, path, error))
+}
+
+fn read_error(hash: ObjectHash, path: PathBuf, error: std::io::Error) -> PayloadSpoolError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return PayloadSpoolError::Missing { hash, path };
+    }
+    PayloadSpoolError::File {
+        path,
+        error: error.to_string(),
+    }
+}
+
+/// Remove the payload stored under `hash`. An absent file is success: the
+/// obligation this discharges says the payload must not be there, and a drain
+/// that failed after the removal retries the whole deletion.
+fn delete_payload_blocking(
+    store_dir: &StoreDir,
+    hash: ObjectHash,
+) -> Result<(), PayloadSpoolError> {
+    let path = store_dir.payload_spool_path(hash);
+    match std::fs::remove_file(&path) {
+        Ok(()) => sync_parent(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!(payload = %hash, "payload spool file is already absent");
+            Ok(())
+        }
+        Err(error) => Err(PayloadSpoolError::File {
+            path,
+            error: error.to_string(),
+        }),
+    }
+}
+
+fn sync_parent(path: &Path) -> Result<(), PayloadSpoolError> {
+    coven_foundation::atomic_file::sync_parent_dir_blocking(path).map_err(|error| {
+        PayloadSpoolError::File {
+            path: path.to_path_buf(),
+            error,
+        }
+    })
+}
+
+/// Claim `payloads` for `owner_key`, replacing whatever that owner claimed
+/// before. Called in the transaction that writes the row holding the claim, so
+/// the row and its claims commit together.
+///
+/// The whole set is replaced rather than one hash added or dropped, because the
+/// flows that rewrite a journal in place — a Circle operation reaching its
+/// finalization, a membership mutation advancing — carry one owner key across
+/// both the payloads they drop and the payloads they take on, and a payload
+/// named by both must not pass through a moment of being owed a deletion.
+///
+/// A payload leaving the set with no other claimant is owed a deletion,
+/// recorded here. A payload entering it discharges any deletion it was owed:
+/// the obligation says no row names the payload, and this claim is a row that
+/// does.
+pub fn set_payload_owner_claims_on(
+    conn: &Connection,
+    owner_key: &str,
+    payloads: &BTreeSet<ObjectHash>,
 ) -> Result<(), DbError> {
-    let recorded = conn
-        .execute(
-            "INSERT OR IGNORE INTO payload_spool_cleanup (payload_hash) VALUES (?1)",
+    let held = crate::query_mapped_rows(
+        conn,
+        "SELECT payload_hash FROM payload_spool_owners WHERE owner_key = ?1",
+        [owner_key],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(DbError::from)?
+    .into_iter()
+    .map(|hash| hash.parse::<ObjectHash>().map_err(DbError::from))
+    .collect::<Result<BTreeSet<_>, _>>()?;
+
+    for hash in held.difference(payloads) {
+        conn.execute(
+            "DELETE FROM payload_spool_owners WHERE payload_hash = ?1 AND owner_key = ?2",
+            rusqlite::params![hash.to_string(), owner_key],
+        )
+        .map_err(DbError::from)?;
+        let claimed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM payload_spool_owners WHERE payload_hash = ?1)",
+                [hash.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !claimed {
+            conn.execute(
+                "INSERT OR IGNORE INTO payload_spool_cleanup (payload_hash) VALUES (?1)",
+                [hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        }
+    }
+    for hash in payloads.difference(&held) {
+        conn.execute(
+            "INSERT INTO payload_spool_owners (payload_hash, owner_key) VALUES (?1, ?2)",
+            rusqlite::params![hash.to_string(), owner_key],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
             [hash.to_string()],
         )
         .map_err(DbError::from)?;
-    if recorded == 0 {
-        debug!(payload = %hash, "payload spool cleanup obligation already recorded");
     }
     Ok(())
 }
 
+/// Drop every claim `owner_key` holds, owing a deletion for each payload it was
+/// the last claimant of. Called in the transaction that drops the row.
+pub fn release_payload_owner_on(conn: &Connection, owner_key: &str) -> Result<(), DbError> {
+    set_payload_owner_claims_on(conn, owner_key, &BTreeSet::new())
+}
+
+/// The owner key naming one Circle operation's claim on its prepared objects.
+pub fn circle_operation_owner_key(operation_id: &str) -> String {
+    format!("circle-operation:{operation_id}")
+}
+
+/// The owner key naming one remote object record's claim on its payloads.
+pub fn remote_object_owner_key(object_id: ObjectHash) -> String {
+    format!("remote-object:{object_id}")
+}
+
 impl StoreDatabase {
-    async fn payload_spool_cleanup_hashes(&self) -> Result<Vec<ObjectHash>, DbError> {
+    /// The payloads still owed a deletion. Empty once every obligation this
+    /// store committed has been discharged.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
+        self.connection.call(payload_spool_cleanup_hashes_on).await
+    }
+
+    /// The payloads `owner_key` claims. Empty when it holds none.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
+        let owner_key = owner_key.to_string();
         self.connection
-            .call(|conn| {
+            .call(move |conn| {
                 crate::query_mapped_rows(
                     conn,
-                    "SELECT payload_hash FROM payload_spool_cleanup ORDER BY payload_hash",
-                    [],
+                    "SELECT payload_hash FROM payload_spool_owners
+                     WHERE owner_key = ?1 ORDER BY payload_hash",
+                    [owner_key],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(DbError::from)?
@@ -166,26 +301,19 @@ impl StoreDatabase {
             })
             .await
     }
+}
 
-    /// The payloads still owed a deletion. Empty once every obligation this
-    /// store committed has been discharged.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        self.payload_spool_cleanup_hashes().await
-    }
-
-    async fn complete_payload_spool_cleanup(&self, hash: ObjectHash) -> Result<(), DbError> {
-        self.connection
-            .call(move |conn| {
-                conn.execute(
-                    "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
-                    [hash.to_string()],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-            })
-            .await
-    }
+fn payload_spool_cleanup_hashes_on(conn: &Connection) -> Result<Vec<ObjectHash>, DbError> {
+    crate::query_mapped_rows(
+        conn,
+        "SELECT payload_hash FROM payload_spool_cleanup ORDER BY payload_hash",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(DbError::from)?
+    .into_iter()
+    .map(|hash| hash.parse::<ObjectHash>().map_err(DbError::from))
+    .collect()
 }
 
 #[cfg(test)]
@@ -222,8 +350,12 @@ mod tests {
 
         assert_eq!(hash, ObjectHash::digest(&bytes));
         assert_eq!(spool.read(hash).await.expect("read payload"), bytes);
+        assert_eq!(
+            read_payload_blocking(&store_dir, hash).expect("read payload"),
+            bytes
+        );
 
-        spool.delete(hash).await.expect("delete payload");
+        delete_payload_blocking(&store_dir, hash).expect("delete payload");
 
         let error = spool.read(hash).await.expect_err("deleted payload");
         assert!(
@@ -238,13 +370,15 @@ mod tests {
         let spool = PayloadSpool::new(&store_dir);
         let hash = spool.write(&payload(9, 16)).await.expect("write payload");
 
-        spool.delete(hash).await.expect("delete payload");
-        spool.delete(hash).await.expect("delete absent payload");
+        delete_payload_blocking(&store_dir, hash).expect("delete payload");
+        delete_payload_blocking(&store_dir, hash).expect("delete absent payload");
     }
 
     /// Writing the same content twice is the shape a retried insert takes, so
     /// the second write has to land on the first one's file and leave nothing
     /// else behind — no second copy, and no temporary sibling from either write.
+    /// Both write paths install the same file, so the blocking one a database
+    /// transaction uses agrees with the async one a task uses.
     #[tokio::test]
     async fn rewriting_the_same_payload_installs_the_same_single_file() {
         let (_directory, store_dir) = temp_store_dir();
@@ -253,8 +387,10 @@ mod tests {
 
         let first = spool.write(&bytes).await.expect("write payload");
         let second = spool.write(&bytes).await.expect("rewrite payload");
+        let third = write_payload_blocking(&store_dir, &bytes).expect("rewrite payload");
 
         assert_eq!(first, second);
+        assert_eq!(first, third);
         assert_eq!(spool_entries(&store_dir), vec![first.to_string()]);
         assert_eq!(spool.read(first).await.expect("read payload"), bytes);
     }
@@ -298,20 +434,22 @@ mod tests {
         reader.await.expect("reader task");
     }
 
-    /// Record an obligation the way an owning flow does: inside the
-    /// transaction that drops the row referencing the payload.
-    async fn commit_obligation(db: &crate::Database, hash: ObjectHash) {
+    /// Claim `payloads` for `owner_key` the way an owning flow does: inside the
+    /// transaction that writes the row holding the claim.
+    async fn commit_claims(db: &crate::Database, owner_key: &str, payloads: &[ObjectHash]) {
+        let owner_key = owner_key.to_string();
+        let payloads = payloads.iter().copied().collect::<BTreeSet<_>>();
         db.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            enqueue_payload_spool_cleanup_on(&tx, hash)?;
+            set_payload_owner_claims_on(&tx, &owner_key, &payloads)?;
             tx.commit().map_err(DbError::from)
         })
         .await
-        .expect("record cleanup obligation");
+        .expect("record payload claims");
     }
 
     #[tokio::test]
-    async fn a_committed_obligation_deletes_its_payload_and_clears_itself() {
+    async fn the_last_claim_to_go_owes_its_payload_a_deletion_and_the_drain_pays_it() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
         let database = crate::synthetic_store::store_database(&db);
@@ -319,7 +457,9 @@ mod tests {
         let kept = spool.write(&payload(1, 64)).await.expect("write kept");
         let dropped = spool.write(&payload(2, 64)).await.expect("write dropped");
 
-        commit_obligation(&db, dropped).await;
+        commit_claims(&db, "owner-a", &[kept, dropped]).await;
+        commit_claims(&db, "owner-a", &[kept]).await;
+
         spool
             .drain_cleanup(&database)
             .await
@@ -328,11 +468,112 @@ mod tests {
         assert_eq!(spool_entries(&store_dir), vec![kept.to_string()]);
         assert_eq!(
             database
-                .payload_spool_cleanup_hashes()
+                .owed_payload_spool_cleanup()
                 .await
                 .expect("remaining obligations"),
             Vec::new()
         );
+    }
+
+    /// Two owners naming one payload is the collision the claim table exists
+    /// for: a Circle operation finishing with an object whose remote record
+    /// still needs its bytes must not take the file with it.
+    #[tokio::test]
+    async fn a_payload_a_second_owner_still_claims_is_not_owed_a_deletion() {
+        let (_directory, store_dir) = temp_store_dir();
+        let db = crate::synthetic_store::open_test_db();
+        let database = crate::synthetic_store::store_database(&db);
+        let spool = PayloadSpool::new(&store_dir);
+        let shared = spool.write(&payload(3, 64)).await.expect("write shared");
+
+        commit_claims(&db, "owner-a", &[shared]).await;
+        commit_claims(&db, "owner-b", &[shared]).await;
+        commit_claims(&db, "owner-a", &[]).await;
+
+        assert_eq!(
+            database
+                .owed_payload_spool_cleanup()
+                .await
+                .expect("obligations"),
+            Vec::new()
+        );
+
+        spool
+            .drain_cleanup(&database)
+            .await
+            .expect("drain obligations");
+        assert_eq!(spool_entries(&store_dir), vec![shared.to_string()]);
+
+        commit_claims(&db, "owner-b", &[]).await;
+        assert_eq!(
+            database
+                .owed_payload_spool_cleanup()
+                .await
+                .expect("obligations"),
+            vec![shared]
+        );
+    }
+
+    /// A payload an owner takes on is a payload some row names, so whatever
+    /// deletion it was owed is void. Re-preparing an object whose earlier
+    /// record was deleted lands exactly here.
+    #[tokio::test]
+    async fn claiming_a_payload_that_is_owed_a_deletion_discharges_the_obligation() {
+        let (_directory, store_dir) = temp_store_dir();
+        let db = crate::synthetic_store::open_test_db();
+        let database = crate::synthetic_store::store_database(&db);
+        let spool = PayloadSpool::new(&store_dir);
+        let bytes = payload(4, 64);
+        let hash = spool.write(&bytes).await.expect("write payload");
+
+        commit_claims(&db, "owner-a", &[hash]).await;
+        commit_claims(&db, "owner-a", &[]).await;
+        commit_claims(&db, "owner-b", &[hash]).await;
+
+        assert_eq!(
+            database
+                .owed_payload_spool_cleanup()
+                .await
+                .expect("obligations"),
+            Vec::new()
+        );
+        spool
+            .drain_cleanup(&database)
+            .await
+            .expect("drain obligations");
+        assert_eq!(spool.read(hash).await.expect("read payload"), bytes);
+    }
+
+    /// One owner replacing its claim set — the shape a rewritten journal takes
+    /// — must not put a payload it keeps through a moment of being unowned.
+    #[tokio::test]
+    async fn replacing_a_claim_set_keeps_the_payloads_that_stay_in_it() {
+        let (_directory, store_dir) = temp_store_dir();
+        let db = crate::synthetic_store::open_test_db();
+        let database = crate::synthetic_store::store_database(&db);
+        let spool = PayloadSpool::new(&store_dir);
+        let carried = spool.write(&payload(5, 64)).await.expect("write carried");
+        let superseded = spool.write(&payload(6, 64)).await.expect("write old");
+        let fresh = spool.write(&payload(7, 64)).await.expect("write new");
+
+        commit_claims(&db, "owner-a", &[carried, superseded]).await;
+        commit_claims(&db, "owner-a", &[carried, fresh]).await;
+
+        assert_eq!(
+            database
+                .owed_payload_spool_cleanup()
+                .await
+                .expect("obligations"),
+            vec![superseded]
+        );
+        spool
+            .drain_cleanup(&database)
+            .await
+            .expect("drain obligations");
+
+        let mut surviving = vec![carried.to_string(), fresh.to_string()];
+        surviving.sort();
+        assert_eq!(spool_entries(&store_dir), surviving);
     }
 
     /// A drain that fails between removing the file and clearing the row leaves
@@ -344,10 +585,11 @@ mod tests {
         let db = crate::synthetic_store::open_test_db();
         let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
-        let hash = spool.write(&payload(4, 64)).await.expect("write payload");
-        spool.delete(hash).await.expect("delete payload");
+        let hash = spool.write(&payload(8, 64)).await.expect("write payload");
+        delete_payload_blocking(&store_dir, hash).expect("delete payload");
 
-        commit_obligation(&db, hash).await;
+        commit_claims(&db, "owner-a", &[hash]).await;
+        commit_claims(&db, "owner-a", &[]).await;
         spool
             .drain_cleanup(&database)
             .await
@@ -355,7 +597,7 @@ mod tests {
 
         assert_eq!(
             database
-                .payload_spool_cleanup_hashes()
+                .owed_payload_spool_cleanup()
                 .await
                 .expect("remaining obligations"),
             Vec::new()

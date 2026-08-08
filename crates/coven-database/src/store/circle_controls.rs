@@ -47,6 +47,7 @@ impl StoreDatabase {
                         "Circle candidate graph",
                     )?;
                 }
+                claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
                 insert_circle_operation_row_on(&tx, &row)?;
                 tx.commit().map_err(DbError::from)
             })
@@ -84,7 +85,7 @@ impl StoreDatabase {
                         "superseded Circle operation belongs to another circle".to_string(),
                     ));
                 }
-                enqueue_operation_payload_cleanup_on(&tx, discarded.operation())?;
+                release_operation_payloads_on(&tx, &discarded.operation_id)?;
                 let removed = tx
                     .execute(
                         "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
@@ -104,6 +105,7 @@ impl StoreDatabase {
                         "Circle candidate graph",
                     )?;
                 }
+                claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
                 insert_circle_operation_row_on(&tx, &row)?;
                 tx.commit().map_err(DbError::from)
             })
@@ -269,7 +271,7 @@ impl StoreDatabase {
                         "Circle close-finalization candidate graph",
                     )?;
                 }
-                enqueue_operation_payload_cleanup_on(&tx, durable.operation())?;
+                claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
                 tx.execute(
                     "DELETE FROM circle_operation_uploads WHERE operation_id = ?1",
                     [&row.operation_id],
@@ -589,7 +591,7 @@ impl StoreDatabase {
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     update_circle_operation_phase_on(&tx, &waiting)?;
                 } else {
-                    enqueue_operation_payload_cleanup_on(&tx, journal.operation())?;
+                    release_operation_payloads_on(&tx, &journal.operation_id)?;
                     let deleted = tx
                         .execute(
                             "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
@@ -650,19 +652,44 @@ pub(crate) fn update_circle_operation_phase_on(
     Ok(())
 }
 
-/// Owe a deletion for every spool file this operation's objects are stored in.
+/// Claim the spool file behind every object this operation names.
 ///
-/// Called in the transaction that stops the operation naming them — the row
-/// going away, or the finalization boundary replacing it — so the obligation
-/// and the reason for it commit together.
-pub(crate) fn enqueue_operation_payload_cleanup_on(
+/// Called in the transaction that writes the operation row, so the row and its
+/// claims commit together. An object the operation shares with a surviving
+/// `remote_objects` record is claimed twice over, which is what keeps the file
+/// alive when the operation lets go of it.
+///
+/// The whole claim set is replaced rather than added to, so the finalization
+/// boundary — which hands one operation id a new object graph — never puts an
+/// object carried across it through a moment of being owed a deletion.
+pub(crate) fn claim_operation_payloads_on(
     conn: &Connection,
+    operation_id: &CircleOperationId,
     operation: &coven_protocol::circle_journal::PreparedCircleOperation,
 ) -> Result<(), DbError> {
-    for object in operation.prepared_objects.values() {
-        crate::payload_spool::enqueue_payload_spool_cleanup_on(conn, object.stored_hash())?;
-    }
-    Ok(())
+    crate::payload_spool::set_payload_owner_claims_on(
+        conn,
+        &crate::payload_spool::circle_operation_owner_key(operation_id.as_str()),
+        &operation
+            .prepared_objects
+            .values()
+            .map(coven_protocol::objects::ExactObjectRef::stored_hash)
+            .collect(),
+    )
+}
+
+/// Let go of every spool file this operation claimed.
+///
+/// Called in the transaction that stops the operation naming them, so a file no
+/// row names any more is owed its deletion by the same commit.
+pub(crate) fn release_operation_payloads_on(
+    conn: &Connection,
+    operation_id: &CircleOperationId,
+) -> Result<(), DbError> {
+    crate::payload_spool::release_payload_owner_on(
+        conn,
+        &crate::payload_spool::circle_operation_owner_key(operation_id.as_str()),
+    )
 }
 
 /// Record that the object one upload step carried is now in cloud storage.
