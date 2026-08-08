@@ -38,6 +38,245 @@ fn every_bookkeeping_table_is_strict() {
 }
 
 #[test]
+fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    let mut actual = std::collections::BTreeSet::new();
+    for table in table_names() {
+        let sql = format!("PRAGMA table_info({})", crate::quote_ident(table));
+        let columns = conn
+            .prepare(&sql)
+            .expect("prepare table_info")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .expect("query table_info")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read table_info");
+        actual.extend(
+            columns
+                .into_iter()
+                .filter(|(_, declared_type)| declared_type.eq_ignore_ascii_case("BLOB"))
+                .map(|(column, _)| (table, column)),
+        );
+    }
+
+    let expected = std::collections::BTreeSet::from([
+        ("circle_bootstrap_coverage", "bootstrap_ref".to_string()),
+        (
+            "retained_merge_materializations",
+            "canonical_input".to_string(),
+        ),
+        ("merge_retraction_cleanups", "canonical_cleanup".to_string()),
+        ("stream_activations", "activation".to_string()),
+        ("outbound_membership_mutation", "plan_bytes".to_string()),
+        ("outbound_membership_mutation", "progress_bytes".to_string()),
+        ("outbound_store_snapshot", "meta_bytes".to_string()),
+        ("published_store_snapshot", "meta_bytes".to_string()),
+        ("outbound_circle_snapshot", "meta_bytes".to_string()),
+        ("published_circle_snapshot", "meta_bytes".to_string()),
+        ("outbound_store_acks", "ack_bytes".to_string()),
+        ("outbound_circle_acks", "ack_bytes".to_string()),
+        (
+            "store_protocol_root_authority",
+            "store_protocol_root_bytes".to_string(),
+        ),
+        (
+            "local_store_protocol_root",
+            "store_protocol_root_bytes".to_string(),
+        ),
+        (
+            "local_store_device_registration",
+            "registration_bytes".to_string(),
+        ),
+        (
+            "local_store_device_registration",
+            "initial_ack_bytes".to_string(),
+        ),
+        (
+            "store_device_registration_activations",
+            "registration_bytes".to_string(),
+        ),
+        ("circle_control_activations", "control_bytes".to_string()),
+        ("circle_operations", "prepared".to_string()),
+        ("circle_current_state", "state".to_string()),
+    ]);
+
+    assert_eq!(
+        actual, expected,
+        "bookkeeping BLOB columns changed; keep large payloads in the payload spool and update plans/payload-spool.md only for an intentional KB-class artifact"
+    );
+}
+
+#[test]
+fn bookkeeping_json_columns_are_classified_by_payload_shape() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    apply_coven_schema(&conn).expect("apply coven schema");
+    let mut actual = std::collections::BTreeSet::new();
+    for table in table_names() {
+        let create_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("read CREATE TABLE for {table}: {error}"));
+        let normalized = normalize_schema_sql(&create_sql);
+        let table_info = format!("PRAGMA table_info({})", crate::quote_ident(table));
+        let columns = conn
+            .prepare(&table_info)
+            .expect("prepare table_info")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .expect("query table_info")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read table_info");
+        actual.extend(
+            columns
+                .into_iter()
+                .filter(|(column, declared_type)| {
+                    declared_type.eq_ignore_ascii_case("TEXT")
+                        && normalized
+                            .contains(&format!("json_valid({})", column.to_ascii_lowercase()))
+                })
+                .map(|(column, _)| (table, column)),
+        );
+    }
+
+    // These JSON values deliberately carry canonical or prepared byte arrays.
+    // They are control/metadata artifacts, not unbounded database images,
+    // changesets, packages, or ciphertext bodies.
+    let carries_bytes = std::collections::BTreeSet::from([
+        ("store_writes", "prepared".to_string()),
+        ("remote_objects", "state".to_string()),
+        ("protocol_inert_objects", "state".to_string()),
+        ("outbound_store_snapshot", "meta_prepared".to_string()),
+        ("outbound_store_snapshot", "blobs".to_string()),
+        ("outbound_circle_snapshot", "meta_prepared".to_string()),
+        ("outbound_circle_snapshot", "blobs".to_string()),
+        ("outbound_store_acks", "prepared_object".to_string()),
+        ("outbound_circle_acks", "prepared_object".to_string()),
+        ("outbound_store_device_exclusion", "state".to_string()),
+        ("store_reclaim_operations", "state".to_string()),
+        ("local_store_protocol_root", "prepared_object".to_string()),
+        (
+            "local_store_device_registration",
+            "prepared_object".to_string(),
+        ),
+        (
+            "local_store_device_registration",
+            "initial_ack_prepared".to_string(),
+        ),
+        ("local_store_founder_graph", "membership_graph".to_string()),
+    ]);
+    let byte_free = std::collections::BTreeSet::from([
+        ("retained_replay_baselines", "exact_cut".to_string()),
+        ("circle_bootstrap_coverage", "control_coord".to_string()),
+        ("circle_bootstrap_coverage", "activation_commit".to_string()),
+        ("circle_bootstrap_coverage", "exact_cut".to_string()),
+        (
+            "circle_close_exclusions",
+            "excluded_registration".to_string(),
+        ),
+        ("circle_close_exclusions", "successor_control".to_string()),
+        ("circle_close_exclusions", "activating_commit".to_string()),
+        ("retained_merge_materializations", "commit_ref".to_string()),
+        ("merge_retraction_cleanups", "commit_ref".to_string()),
+        ("materialized_commits", "commit_ref".to_string()),
+        ("materialized_commits", "retained_commit_ref".to_string()),
+        ("stream_activations", "activating_commit".to_string()),
+        ("snapshot_coverage", "commit_ref".to_string()),
+        ("cloud_outbox", "row_ref".to_string()),
+        ("cloud_outbox", "upload_state".to_string()),
+        ("cloud_outbox", "stored_ref".to_string()),
+        ("store_writes", "status".to_string()),
+        ("store_writes", "affected_rows".to_string()),
+        ("store_writes", "base".to_string()),
+        ("store_writes", "blob_facts".to_string()),
+        ("store_write_partitions", "control_coord".to_string()),
+        ("retained_replay_objects", "commit_ref".to_string()),
+        ("reclaimed_store_packages", "state".to_string()),
+        ("row_blob_locators", "audience_authority".to_string()),
+        ("outbound_store_snapshot", "snapshot_ref".to_string()),
+        ("outbound_store_snapshot", "image_ref".to_string()),
+        ("published_store_snapshot", "snapshot_ref".to_string()),
+        ("published_store_snapshot", "successor_slot".to_string()),
+        ("outbound_circle_snapshot", "snapshot_ref".to_string()),
+        ("outbound_circle_snapshot", "image_ref".to_string()),
+        ("published_circle_snapshot", "snapshot_ref".to_string()),
+        ("published_circle_snapshot", "successor_slot".to_string()),
+        ("published_circle_snapshot", "cut".to_string()),
+        ("outbound_store_acks", "ack_ref".to_string()),
+        ("outbound_store_acks", "activation".to_string()),
+        ("published_store_acks", "ack_ref".to_string()),
+        ("published_store_acks", "successor_slot".to_string()),
+        ("outbound_circle_acks", "ack_ref".to_string()),
+        ("published_circle_acks", "ack_ref".to_string()),
+        ("published_circle_acks", "successor_slot".to_string()),
+        ("published_circle_acks", "store_cut".to_string()),
+        ("published_circle_acks", "control_coord".to_string()),
+        ("activated_circle_acks", "ack_ref".to_string()),
+        ("activated_circle_acks", "activating_commit".to_string()),
+        ("activated_store_acks", "ack_ref".to_string()),
+        ("activated_store_acks", "activating_commit".to_string()),
+        ("store_device_exclusion_freezes", "proposal_ref".to_string()),
+        ("store_device_exclusion_freezes", "target_cut".to_string()),
+        (
+            "store_protocol_root_authority",
+            "store_root_object".to_string(),
+        ),
+        (
+            "local_store_device_registration",
+            "initial_ack_ref".to_string(),
+        ),
+        ("local_store_device_registration", "state".to_string()),
+        (
+            "store_device_registration_activations",
+            "registration_object".to_string(),
+        ),
+        (
+            "store_device_registration_activations",
+            "activation_authority".to_string(),
+        ),
+        ("store_device_state_snapshots", "commit_ref".to_string()),
+        ("store_device_state_snapshots", "state".to_string()),
+        (
+            "store_author_exclusion_activations",
+            "exclusion_ref".to_string(),
+        ),
+        (
+            "store_author_exclusion_activations",
+            "accepted_cut".to_string(),
+        ),
+        (
+            "store_author_exclusion_activations",
+            "activation_commit".to_string(),
+        ),
+        (
+            "store_author_exclusion_activations",
+            "activation_head".to_string(),
+        ),
+        ("circle_control_activations", "control_coord".to_string()),
+        ("circle_operations", "phase".to_string()),
+        ("circle_access_cache", "control_coord".to_string()),
+    ]);
+
+    assert!(
+        carries_bytes.is_disjoint(&byte_free),
+        "a bookkeeping JSON column cannot be both byte-carrying and byte-free"
+    );
+    let classified = carries_bytes
+        .union(&byte_free)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual, classified,
+        "bookkeeping JSON columns changed; classify the new column and keep large payloads in the payload spool as required by plans/payload-spool.md"
+    );
+}
+
+#[test]
 fn active_and_protocol_inert_object_identities_are_disjoint() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");

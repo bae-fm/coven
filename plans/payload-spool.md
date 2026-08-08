@@ -572,10 +572,31 @@ probes retain their explicit full/range/cross-principal reads, and selecting the
   JSON-bytes-carrying columns equals an explicit allowlist (the KB-class
   artifacts); any new large-payload column fails the test with a pointer to
   this design.
-- Full workspace suite; nextest timing run + `sample` profile of the previously
-  slowest tests; record the numbers here. Expectation: replication CPU
-  collapses from ~1,180s; the 31s pull test and 25s circle tests drop to
-  seconds.
+- The deferred `circle_bootstrap_coverage.image_bytes` conversion is resolved
+  here. Store snapshots carry each coverage row's exact bootstrap reference,
+  control, and activation commit, but not its image. Restore re-resolves the
+  restoring identity's access at that historical control and commit, downloads
+  the exact Circle bootstrap protocol object with that epoch key, verifies it,
+  then installs and claims the image in the payload spool in the same transaction
+  as the restored Store. Local retained replay opens the hash-verified spool file
+  directly as SQLite. The schema gate therefore admits the bootstrap reference
+  BLOB but no Circle bootstrap image BLOB.
+- **Re-measured 2026-08-08 at 1845d205** on the same machine with warm nextest
+  binaries. The 637-test replication suite ran in 126.37s wall and 555.14s CPU
+  (510.42s user + 44.72s system), versus 184.6s wall at the final stage-4
+  receipt and about 1,180s CPU at the original measurement. The two receipt
+  tests moved from 33.17s to 23.76s
+  (`routing_conflicts_converge_after_progressive_and_complete_discovery`) and
+  from 15.63s to 4.70s
+  (`active_store_member_holds_unavailable_circle_package_without_partial_materialization`).
+  A 10s `sample` of the routing test recorded 5,539 non-idle top-of-stack
+  samples: 26.8% unoptimized bounds/alignment checks, 11.4% serde, 10.4%
+  `fcntl`, 8.0% ed25519, 3.5% sha256, and 3.1% hex conversion. A 3s sample of
+  the effective-access test recorded 2,114 non-idle top-of-stack samples:
+  29.6% `fcntl`, 17.4% bounds/alignment checks, 12.5% serde, 3.7% sha256,
+  3.1% ed25519, and 2.3% hex conversion. The `fcntl` stacks are payload-spool
+  `File::sync_all` and parent-directory syncs; neither profile contains the
+  repeated large JSON byte-array work that initiated this plan.
 
 ## After the arc — pin the durability contract
 
