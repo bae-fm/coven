@@ -15,7 +15,6 @@ mod read_handle;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
 pub(crate) mod store_cloud_storage;
-pub(crate) mod store_foundation;
 pub(crate) mod store_joining;
 pub(crate) mod store_membership;
 pub(crate) mod store_recovery;

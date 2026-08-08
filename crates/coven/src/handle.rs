@@ -25,9 +25,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::store_blobs::StoreBlobAccess;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
-use crate::store_foundation::StoreFoundation;
+use crate::store_cloud_storage::StoreCloudStorage;
 use crate::store_joining::StoreJoining;
 use crate::store_membership::StoreMembership;
 use crate::store_recovery::StoreRecovery;
@@ -48,6 +49,7 @@ use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
+use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use coven_replication::sync::sync_loop::SyncLoopStatus;
 use coven_replication::sync::{BlobCacheError, BlobStream};
 #[cfg(any(test, feature = "test-utils"))]
@@ -143,23 +145,25 @@ impl CovenHandle {
         open_guard: Arc<StoreOpenGuard>,
         blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
-        let StoreFoundation {
-            database,
-            security,
-            cloud_storage,
-            local_blob_access,
-            blob_access,
-        } = StoreFoundation::new(
-            db,
-            &store_dir,
-            config_provider.clone(),
-            key_service,
-            key_custody.clone(),
-            identity_custody,
-            oauth_clients,
+        let database = StoreDatabase::from_database(db);
+        let cloud_homes =
+            coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
+        let security = StoreSecurity::new(key_service, key_custody.clone(), identity_custody);
+        let cloud_storage = StoreCloudStorage::new(
+            security.clone(),
+            cloud_homes,
             clock.clone(),
             cloudkit_ops,
             blob_chunking,
+        );
+        let blob_cache = StoreBlobCache::new(database.clone(), store_dir.clone());
+        let local_blob_access =
+            LocalStoreBlobAccess::new(database.clone(), store_dir.clone(), blob_cache);
+        let blob_access = StoreBlobAccess::new(
+            database.clone(),
+            config_provider.clone(),
+            cloud_storage.clone(),
+            local_blob_access.clone(),
         );
         let read_database = StoreDatabase::from_database(read_db);
         let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());

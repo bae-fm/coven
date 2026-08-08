@@ -11,6 +11,7 @@ cargo run --quiet -p owner-construction-check -- \
     --retained-service-construction \
     --retained-service-returns \
     --retained-capability-parameters \
+    --transient-component-bundles \
     --network-boundary \
     --crypto-boundary \
     --keyring-boundary \

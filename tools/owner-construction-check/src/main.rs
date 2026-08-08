@@ -118,13 +118,6 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
-    // The owners a full handle and a read-only handle both hold. Both roots
-    // above delegate here so one store is never composed two ways.
-    (
-        "crates/coven/src/store_foundation.rs",
-        "StoreFoundation",
-        "new",
-    ),
     (
         "crates/coven-replication/src/sync/store/device_join/joiner.rs",
         "PendingDeviceJoinObservation",
@@ -401,6 +394,150 @@ struct RetainedCapabilityParameterViolation {
 }
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct TransientComponentBundleViolation {
+    path: String,
+    line: usize,
+    bundle: String,
+}
+
+#[derive(Default)]
+struct BundleTypeInfo {
+    public_fields: usize,
+    field_count: usize,
+    inherent_methods: Vec<(String, bool, bool)>,
+}
+
+fn find_transient_component_bundle_violations(
+    files: &[RustFile],
+) -> Vec<TransientComponentBundleViolation> {
+    let bundle_types = collect_transient_component_bundle_types(files);
+    let mut violations = BTreeSet::new();
+    for file in files {
+        if is_test_source(&file.relative_path) {
+            continue;
+        }
+        let mut visitor = TransientComponentBundleVisitor {
+            path: &file.relative_path,
+            bundle_types: &bundle_types,
+            violations: &mut violations,
+        };
+        visitor.visit_file(&file.syntax);
+    }
+    violations.into_iter().collect()
+}
+
+fn collect_transient_component_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
+    let mut types = BTreeMap::new();
+    for file in files {
+        if is_test_source(&file.relative_path) {
+            continue;
+        }
+        collect_bundle_type_info(&file.syntax.items, &mut types);
+    }
+    types
+        .into_iter()
+        .filter_map(|(name, info)| {
+            (info.field_count >= 2
+                && info.field_count == info.public_fields
+                && matches!(info.inherent_methods.as_slice(), [(method, true, false)] if method == "new"))
+            .then_some(name)
+        })
+        .collect()
+}
+
+fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, BundleTypeInfo>) {
+    for item in items {
+        match item {
+            syn::Item::Struct(item) if !is_test_only(&item.attrs) => {
+                let info = types.entry(item.ident.to_string()).or_default();
+                info.field_count = item.fields.len();
+                info.public_fields = item
+                    .fields
+                    .iter()
+                    .filter(|field| visibility_crosses_owner(&field.vis))
+                    .count();
+            }
+            syn::Item::Impl(item) if item.trait_.is_none() && !is_test_only(&item.attrs) => {
+                let Some(name) = type_name(&item.self_ty) else {
+                    continue;
+                };
+                let info = types.entry(name).or_default();
+                for method in &item.items {
+                    let syn::ImplItem::Fn(method) = method else {
+                        continue;
+                    };
+                    if is_test_only(&method.attrs) {
+                        continue;
+                    }
+                    info.inherent_methods.push((
+                        method.sig.ident.to_string(),
+                        output_contains_owner(
+                            &method.sig.output,
+                            &type_name(&item.self_ty).expect("inherent impl type"),
+                        ),
+                        method.sig.receiver().is_some(),
+                    ));
+                }
+            }
+            syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
+                if let Some((_, items)) = &item.content {
+                    collect_bundle_type_info(items, types);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+struct TransientComponentBundleVisitor<'a> {
+    path: &'a str,
+    bundle_types: &'a BTreeSet<String>,
+    violations: &'a mut BTreeSet<TransientComponentBundleViolation>,
+}
+
+impl<'ast> Visit<'ast> for TransientComponentBundleVisitor<'_> {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        let syn::Pat::Struct(pattern) = &node.pat else {
+            return visit::visit_local(self, node);
+        };
+        let Some(initializer) = &node.init else {
+            return visit::visit_local(self, node);
+        };
+        let syn::Expr::Call(call) = initializer.expr.as_ref() else {
+            return visit::visit_local(self, node);
+        };
+        let syn::Expr::Path(function) = call.func.as_ref() else {
+            return visit::visit_local(self, node);
+        };
+        let Some(bundle) = pattern
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return visit::visit_local(self, node);
+        };
+        let Some(constructor) = function.path.segments.last() else {
+            return visit::visit_local(self, node);
+        };
+        let Some(owner) = function.path.segments.iter().rev().nth(1) else {
+            return visit::visit_local(self, node);
+        };
+        if constructor.ident == "new"
+            && owner.ident == bundle
+            && self.bundle_types.contains(&bundle)
+        {
+            self.violations.insert(TransientComponentBundleViolation {
+                path: self.path.to_string(),
+                line: node.span().start().line,
+                bundle,
+            });
+        }
+        visit::visit_local(self, node);
+    }
+}
+
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct DeepParentPathViolation {
     path: String,
     line: usize,
@@ -579,6 +716,7 @@ struct CheckResult {
     service_returns: Vec<ServiceReturnViolation>,
     retained_service_construction: Vec<RetainedServiceConstructionViolation>,
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
+    transient_component_bundles: Vec<TransientComponentBundleViolation>,
     deep_parent_paths: Vec<DeepParentPathViolation>,
     capability_boundaries: Vec<CapabilityBoundaryViolation>,
     module_dependencies: Vec<ModuleDependencyViolation>,
@@ -598,6 +736,7 @@ fn main() {
     let mut retained_service_returns = false;
     let mut retained_service_construction = false;
     let mut retained_capability_parameters = false;
+    let mut transient_component_bundles = false;
     let mut capability_boundaries: Vec<&'static [GatedCapability]> = Vec::new();
     let mut module_dependencies = false;
     let mut root = None;
@@ -612,6 +751,8 @@ fn main() {
             retained_service_construction = true;
         } else if argument == "--retained-capability-parameters" {
             retained_capability_parameters = true;
+        } else if argument == "--transient-component-bundles" {
+            transient_component_bundles = true;
         } else if let Some((_, boundary)) = CAPABILITY_BOUNDARY_FLAGS
             .iter()
             .find(|(flag, _)| argument == *flag)
@@ -621,7 +762,7 @@ fn main() {
             root = Some(PathBuf::from(argument));
         } else {
             eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
+                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
             );
             std::process::exit(2);
         }
@@ -633,6 +774,7 @@ fn main() {
         retained_service_returns,
         retained_service_construction,
         retained_capability_parameters,
+        transient_component_bundles,
         &capability_boundaries,
         module_dependencies,
     ) {
@@ -642,6 +784,7 @@ fn main() {
                 && result.service_returns.is_empty()
                 && result.retained_service_construction.is_empty()
                 && result.retained_capability_parameters.is_empty()
+                && result.transient_component_bundles.is_empty()
                 && result.deep_parent_paths.is_empty()
                 && result.capability_boundaries.is_empty()
                 && result.module_dependencies.is_empty() => {}
@@ -699,6 +842,12 @@ fn main() {
                     violation.capability
                 );
             }
+            for violation in &result.transient_component_bundles {
+                eprintln!(
+                    "{}:{}: {} only bundles components for immediate destructuring",
+                    violation.path, violation.line, violation.bundle
+                );
+            }
             for violation in &result.deep_parent_paths {
                 eprintln!(
                     "{}:{}: paths cannot skip over the immediate parent module with super::super",
@@ -750,6 +899,11 @@ fn main() {
                     "construction-only capabilities are bound when owner graphs are composed and are never accepted by runtime owner methods"
                 );
             }
+            if !result.transient_component_bundles.is_empty() {
+                eprintln!(
+                    "construct each component at the handle that retains it; a bundle type needs behavior or an invariant of its own"
+                );
+            }
             if !result.deep_parent_paths.is_empty() {
                 eprintln!(
                     "import the capability from the immediate parent or from its domain boundary"
@@ -780,6 +934,7 @@ fn check(
     check_retained_service_returns: bool,
     check_retained_service_construction: bool,
     check_retained_capability_parameters: bool,
+    check_transient_component_bundles: bool,
     capability_boundaries: &[&'static [GatedCapability]],
     check_module_dependencies: bool,
 ) -> Result<CheckResult, String> {
@@ -824,6 +979,11 @@ fn check(
         },
         retained_capability_parameters: if check_retained_capability_parameters {
             find_retained_capability_parameter_violations(&files, &owners, &constructors)
+        } else {
+            Vec::new()
+        },
+        transient_component_bundles: if check_transient_component_bundles {
+            find_transient_component_bundle_violations(&files)
         } else {
             Vec::new()
         },
@@ -2014,6 +2174,60 @@ mod tests {
         }];
 
         assert_eq!(find_deep_parent_path_violations(&files).len(), 2);
+    }
+
+    #[test]
+    fn component_bundle_constructed_only_to_be_destructured_is_rejected() {
+        let source = syn::parse_file(
+            r#"
+            struct ComponentBundle {
+                pub(crate) first: First,
+                pub(crate) second: Second,
+            }
+
+            impl ComponentBundle {
+                fn new(first: First, second: Second) -> Self { Self { first, second } }
+            }
+
+            fn compose(first: First, second: Second) {
+                let ComponentBundle { first, second } = ComponentBundle::new(first, second);
+                use_components(first, second);
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/handle.rs".to_string(),
+            syntax: source,
+        }];
+
+        let violations = find_transient_component_bundle_violations(&files);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].bundle, "ComponentBundle");
+    }
+
+    #[test]
+    fn component_value_with_behavior_is_allowed() {
+        let source = syn::parse_file(
+            r#"
+            struct PreparedComponents {
+                pub(crate) first: First,
+                pub(crate) second: Second,
+            }
+
+            impl PreparedComponents {
+                fn new(first: First, second: Second) -> Self { Self { first, second } }
+                fn install(self) { use_components(self.first, self.second); }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "crates/coven/src/handle.rs".to_string(),
+            syntax: source,
+        }];
+
+        assert!(find_transient_component_bundle_violations(&files).is_empty());
     }
 
     #[test]
