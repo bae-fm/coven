@@ -204,12 +204,32 @@ pub struct SnapshotPublicationPermit {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+/// This store's connection, and the payload files the rows on it name.
+///
+/// Every call this store makes goes through here, which is what lets the payload
+/// deletions a call commits be paid by that same call. A flow that drops the
+/// last claim on a payload records the deletion in the transaction that drops
+/// the row; once that transaction commits the file is nobody's, and the
+/// discharge below removes it before the call returns — on the connection
+/// thread, where the claim transactions run, so nothing can re-claim a payload
+/// in between. Attaching it here rather than at each producing flow is what
+/// makes "every obligation has an owner that pays it" a fact of one function
+/// instead of a convention every future producer has to remember.
 #[derive(Clone)]
-struct StoreDatabaseConnection(crate::DatabaseConnection);
+struct StoreDatabaseConnection {
+    connection: crate::DatabaseConnection,
+    store_dir: coven_foundation::store_dir::StoreDir,
+}
 
 impl StoreDatabaseConnection {
-    fn new(connection: crate::DatabaseConnection) -> Self {
-        Self(connection)
+    fn new(
+        connection: crate::DatabaseConnection,
+        store_dir: coven_foundation::store_dir::StoreDir,
+    ) -> Self {
+        Self {
+            connection,
+            store_dir,
+        }
     }
 
     async fn call<F, R>(&self, operation: F) -> Result<R, DbError>
@@ -217,7 +237,14 @@ impl StoreDatabaseConnection {
         F: FnOnce(&rusqlite::Connection) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.0.call(operation).await
+        let store_dir = self.store_dir.clone();
+        self.connection
+            .call(move |conn| {
+                let outcome = operation(conn)?;
+                payload_spool::pay_owed_payload_deletions_on(conn, &store_dir)?;
+                Ok(outcome)
+            })
+            .await
     }
 }
 
@@ -252,8 +279,8 @@ impl StoreDatabase {
     pub fn from_database(database: Database) -> Self {
         let Database { connection, state } = database;
         Self {
+            connection: StoreDatabaseConnection::new(connection, state.store_dir.clone()),
             store_dir: state.store_dir,
-            connection: StoreDatabaseConnection::new(connection),
             runtime: state.store_runtime,
             hlc: state.hlc,
             synced_tables: state.synced_tables,

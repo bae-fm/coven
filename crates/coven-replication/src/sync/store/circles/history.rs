@@ -8,7 +8,6 @@ use coven_storage::SyncStorage;
 pub(crate) struct VerifiedCircleHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn SyncStorage,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     history: &'operation mut MergeHistoryVerifier<'storage>,
 }
 
@@ -16,13 +15,11 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn SyncStorage,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         history: &'operation mut MergeHistoryVerifier<'storage>,
     ) -> Self {
         Self {
             database,
             storage,
-            store_dir,
             history,
         }
     }
@@ -151,9 +148,6 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.database
             .finish_circle_operation_discard(operation_id)
             .await?;
-        // Completing the discard drops the operation row, so its objects' spool
-        // files are owed a deletion.
-        super::drain_payload_spool(&self.database, self.store_dir).await?;
         Ok(())
     }
 

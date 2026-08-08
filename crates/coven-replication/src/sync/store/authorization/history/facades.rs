@@ -26,7 +26,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         pull::PullHistory::new(
             self.database.clone(),
             self.storage.as_ref(),
-            self.store_dir,
             &mut self.history_verifier,
             &self.blob_source,
             &self.blob_cache,
@@ -39,7 +38,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         crate::sync::store::circles::VerifiedCircleHistory::new(
             self.database.clone(),
             self.storage.as_ref(),
-            self.store_dir,
             &mut self.history_verifier,
         )
     }

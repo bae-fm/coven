@@ -259,11 +259,11 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
         .expect("baseline loads again once its image payload is back");
 }
 
-/// Replacing the baseline's authority replaces its claim set: the superseded
-/// authority payload is the last thing naming its bytes, so it is owed a
-/// deletion, while the image the row keeps naming is not.
+/// Replacing the baseline's authority replaces its claim set, and the flow that
+/// drops the last claim on the superseded payload pays for it before returning:
+/// the old authority file is gone, the image the row still names is not.
 #[tokio::test]
-async fn replacing_the_replay_authority_owes_the_superseded_payload_a_deletion() {
+async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     let db = open_test_db();
     TestStore::create(
         &db,
@@ -274,6 +274,7 @@ async fn replacing_the_replay_authority_owes_the_superseded_payload_a_deletion()
     .await
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
+    let store_dir = db.store_dir_for_test().clone();
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -283,17 +284,26 @@ async fn replacing_the_replay_authority_owes_the_superseded_payload_a_deletion()
             .canonical_authority_bytes()
             .expect("canonical authority bytes"),
     );
+    assert!(store_dir.payload_spool_path(superseded).is_file());
 
     database
         .replace_generation_zero_replay_authority_for_test(b"{\"kind\":\"other\"}".to_vec())
         .await
         .expect("replace retained replay authority");
 
+    assert!(
+        !store_dir.payload_spool_path(superseded).exists(),
+        "the superseded authority payload outlived the last row naming it"
+    );
+    assert!(
+        store_dir.payload_spool_path(baseline.image_hash).is_file(),
+        "the image the row still names must survive its authority being replaced"
+    );
     assert_eq!(
         database
             .owed_payload_spool_cleanup()
             .await
             .expect("read owed payload cleanup"),
-        vec![superseded]
+        Vec::new()
     );
 }

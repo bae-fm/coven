@@ -158,11 +158,7 @@ pub struct TestStore {
     signer: UserKeypair,
     founder: TestDevice,
     producers: Arc<tokio::sync::Mutex<TestStoreProducers>>,
-    /// One store directory per device identity. A device that is bound, dropped
-    /// and bound again is the same device, and the local state it left behind —
-    /// the payload spool a prepared operation writes its object bytes into —
-    /// has to still be there when it comes back.
-    store_dirs: std::sync::Mutex<HashMap<String, TestStoreDir>>,
+    founder_store_dir: TestStoreDir,
 }
 
 /// Why a test pull did not produce a result. Keeps the three steps a test pull
@@ -298,24 +294,21 @@ mod test_device {
         }
     }
 
-    /// One device's store directory, held apart from the device itself.
-    ///
-    /// A test rebinds the same device many times, and durable state under the
-    /// directory — the payload spool among it — has to survive rebinding, so
-    /// the temporary directory outlives any one [`TestDevice`] that reads it.
+    /// One device's store directory, shared by its database and Store object.
     #[derive(Clone)]
     pub struct TestStoreDir {
-        _temporary: std::sync::Arc<tempfile::TempDir>,
         dir: StoreDir,
     }
 
     impl TestStoreDir {
-        pub fn new() -> Self {
-            let (temporary, dir) = temp_store_dir();
+        pub fn from_database(database: &Database) -> Self {
             Self {
-                _temporary: std::sync::Arc::new(temporary),
-                dir,
+                dir: database.store_dir_for_test().clone(),
             }
+        }
+
+        pub fn from_store_dir(dir: StoreDir) -> Self {
+            Self { dir }
         }
 
         pub fn dir(&self) -> &StoreDir {
@@ -342,6 +335,7 @@ mod test_device {
         ) -> Result<Self, String> {
             Self::create_with_database(
                 coven_database::StoreDatabase::new(db),
+                TestStoreDir::from_database(db),
                 storage,
                 founder_timestamp,
                 identity,
@@ -351,11 +345,11 @@ mod test_device {
 
         pub async fn create_with_database(
             database: coven_database::StoreDatabase,
+            store_dir: TestStoreDir,
             storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
-            let store_dir = TestStoreDir::new();
             let initialized = crate::sync::store::Store::create(
                 database.clone(),
                 storage.clone(),
@@ -377,11 +371,11 @@ mod test_device {
 
         pub async fn open_with_database(
             database: coven_database::StoreDatabase,
+            store_dir: TestStoreDir,
             storage: std::sync::Arc<coven_storage::CloudSyncStorage>,
             root: &coven_protocol::store_commit::StoreRootRef,
             identity: &UserKeypair,
         ) -> Result<Self, String> {
-            let store_dir = TestStoreDir::new();
             let initialized = crate::sync::store::Store::open(
                 database.clone(),
                 storage.clone(),
@@ -410,7 +404,7 @@ mod test_device {
                 coven_database::StoreDatabase::new(db),
                 storage,
                 identity,
-                TestStoreDir::new(),
+                TestStoreDir::from_database(db),
             )
             .await
         }
@@ -2883,12 +2877,14 @@ impl TestStore {
 
     pub async fn create_with_database(
         database: coven_database::StoreDatabase,
+        store_dir: TestStoreDir,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Arc<Self>, String> {
         Box::pin(Self::create_with_protection_database(
             database,
+            store_dir,
             store_id,
             signer,
             home,
@@ -2931,6 +2927,7 @@ impl TestStore {
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection_database(
             coven_database::StoreDatabase::new(db),
+            TestStoreDir::from_database(db),
             store_id,
             signer,
             home,
@@ -2942,6 +2939,7 @@ impl TestStore {
 
     async fn create_with_protection_database(
         database: coven_database::StoreDatabase,
+        store_dir: TestStoreDir,
         store_id: &str,
         signer: UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2958,14 +2956,16 @@ impl TestStore {
             )
             .map_err(|error| error.to_string())?,
         );
-        let founder =
-            TestDevice::create_with_database(database, storage.clone(), store_id, signer.clone())
-                .await?;
+        let founder = TestDevice::create_with_database(
+            database,
+            store_dir,
+            storage.clone(),
+            store_id,
+            signer.clone(),
+        )
+        .await?;
         let root = founder.store_root().clone();
-        let store_dirs = HashMap::from([(
-            coven_keys::keys::public_key_hex(&signer),
-            founder.test_store_dir().clone(),
-        )]);
+        let founder_store_dir = founder.test_store_dir().clone();
         Ok(Arc::new(Self {
             home,
             storage,
@@ -2976,7 +2976,7 @@ impl TestStore {
                 unassigned: Some(founder),
                 by_name: HashMap::new(),
             })),
-            store_dirs: std::sync::Mutex::new(store_dirs),
+            founder_store_dir,
         }))
     }
 
@@ -3555,8 +3555,14 @@ impl TestStore {
         db: &Database,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
-        self.bind_store_device(&coven_database::StoreDatabase::new(db), identity)
-            .await
+        TestDevice::load_with_database(
+            coven_database::StoreDatabase::new(db),
+            self.storage_for_device(identity.clone())?,
+            identity.clone(),
+            TestStoreDir::from_database(db),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     pub async fn drain_uploads(
@@ -3635,9 +3641,9 @@ impl TestStore {
             .publish_device_provider_challenge(provisional)
             .await
             .map_err(|error| format!("publish device provider challenge: {error}"))?;
-        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
+        let bootstrap_store_dir = TestStoreDir::from_database(joining_db);
         let mut joining = pending_join
-            .begin_joining_store(joining_database, &bootstrap_store_dir)
+            .begin_joining_store(joining_database, bootstrap_store_dir.dir())
             .await
             .map_err(|error| format!("begin joining Store: {error}"))?;
         let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
@@ -3671,7 +3677,7 @@ impl TestStore {
             activated_database,
             self.storage_for_device(joining_identity.clone())?,
             joining_identity.clone(),
-            self.device_store_dir(joining_identity),
+            bootstrap_store_dir,
         )
         .await
         .map_err(|error| error.to_string())
@@ -3682,25 +3688,17 @@ impl TestStore {
         database: &coven_database::StoreDatabase,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
+        if identity.public_key() != self.signer.public_key() {
+            return Err("custom Store database binding requires the founder identity".to_string());
+        }
         TestDevice::load_with_database(
             database.clone(),
             self.storage_for_device(identity.clone())?,
             identity.clone(),
-            self.device_store_dir(identity),
+            self.founder_store_dir.clone(),
         )
         .await
         .map_err(|error| error.to_string())
-    }
-
-    /// The store directory this identity's device keeps across bindings,
-    /// created the first time the identity is bound.
-    fn device_store_dir(&self, identity: &UserKeypair) -> TestStoreDir {
-        self.store_dirs
-            .lock()
-            .expect("Circle test store directories")
-            .entry(coven_keys::keys::public_key_hex(identity))
-            .or_insert_with(TestStoreDir::new)
-            .clone()
     }
 
     pub async fn invite_member(
@@ -3853,8 +3851,14 @@ impl TestStore {
     }
 
     pub async fn open_into(&self, db: &Database) -> Result<TestDevice, String> {
-        self.open_into_store_database(&coven_database::StoreDatabase::new(db))
-            .await
+        TestDevice::open_with_database(
+            coven_database::StoreDatabase::new(db),
+            TestStoreDir::from_database(db),
+            self.storage_for_device(self.signer.clone())?,
+            &self.root,
+            &self.signer,
+        )
+        .await
     }
 
     pub async fn open_into_store_database(
@@ -3863,6 +3867,7 @@ impl TestStore {
     ) -> Result<TestDevice, String> {
         TestDevice::open_with_database(
             database.clone(),
+            self.founder_store_dir.clone(),
             self.storage_for_device(self.signer.clone())?,
             &self.root,
             &self.signer,

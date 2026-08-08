@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct PullHistory<'operation, 'storage> {
     database: StoreDatabase,
     storage: &'storage dyn SyncStorage,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     history: &'operation mut MergeHistoryVerifier<'storage>,
     blob_source: &'operation RemoteBlobSource<'storage>,
     blob_cache: &'operation StoreBlobCache,
@@ -21,7 +20,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) fn new(
         database: StoreDatabase,
         storage: &'storage dyn SyncStorage,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         history: &'operation mut MergeHistoryVerifier<'storage>,
         blob_source: &'operation RemoteBlobSource<'storage>,
         blob_cache: &'operation StoreBlobCache,
@@ -29,7 +27,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         Self {
             database,
             storage,
-            store_dir,
             history,
             blob_source,
             blob_cache,
@@ -42,7 +39,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         crate::sync::store::circles::VerifiedCircleHistory::new(
             self.database.clone(),
             self.storage,
-            self.store_dir,
             self.history,
         )
     }

@@ -33,6 +33,9 @@ impl StoreSync {
     ) -> Result<std::sync::Arc<coven_replication::sync::test_helpers::TestStore>, String> {
         coven_replication::sync::test_helpers::TestStore::create_with_database(
             self.database.clone(),
+            coven_replication::sync::test_helpers::TestStoreDir::from_store_dir(
+                self.store_dir.clone(),
+            ),
             store_id,
             signer,
             home,

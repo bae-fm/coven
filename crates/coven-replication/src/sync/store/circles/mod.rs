@@ -30,24 +30,3 @@ pub(crate) use preparation::PreparedCircleJournal;
 
 #[cfg(test)]
 mod tests;
-
-/// Delete the payload behind every spool cleanup obligation this store has
-/// committed, and clear each obligation with its file.
-///
-/// An operation's objects are enqueued for deletion inside the transaction that
-/// drops the row naming them, so the obligation is durable the moment that
-/// transaction commits. This is the other half: the flow that committed it
-/// discharges it immediately, and calls this again when it resumes, so a crash
-/// in between is finished by the flow that owns the work rather than left for a
-/// sweeper.
-pub(super) async fn drain_payload_spool(
-    database: &coven_database::StoreDatabase,
-    store_dir: &coven_foundation::store_dir::StoreDir,
-) -> Result<(), CircleOperationError> {
-    coven_database::payload_spool::PayloadSpool::new(store_dir)
-        .drain_cleanup(database)
-        .await
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!("Circle payload spool cleanup: {error}"))
-        })
-}

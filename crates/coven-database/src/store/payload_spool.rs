@@ -11,10 +11,14 @@
 //! name the same payload — a Circle operation and the remote object it prepared
 //! both need one object's bytes — so a row does not delete the file it is done
 //! with; it drops its claim with [`set_payload_owner_claims_on`], and the
-//! transaction that drops the last claim records the deletion obligation. Once
-//! that transaction commits, [`PayloadSpool::drain_cleanup`] removes each file
-//! and clears its obligation. A failure between the two leaves the obligation
-//! durable, so the next drain finishes the deletion rather than losing it.
+//! transaction that drops the last claim records the deletion obligation.
+//!
+//! [`pay_owed_payload_deletions_on`] is the other half. Every call this store
+//! makes runs it once the call's own work has returned, so the flow that
+//! committed an obligation is the flow that discharges it and no sweeper exists
+//! to be kept correct. A failure between removing a file and clearing its
+//! obligation leaves the obligation durable, so the caller's retry finishes the
+//! deletion rather than losing it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -37,8 +41,6 @@ pub enum PayloadSpoolError {
     Missing { hash: ObjectHash, path: PathBuf },
     #[error("payload spool {}: {error}", path.display())]
     File { path: PathBuf, error: String },
-    #[error("{0}")]
-    Database(#[from] DbError),
 }
 
 /// One store's payload files, under `spool/payloads` in its store directory.
@@ -92,34 +94,30 @@ impl<'store> PayloadSpool<'store> {
             Err(error) => Err(read_error(hash, path, error)),
         }
     }
+}
 
-    /// Delete the payload behind every committed cleanup obligation, clearing
-    /// each obligation once its file is gone. A filesystem or database failure
-    /// leaves the obligation durable and fails the drain.
-    ///
-    /// The deletions run on the database's connection thread, alongside the
-    /// transactions that register claims, so a payload cannot be re-claimed and
-    /// rewritten between this drain reading its obligation and removing its
-    /// file.
-    pub async fn drain_cleanup(&self, database: &StoreDatabase) -> Result<(), PayloadSpoolError> {
-        let store_dir = self.store_dir.clone();
-        database
-            .connection
-            .call(move |conn| {
-                for hash in payload_spool_cleanup_hashes_on(conn)? {
-                    delete_payload_blocking(&store_dir, hash)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                    conn.execute(
-                        "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
-                        [hash.to_string()],
-                    )
-                    .map_err(DbError::from)?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(PayloadSpoolError::Database)
+/// Delete the payload behind every committed cleanup obligation, clearing each
+/// obligation once its file is gone.
+///
+/// Runs on the database's connection thread, where the transactions that record
+/// obligations also run, so a payload cannot be re-claimed and rewritten between
+/// this reading its obligation and removing its file. A failure between the two
+/// leaves the obligation durable and fails the caller, so the caller's retry
+/// finishes the deletion rather than losing it.
+pub fn pay_owed_payload_deletions_on(
+    conn: &Connection,
+    store_dir: &StoreDir,
+) -> Result<(), DbError> {
+    for hash in payload_spool_cleanup_hashes_on(conn)? {
+        delete_payload_blocking(store_dir, hash)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        conn.execute(
+            "DELETE FROM payload_spool_cleanup WHERE payload_hash = ?1",
+            [hash.to_string()],
+        )
+        .map_err(DbError::from)?;
     }
+    Ok(())
 }
 
 /// A connection and the payload files the rows on it name.
@@ -525,11 +523,22 @@ mod tests {
         .expect("record payload claims");
     }
 
+    async fn pay_owed_deletions(db: &crate::Database, store_dir: &StoreDir) -> Result<(), DbError> {
+        let store_dir = store_dir.clone();
+        db.call(move |conn| pay_owed_payload_deletions_on(conn, &store_dir))
+            .await
+    }
+
+    async fn owed_deletions(db: &crate::Database) -> Vec<ObjectHash> {
+        db.call(payload_spool_cleanup_hashes_on)
+            .await
+            .expect("read payload cleanup obligations")
+    }
+
     #[tokio::test]
     async fn the_last_claim_to_go_owes_its_payload_a_deletion_and_the_drain_pays_it() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
-        let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
         let kept = spool.write(&payload(1, 64)).await.expect("write kept");
         let dropped = spool.write(&payload(2, 64)).await.expect("write dropped");
@@ -537,19 +546,12 @@ mod tests {
         commit_claims(&db, "owner-a", &[kept, dropped]).await;
         commit_claims(&db, "owner-a", &[kept]).await;
 
-        spool
-            .drain_cleanup(&database)
+        pay_owed_deletions(&db, &store_dir)
             .await
             .expect("drain obligations");
 
         assert_eq!(spool_entries(&store_dir), vec![kept.to_string()]);
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("remaining obligations"),
-            Vec::new()
-        );
+        assert_eq!(owed_deletions(&db).await, Vec::new());
     }
 
     /// Two owners naming one payload is the collision the claim table exists
@@ -559,7 +561,6 @@ mod tests {
     async fn a_payload_a_second_owner_still_claims_is_not_owed_a_deletion() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
-        let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
         let shared = spool.write(&payload(3, 64)).await.expect("write shared");
 
@@ -567,28 +568,15 @@ mod tests {
         commit_claims(&db, "owner-b", &[shared]).await;
         commit_claims(&db, "owner-a", &[]).await;
 
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("obligations"),
-            Vec::new()
-        );
+        assert_eq!(owed_deletions(&db).await, Vec::new());
 
-        spool
-            .drain_cleanup(&database)
+        pay_owed_deletions(&db, &store_dir)
             .await
             .expect("drain obligations");
         assert_eq!(spool_entries(&store_dir), vec![shared.to_string()]);
 
         commit_claims(&db, "owner-b", &[]).await;
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("obligations"),
-            vec![shared]
-        );
+        assert_eq!(owed_deletions(&db).await, vec![shared]);
     }
 
     /// A payload an owner takes on is a payload some row names, so whatever
@@ -598,7 +586,6 @@ mod tests {
     async fn claiming_a_payload_that_is_owed_a_deletion_discharges_the_obligation() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
-        let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
         let bytes = payload(4, 64);
         let hash = spool.write(&bytes).await.expect("write payload");
@@ -607,15 +594,8 @@ mod tests {
         commit_claims(&db, "owner-a", &[]).await;
         commit_claims(&db, "owner-b", &[hash]).await;
 
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("obligations"),
-            Vec::new()
-        );
-        spool
-            .drain_cleanup(&database)
+        assert_eq!(owed_deletions(&db).await, Vec::new());
+        pay_owed_deletions(&db, &store_dir)
             .await
             .expect("drain obligations");
         assert_eq!(spool.read(hash).await.expect("read payload"), bytes);
@@ -627,7 +607,6 @@ mod tests {
     async fn replacing_a_claim_set_keeps_the_payloads_that_stay_in_it() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
-        let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
         let carried = spool.write(&payload(5, 64)).await.expect("write carried");
         let superseded = spool.write(&payload(6, 64)).await.expect("write old");
@@ -636,15 +615,8 @@ mod tests {
         commit_claims(&db, "owner-a", &[carried, superseded]).await;
         commit_claims(&db, "owner-a", &[carried, fresh]).await;
 
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("obligations"),
-            vec![superseded]
-        );
-        spool
-            .drain_cleanup(&database)
+        assert_eq!(owed_deletions(&db).await, vec![superseded]);
+        pay_owed_deletions(&db, &store_dir)
             .await
             .expect("drain obligations");
 
@@ -660,24 +632,16 @@ mod tests {
     async fn a_drain_whose_payload_is_already_gone_still_clears_the_obligation() {
         let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
-        let database = crate::synthetic_store::store_database(&db);
         let spool = PayloadSpool::new(&store_dir);
         let hash = spool.write(&payload(8, 64)).await.expect("write payload");
         delete_payload_blocking(&store_dir, hash).expect("delete payload");
 
         commit_claims(&db, "owner-a", &[hash]).await;
         commit_claims(&db, "owner-a", &[]).await;
-        spool
-            .drain_cleanup(&database)
+        pay_owed_deletions(&db, &store_dir)
             .await
             .expect("drain obligations");
 
-        assert_eq!(
-            database
-                .owed_payload_spool_cleanup()
-                .await
-                .expect("remaining obligations"),
-            Vec::new()
-        );
+        assert_eq!(owed_deletions(&db).await, Vec::new());
     }
 }

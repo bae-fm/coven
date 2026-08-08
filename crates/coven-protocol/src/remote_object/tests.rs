@@ -581,3 +581,61 @@ fn deserialized_device_head_rejects_resolution_cleanup_state() {
         Err(RemoteObjectRecordError::DomainMismatch)
     ));
 }
+
+/// A record's payload variant says where its bytes are, and only a stored blob's
+/// row travels — inside published snapshot and bootstrap images, where the
+/// receiving device has the row and none of this device's spool. Every other
+/// domain names its payloads in the spool. A record that claims the wrong one is
+/// refused, so the carry set is structural rather than a convention each new
+/// constructor has to honour.
+#[test]
+fn a_record_whose_payloads_contradict_its_domain_is_refused() {
+    let commit = test_commit_ref("payload-placement", 1);
+    let blob = test_stored_blob("payload-placement-blob");
+    let carried = RemoteObjectRecord::activated_blob(&blob, commit.clone())
+        .expect("activate stored blob")
+        .into_record();
+    let locator_bytes = carried
+        .payloads()
+        .carried_locator_bytes()
+        .expect("a stored blob carries its locator")
+        .to_vec();
+
+    for spooled in [
+        RemoteObjectPayloads::SpooledInline,
+        RemoteObjectPayloads::SpooledExternal,
+    ] {
+        let mut relocated = carried.clone();
+        let RemoteObjectRecord::SharedLiveSet(inner) = &mut relocated else {
+            unreachable!("constructed stored blob")
+        };
+        inner.payloads = spooled;
+        assert!(
+            matches!(
+                relocated.validate(),
+                Err(RemoteObjectRecordError::PayloadPlacement)
+            ),
+            "a stored blob whose row travels must carry its locator, not spool it"
+        );
+    }
+
+    let (reference, package) = test_store_package(&commit);
+    let mut spooling = RemoteObjectRecord::activated_external_package(
+        SharedLiveSetObjectDomain::StorePackage { reference },
+        &package,
+        commit,
+    )
+    .expect("activate external package")
+    .into_record();
+    let RemoteObjectRecord::SharedLiveSet(inner) = &mut spooling else {
+        unreachable!("constructed shared package")
+    };
+    inner.payloads = RemoteObjectPayloads::RowBlob { locator_bytes };
+    assert!(
+        matches!(
+            spooling.validate(),
+            Err(RemoteObjectRecordError::PayloadPlacement)
+        ),
+        "only a stored blob may carry a locator in its row"
+    );
+}
