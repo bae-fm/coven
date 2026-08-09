@@ -6,7 +6,7 @@ use tracing::warn;
 
 use crate::BlobDecls;
 use crate::PublicationBlob;
-use crate::{attach_session, capture_changeset, local_merge_stream_id_on, *};
+use crate::{attach_session, capture_changeset, *};
 use crate::{
     audience_moves, capture_routing_changes, is_routing_table, partition_outbound,
     validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
@@ -45,7 +45,7 @@ fn rollback_staged_audience_blobs(
 pub trait AudienceBlobMoveStaging: Send + Sync {
     fn stage_audience_move_blobs_on(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
@@ -68,27 +68,31 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
     blob_decls: &'operation BlobDecls,
     routing: StoreWriteRouting<'operation>,
     blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
+    verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
     write_id: WriteId,
 }
 
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
     store_dir: &'transaction coven_foundation::store_dir::StoreDir,
+    verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
 }
 
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
     fn new(
         transaction: &'transaction rusqlite::Transaction<'connection>,
         store_dir: &'transaction coven_foundation::store_dir::StoreDir,
+        verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
     ) -> Self {
         Self {
             transaction,
             store_dir,
+            verified_authority,
         }
     }
 
     pub fn local_activated_registration(
-        &self,
+        &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let reference =
@@ -97,7 +101,11 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
                     "audience blob move has no activated local Store registration".to_string(),
                 )
             })?;
-        let registration = load_activated_registration_on(self.transaction, root, &reference)?;
+        let registration = self.verified_authority.activated_registration_on(
+            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            root,
+            &reference,
+        )?;
         coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
             reference,
             registration,
@@ -114,7 +122,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     }
 
     pub fn circle_blob_opening_protection(
-        &self,
+        &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         circle_id: coven_protocol::circle::CircleId,
         expected_control: &coven_protocol::circle::CircleControlCoord,
@@ -122,6 +130,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         super::circle_blob_opening_protection_on(
             crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            self.verified_authority,
             root,
             circle_id,
             expected_control,
@@ -433,7 +442,7 @@ impl StoreDatabase {
         Self::store_write_routing(&self.gates, routing_encryption).map(drop)
     }
 
-    pub fn insert_store_write_on(
+    pub(crate) fn insert_store_write_on(
         records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         write_id: &WriteId,
         partitions: &[AudiencePartition],
@@ -442,7 +451,7 @@ impl StoreDatabase {
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
-        let tx = records.transaction();
+        let tx = records.transaction;
         let remote_partitions = partitions
             .iter()
             .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
@@ -574,11 +583,13 @@ impl StoreDatabase {
     }
 
     pub async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.call_records(move |records| {
-            let conn = records.conn();
-            let stored = conn
-                .query_row(
-                    "SELECT write_id, base, blob_facts FROM store_writes
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let conn = records.conn;
+                let stored = conn
+                    .query_row(
+                        "SELECT write_id, base, blob_facts FROM store_writes
                  WHERE status = '\"pending\"'
                    AND ordinal = (
                        SELECT MIN(ordinal) FROM store_writes
@@ -590,38 +601,38 @@ impl StoreDatabase {
                        SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
                    )
                  ORDER BY ordinal LIMIT 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let Some((write_id, base, blob_facts)) = stored else {
-                return Ok(None);
-            };
-            let partitions = Self::store_write_partitions_on(records, &write_id)?;
-            Ok(Some(PreparedStoreWrite {
-                write_id: WriteId::from_generated(write_id),
-                partitions,
-                base: serde_json::from_str(&base)
-                    .map_err(|error| DbError::context("pending write base", error))?,
-                blob_facts: serde_json::from_str(&blob_facts)
-                    .map_err(|error| DbError::context("pending write blob facts", error))?,
-            }))
-        })
-        .await
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let Some((write_id, base, blob_facts)) = stored else {
+                    return Ok(None);
+                };
+                let partitions = Self::store_write_partitions_on(records, &write_id)?;
+                Ok(Some(PreparedStoreWrite {
+                    write_id: WriteId::from_generated(write_id),
+                    partitions,
+                    base: serde_json::from_str(&base)
+                        .map_err(|error| DbError::context("pending write base", error))?,
+                    blob_facts: serde_json::from_str(&blob_facts)
+                        .map_err(|error| DbError::context("pending write blob facts", error))?,
+                }))
+            })
+            .await
     }
 
-    pub fn store_write_partitions_on(
+    pub(crate) fn store_write_partitions_on(
         records: crate::payload_spool::StoreRecords<'_>,
         write_id: &str,
     ) -> Result<PreparedStoreWritePartitions, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let mut statement = conn
             .prepare(
                 "SELECT audience, control_coord, changeset_hash
@@ -726,6 +737,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
         blob_staging: Option<&'operation dyn AudienceBlobMoveStaging>,
+        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         Self::begin(
@@ -736,6 +748,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             blob_decls,
             routing_encryption,
             blob_staging.map(AudienceBlobMoveMaterialization::Host),
+            verified_authority,
             write_id,
         )
     }
@@ -747,6 +760,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         gates: &'operation Gates,
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
+        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         Self::begin(
@@ -757,6 +771,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             blob_decls,
             routing_encryption,
             Some(AudienceBlobMoveMaterialization::PreparedTransition),
+            verified_authority,
             write_id,
         )
     }
@@ -770,6 +785,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         blob_decls: &'operation BlobDecls,
         routing_encryption: Option<&'operation EncryptionService>,
         blob_materialization: Option<AudienceBlobMoveMaterialization<'operation>>,
+        verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
         let routing = StoreDatabase::store_write_routing(gates, routing_encryption)?;
@@ -784,6 +800,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             blob_decls,
             routing,
             blob_materialization,
+            verified_authority,
             write_id,
         })
     }
@@ -804,6 +821,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             blob_decls,
             routing,
             blob_materialization,
+            verified_authority,
             write_id,
         } = self;
         (|| {
@@ -848,7 +866,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             }
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
-                    let store_root_hash = required_store_root_authority_on(&tx)
+                    let store_root_hash = verified_authority
+                        .required_root_authority_on(crate::payload_spool::StoreRecords::new(
+                            &tx, store_dir,
+                        ))
                         .map_err(E::from)?
                         .store_root_hash;
                     let key =
@@ -897,11 +918,12 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
-                    let blob_transaction = HostWriteBlobTransaction::new(&tx, store_dir);
+                    let mut blob_transaction =
+                        HostWriteBlobTransaction::new(&tx, store_dir, verified_authority);
                     Some(
                         staging
                             .stage_audience_move_blobs_on(
-                                &blob_transaction,
+                                &mut blob_transaction,
                                 &mut blob_facts,
                                 &partitioned.moves,
                                 &partitioned.partitions,
@@ -938,7 +960,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             drop(journal);
             let committed = (|| {
                 let rows_changed = tx.total_changes().saturating_sub(changes_before);
-                let local_stream_id = local_merge_stream_id_on(&tx)?;
+                let local_stream_id = verified_authority.local_merge_stream_id_on(
+                    crate::payload_spool::StoreRecords::new(&tx, store_dir),
+                )?;
                 let base = StoreWriteBase {
                     dependencies: StoreDatabase::materialized_frontier_on(
                         &tx,

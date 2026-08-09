@@ -1,13 +1,14 @@
-use crate::local_store_identity::local_store_authority_on;
 use coven_protocol::circle::CircleId;
 use coven_protocol::store_commit::{
-    CircleSnapshotMeta, CircleSnapshotRef, ObjectHash, SnapshotImageRef,
+    CircleSnapshotMeta, CircleSnapshotRef, ObjectHash, ReferencedStoreDeviceRegistration,
+    SnapshotImageRef,
 };
 
 use super::*;
 
 pub fn load_published_circle_snapshot_on(
     conn: &Connection,
+    authority: &ReferencedStoreDeviceRegistration,
     circle_id: CircleId,
 ) -> Result<Option<PublishedCircleSnapshot>, DbError> {
     conn.query_row(
@@ -41,7 +42,6 @@ pub fn load_published_circle_snapshot_on(
         }
         let successor_slot = serde_json::from_str(&successor_slot)
             .map_err(|error| DbError::context("published Circle snapshot successor slot", error))?;
-        let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
         let meta = CircleSnapshotMeta::parse_at(
@@ -71,11 +71,12 @@ pub fn load_published_circle_snapshot_on(
     .transpose()
 }
 
-pub fn load_outbound_circle_snapshot_on(
+pub(crate) fn load_outbound_circle_snapshot_on(
     records: crate::payload_spool::StoreRecords<'_>,
+    authority: &ReferencedStoreDeviceRegistration,
     circle_id: CircleId,
 ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
-    let conn = records.conn();
+    let conn = records.conn;
     conn.query_row(
         "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs \
          FROM outbound_circle_snapshot WHERE circle_id = ?1",
@@ -127,7 +128,6 @@ pub fn load_outbound_circle_snapshot_on(
                         .to_string(),
                 ));
             }
-            let authority = local_store_authority_on(conn)?;
             let author_ref = authority.reference();
             let author = authority.value();
             let meta = CircleSnapshotMeta::parse_at(

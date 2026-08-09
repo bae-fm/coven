@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 
 cargo run --quiet -p owner-construction-check -- \
     --database-boundary \
+    --owner-dependency-boundary \
     --retained-service-construction \
     --retained-service-returns \
     --retained-capability-parameters \

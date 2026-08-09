@@ -76,6 +76,65 @@ impl DatabaseTestSql<'_> {
         values
     }
 
+    pub fn pay_owed_payload_deletions(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), DbError> {
+        crate::payload_spool::pay_owed_payload_deletions_on(self.connection, store_dir)
+    }
+
+    pub fn payload_spool_cleanup_hashes(
+        &self,
+    ) -> Result<Vec<coven_protocol::store_commit::ObjectHash>, DbError> {
+        crate::payload_spool::payload_spool_cleanup_hashes_on(self.connection)
+    }
+
+    pub fn set_payload_owner_claims(
+        &self,
+        owner_key: &str,
+        payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
+    ) -> Result<(), DbError> {
+        crate::payload_spool::set_payload_owner_claims_on(self.connection, owner_key, payloads)
+    }
+
+    pub fn record_obsolete_copy_intents(
+        &self,
+        decls: &crate::BlobDecls,
+        intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,
+    ) -> Result<(), DbError> {
+        crate::store::record_obsolete_copy_intents_on(self.connection, decls, intent)
+    }
+
+    pub fn persist_exact_remote_object(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        remote: &coven_protocol::remote_object::ClosedRemoteObject,
+        subject: &str,
+    ) -> Result<(), DbError> {
+        crate::persist_exact_remote_object_on(self.connection, store_dir, remote, subject)
+    }
+
+    pub fn load_remote_object(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        crate::load_remote_object_on(self.connection, object_id)
+    }
+
+    pub fn load_reclaimed_store_package(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<Option<crate::ReclaimedStorePackage>, DbError> {
+        crate::remote_object_records::load_reclaimed_store_package_on(self.connection, object_id)
+    }
+
+    pub fn record_reclaimed_store_package(
+        &self,
+        package: &crate::ReclaimedStorePackage,
+    ) -> Result<(), DbError> {
+        crate::record_reclaimed_store_package_on(self.connection, None, package)
+    }
+
     /// Every durable write partition, Store audience first and Local last.
     pub fn store_write_partitions_in_audience_order(
         &self,
@@ -1788,6 +1847,14 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
+    pub fn install_exact_store_root_authority(
+        &self,
+        reference: &coven_protocol::store_commit::StoreRootRef,
+        bytes: &[u8],
+    ) -> Result<(), DbError> {
+        crate::install_store_root_authority_on(self.connection, reference, bytes).map(|_| ())
+    }
+
     pub fn circle_bootstrap_coverage(
         &self,
         circle_id: coven_protocol::circle::CircleId,
@@ -1826,9 +1893,11 @@ impl DatabaseTestSql<'_> {
         store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::OwnedVerifiedMergeMaterialization>, DbError> {
+        let mut authority = crate::store::VerifiedStoreAuthority::default();
         crate::StoreDatabase::load_retained_merge_replay_inputs_on(
             crate::payload_spool::StoreRecords::new(self.connection, store_dir),
             root,
+            &mut authority,
         )
     }
 

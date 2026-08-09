@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::sync::store::Store;
+use coven_database::SyntheticDatabase;
 use coven_protocol::circle::{CircleControlCoord, CircleInfo, CircleRole};
 
 const ROUTING_KEY: [u8; 32] = [42; 32];
@@ -16,9 +17,9 @@ fn routing() -> EncryptionService {
 /// cloud home, so a control successor authored on each and not seen by the other
 /// forms a genuine `ControlConflict` once either device pulls both.
 struct ConflictFixture {
-    db1: Database,
+    db1: SyntheticDatabase,
     device1: String,
-    db2: Database,
+    db2: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     founder: UserKeypair,
@@ -493,7 +494,7 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
 /// owner's production sync components (to add the member and close over its
 /// removal) and a registered second founder device that can author a concurrent
 /// successor.
-fn open_routing_db() -> Database {
+fn open_routing_db() -> SyntheticDatabase {
     crate::sync::test_helpers::open_test_db_schema(
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",

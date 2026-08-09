@@ -28,7 +28,8 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
-    let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
+    let owner_database =
+        coven_database::StoreDatabase::from_database(owner_db.clone().into_database());
     let home = test_cloud_home();
     let create_store_db = owner_db.clone();
     let create_store_owner = owner.clone();

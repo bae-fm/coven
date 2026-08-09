@@ -1,4 +1,5 @@
 use super::*;
+use coven_database::SyntheticDatabase;
 use coven_protocol::store_commit::StoreCommitOperationsInput;
 use coven_protocol::store_commit::StoreDeviceHead;
 use coven_protocol::store_commit::StorePackageInput;
@@ -8,7 +9,7 @@ use coven_protocol::store_commit::{commit_semantic_prefix, package_semantic_pref
 pub(super) struct PreparedWriteFixture {
     home: InMemoryCloudHome,
     storage: Arc<CloudSyncConnection>,
-    db: Database,
+    db: SyntheticDatabase,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
     keypair: UserKeypair,

@@ -108,7 +108,6 @@ impl<'operation, 'storage>
             return Err(DeviceJoinError::AttemptMismatch);
         }
         self.storage
-            .provider_probes()
             .settle_cross_principal_challenge(
                 &self.database,
                 authorization,
@@ -260,7 +259,6 @@ impl<'operation, 'storage>
             );
             DeviceProviderAdmissionChallenge::CrossPrincipal(
                 self.storage
-                    .provider_probes()
                     .prepare_cross_principal_challenge(
                         &database,
                         probe_id,
@@ -434,7 +432,6 @@ impl<'operation, 'storage>
                 };
                 DeviceProviderAdmission::CrossPrincipal(
                     self.storage
-                        .provider_probes()
                         .complete_cross_principal_probe(
                             &database,
                             challenge,

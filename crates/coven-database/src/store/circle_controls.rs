@@ -2,10 +2,9 @@ use rusqlite::Connection;
 
 use super::{MergeMaterializationTransaction, StoreDatabase};
 use crate::{
-    candidate_graph_exact_objects, circle_operation_ids_in_phase_on,
-    load_activated_registration_on, load_circle_operation_on, load_remote_object_on,
-    persist_prepared_remote_object_on, required_store_root_authority_on, update_remote_object_on,
-    DbError, PreparedCircleOperationRow, VerifiedMergeMaterialization,
+    candidate_graph_exact_objects, circle_operation_ids_in_phase_on, load_circle_operation_on,
+    load_remote_object_on, persist_prepared_remote_object_on, update_remote_object_on, DbError,
+    PreparedCircleOperationRow, VerifiedMergeMaterialization,
 };
 use coven_protocol::circle::{CircleOperationId, CircleOperationState};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
@@ -38,7 +37,8 @@ impl StoreDatabase {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 for remote in &remotes {
                     persist_prepared_remote_object_on(
@@ -76,7 +76,8 @@ impl StoreDatabase {
         let circle_id = row.circle_id.clone();
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let discarded = load_circle_operation_on(&tx, &superseded)?.ok_or_else(|| {
                     DbError::Message(
@@ -122,7 +123,9 @@ impl StoreDatabase {
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.connection
-            .call(move |conn| load_circle_operation_on(conn, &operation_id))
+            .call_store(move |session| {
+                load_circle_operation_on(session.records.conn, &operation_id)
+            })
             .await
     }
 
@@ -130,7 +133,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let conn = session.records.conn;
                 let Some(operation_id) = circle_operation_ids_in_phase_on(conn, |progress| {
                     matches!(
                         progress,
@@ -148,7 +152,8 @@ impl StoreDatabase {
 
     pub async fn waiting_circle_operations(&self) -> Result<Vec<CircleOperationJournal>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let conn = session.records.conn;
                 let waiting = circle_operation_ids_in_phase_on(conn, |progress| {
                     matches!(progress, CircleOperationProgress::WaitingForCloseResponses)
                 })?;
@@ -185,8 +190,8 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         let step = step.to_string();
-        self.connection
-            .call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
                     DbError::Message(format!(
@@ -248,7 +253,8 @@ impl StoreDatabase {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let durable = load_circle_operation_on(&tx, journal.operation_id.as_str())?
                     .ok_or_else(|| {
@@ -314,7 +320,8 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let updated = conn
                     .execute(
                         "UPDATE circle_operations SET prepared = ?3
@@ -340,7 +347,8 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let mut journal =
                     load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
@@ -361,7 +369,8 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let mut journal =
                     load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
@@ -381,10 +390,12 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        let gates = self.gates();
+        let gates = self.gates.clone();
         let store_dir = self.store_dir.clone();
-        self.with_retained_replay(move |records, retained_cache| {
-                let conn = records.conn();
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 journal
                     .validate_identity()
@@ -422,9 +433,11 @@ impl StoreDatabase {
                     serde_json::from_slice(&operation.commit_bytes).map_err(|error| {
                         DbError::context("parse circle Store commit", error)
                     })?;
-                let root = required_store_root_authority_on(&tx)?;
-                let author = load_activated_registration_on(
-                    &tx,
+                let transaction_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let root = authority.required_root_authority_on(transaction_records)?;
+                let author = authority.activated_registration_on(
+                    transaction_records,
                     &root,
                     &unverified_commit.author_registration,
                 )?;
@@ -534,7 +547,7 @@ impl StoreDatabase {
                         None,
                     )?;
                     let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
-                        .record_verified_merge_materialization(materialization)?;
+                        .record_verified_merge_materialization(authority, materialization)?;
                     (
                         commit,
                         activation.clone(),
@@ -542,7 +555,7 @@ impl StoreDatabase {
                         retained,
                     )
                 };
-                retained_cache.validate_insert_verified(&retained)?;
+                authority.validate_retained_materialization_insert(&retained)?;
                 let mut object_ids = candidate_graph_exact_objects(&commit)?
                     .iter()
                     .map(remote_object_id)
@@ -621,8 +634,8 @@ impl StoreDatabase {
                     }
                 }
                 tx.commit().map_err(DbError::from)?;
-                retained_cache
-                    .insert_verified(retained)
+                authority
+                    .insert_retained_materialization(retained)
                     .expect("committed Circle materialization passed cache validation");
                 Ok(())
             })

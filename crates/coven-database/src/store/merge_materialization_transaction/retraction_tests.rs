@@ -63,7 +63,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     let encoded_activation =
         serde_json::to_string(&activation).expect("serialize bootstrap activation");
     database
-        .call(move |connection| {
+        .test_sql(move |connection| {
             let store_dir = store_dir;
             let image = b"Circle bootstrap retraction image";
             let image_hash = crate::payload_spool::write_payload_blocking(&store_dir, image)?;
@@ -84,26 +84,25 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                     ],
                 )
                 .map_err(DbError::from)?;
-            crate::payload_spool::set_payload_owner_claims_on(
-                connection,
+            connection.set_payload_owner_claims(
                 &crate::payload_spool::circle_bootstrap_coverage_owner_key(circle_id),
                 &BTreeSet::from([image_hash]),
             )?;
-            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-            assert_eq!(
-                MergeMaterializationTransaction::new(&transaction, &store_dir)
-                    .retire_circle_bootstrap_coverage(&activation)?,
-                1
-            );
-            let retained: i64 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM circle_bootstrap_coverage",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            assert_eq!(retained, 0);
-            transaction.rollback().map_err(DbError::from)?;
+            connection.rolled_back_transaction(|transaction| {
+                assert_eq!(
+                    transaction.retire_circle_bootstrap_coverage(&store_dir, &activation)?,
+                    1
+                );
+                let retained: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM circle_bootstrap_coverage",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                assert_eq!(retained, 0);
+                Ok(())
+            })?;
             let retained: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM circle_bootstrap_coverage",
@@ -122,13 +121,13 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                 )
                 .map_err(DbError::from)?;
             assert_eq!(claims, 1);
-            let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-            assert_eq!(
-                MergeMaterializationTransaction::new(&transaction, &store_dir)
-                    .retire_circle_bootstrap_coverage(&activation)?,
-                1
-            );
-            transaction.commit().map_err(DbError::from)?;
+            connection.transaction(|transaction| {
+                assert_eq!(
+                    transaction.retire_circle_bootstrap_coverage(&store_dir, &activation)?,
+                    1
+                );
+                Ok(())
+            })?;
             let retained: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM circle_bootstrap_coverage",

@@ -135,7 +135,8 @@ impl StoreDatabase {
         root: Option<(String, String)>,
     ) -> Result<Vec<QueuedUpload>, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
                             attempt_count, last_error, created_at, last_attempt_at
                      FROM cloud_outbox WHERE operation = 'upload'";
@@ -160,7 +161,8 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub async fn queued_deletes(&self) -> Result<Vec<QueuedDelete>, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT stored_ref, attempt_count, last_error, created_at, last_attempt_at
@@ -183,7 +185,8 @@ impl StoreDatabase {
 
     async fn pending_outbox(&self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
@@ -211,7 +214,8 @@ impl StoreDatabase {
         let stored = serde_json::to_string(stored)
             .map_err(|error| DbError::context("serialize stored blob ref", error))?;
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let removed = connection
                     .execute(
                         "DELETE FROM cloud_outbox
@@ -233,8 +237,8 @@ impl StoreDatabase {
         &self,
         max_seq: u64,
     ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
-        self.connection
-            .call(move |connection| {
+        self.connection.call_store(move |session| {
+                let connection = session.records.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
@@ -343,7 +347,8 @@ impl StoreDatabase {
         let id = intent.drop.id.clone();
         let locator_hash = intent.drop.locator_hash.to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute(
                         "DELETE FROM published_blob_drop_intents
@@ -457,7 +462,8 @@ impl StoreDatabase {
         let error = error.to_string();
         let attempted_at = attempted_at.to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let updated = match identity {
                     OutboxIdentity::Upload {
                         table,
@@ -510,7 +516,8 @@ impl StoreDatabase {
         let column = row.column().to_string();
         let row_stamp = row.row_stamp().to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let updated = connection
                     .execute(
                         "UPDATE cloud_outbox SET upload_state = ?1
@@ -533,7 +540,8 @@ impl StoreDatabase {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_outbox_backoff(&self) -> Result<(), DbError> {
         self.connection
-            .call(|connection| {
+            .call_store(|session| {
+                let connection = session.records.conn;
                 connection
                     .execute(
                         "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
@@ -553,7 +561,8 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 Database::make_remote_intent_state(connection, &root_table, &root_id)
             })
             .await
@@ -577,7 +586,8 @@ impl StoreDatabase {
     pub async fn finish_cancelled_blob_upload(&self, entry: &OutboxEntry) -> Result<bool, DbError> {
         let entry = entry.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 let finished =
                     crate::CloudOutboxRecords::new(&transaction).finish_cancelled_upload(&entry)?;

@@ -1,4 +1,5 @@
 use super::*;
+use coven_database::SyntheticDatabase;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -48,7 +49,7 @@ fn circle_routing_tables() -> Vec<coven_protocol::synced_schema::SyncedTable> {
     ]
 }
 
-fn open_circle_routing_test_db() -> Database {
+fn open_circle_routing_test_db() -> SyntheticDatabase {
     crate::sync::test_helpers::open_test_db_schema(
         circle_routing_tables(),
         circle_routing_migrations(),
@@ -60,7 +61,7 @@ fn open_circle_routing_test_db() -> Database {
 /// components; the member exists only as a Store identity and Circle roster
 /// entry whose removal makes the Circle rotation-required.
 struct RotationFixture {
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     owner_device: TestDevice,
@@ -69,7 +70,7 @@ struct RotationFixture {
     circle_id: CircleId,
     member: UserKeypair,
     member_pubkey: String,
-    member_db: Database,
+    member_db: SyntheticDatabase,
     member_device: RotationMemberDevice,
     store_dir: coven_foundation::store_dir::StoreDir,
     _store_temp: tempfile::TempDir,
@@ -1166,7 +1167,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 /// Circle's roster, and the production sync components the owner drives. Every
 /// restore case starts from this shape and differs only in what it does next.
 struct CircleWithOneMember {
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
@@ -1233,7 +1234,7 @@ impl CircleWithOneMember {
 /// from that snapshot is floored against.
 async fn publish_acknowledged_store_snapshot(
     store: &TestStore,
-    db: &Database,
+    db: &SyntheticDatabase,
     signer: &UserKeypair,
     routing: &EncryptionService,
     cut_stamp: &str,
@@ -1300,7 +1301,7 @@ impl RestoreTarget {
 /// the failure cases are exactly what several of these tests assert on.
 async fn restore_store_snapshot<'a>(
     store: &'a TestStore,
-    db: &Database,
+    db: &SyntheticDatabase,
     membership: &coven_protocol::membership::MembershipChain,
     restorer: &UserKeypair,
     target: &'a RestoreTarget,
@@ -1329,7 +1330,7 @@ async fn restore_store_snapshot<'a>(
 }
 
 struct ActiveMemberCircleSnapshot {
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,

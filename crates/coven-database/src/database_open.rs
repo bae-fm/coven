@@ -287,6 +287,7 @@ impl DatabaseCore {
         let core = DatabaseCore {
             store_dir,
             conn,
+            verified_store_authority: Default::default(),
             hlc,
             synced_tables,
             schema_version,
@@ -356,6 +357,7 @@ impl DatabaseCore {
         let core = DatabaseCore {
             store_dir,
             conn,
+            verified_store_authority: Default::default(),
             hlc,
             synced_tables,
             schema_version,
@@ -388,13 +390,6 @@ impl DatabaseCore {
             #[cfg(any(test, feature = "test-utils"))]
             merge_materialization_failure: Arc::new(std::sync::Mutex::new(None)),
         }
-    }
-
-    pub(crate) fn run<F, R>(&self, operation: F) -> R
-    where
-        F: FnOnce(&Connection) -> R,
-    {
-        operation(&self.conn)
     }
 }
 

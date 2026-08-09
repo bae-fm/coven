@@ -5,8 +5,6 @@ use coven_protocol::objects::StoreObjectError;
 #[cfg(test)]
 use super::RegistrationOutbox;
 #[cfg(test)]
-use coven_database::Database;
-#[cfg(test)]
 use coven_keys::keys::UserKeypair;
 #[cfg(test)]
 use coven_protocol::objects::ProtocolObjectDomain;
@@ -35,11 +33,11 @@ pub enum StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_test_db, TestStore};
+    use crate::sync::test_helpers::{open_test_db, SyntheticDatabase, TestStore};
     use coven_protocol::store_commit::StoreBatchCommitRef;
     use coven_storage::CloudSyncObjectStorage;
 
-    async fn initialized() -> (std::sync::Arc<TestStore>, Database, UserKeypair) {
+    async fn initialized() -> (std::sync::Arc<TestStore>, SyntheticDatabase, UserKeypair) {
         let signer = UserKeypair::generate();
         let db = open_test_db();
         let store = TestStore::create(
@@ -55,7 +53,7 @@ mod tests {
 
     async fn recovered_author() -> (
         std::sync::Arc<TestStore>,
-        Database,
+        SyntheticDatabase,
         StoreDeviceRegistrationRef,
         StoreBatchCommitRef,
     ) {
@@ -200,7 +198,7 @@ mod tests {
         .await;
 
         let root = store.root.clone();
-        let store_dir = db.store_dir_for_test().clone();
+        let store_dir = db.store_dir.clone();
         db.test_sql(move |database| {
             database
                 .load_retained_merge_replay_inputs(&store_dir, &root)
@@ -222,7 +220,7 @@ mod tests {
         .await;
 
         let root = store.root.clone();
-        let store_dir = db.store_dir_for_test().clone();
+        let store_dir = db.store_dir.clone();
         db.test_sql(move |database| {
             database
                 .load_retained_merge_replay_inputs(&store_dir, &root)

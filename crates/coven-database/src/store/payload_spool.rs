@@ -21,7 +21,7 @@
 //! deletion rather than losing it.
 
 use std::collections::BTreeSet;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use coven_foundation::atomic_file::AtomicFileStage;
@@ -197,42 +197,27 @@ pub fn pay_owed_payload_deletions_on(
 /// function that only touches rows keeps taking the connection alone, and its
 /// signature says so.
 #[derive(Clone, Copy)]
-pub struct StoreRecords<'store> {
-    conn: &'store Connection,
-    store_dir: &'store StoreDir,
+pub(crate) struct StoreRecords<'store> {
+    pub(crate) conn: &'store Connection,
+    pub(crate) store_dir: &'store StoreDir,
 }
 
 impl<'store> StoreRecords<'store> {
-    pub fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
+    pub(crate) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
         Self { conn, store_dir }
     }
 
-    pub fn conn(&self) -> &'store Connection {
-        self.conn
-    }
-
-    pub fn store_dir(&self) -> &'store StoreDir {
-        self.store_dir
-    }
-
     /// The payload stored under `hash`, read on this thread.
-    pub fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
+    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
         read_payload_blocking(self.store_dir, hash)
     }
 
-    /// Open the SQLite database payload named by `hash` after streaming its
-    /// bytes through the content hash. The connection reads the spool file in
-    /// place; callers that replay a database image never materialize it as a
-    /// `Vec<u8>`.
-    pub fn open_database_payload(
-        &self,
-        hash: ObjectHash,
-    ) -> Result<rusqlite::Connection, PayloadSpoolError> {
-        open_database_payload_blocking(self.store_dir, hash)
+    pub(crate) fn verified_payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
+        read_verified_payload_blocking(self.store_dir, hash)
     }
 
     /// Install `bytes` as a payload and return the hash naming the file.
-    pub fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
+    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         write_payload_blocking(self.store_dir, bytes)
     }
 }
@@ -244,13 +229,13 @@ impl<'store> StoreRecords<'store> {
 /// autocommit each statement would land on its own, and a failure between them
 /// would leave a row naming a file that never arrived — or the reverse.
 #[derive(Clone, Copy)]
-pub struct StoreRecordTransaction<'store, 'connection> {
-    transaction: &'store rusqlite::Transaction<'connection>,
-    store_dir: &'store StoreDir,
+pub(crate) struct StoreRecordTransaction<'store, 'connection> {
+    pub(crate) transaction: &'store rusqlite::Transaction<'connection>,
+    pub(crate) store_dir: &'store StoreDir,
 }
 
 impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
-    pub fn new(
+    pub(crate) fn new(
         transaction: &'store rusqlite::Transaction<'connection>,
         store_dir: &'store StoreDir,
     ) -> Self {
@@ -260,36 +245,8 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         }
     }
 
-    pub fn conn(&self) -> &'store Connection {
-        self.transaction
-    }
-
-    pub fn store_dir(&self) -> &'store StoreDir {
-        self.store_dir
-    }
-
-    pub fn records(&self) -> StoreRecords<'store> {
-        StoreRecords::new(self.transaction, self.store_dir)
-    }
-
-    pub fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
-        read_payload_blocking(self.store_dir, hash)
-    }
-
-    pub fn open_database_payload(
-        &self,
-        hash: ObjectHash,
-    ) -> Result<rusqlite::Connection, PayloadSpoolError> {
-        open_database_payload_blocking(self.store_dir, hash)
-    }
-
-    pub fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
+    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         write_payload_blocking(self.store_dir, bytes)
-    }
-
-    /// The transaction itself, for the statements that need it named.
-    pub fn transaction(&self) -> &'store rusqlite::Transaction<'connection> {
-        self.transaction
     }
 }
 
@@ -345,31 +302,13 @@ pub fn read_payload_blocking(
     std::fs::read(&path).map_err(|error| read_error(hash, path, error))
 }
 
-fn open_database_payload_blocking(
+fn read_verified_payload_blocking(
     store_dir: &StoreDir,
     hash: ObjectHash,
-) -> Result<rusqlite::Connection, PayloadSpoolError> {
+) -> Result<Vec<u8>, PayloadSpoolError> {
     let path = store_dir.payload_spool_path(hash);
-    let mut file =
-        std::fs::File::open(&path).map_err(|error| read_error(hash, path.clone(), error))?;
-    let mut hasher = coven_protocol::blob::ContentHasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| PayloadSpoolError::File {
-                path: path.clone(),
-                error: error.to_string(),
-            })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = hasher
-        .finish()
-        .parse::<ObjectHash>()
-        .expect("SHA-256 hex is an ObjectHash");
+    let bytes = std::fs::read(&path).map_err(|error| read_error(hash, path.clone(), error))?;
+    let actual = ObjectHash::digest(&bytes);
     if actual != hash {
         return Err(PayloadSpoolError::ContentMismatch {
             expected: hash,
@@ -377,12 +316,7 @@ fn open_database_payload_blocking(
             path,
         });
     }
-    crate::connection_io::open_connection_read_only(&path).map_err(|error| {
-        PayloadSpoolError::File {
-            path,
-            error: error.to_string(),
-        }
-    })
+    Ok(bytes)
 }
 
 fn read_error(hash: ObjectHash, path: PathBuf, error: std::io::Error) -> PayloadSpoolError {
@@ -551,7 +485,9 @@ impl StoreDatabase {
     /// store committed has been discharged.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        self.connection.call(payload_spool_cleanup_hashes_on).await
+        self.connection
+            .call_store(|session| payload_spool_cleanup_hashes_on(session.records.conn))
+            .await
     }
 
     /// The payloads `owner_key` claims. Empty when it holds none.
@@ -559,7 +495,8 @@ impl StoreDatabase {
     pub async fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
         let owner_key = owner_key.to_string();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 Ok(payload_owner_claims_on(conn, &owner_key)?
                     .into_iter()
                     .collect())
@@ -568,7 +505,9 @@ impl StoreDatabase {
     }
 }
 
-fn payload_spool_cleanup_hashes_on(conn: &Connection) -> Result<Vec<ObjectHash>, DbError> {
+pub(crate) fn payload_spool_cleanup_hashes_on(
+    conn: &Connection,
+) -> Result<Vec<ObjectHash>, DbError> {
     crate::query_mapped_rows(
         conn,
         "SELECT payload_hash FROM payload_spool_cleanup ORDER BY payload_hash",
@@ -659,12 +598,9 @@ mod tests {
         }
         let (hash, _) = write_payload_file_blocking(&store_dir, &source_path)
             .expect("install database payload");
-        let owner = rusqlite::Connection::open_in_memory().expect("open owner database");
-        let records = StoreRecords::new(&owner, &store_dir);
-
-        let opened = records
-            .open_database_payload(hash)
-            .expect("open database payload");
+        let bytes =
+            read_verified_payload_blocking(&store_dir, hash).expect("read database payload");
+        let opened = crate::open_database_image(&bytes).expect("open database payload");
         assert_eq!(
             opened
                 .query_row("SELECT value FROM facts", [], |row| row.get::<_, String>(0))
@@ -676,7 +612,7 @@ mod tests {
         std::fs::write(store_dir.payload_spool_path(hash), b"changed")
             .expect("change installed payload");
         assert!(matches!(
-            records.open_database_payload(hash),
+            read_verified_payload_blocking(&store_dir, hash),
             Err(PayloadSpoolError::ContentMismatch { expected, .. }) if expected == hash
         ));
     }
@@ -778,10 +714,8 @@ mod tests {
     async fn commit_claims(db: &crate::Database, owner_key: &str, payloads: &[ObjectHash]) {
         let owner_key = owner_key.to_string();
         let payloads = payloads.iter().copied().collect::<BTreeSet<_>>();
-        db.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            set_payload_owner_claims_on(&tx, &owner_key, &payloads)?;
-            tx.commit().map_err(DbError::from)
+        db.test_sql(move |conn| {
+            conn.transaction(|tx| tx.set_payload_owner_claims(&owner_key, &payloads))
         })
         .await
         .expect("record payload claims");
@@ -789,12 +723,12 @@ mod tests {
 
     async fn pay_owed_deletions(db: &crate::Database, store_dir: &StoreDir) -> Result<(), DbError> {
         let store_dir = store_dir.clone();
-        db.call(move |conn| pay_owed_payload_deletions_on(conn, &store_dir))
+        db.test_sql(move |database| database.pay_owed_payload_deletions(&store_dir))
             .await
     }
 
     async fn owed_deletions(db: &crate::Database) -> Vec<ObjectHash> {
-        db.call(payload_spool_cleanup_hashes_on)
+        db.test_sql(|database| database.payload_spool_cleanup_hashes())
             .await
             .expect("read payload cleanup obligations")
     }
@@ -912,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn a_store_call_pays_existing_deletion_obligations_when_its_operation_fails() {
         let db = crate::synthetic_store::open_test_db();
-        let store_dir = db.store_dir_for_test().clone();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let hash = spool.write(&payload(9, 64)).await.expect("write payload");
         commit_claims(&db, "owner-a", &[hash]).await;

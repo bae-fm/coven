@@ -1,7 +1,7 @@
 use super::*;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
-use coven_database::Database;
 use coven_database::StoreDatabase;
+use coven_database::SyntheticDatabase;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{MasterKeyCustody, UserKeypair};
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
@@ -20,7 +20,7 @@ struct MergeFixture {
     home: Arc<coven_storage::InMemoryCloudHome>,
     store_id: String,
     device: crate::sync::test_helpers::TestDevice,
-    db: Database,
+    db: SyntheticDatabase,
     database: StoreDatabase,
     owner: UserKeypair,
     owner_pubkey: String,

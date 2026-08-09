@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
-use coven_database::Database;
 use coven_database::Migration;
+use coven_database::SyntheticDatabase;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::blob::{CacheFill, Provenance};
@@ -78,7 +78,7 @@ trait PullTestDatabaseOps {
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId;
     async fn pull_exact_store_into(
         &self,
-        source: &coven_database::Database,
+        source: &coven_database::SyntheticDatabase,
         storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -90,7 +90,7 @@ trait PullTestDatabaseOps {
     async fn row_blob_object_key(&self, table: &str, row_id: &str) -> String;
 }
 
-impl PullTestDatabaseOps for coven_database::Database {
+impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
     async fn exact_row_blob_ref(
         &self,
         table: &str,
@@ -150,7 +150,7 @@ impl PullTestDatabaseOps for coven_database::Database {
 
     async fn pull_exact_store_into(
         &self,
-        source: &coven_database::Database,
+        source: &coven_database::SyntheticDatabase,
         storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -265,14 +265,14 @@ fn commit_stream_id(reference: &coven_protocol::store_commit::StoreBatchCommitRe
 trait TestStoreStorage: Sync {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String>;
 
     async fn sync_for_test(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -327,7 +327,7 @@ trait TestStoreStorage: Sync {
     /// the resulting immutable Store objects as `keypair`.
     async fn publish_test_cycle(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -346,7 +346,7 @@ trait TestStoreStorage: Sync {
 impl TestStoreStorage for TestStore {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -362,7 +362,7 @@ impl TestStoreStorage for TestStore {
 impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -396,7 +396,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
 trait PullTestStoreOps {
     async fn make_root_remote(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     );
@@ -404,11 +404,11 @@ trait PullTestStoreOps {
     async fn read_exact_blob(&self, blob: &coven_protocol::blob::locator::StoredBlobRef)
         -> Vec<u8>;
 
-    async fn author_scoped_write(&self, db: &coven_database::Database, sql: String);
+    async fn author_scoped_write(&self, db: &coven_database::SyntheticDatabase, sql: String);
 
     async fn pull_scoped(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
 
     async fn publish_exact_changeset_with_authority(
@@ -424,7 +424,7 @@ trait PullTestStoreOps {
 impl PullTestStoreOps for TestStore {
     async fn make_root_remote(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     ) {
@@ -483,7 +483,7 @@ impl PullTestStoreOps for TestStore {
             .expect("read staged exact blob plaintext")
     }
 
-    async fn author_scoped_write(&self, db: &coven_database::Database, sql: String) {
+    async fn author_scoped_write(&self, db: &coven_database::SyntheticDatabase, sql: String) {
         coven_database::StoreDatabase::new(db)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
@@ -503,7 +503,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn pull_scoped(
         &self,
-        db: &coven_database::Database,
+        db: &coven_database::SyntheticDatabase,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let device = self
             .open_into(db)
@@ -571,7 +571,7 @@ fn photo_decl_with_blob_id_column() -> BlobDecl {
         .with_id_column("cloud_path")
 }
 
-fn unique_note_db() -> coven_database::Database {
+fn unique_note_db() -> coven_database::SyntheticDatabase {
     open_test_db_schema(
         vec![SyncedTable::new(
             "unique_notes",
@@ -592,7 +592,7 @@ fn unique_note_db() -> coven_database::Database {
     )
 }
 
-fn uuid_note_db() -> coven_database::Database {
+fn uuid_note_db() -> coven_database::SyntheticDatabase {
     open_test_db_schema(
         vec![SyncedTable::new(
             "uuid_notes",
@@ -611,7 +611,7 @@ fn uuid_note_db() -> coven_database::Database {
     )
 }
 
-fn mixed_constraint_db() -> coven_database::Database {
+fn mixed_constraint_db() -> coven_database::SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -642,8 +642,11 @@ fn mixed_constraint_db() -> coven_database::Database {
     )
 }
 
-fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> coven_database::Database {
-    coven_database::Database::open(
+fn open_blob_test_db_at(
+    path: &std::path::Path,
+    decl: BlobDecl,
+) -> coven_database::SyntheticDatabase {
+    coven_database::SyntheticDatabase::open(
         path,
         test_synced_tables_with_blob(decl),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -656,7 +659,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> coven_databas
 }
 
 async fn create_store(
-    db: &coven_database::Database,
+    db: &coven_database::SyntheticDatabase,
     signer: UserKeypair,
 ) -> std::sync::Arc<TestStore> {
     TestStore::create(
@@ -1832,7 +1835,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let target_dir = tempfile::tempdir().expect("create retained-input database directory");
     let target_path = target_dir.path().join("target.sqlite");
     let open_target = || {
-        Database::open(
+        SyntheticDatabase::open(
             &target_path,
             test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -2074,7 +2077,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &missing)
         .await;
     let root = storage.root.clone();
-    let store_dir = target.store_dir_for_test().clone();
+    let store_dir = target.store_dir.clone();
     assert!(target
         .test_sql(move |database| {
             database
@@ -2112,7 +2115,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &tampered)
         .await;
     let root = storage.root.clone();
-    let store_dir = target.store_dir_for_test().clone();
+    let store_dir = target.store_dir.clone();
     assert!(target
         .test_sql(move |database| {
             database
@@ -2158,7 +2161,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure"));
     let root = storage.root.clone();
-    let store_dir = target.store_dir_for_test().clone();
+    let store_dir = target.store_dir.clone();
     assert!(target
         .test_sql(move |database| {
             database
@@ -2199,10 +2202,10 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .await
         .expect("copy the locally-authored retained input");
     crate::sync::test_helpers::copy_payload_spool(
-        source.store_dir_for_test(),
+        &source.store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(target_dir.path()),
     );
-    let target = coven_database::Database::open(
+    let target = coven_database::SyntheticDatabase::open(
         &target_path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -2873,7 +2876,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
 }
 
 /// The pull gate compares an incoming changeset's `schema_version` against the
-/// opened db's [`Database::schema_version`], not a hand-bumped constant: a peer at
+/// opened db's [`coven_database::Database::schema_version`], not a hand-bumped constant: a peer at
 /// version N applies a changeset stamped N and skips one stamped N+1 without
 /// advancing its position. The peer's own version is derived from the db, so this
 /// fails if the gate stops tracking the schema that actually exists on disk. (The
@@ -2957,7 +2960,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 }
 
 /// The push side stamps an outgoing changeset with the db's
-/// [`Database::schema_version`], driven through the real producer
+/// [`coven_database::Database::schema_version`], driven through the real producer
 /// (Store write preparation) and read back off the produced envelope — so a regression
 /// that stamped a constant instead would fail here. Paired with
 /// `pull_gate_tracks_the_dbs_schema_version`, which covers the receiver gate.
@@ -3748,7 +3751,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     );
 }
 
-fn open_scoped_circle_test_db() -> coven_database::Database {
+fn open_scoped_circle_test_db() -> coven_database::SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -3963,7 +3966,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     );
 }
 
-fn scoped_fk_circle_db() -> coven_database::Database {
+fn scoped_fk_circle_db() -> coven_database::SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -5986,7 +5989,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
 struct PersistedCycleRemoval {
     storage: std::sync::Arc<TestStore>,
-    db: coven_database::Database,
+    db: coven_database::SyntheticDatabase,
     founder_pubkey: String,
     second_owner_head: coven_protocol::membership::MembershipHeadRef,
     removed_member_pubkey: String,

@@ -5,6 +5,64 @@ use async_trait::async_trait;
 use coven_protocol::objects::StorageError;
 use coven_protocol::provider::{ProviderProbeId, ProviderProbeJournal, ProviderProbeJournalRecord};
 
+impl StoreSession<'_> {
+    fn load_provider_probe_journal(
+        &self,
+        key: &str,
+    ) -> Result<Option<ProviderProbeJournalRecord>, DbError> {
+        crate::get_protocol_state_on(self.records.conn, key)?
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| DbError::context("parse provider probe journal", error))
+            })
+            .transpose()
+    }
+
+    fn begin_provider_probe_journal(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<ProviderProbeJournalRecord, DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (key, value),
+            )
+            .map_err(DbError::from)?;
+        let actual = crate::required_protocol_state_on(&transaction, key)?;
+        transaction.commit().map_err(DbError::from)?;
+        serde_json::from_str(&actual)
+            .map_err(|error| DbError::context("parse provider probe journal", error))
+    }
+
+    fn advance_provider_probe_journal(
+        &self,
+        key: &str,
+        previous: &str,
+        next: &str,
+    ) -> Result<(), DbError> {
+        let changed = self
+            .records
+            .conn
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (next, key, previous),
+            )
+            .map_err(DbError::from)?;
+        if changed != 1 {
+            return Err(DbError::Message(
+                "provider probe journal advance lost its exact predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ProviderProbeJournal for StoreDatabase {
     async fn load(
@@ -13,16 +71,7 @@ impl ProviderProbeJournal for StoreDatabase {
     ) -> Result<Option<ProviderProbeJournalRecord>, StorageError> {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
         self.connection
-            .call(move |connection| {
-                let value = crate::get_protocol_state_on(connection, &key)?;
-                value
-                    .map(|value| {
-                        serde_json::from_str(&value).map_err(|error| {
-                            DbError::context("parse provider probe journal", error)
-                        })
-                    })
-                    .transpose()
-            })
+            .call_store(move |session| session.load_provider_probe_journal(&key))
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))
     }
@@ -42,19 +91,7 @@ impl ProviderProbeJournal for StoreDatabase {
             StorageError::Storage(format!("serialize provider probe journal: {error}"))
         })?;
         self.connection
-            .call(move |connection| {
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                transaction
-                    .execute(
-                        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                        (&key, &value),
-                    )
-                    .map_err(DbError::from)?;
-                let actual = crate::required_protocol_state_on(&transaction, &key)?;
-                transaction.commit().map_err(DbError::from)?;
-                serde_json::from_str(&actual)
-                    .map_err(|error| DbError::context("parse provider probe journal", error))
-            })
+            .call_store(move |session| session.begin_provider_probe_journal(&key, &value))
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))
     }
@@ -78,19 +115,8 @@ impl ProviderProbeJournal for StoreDatabase {
             StorageError::Storage(format!("serialize provider probe journal: {error}"))
         })?;
         self.connection
-            .call(move |connection| {
-                let changed = connection
-                    .execute(
-                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                        (&next, &key, &previous),
-                    )
-                    .map_err(DbError::from)?;
-                if changed != 1 {
-                    return Err(DbError::Message(
-                        "provider probe journal advance lost its exact predecessor".to_string(),
-                    ));
-                }
-                Ok(())
+            .call_store(move |session| {
+                session.advance_provider_probe_journal(&key, &previous, &next)
             })
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))

@@ -18,8 +18,8 @@ use crate::sync::test_helpers::{
     StorageInterceptor, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
-use coven_database::Database;
 use coven_database::StoreDatabase;
+use coven_database::SyntheticDatabase;
 use coven_foundation::clock::FixedClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -39,10 +39,10 @@ fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
         .with_timezone(&chrono::Utc)
 }
 
-/// A `Database` over an in-memory connection with just the bookkeeping tables.
-/// The `cloud_outbox` table both operations share is created by `Database::open`.
-fn open_outbox_db() -> Database {
-    let db = Database::open(
+/// A `SyntheticDatabase` over an in-memory connection with just the bookkeeping tables.
+/// The `cloud_outbox` table both operations share is created by `SyntheticDatabase::open`.
+fn open_outbox_db() -> SyntheticDatabase {
+    let db = SyntheticDatabase::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
@@ -126,7 +126,7 @@ impl<'a> TombstoneCollector<'a> {
 /// `member` (Member). Returns the storage plus both keypairs so tests can sign as
 /// a member, a non-member, or the founder.
 async fn storage_with_chain(
-    db: &Database,
+    db: &SyntheticDatabase,
 ) -> (std::sync::Arc<TestStore>, UserKeypair, UserKeypair) {
     let founder = UserKeypair::generate();
     let member = UserKeypair::generate();

@@ -7,7 +7,10 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<bool, DbError> {
         let write_id = write_id.clone();
-        self.connection.call(move |conn| {
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
+            let conn = records.conn;
             let (raw_status, raw_prepared): (String, Option<String>) = conn
                 .query_row(
                     "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -42,7 +45,11 @@ impl StoreDatabase {
                     )
                     .map_err(DbError::from)?;
                 if exists {
-                    crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, candidate)?;
+                    crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                        records,
+                        verified_authority,
+                        candidate,
+                    )?;
                 }
                 return Ok(exists);
             }
@@ -51,7 +58,8 @@ impl StoreDatabase {
             };
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
-            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
+            let candidate =
+                parse_prepared_merge_candidate_on(records, verified_authority, &prepared)?;
             let cleanup_pending = |candidate: &PreparedMergeCandidate| -> Result<bool, DbError> {
                 let remote = load_remote_object_on(
                     conn,
@@ -80,12 +88,13 @@ impl StoreDatabase {
                     ..
                 } => {
                     let authority = parse_prepared_merge_candidate_parts_on(
-                    conn,
-                    authority_commit.semantic_bytes(),
-                    authority_commit.prepared().reference(),
-                    authority_head.semantic_bytes(),
-                    authority_head.prepared().reference(),
-                )?;
+                        records,
+                        verified_authority,
+                        authority_commit.semantic_bytes(),
+                        authority_commit.prepared().reference(),
+                        authority_head.semantic_bytes(),
+                        authority_head.prepared().reference(),
+                    )?;
                     match outcome {
                         MergeAbandonmentOutcome::Prepared => Ok(false),
                         MergeAbandonmentOutcome::Accepted { .. } => cleanup_pending(&candidate),
@@ -108,7 +117,10 @@ impl StoreDatabase {
         write_id: WriteId,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let (raw_status, raw_prepared): (String, Option<String>) = conn
                     .query_row(
                         "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -121,7 +133,8 @@ impl StoreDatabase {
                 if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &status {
                     witness.validate().map_err(DbError::Message)?;
                     let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
-                        conn,
+                        records,
+                        verified_authority,
                         witness.original_position().commit(),
                     )?;
                     if candidate.commit.write_id != write_id {
@@ -147,7 +160,8 @@ impl StoreDatabase {
                 })?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
-                let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
+                let candidate =
+                    parse_prepared_merge_candidate_on(records, verified_authority, &prepared)?;
                 match &prepared {
                     PreparedStoreWriteState::Publication { .. } => {
                         merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, true, &[])
@@ -159,7 +173,8 @@ impl StoreDatabase {
                         ..
                     } => {
                         let authority = parse_prepared_merge_candidate_parts_on(
-                            conn,
+                            records,
+                            verified_authority,
                             authority_commit.semantic_bytes(),
                             authority_commit.prepared().reference(),
                             authority_head.semantic_bytes(),
@@ -228,7 +243,10 @@ impl StoreDatabase {
         write_id: WriteId,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let raw_status: String = tx
                     .query_row(
@@ -244,8 +262,11 @@ impl StoreDatabase {
                 };
                 witness.validate().map_err(DbError::Message)?;
                 let candidate_ref = witness.original_position().commit().clone();
-                let candidate =
-                    crate::StoreDatabase::load_merge_retraction_cleanup_on(&tx, &candidate_ref)?;
+                let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
+                    &candidate_ref,
+                )?;
                 if candidate.commit.write_id != write_id {
                     return Err(DbError::Message(
                         "Merge retraction cleanup names another write".to_string(),
@@ -261,7 +282,10 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let rows = query_mapped_rows(
                     conn,
                     "SELECT device_id, seq, commit_ref
@@ -284,7 +308,11 @@ impl StoreDatabase {
                             sequence,
                             &encoded_ref,
                         )?;
-                        crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
+                        crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                            records,
+                            verified_authority,
+                            &candidate,
+                        )?;
                         Ok(candidate)
                     })
                     .collect()
@@ -297,9 +325,15 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
-        self.call_records(move |records| {
-            let conn = records.conn();
-            let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
+            let conn = records.conn;
+            let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                records,
+                verified_authority,
+                &candidate,
+            )?;
             let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
             let proof = remote
                 .candidate_nonactivation_proof(&candidate)
@@ -314,7 +348,12 @@ impl StoreDatabase {
                     exclusion,
                     ..
                 } => TerminalCandidateAuthority::AuthorExclusion(
-                    load_author_exclusion_activation_locator_on(records, &root, exclusion)?,
+                    load_author_exclusion_activation_locator_on(
+                        records,
+                        verified_authority,
+                        &root,
+                        exclusion,
+                    )?,
                 ),
                 coven_protocol::remote_object::CandidateNonactivationProof::MergeMembershipGrantRevocation {
                     grant_id,
@@ -334,7 +373,12 @@ impl StoreDatabase {
                         proof.clone(),
                     )
                     .map_err(|error| DbError::Message(error.to_string()))?;
-                    validate_terminal_nonactivation_authority_on(records, &root, &durable)?;
+                    validate_terminal_nonactivation_authority_on(
+                        records,
+                        verified_authority,
+                        &root,
+                        &durable,
+                    )?;
                     TerminalCandidateAuthority::DependencyRetraction(
                         coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
                             .map_err(|error| DbError::Message(error.to_string()))?,
@@ -359,9 +403,15 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.connection
-            .call(move |conn| {
-                let prepared =
-                    crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    records,
+                    verified_authority,
+                    &candidate,
+                )?;
                 merge_candidate_cleanup_targets_on(
                     conn,
                     &prepared.commit.write_id,
@@ -382,28 +432,38 @@ impl StoreDatabase {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.call_records(move |records| {
-            let conn = records.conn();
-            let prepared =
-                crate::StoreDatabase::load_merge_retraction_cleanup_on(conn, &candidate)?;
-            if durable
-                .reference()
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != candidate
-                || head_nonactivation.head().object() != &prepared.head_object
-            {
-                return Err(DbError::Message(
-                    "verified Merge retraction cleanup names another candidate".to_string(),
-                ));
-            }
-            if let coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    records,
+                    verified_authority,
+                    &candidate,
+                )?;
+                if durable
+                    .reference()
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    != candidate
+                    || head_nonactivation.head().object() != &prepared.head_object
+                {
+                    return Err(DbError::Message(
+                        "verified Merge retraction cleanup names another candidate".to_string(),
+                    ));
+                }
+                if let coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                 exclusion,
                 accepted_cut,
                 activation_head,
             } = durable.proof()
             {
-                let locator =
-                    load_author_exclusion_activation_locator_on(records, &root, exclusion)?;
+                let locator = load_author_exclusion_activation_locator_on(
+                    records,
+                    verified_authority,
+                    &root,
+                    exclusion,
+                )?;
                 if locator.accepted_cut() != accepted_cut
                     || locator.activation_head() != activation_head
                 {
@@ -413,28 +473,28 @@ impl StoreDatabase {
                     ));
                 }
             }
-            let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
-            if remote
-                .candidate_nonactivation_proof(&candidate)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(durable.proof())
-            {
-                return Err(DbError::Message(
-                    "verified Merge retraction differs from candidate ownership".to_string(),
-                ));
-            }
-            if !matches!(
-                load_merge_candidate_head_cleanup_on(conn, &prepared.head_object, &candidate,)?,
-                MergeCandidateHeadCleanup::ProtocolInert
-            ) {
-                return Err(DbError::Message(
-                    "retracted Merge activation head is not retained as inert authority"
-                        .to_string(),
-                ));
-            }
-            Ok(())
-        })
-        .await
+                let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
+                if remote
+                    .candidate_nonactivation_proof(&candidate)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    != Some(durable.proof())
+                {
+                    return Err(DbError::Message(
+                        "verified Merge retraction differs from candidate ownership".to_string(),
+                    ));
+                }
+                if !matches!(
+                    load_merge_candidate_head_cleanup_on(conn, &prepared.head_object, &candidate,)?,
+                    MergeCandidateHeadCleanup::ProtocolInert
+                ) {
+                    return Err(DbError::Message(
+                        "retracted Merge activation head is not retained as inert authority"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            })
+            .await
     }
 
     pub async fn finish_merge_retraction_cleanup(
@@ -442,10 +502,16 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let prepared =
-                    crate::StoreDatabase::load_merge_retraction_cleanup_on(&tx, &candidate)?;
+                let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
+                    &candidate,
+                )?;
                 finish_merge_retraction_cleanup_on(&tx, &prepared)?;
                 tx.commit().map_err(DbError::from)
             })

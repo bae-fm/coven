@@ -420,7 +420,6 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         identity: &UserKeypair,
     ) -> Result<CrossPrincipalProbeResponse, coven_protocol::provider::ProviderProbeError> {
         self.storage
-            .provider_probes()
             .create_cross_principal_response(
                 challenge,
                 context,

@@ -1,15 +1,15 @@
 use super::{
     candidate_records::parse_prepared_merge_candidate_parts_on,
-    publication_state::PreparedStoreWriteState, StoreDatabase,
+    publication_state::PreparedStoreWriteState, StoreDatabase, StoreSession,
 };
 use crate::{
-    load_prepared_audience_objects_on, required_store_root_authority_on, DbError,
-    ExactProtocolObject, PreparedStoreWriteCommit, StoreWriteBase,
+    load_prepared_audience_objects_on, DbError, ExactProtocolObject, PreparedStoreWriteCommit,
+    StoreWriteBase,
 };
 use coven_protocol::membership::AuthorStreamId;
 use coven_protocol::store_commit::{
     CommitFrontier, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
+    StoreDeviceRegistrationRef, VerifiedStoreBatchCommit,
 };
 use coven_protocol::write::WriteId;
 use rusqlite::OptionalExtension;
@@ -30,15 +30,25 @@ pub struct LocalCommitBase {
     pub frontier: BTreeMap<String, StoreBatchCommitRef>,
 }
 
+impl StoreSession<'_> {
+    fn latest_local_store_position(
+        &self,
+        stream_id: &str,
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
+        StoreDatabase::latest_position_for_device_on(self.records.conn, stream_id)
+    }
+}
+
 impl StoreDatabase {
     pub async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
-        let store_dir = self.store_dir.clone();
         let loaded = self
             .connection
-            .call(move |conn| {
-                let row = conn
+            .call_store(move |session| {
+                let records = session.records;
+                let row = records
+                    .conn
                     .query_row(
                         "SELECT write_id, base, prepared FROM store_writes
                  WHERE prepared IS NOT NULL
@@ -78,18 +88,18 @@ impl StoreDatabase {
                             "prepared write id differs from signed commit".to_string(),
                         ));
                     }
-                    let root = required_store_root_authority_on(conn)?;
                     let registration_ref = &unverified_commit.author_registration;
-                    let (registration_bytes, stored_registration_ref): (Vec<u8>, String) = conn
+                    let stored_registration_ref: String = records
+                        .conn
                         .query_row(
-                            "SELECT registration_bytes, registration_object \
+                            "SELECT registration_object \
                          FROM store_device_registration_activations \
                          WHERE device_id = ?1 AND registration_hash = ?2",
                             (
                                 registration_ref.device_id.to_string(),
                                 registration_ref.registration_hash.to_string(),
                             ),
-                            |row| Ok((row.get(0)?, row.get(1)?)),
+                            |row| row.get(0),
                         )
                         .map_err(DbError::from)?;
                     let stored_registration_ref: StoreDeviceRegistrationRef =
@@ -101,12 +111,9 @@ impl StoreDatabase {
                             "prepared commit registration differs from its activation".to_string(),
                         ));
                     }
-                    let registration = StoreDeviceRegistration::parse_at(
-                        &registration_bytes,
-                        &root,
-                        registration_ref.device_id,
-                    )
-                    .map_err(|error| DbError::context("prepared write registration", error))?;
+                    let authority = session.activated_registration(registration_ref)?;
+                    let registration = authority.value();
+                    let root = &registration.store_root;
                     let stream_id =
                         coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                             root.store_root_hash,
@@ -122,14 +129,14 @@ impl StoreDatabase {
                         root.store_root_hash,
                         coord,
                         commit.prepared().reference().clone(),
-                        &registration,
+                        registration,
                     )
                     .map_err(|error| DbError::context("verify prepared Store commit", error))?;
                     let commit_ref = commit_value.reference().clone();
                     let head_value = StoreDeviceHead::parse_at(
                         head.semantic_bytes(),
                         root.store_root_hash,
-                        &registration,
+                        registration,
                         &commit_ref,
                     )
                     .map_err(|error| DbError::context("verify prepared Store head", error))?;
@@ -143,11 +150,13 @@ impl StoreDatabase {
                                 .to_string(),
                         ));
                     }
-                    let partitions = StoreDatabase::store_write_partitions_on(
-                        crate::payload_spool::StoreRecords::new(conn, &store_dir),
-                        write_id.as_str(),
+                    let partitions =
+                        StoreDatabase::store_write_partitions_on(records, write_id.as_str())?;
+                    let audiences = load_prepared_audience_objects_on(
+                        records.conn,
+                        records.store_dir,
+                        &write_id,
                     )?;
-                    let audiences = load_prepared_audience_objects_on(conn, &store_dir, &write_id)?;
                     let graph_commit = match graph_commit {
                         Some(graph_commit) => {
                             let candidate_head = match &prepared {
@@ -158,7 +167,8 @@ impl StoreDatabase {
                                 _ => unreachable!("matched Merge abandonment"),
                             };
                             let candidate = parse_prepared_merge_candidate_parts_on(
-                                conn,
+                                records,
+                                session.verified_store_authority,
                                 graph_commit.semantic_bytes(),
                                 graph_commit.prepared().reference(),
                                 candidate_head.semantic_bytes(),
@@ -319,7 +329,8 @@ impl StoreDatabase {
         let authorship = self.author_own_stream().await;
         let (predecessor, frontier) = self
             .connection
-            .call(move |conn| {
+            .call_database(move |session| {
+                let conn = session.conn;
                 let stream_id = stream_id.to_string();
                 Ok((
                     StoreDatabase::latest_position_for_device_on(conn, &stream_id)?,
@@ -339,10 +350,7 @@ impl StoreDatabase {
         stream_id: AuthorStreamId,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         self.connection
-            .call(move |conn| {
-                let stream_id = stream_id.to_string();
-                crate::StoreDatabase::latest_position_for_device_on(conn, &stream_id)
-            })
+            .call_store(move |session| session.latest_local_store_position(&stream_id.to_string()))
             .await
     }
 }

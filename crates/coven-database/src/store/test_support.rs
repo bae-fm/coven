@@ -38,7 +38,8 @@ impl StoreDatabase {
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
         let hash = coven_protocol::blob::content_hash(bytes);
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute(
                         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
@@ -73,7 +74,8 @@ impl StoreDatabase {
             .expect("load exact Local row blob reference");
         let path = path.to_path_buf();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 crate::DatabaseTestSql::new(connection).register_external_blob(&reference, &path)
             })
             .await
@@ -94,7 +96,8 @@ impl StoreDatabase {
         let source_path = source_path.to_path_buf();
         let created_at = created_at.to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 crate::DatabaseTestSql::new(connection).enqueue_blob_upload(
                     &root_table,
                     &root_id,
@@ -139,19 +142,22 @@ impl StoreDatabase {
     {
         let store_dir = self.store_dir.clone();
         let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates();
-        let blob_decls = self.blob_decls();
+        let gates = self.gates.clone();
+        let blob_decls = self.blob_decls.clone();
         let write_id = self.new_store_write_id();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-                    connection,
+                    records.conn,
                     &store_dir,
                     &synced_tables,
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
                     blob_staging.as_deref(),
+                    verified_authority,
                     write_id,
                 )?
                 .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
@@ -173,18 +179,20 @@ impl StoreDatabase {
     {
         let store_dir = self.store_dir.clone();
         let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates();
-        let blob_decls = self.blob_decls();
+        let gates = self.gates.clone();
+        let blob_decls = self.blob_decls.clone();
         let write_id = self.new_store_write_id();
-        self.connection
-            .call(move |connection| {
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-                    connection,
+                    records.conn,
                     &store_dir,
                     &synced_tables,
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
+                    verified_authority,
                     write_id,
                 )?
                 .execute(|transaction| {
@@ -202,7 +210,8 @@ impl StoreDatabase {
         let namespace = namespace.to_string();
         let blob_id = blob_id.to_string();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM local_cleanup_intents
@@ -220,7 +229,8 @@ impl StoreDatabase {
         table: crate::DatabaseTestTable,
     ) -> Result<bool, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT EXISTS(
@@ -236,7 +246,8 @@ impl StoreDatabase {
 
     pub async fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute_batch(
                         "CREATE TRIGGER fail_store_write_journal
@@ -252,7 +263,8 @@ impl StoreDatabase {
 
     pub async fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute_batch("DROP TRIGGER fail_store_write_journal")
                     .map_err(DbError::from)
@@ -262,7 +274,8 @@ impl StoreDatabase {
 
     pub async fn write_blob_facts_for_test(&self, write_id: WriteId) -> Result<String, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
@@ -279,7 +292,8 @@ impl StoreDatabase {
         label: String,
     ) -> Result<coven_protocol::circle::CircleId, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let database = crate::DatabaseTestSql::new(connection);
                 let (circle_id, _) = database.install_test_active_circle(&label);
                 Ok(circle_id)
@@ -298,7 +312,8 @@ impl StoreDatabase {
         let changeset_hash = crate::payload_spool::write_payload_blocking(&self.store_dir, b"")?;
         let owner_key = crate::payload_spool::store_write_owner_key(&write_id);
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 transaction
                     .execute(
@@ -320,7 +335,8 @@ impl StoreDatabase {
 
     pub async fn delete_write_for_test(&self, write_id: WriteId) -> Result<(), DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 crate::payload_spool::release_payload_owner_on(
                     &transaction,
@@ -354,7 +370,8 @@ impl StoreDatabase {
         let write_id = write_id.clone();
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let encoded: String = connection
                     .query_row(
                         "SELECT changeset_hash FROM store_write_partitions
@@ -379,7 +396,8 @@ impl StoreDatabase {
     ) -> Result<i64, DbError> {
         let write_id = write_id.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM store_write_blob_leases WHERE write_id = ?1",
@@ -395,7 +413,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<(String, u64), DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let (device_id, sequence): (String, i64) = connection
                     .query_row(
                         "SELECT device_id, seq
@@ -425,72 +444,57 @@ impl StoreDatabase {
         late_id: String,
     ) -> Result<(i64, i64, i64, i64), DbError> {
         let store_dir = self.store_dir.clone();
-        let blob_decls = self.blob_decls();
-        let gates = self.gates();
+        let blob_decls = self.blob_decls.clone();
+        let gates = self.gates.clone();
         let tables = self.synced_tables().to_vec();
-        self.with_retained_replay(move |records, retained_replay| {
-            let transaction = records
-                .conn()
-                .unchecked_transaction()
-                .map_err(DbError::from)?;
-            let retained = retained_replay.replay_projection_on(
-                &transaction,
-                &store_dir,
-                &root,
-                &blob_decls,
-                &gates,
-                &tables,
-                Some(&routing_key),
-                &BTreeSet::new(),
-                None,
-                false,
-                coven_protocol::membership::LocalStoreMembership::Current,
-            )?;
-            let retained_count = retained.query_row(
-                "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                [historical_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let retained_late_count = retained.query_row(
-                "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                [late_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?;
-            transaction
-                .execute("DELETE FROM circle_bootstrap_coverage", [])
-                .map_err(DbError::from)?;
-            let sabotaged = retained_replay.replay_projection_on(
-                &transaction,
-                &store_dir,
-                &root,
-                &blob_decls,
-                &gates,
-                &tables,
-                Some(&routing_key),
-                &BTreeSet::new(),
-                None,
-                false,
-                coven_protocol::membership::LocalStoreMembership::Current,
-            )?;
-            let sabotaged_count = sabotaged.query_row(
-                "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                [historical_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let sabotaged_late_count = sabotaged.query_row(
-                "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                [late_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )?;
-            transaction.rollback().map_err(DbError::from)?;
-            Ok((
-                retained_count,
-                retained_late_count,
-                sabotaged_count,
-                sabotaged_late_count,
-            ))
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let transaction = records
+                    .conn
+                    .unchecked_transaction()
+                    .map_err(DbError::from)?;
+                let retained = authority.replay_projection_on(
+                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
+                    &root,
+                    &blob_decls,
+                    &gates,
+                    &tables,
+                    Some(&routing_key),
+                    &BTreeSet::new(),
+                    None,
+                    false,
+                    coven_protocol::membership::LocalStoreMembership::Current,
+                )?;
+                let retained_count = retained.document_count(&historical_id)?;
+                let retained_late_count = retained.document_count(&late_id)?;
+                transaction
+                    .execute("DELETE FROM circle_bootstrap_coverage", [])
+                    .map_err(DbError::from)?;
+                let sabotaged = authority.replay_projection_on(
+                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
+                    &root,
+                    &blob_decls,
+                    &gates,
+                    &tables,
+                    Some(&routing_key),
+                    &BTreeSet::new(),
+                    None,
+                    false,
+                    coven_protocol::membership::LocalStoreMembership::Current,
+                )?;
+                let sabotaged_count = sabotaged.document_count(&historical_id)?;
+                let sabotaged_late_count = sabotaged.document_count(&late_id)?;
+                transaction.rollback().map_err(DbError::from)?;
+                Ok((
+                    retained_count,
+                    retained_late_count,
+                    sabotaged_count,
+                    sabotaged_late_count,
+                ))
+            })
+            .await
     }
 
     pub async fn circle_bootstrap_coverage_count_for_test(
@@ -498,7 +502,8 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM circle_bootstrap_coverage WHERE circle_id = ?1",
@@ -516,7 +521,8 @@ impl StoreDatabase {
     ) -> Result<String, DbError> {
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 transaction
                     .execute(
@@ -545,7 +551,8 @@ impl StoreDatabase {
         let store_dir = self.store_dir.clone();
         let activation_commit = activation_commit.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 transaction
                     .execute(
@@ -561,10 +568,12 @@ impl StoreDatabase {
                 let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
                     crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
                     &root,
+                    session.verified_store_authority,
                     &activation_commit,
                 )?;
                 let error = StoreDatabase::record_circle_bootstrap_coverage_on(
                     crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
+                    session.verified_store_authority,
                     &root,
                     &activation_commit,
                     retained.circle_activations(),
@@ -585,7 +594,8 @@ impl StoreDatabase {
         let source_store_dir = self.store_dir.clone();
         let transfer = self
             .connection
-            .call(move |connection| {
+            .call_database(move |session| {
+                let connection = session.conn;
                 let write = connection
                     .query_row(
                         "SELECT status, affected_rows, changeset_hash,
@@ -731,7 +741,8 @@ impl StoreDatabase {
         let destination_write_id = write_id.clone();
         destination
             .connection
-            .call(move |connection| {
+            .call_database(move |session| {
+                let connection = session.conn;
                 let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
                 for (object_id, state) in transfer.remotes {
                     let imported = transaction
@@ -825,7 +836,8 @@ impl StoreDatabase {
         let exclusion = serde_json::to_string(exclusion)
             .map_err(|error| DbError::context("serialize exclusion ref", error))?;
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .query_row(
                         "SELECT accepted_cut, activation_head
@@ -848,7 +860,8 @@ impl StoreDatabase {
         let exclusion = exclusion.clone();
         let candidate = candidate.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let exact = serde_json::to_string(&exclusion).map_err(|error| {
                     DbError::context("serialize exact exclusion reference", error)
                 })?;

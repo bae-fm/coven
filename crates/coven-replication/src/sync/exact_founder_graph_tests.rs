@@ -192,7 +192,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
         }
     }
     baseline
-        .validate_image(db.store_dir_for_test())
+        .validate_image(&db.store_dir)
         .expect("validate replay image");
 }
 
@@ -212,7 +212,7 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
     .await
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
-    let store_dir = db.store_dir_for_test().clone();
+    let store_dir = db.store_dir.clone();
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -274,7 +274,7 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     .await
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db);
-    let store_dir = db.store_dir_for_test().clone();
+    let store_dir = db.store_dir.clone();
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await

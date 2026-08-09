@@ -50,6 +50,52 @@ impl DatabaseTestTransaction<'_, '_> {
             .pragma_update(None, "defer_foreign_keys", true)
     }
 
+    pub fn set_payload_owner_claims(
+        &self,
+        owner_key: &str,
+        payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
+    ) -> Result<(), DbError> {
+        crate::payload_spool::set_payload_owner_claims_on(self.transaction, owner_key, payloads)
+    }
+
+    pub fn insert_store_reclaim_operation(
+        &self,
+        operation: &crate::DurableStoreReclaimOperation,
+    ) -> Result<(), DbError> {
+        crate::insert_store_reclaim_operation_on(self.transaction, operation)
+    }
+
+    pub fn record_reclaimed_store_package(
+        &self,
+        package: &crate::ReclaimedStorePackage,
+    ) -> Result<(), DbError> {
+        crate::record_reclaimed_store_package_on(self.transaction, None, package)
+    }
+
+    pub fn persist_prepared_audience_objects(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        write_id: &coven_protocol::write::WriteId,
+        packages: &[crate::PreparedAudiencePackage],
+        blobs: &[crate::PreparedAudienceBlob],
+    ) -> Result<(), DbError> {
+        crate::StoreDatabase::persist_prepared_audience_objects_on(
+            crate::payload_spool::StoreRecords::new(self.transaction, store_dir),
+            write_id,
+            packages,
+            blobs,
+        )
+    }
+
+    pub fn retire_circle_bootstrap_coverage(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        activation: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<usize, DbError> {
+        crate::MergeMaterializationTransaction::new(self.transaction, store_dir)
+            .retire_circle_bootstrap_coverage(activation)
+    }
+
     pub fn enqueue_blob_upload(
         &self,
         root_table: &str,

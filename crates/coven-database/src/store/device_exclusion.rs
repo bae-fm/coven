@@ -202,7 +202,8 @@ impl StoreDatabase {
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
         let store_dir = self.store_dir.clone();
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+                let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
                 if active.operation_id() != operation.operation_id() {
@@ -240,7 +241,11 @@ impl StoreDatabase {
     pub async fn active_outbound_store_device_exclusion(
         &self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(self.connection.call(load_active_store_device_exclusion_on)).await
+        Box::pin(
+            self.connection
+                .call_store(|session| load_active_store_device_exclusion_on(session.records.conn)),
+        )
+        .await
     }
 
     pub async fn replace_outbound_store_device_exclusion_candidate(
@@ -268,7 +273,8 @@ impl StoreDatabase {
             ));
         }
         let store_dir = self.store_dir.clone();
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let next_candidate = next.candidate().expect("validated candidate state");
@@ -317,7 +323,8 @@ impl StoreDatabase {
             };
             let expected = Box::new(expected);
             let next = Box::new(next);
-            Box::pin(self.connection.call(move |conn| {
+            Box::pin(self.connection.call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 require_store_device_exclusion_transition_on(
                     &tx,
@@ -363,7 +370,8 @@ impl StoreDatabase {
         let remotes = expected
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+                let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             for remote in &remotes {
@@ -426,7 +434,8 @@ impl StoreDatabase {
                     .to_string(),
             ));
         }
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let authority_id = remote_object_id(expected.object().object());
@@ -512,7 +521,8 @@ impl StoreDatabase {
         .remote_objects()
         .map_err(store_device_exclusion_journal_error)?;
         let store_dir = self.store_dir.clone();
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             for remote in replacement_remotes
@@ -574,7 +584,8 @@ impl StoreDatabase {
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let current = load_store_device_exclusion_on(conn, expected.operation_id())?
                 .ok_or_else(|| {
                     DbError::Message("Store-device exclusion journal is absent".to_string())
@@ -626,7 +637,8 @@ impl StoreDatabase {
         };
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&losing.candidate.reference.object);
@@ -709,7 +721,8 @@ impl StoreDatabase {
         );
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call(move |conn| {
+        Box::pin(self.connection.call_store(move |session| {
+            let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
             let commit_id = remote_object_id(&candidate.reference.object);
@@ -782,8 +795,8 @@ impl StoreDatabase {
             })?
             .reference
             .clone();
-        self.connection
-            .call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
                 let object_id = expected.object_id();
                 let current = load_remote_object_on(conn, object_id)?;
                 let (
@@ -827,7 +840,8 @@ impl StoreDatabase {
     pub async fn outbound_store_device_exclusion_operations(
         &self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(self.connection.call(|conn| {
+        Box::pin(self.connection.call_store(|session| {
+            let conn = session.records.conn;
             let mut statement = conn
                 .prepare(
                     "SELECT operation_id, state

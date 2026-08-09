@@ -1,10 +1,11 @@
 use super::*;
+use coven_database::SyntheticDatabase;
 
 /// Prepare a founder Circle operation on a member device, then revoke that
 /// member's grant so publishing it blocks under lost authority.
 struct RevokedOperation {
-    db: Database,
-    owner_db: Database,
+    db: SyntheticDatabase,
+    owner_db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     founder: UserKeypair,
     successor: UserKeypair,

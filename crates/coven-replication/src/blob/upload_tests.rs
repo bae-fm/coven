@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 use coven_database::StoreDatabase;
-use coven_database::{Database, DbError};
+use coven_database::{DbError, SyntheticDatabase};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -258,7 +258,7 @@ impl ExactSlotStorage for InstrumentedHome {
 }
 
 struct UploadFixture {
-    db: Database,
+    db: SyntheticDatabase,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
     storage: Arc<CloudSyncConnection>,
@@ -275,7 +275,7 @@ impl UploadFixture {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
-        let db = Database::open(
+        let db = SyntheticDatabase::open(
             std::path::Path::new(":memory:"),
             test_synced_tables_with_blob(BlobDecl::new(
                 "photos",

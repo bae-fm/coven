@@ -80,6 +80,28 @@ impl Database {
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Database, OpenError> {
         let store_dir = store_dir_of(path);
+        Self::open_with_hlc_and_coven_metadata_in_store_dir(
+            path,
+            store_dir,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            migrations,
+            metadata_open,
+        )
+    }
+
+    fn open_with_hlc_and_coven_metadata_in_store_dir(
+        path: &Path,
+        store_dir: coven_foundation::store_dir::StoreDir,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+        metadata_open: CovenMetadataOpen<'_>,
+    ) -> Result<Database, OpenError> {
         let (core, state) = DatabaseCore::open(
             path,
             store_dir,
@@ -97,6 +119,51 @@ impl Database {
         };
 
         Ok(database)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_in_store_dir_for_test(
+        path: &Path,
+        store_dir: coven_foundation::store_dir::StoreDir,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        device_id: String,
+        clock: coven_foundation::clock::ClockRef,
+        migrations: &[Migration],
+    ) -> Result<Database, OpenError> {
+        let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
+        Self::open_with_hlc_in_store_dir_for_test(
+            path,
+            store_dir,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            Arc::new(hlc),
+            migrations,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_with_hlc_in_store_dir_for_test(
+        path: &Path,
+        store_dir: coven_foundation::store_dir::StoreDir,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+    ) -> Result<Database, OpenError> {
+        Self::open_with_hlc_and_coven_metadata_in_store_dir(
+            path,
+            store_dir,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            hlc,
+            migrations,
+            CovenMetadataOpen::Detect,
+        )
     }
 
     /// Open the store at `path` read-only for a same-store secondary reader
@@ -213,23 +280,6 @@ impl Database {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn receive_wall_ms(&self) -> u64 {
         self.state.hlc.wall_now_ms()
-    }
-
-    /// Run `f` against the connection and await the result.
-    ///
-    /// This is how tests run raw bookkeeping and gating operations that need a
-    /// `&Connection`. Host writes and coven transitions that mutate synced rows
-    /// go through [`StoreDatabase`] so they land in the pending-write journal.
-    ///
-    /// Hands `f` to the connection thread and awaits its reply, so the SQL runs
-    /// off the async executor.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn call<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.connection.call(f).await
     }
 }
 

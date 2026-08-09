@@ -50,8 +50,119 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         self.home.delete(key).await.map_err(Into::into)
     }
 
-    fn provider_probes(&self) -> &crate::provider_probe::ProviderProbeStorage {
-        &self.provider_probes
+    async fn reserve_cross_principal_response_slot(
+        &self,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+    ) -> Result<ObjectSlot, coven_protocol::provider::ProviderProbeError> {
+        self.provider_probes
+            .reserve_cross_principal_response_slot(probe_id)
+            .await
+    }
+
+    async fn prepare_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        store: &coven_protocol::StoreProviderBinding,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.provider_probes
+            .prepare_cross_principal_challenge(
+                publication_journal,
+                probe_id,
+                store,
+                context,
+                administrator_signer,
+            )
+            .await
+    }
+
+    async fn settle_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        authorization: &coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        store: &coven_protocol::StoreProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.provider_probes
+            .settle_cross_principal_challenge(
+                publication_journal,
+                authorization,
+                challenge,
+                context,
+                store,
+            )
+            .await
+    }
+
+    async fn create_cross_principal_response(
+        &self,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signing_pubkey: &str,
+        peer_signer: &coven_keys::keys::UserKeypair,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeResponse,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.provider_probes
+            .create_cross_principal_response(
+                challenge,
+                context,
+                store,
+                administrator_signing_pubkey,
+                peer_signer,
+            )
+            .await
+    }
+
+    async fn complete_cross_principal_probe(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        response: &coven_protocol::provider::CrossPrincipalProbeResponse,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+        peer_signing_pubkey: &str,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.provider_probes
+            .complete_cross_principal_probe(
+                journal,
+                challenge,
+                response,
+                context,
+                store,
+                administrator_signer,
+                peer_signing_pubkey,
+            )
+            .await
+    }
+
+    async fn probe_exact_slots(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        binding: &ResolvedProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::ExactSlotProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.provider_probes
+            .probe_exact_slots(journal, probe_id, binding)
+            .await
     }
 
     async fn observe_exact_slot(

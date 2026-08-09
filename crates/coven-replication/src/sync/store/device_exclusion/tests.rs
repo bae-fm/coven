@@ -7,7 +7,7 @@ use crate::sync::store::Store;
 use crate::sync::test_helpers::{
     open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
 };
-use coven_database::Database;
+use coven_database::SyntheticDatabase;
 use coven_database::{AuthorExclusionLocatorTamper, StoreDatabase};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -18,8 +18,8 @@ use coven_protocol::write::WriteId;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> Database {
-    Database::open(
+fn open(path: &Path, device_id: &str) -> SyntheticDatabase {
+    SyntheticDatabase::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -828,13 +828,13 @@ enum ExpectedHeldCandidate<'a> {
 }
 
 struct ExcludedPeer<'a> {
-    database: &'a Database,
+    database: &'a SyntheticDatabase,
     store: &'a TestStore,
     store_dir: &'a StoreDir,
 }
 
 impl<'a> ExcludedPeer<'a> {
-    fn new(database: &'a Database, store: &'a TestStore, store_dir: &'a StoreDir) -> Self {
+    fn new(database: &'a SyntheticDatabase, store: &'a TestStore, store_dir: &'a StoreDir) -> Self {
         Self {
             database,
             store,

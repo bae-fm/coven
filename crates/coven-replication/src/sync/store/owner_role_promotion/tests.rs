@@ -12,12 +12,12 @@ use super::journal::OwnerPromotionJournalState;
 /// device's registration names — the starting point of every promotion case that
 /// works on a single candidate.
 struct PromotionCandidate {
-    owner_db: coven_database::Database,
+    owner_db: coven_database::SyntheticDatabase,
     owner: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     member: UserKeypair,
-    member_db: coven_database::Database,
+    member_db: coven_database::SyntheticDatabase,
     member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     encryption: EncryptionService,
 }

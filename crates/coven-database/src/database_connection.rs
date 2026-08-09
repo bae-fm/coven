@@ -27,12 +27,50 @@ impl DatabaseConnection {
         })
     }
 
-    pub async fn call<F, R>(&self, f: F) -> Result<R, DbError>
+    pub(crate) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
     where
-        F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
+        F: for<'session> FnOnce(&mut DatabaseSession<'session>) -> Result<R, DbError>
+            + Send
+            + 'static,
         R: Send + 'static,
     {
-        self.on_connection_thread(move |core| core.run(f)).await
+        self.on_connection_thread(move |core| {
+            let mut session = DatabaseSession { conn: &core.conn };
+            operation(&mut session)
+        })
+        .await
+    }
+
+    /// Run one Store operation against the connection-owned row, payload, and
+    /// verified-authority state, then discharge every payload deletion the
+    /// operation committed before another Store operation can run.
+    pub(crate) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
+    where
+        F: for<'session> FnOnce(&mut crate::store::StoreSession<'session>) -> Result<R, DbError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.on_connection_thread(move |core| {
+            let outcome = {
+                let records = crate::payload_spool::StoreRecords::new(&core.conn, &core.store_dir);
+                let mut session =
+                    crate::store::StoreSession::new(records, &mut core.verified_store_authority);
+                operation(&mut session)
+            };
+            let cleanup =
+                crate::payload_spool::pay_owed_payload_deletions_on(&core.conn, &core.store_dir);
+            match (outcome, cleanup) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(operation), Ok(())) => Err(operation),
+                (Ok(_), Err(cleanup)) => Err(cleanup),
+                (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
+                    operation: Box::new(operation),
+                    cleanup: Box::new(cleanup),
+                }),
+            }
+        })
+        .await
     }
 
     /// Send `f` to the connection thread, run it against the owned core there, and
@@ -158,9 +196,12 @@ mod tests {
         let slow_db = db.clone();
         let slow = tokio::spawn(async move {
             slow_db
-                .call(|conn| {
+                .connection
+                .call_database(|session| {
                     std::thread::sleep(Duration::from_millis(500));
-                    conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                    session
+                        .conn
+                        .query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
                         .map_err(DbError::from)
                 })
                 .await
@@ -208,7 +249,8 @@ mod tests {
         let job_marker = marker.clone();
         let task = tokio::spawn(async move {
             let _ = job_db
-                .call(move |_conn| {
+                .connection
+                .call_database(move |_session| {
                     std::thread::sleep(Duration::from_millis(300));
                     std::fs::write(&job_marker, b"landed")
                         .map_err(|e| DbError::Message(e.to_string()))

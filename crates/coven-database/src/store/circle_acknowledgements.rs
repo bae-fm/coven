@@ -7,10 +7,10 @@ use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::store_commit::{
     CircleAck, CircleAckRef, CommitFrontier, StoreDeviceId, StoreDeviceStatus, StoreHistoryCut,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::StoreDatabase;
+use super::{StoreDatabase, StoreSession};
 
 /// Everything one active Circle contributes to staging its device's next Circle
 /// acknowledgement: the exact control and epoch the live projection derives from,
@@ -34,23 +34,14 @@ pub struct PublishedCircleAck {
     pub control: CircleControlCoord,
 }
 
-impl StoreDatabase {
-    pub async fn circle_acknowledgement_publication_inputs(
+impl StoreSession<'_> {
+    fn circle_acknowledgement_publication_inputs(
         &self,
     ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
-        self.connection
-            .call(Self::circle_acknowledgement_publication_inputs_on)
-            .await
-    }
-
-    fn circle_acknowledgement_publication_inputs_on(
-        conn: &Connection,
-    ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
+        let conn = self.records.conn;
         let mut inputs = Vec::new();
-        for state in Self::circle_current_states_on(conn)? {
+        for state in StoreDatabase::circle_current_states_on(conn)? {
             let circle_id = state.circle_id();
-            // Only an active projection holds private history to acknowledge; an
-            // inactive recipient has no access leaf and stages nothing.
             let Some(authoring) = state.authoring_state() else {
                 tracing::debug!(
                     circle_id = %circle_id,
@@ -61,7 +52,7 @@ impl StoreDatabase {
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
             let access = super::circle_publication_context_on(conn, circle_id, &control)?;
-            let seeded_from = Self::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
+            let seeded_from = StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
                 circle_id,
                 control,
@@ -73,6 +64,161 @@ impl StoreDatabase {
         Ok(inputs)
     }
 
+    fn activated_circle_ack(
+        &self,
+        circle_id: CircleId,
+        device_id: StoreDeviceId,
+    ) -> Result<Option<CircleAckRef>, DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT ack_ref FROM activated_circle_acks
+                 WHERE circle_id = ?1 AND device_id = ?2",
+                rusqlite::params![circle_id.to_string(), device_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|raw| parse_circle_ack_ref(&raw, circle_id, "activated"))
+            .transpose()
+    }
+
+    fn circle_current_roster_members(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<BTreeSet<String>, DbError> {
+        let Some(state) = StoreDatabase::circle_current_state_on(self.records.conn, circle_id)?
+        else {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} has no current state"
+            )));
+        };
+        let Some((_current, _access, roster, _metadata)) = state.active() else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(roster.members().into_keys().collect())
+    }
+
+    fn activated_circle_acks(&self, circle_id: CircleId) -> Result<Vec<CircleAckRef>, DbError> {
+        query_mapped_rows(
+            self.records.conn,
+            "SELECT ack_ref FROM activated_circle_acks
+             WHERE circle_id = ?1 ORDER BY device_id",
+            [circle_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )?
+        .into_iter()
+        .map(|raw| parse_circle_ack_ref(&raw, circle_id, "activated"))
+        .collect()
+    }
+
+    fn latest_published_circle_ack(
+        &self,
+        circle_id: CircleId,
+    ) -> Result<Option<PublishedCircleAck>, DbError> {
+        let row: Option<(String, String, String, String)> = self
+            .records
+            .conn
+            .query_row(
+                "SELECT ack_ref, successor_slot, store_cut, control_coord
+                 FROM published_circle_acks WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((reference, successor_slot, store_cut, control)) = row else {
+            return Ok(None);
+        };
+        let reference = parse_circle_ack_ref(&reference, circle_id, "published")?;
+        if reference.sequence == 0 {
+            return Err(DbError::Message(
+                "published Circle acknowledgement names sequence zero".to_string(),
+            ));
+        }
+        Ok(Some(PublishedCircleAck {
+            reference,
+            successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
+                DbError::context("published Circle acknowledgement successor slot", error)
+            })?,
+            store_cut: serde_json::from_str(&store_cut)
+                .map_err(|error| DbError::context("published Circle acknowledgement cut", error))?,
+            control: serde_json::from_str(&control).map_err(|error| {
+                DbError::context("published Circle acknowledgement control", error)
+            })?,
+        }))
+    }
+
+    fn stage_circle_ack(
+        &mut self,
+        ack: CircleAck,
+        prepared: PreparedExactObject,
+    ) -> Result<CircleAckRef, DbError> {
+        let authority = self.local_store_authority()?;
+        let registration = authority.value();
+        let bytes = ack.to_bytes();
+        let reference = CircleAckRef {
+            registration: ack.registration.clone(),
+            circle_id: ack.circle_id,
+            control: ack.control.clone(),
+            sequence: ack.sequence,
+            ack_hash: ack.ack_hash(),
+            object: prepared.reference().clone(),
+        };
+        let verified =
+            CircleAck::parse_at(&bytes, &registration.store_root, &reference, registration)
+                .map_err(|error| DbError::context("stage Circle acknowledgement", error))?;
+        if verified != ack {
+            return Err(DbError::Message(
+                "staged Circle acknowledgement changed during exact verification".to_string(),
+            ));
+        }
+        let ack_ref = serde_json::to_string(&reference).map_err(|error| {
+            DbError::context("serialize exact Circle acknowledgement ref", error)
+        })?;
+        let prepared = serde_json::to_string(&prepared).map_err(|error| {
+            DbError::context("serialize prepared Circle acknowledgement", error)
+        })?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT INTO outbound_circle_acks (circle_id, ack_ref, ack_bytes, prepared_object)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![reference.circle_id.to_string(), ack_ref, bytes, prepared],
+        )
+        .map_err(DbError::from)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(reference)
+    }
+}
+
+fn parse_circle_ack_ref(
+    raw: &str,
+    circle_id: CircleId,
+    state: &str,
+) -> Result<CircleAckRef, DbError> {
+    let reference: CircleAckRef = serde_json::from_str(raw)
+        .map_err(|error| DbError::context(format!("{state} Circle acknowledgement ref"), error))?;
+    if reference.circle_id != circle_id {
+        return Err(DbError::Message(format!(
+            "{state} Circle acknowledgement names another Circle"
+        )));
+    }
+    Ok(reference)
+}
+
+impl StoreDatabase {
+    pub async fn circle_acknowledgement_publication_inputs(
+        &self,
+    ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
+        self.connection
+            .call_store(|session| session.circle_acknowledgement_publication_inputs())
+            .await
+    }
+
     /// The latest activated Circle acknowledgement `device_id` published for
     /// `circle_id`, or `None` if that device has never had an acknowledgement
     /// activated. Snapshot stability reads this per access-holding device.
@@ -82,28 +228,7 @@ impl StoreDatabase {
         device_id: StoreDeviceId,
     ) -> Result<Option<CircleAckRef>, DbError> {
         self.connection
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT ack_ref FROM activated_circle_acks
-                     WHERE circle_id = ?1 AND device_id = ?2",
-                    rusqlite::params![circle_id.to_string(), device_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|raw| {
-                    let reference: CircleAckRef = serde_json::from_str(&raw).map_err(|error| {
-                        DbError::context("activated Circle acknowledgement ref", error)
-                    })?;
-                    if reference.circle_id != circle_id {
-                        return Err(DbError::Message(
-                            "activated Circle acknowledgement names another Circle".to_string(),
-                        ));
-                    }
-                    Ok(reference)
-                })
-                .transpose()
-            })
+            .call_store(move |session| session.activated_circle_ack(circle_id, device_id))
             .await
     }
 
@@ -162,17 +287,7 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<BTreeSet<String>, DbError> {
         self.connection
-            .call(move |conn| {
-                let Some(state) = Self::circle_current_state_on(conn, circle_id)? else {
-                    return Err(DbError::Message(format!(
-                        "Circle {circle_id} has no current state"
-                    )));
-                };
-                let Some((_current, _access, roster, _metadata)) = state.active() else {
-                    return Ok(BTreeSet::new());
-                };
-                Ok(roster.members().into_keys().collect())
-            })
+            .call_store(move |session| session.circle_current_roster_members(circle_id))
             .await
     }
 
@@ -186,29 +301,7 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Vec<CircleAckRef>, DbError> {
         self.connection
-            .call(move |conn| {
-                let rows = query_mapped_rows(
-                    conn,
-                    "SELECT ack_ref FROM activated_circle_acks \
-                         WHERE circle_id = ?1 ORDER BY device_id",
-                    [circle_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )?;
-                rows.into_iter()
-                    .map(|raw| {
-                        let reference: CircleAckRef =
-                            serde_json::from_str(&raw).map_err(|error| {
-                                DbError::context("activated Circle acknowledgement ref", error)
-                            })?;
-                        if reference.circle_id != circle_id {
-                            return Err(DbError::Message(
-                                "activated Circle acknowledgement names another Circle".to_string(),
-                            ));
-                        }
-                        Ok(reference)
-                    })
-                    .collect()
-            })
+            .call_store(move |session| session.activated_circle_acks(circle_id))
             .await
     }
 
@@ -217,42 +310,7 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleAck>, DbError> {
         self.connection
-            .call(move |conn| {
-                let row: Option<(String, String, String, String)> = conn
-                    .query_row(
-                        "SELECT ack_ref, successor_slot, store_cut, control_coord
-                         FROM published_circle_acks WHERE circle_id = ?1",
-                        [circle_id.to_string()],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some((reference, successor_slot, store_cut, control)) = row else {
-                    return Ok(None);
-                };
-                let reference: CircleAckRef =
-                    serde_json::from_str(&reference).map_err(|error| {
-                        DbError::context("published Circle acknowledgement ref", error)
-                    })?;
-                if reference.circle_id != circle_id || reference.sequence == 0 {
-                    return Err(DbError::Message(
-                        "published Circle acknowledgement names another Circle or sequence zero"
-                            .to_string(),
-                    ));
-                }
-                Ok(Some(PublishedCircleAck {
-                    reference,
-                    successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
-                        DbError::context("published Circle acknowledgement successor slot", error)
-                    })?,
-                    store_cut: serde_json::from_str(&store_cut).map_err(|error| {
-                        DbError::context("published Circle acknowledgement cut", error)
-                    })?,
-                    control: serde_json::from_str(&control).map_err(|error| {
-                        DbError::context("published Circle acknowledgement control", error)
-                    })?,
-                }))
-            })
+            .call_store(move |session| session.latest_published_circle_ack(circle_id))
             .await
     }
 
@@ -262,49 +320,7 @@ impl StoreDatabase {
         prepared: PreparedExactObject,
     ) -> Result<CircleAckRef, DbError> {
         self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let bytes = ack.to_bytes();
-                let authority = local_store_authority_on(&tx)?;
-                let registration = authority.value();
-                let reference = CircleAckRef {
-                    registration: ack.registration.clone(),
-                    circle_id: ack.circle_id,
-                    control: ack.control.clone(),
-                    sequence: ack.sequence,
-                    ack_hash: ack.ack_hash(),
-                    object: prepared.reference().clone(),
-                };
-                let verified = CircleAck::parse_at(
-                    &bytes,
-                    &registration.store_root,
-                    &reference,
-                    registration,
-                )
-                    .map_err(|error| {
-                        DbError::context("stage Circle acknowledgement", error)
-                    })?;
-                if verified != ack {
-                    return Err(DbError::Message(
-                        "staged Circle acknowledgement changed during exact verification"
-                            .to_string(),
-                    ));
-                }
-                let ack_ref = serde_json::to_string(&reference).map_err(|error| {
-                    DbError::context("serialize exact Circle acknowledgement ref", error)
-                })?;
-                let prepared = serde_json::to_string(&prepared).map_err(|error| {
-                    DbError::context("serialize prepared Circle acknowledgement", error)
-                })?;
-                tx.execute(
-                    "INSERT INTO outbound_circle_acks (circle_id, ack_ref, ack_bytes, prepared_object)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![reference.circle_id.to_string(), ack_ref, bytes, prepared],
-                )
-                .map_err(DbError::from)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(reference)
-            })
+            .call_store(move |session| session.stage_circle_ack(ack, prepared))
             .await
     }
 }

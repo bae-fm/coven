@@ -7,19 +7,19 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::ObjectHash;
 use coven_storage::CloudSyncObjectStorage;
 
-fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
+fn store_database(db: &coven_database::SyntheticDatabase) -> coven_database::StoreDatabase {
     coven_database::StoreDatabase::new(db)
 }
 
 struct HistoryPublisher<'fixture> {
-    database: &'fixture coven_database::Database,
+    database: &'fixture coven_database::SyntheticDatabase,
     device: &'fixture crate::sync::test_helpers::TestDevice,
     store_dir: &'fixture coven_foundation::store_dir::StoreDir,
 }
 
 impl<'fixture> HistoryPublisher<'fixture> {
     fn new(
-        database: &'fixture coven_database::Database,
+        database: &'fixture coven_database::SyntheticDatabase,
         device: &'fixture crate::sync::test_helpers::TestDevice,
         store_dir: &'fixture coven_foundation::store_dir::StoreDir,
     ) -> Self {
@@ -57,7 +57,7 @@ impl<'fixture> HistoryPublisher<'fixture> {
 }
 
 struct PublishedHistory {
-    db: coven_database::Database,
+    db: coven_database::SyntheticDatabase,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     device: crate::sync::test_helpers::TestDevice,
@@ -360,6 +360,140 @@ async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
         .await;
 }
 
+enum VerifiedAuthoritySabotage {
+    StoreRoot,
+    Registration,
+}
+
+async fn publish_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySabotage) {
+    let fixture = PublishedHistory::publish(1).await;
+    let registration = fixture.retained_history().await[0]
+        .activation_head()
+        .author_registration
+        .clone();
+    match sabotage {
+        VerifiedAuthoritySabotage::StoreRoot => {
+            fixture
+                .db
+                .test_sql(|conn| conn.replace_store_root_hash(None))
+                .await
+                .expect("delete verified Store root authority");
+        }
+        VerifiedAuthoritySabotage::Registration => {
+            fixture
+                .db
+                .test_sql(move |conn| conn.corrupt_store_device_registration_bytes(&registration))
+                .await
+                .expect("corrupt verified Store registration authority");
+        }
+    }
+
+    HistoryPublisher::new(&fixture.db, &fixture.device, &fixture.store_dir)
+        .publish_note(2)
+        .await;
+}
+
+#[tokio::test]
+async fn open_connection_reuses_verified_store_root_authority() {
+    publish_after_verified_authority_sabotage(VerifiedAuthoritySabotage::StoreRoot).await;
+}
+
+#[tokio::test]
+async fn open_connection_reuses_verified_registration_authority() {
+    publish_after_verified_authority_sabotage(VerifiedAuthoritySabotage::Registration).await;
+}
+
+fn open_persistent_history_database(
+    path: &std::path::Path,
+    device_id: &str,
+) -> coven_database::SyntheticDatabase {
+    let migrations = crate::sync::test_helpers::test_migrations();
+    coven_database::SyntheticDatabase::open(
+        path,
+        crate::sync::test_helpers::test_synced_tables(),
+        coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
+        device_id.to_string(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        &migrations,
+    )
+    .expect("open persistent history database")
+}
+
+async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySabotage) -> String {
+    let directory = tempfile::tempdir().expect("create authority reopen directory");
+    let path = directory.path().join("authority.sqlite");
+    let signer = UserKeypair::generate();
+    let database = open_persistent_history_database(&path, "authority-reopen-device");
+    let store = TestStore::create(
+        &database,
+        "authority-reopen",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create authority reopen Store");
+    let device = store
+        .bind_device(&database, &signer)
+        .await
+        .expect("bind authority reopen Store");
+    let store_database = store_database(&database);
+    store_database
+        .validated_store_owner(device.store_root())
+        .await
+        .expect("verify Store root and founder registration before sabotage");
+    let registration = store_database
+        .local_activated_registration_ref()
+        .await
+        .expect("load local registration reference")
+        .expect("local registration is activated");
+    match sabotage {
+        VerifiedAuthoritySabotage::StoreRoot => database
+            .test_sql(|sql| sql.replace_store_root_hash(None))
+            .await
+            .expect("remove verified Store root"),
+        VerifiedAuthoritySabotage::Registration => database
+            .test_sql(move |sql| sql.corrupt_store_device_registration_bytes(&registration))
+            .await
+            .expect("corrupt verified Store registration"),
+    }
+    let storage = store.storage();
+    drop(device);
+    drop(store);
+    drop(store_database);
+    drop(database);
+
+    let reopened = open_persistent_history_database(&path, "authority-reopen-device");
+    match crate::sync::test_helpers::TestDevice::load(&reopened, storage, signer).await {
+        Ok(device) => coven_database::StoreDatabase::new(&reopened)
+            .validated_store_owner(device.store_root())
+            .await
+            .expect_err("first verification accepted altered durable Store authority")
+            .to_string(),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn reopened_connection_rejects_an_altered_store_root_before_first_verification() {
+    let error =
+        reopen_after_verified_authority_sabotage(VerifiedAuthoritySabotage::StoreRoot).await;
+    assert!(
+        error.contains("root"),
+        "unexpected Store root error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn reopened_connection_rejects_an_altered_registration_before_first_verification() {
+    let error =
+        reopen_after_verified_authority_sabotage(VerifiedAuthoritySabotage::Registration).await;
+    assert!(
+        error.contains("registration"),
+        "unexpected Store registration error: {error}"
+    );
+}
+
 #[tokio::test]
 async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     let fixture = PublishedHistory::publish(1).await;
@@ -468,7 +602,7 @@ async fn retained_commit_evidence_rejects_an_omitted_acknowledgement() {
 }
 
 struct MemberRemovalHistory {
-    db: coven_database::Database,
+    db: coven_database::SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
     removal: coven_database::OwnedVerifiedMergeMaterialization,

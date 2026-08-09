@@ -79,7 +79,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 ],
             )
             .map_err(DbError::from)?;
-        StoreDatabase::load_merge_retraction_cleanup_on(self.transaction, retained.commit_ref())?;
+        StoreDatabase::load_merge_retraction_cleanup_for_verified_materialization_on(
+            self.transaction,
+            retained,
+        )?;
         Ok(())
     }
 
@@ -102,17 +105,17 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .parse()
                 .map_err(|error| DbError::context("parse retracted Circle bootstrap id", error))?;
             StoreDatabase::clear_circle_bootstrap_coverage_on(
-                self.record_transaction(),
+                crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
                 circle_id,
             )?;
         }
         Ok(circle_ids.len())
     }
 
-    pub fn retract_verified_merge_materializations(
+    pub(super) fn retract_verified_merge_materializations(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
-        retained_replay: &mut RetainedReplayCache,
+        retained_replay: &mut RetainedReplayTransaction,
         retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
         let conn = self.transaction;
@@ -124,11 +127,14 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = retained_replay.replay_inputs_on(self.records(), root)?;
+        let retained = retained_replay.replay_inputs_on(
+            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+        )?;
         let mut required = BTreeSet::new();
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(
-                self.records(),
+                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+                retained_replay,
                 root,
                 retained.commit_ref(),
                 &retained.commit().author_registration,
@@ -176,7 +182,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let candidate = nonactivation
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            validate_terminal_nonactivation_authority_on(self.records(), root, &nonactivation)?;
+            validate_terminal_nonactivation_authority_on(
+                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+                retained_replay,
+                root,
+                &nonactivation,
+            )?;
             match nonactivation.proof() {
                 coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
                     exclusion,
@@ -184,7 +195,15 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     activation_head,
                 } => {
                     let locator =
-                        load_author_exclusion_activation_locator_on(self.records(), root, exclusion)?;
+                        load_author_exclusion_activation_locator_on(
+                            crate::payload_spool::StoreRecords::new(
+                                self.transaction,
+                                self.store_dir,
+                            ),
+                            retained_replay,
+                            root,
+                            exclusion,
+                        )?;
                     if locator.accepted_cut() != accepted_cut
                         || locator.activation_head() != activation_head
                     {
@@ -218,14 +237,16 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let retained = StoreDatabase::load_retained_merge_materialization_on(
-                self.records(),
-                root,
-                &stream_id,
-                *sequence,
+            let retained = retained_replay.retained_materialization_by_ref_on(
+                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
                 &candidate,
-                &input_hash,
             )?;
+            if retained.root() != root || retained.input_hash().to_string() != input_hash {
+                return Err(DbError::Message(
+                    "terminal retraction retained input differs from its materialization"
+                        .to_string(),
+                ));
+            }
             if retained.commit().to_bytes() != nonactivation.candidate().canonical_signed_bytes
                 || retained.activation_head_object() != head_nonactivation.head().object()
             {

@@ -8,45 +8,52 @@ use super::fixtures::*;
 
 #[tokio::test]
 async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
-    let db = Database::open(
+    let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(
+        std::env::temp_dir().join(format!("coven-remote-objects-{}", uuid::Uuid::new_v4())),
+    );
+    let db = Database::open_with_hlc_in_store_dir_for_test(
         Path::new(":memory:"),
+        store_dir.clone(),
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
-        "prepared-audience-objects".to_string(),
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        std::sync::Arc::new(
+            coven_protocol::hlc::Hlc::try_new(
+                "prepared-audience-objects".to_string(),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            )
+            .expect("create test register clock"),
+        ),
         &[],
     )
     .expect("open database");
-    let store_dir = db.store_dir_for_test().clone();
     let empty_changeset_hash = crate::payload_spool::write_payload_blocking(&store_dir, b"")
         .expect("install empty captured changeset");
     let write_id = WriteId::from_generated("write-1".to_string());
     let stored_write_id = write_id.clone();
-    db.call(move |conn| {
+    db.test_sql(move |conn| {
         let base = serde_json::to_string(&StoreWriteBase {
             dependencies: BTreeMap::new(),
         })
         .expect("serialize base");
-        let transaction = conn.unchecked_transaction().map_err(DbError::from)?;
-        transaction
-            .execute(
-                "INSERT INTO store_writes
+        conn.transaction(|transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO store_writes
              (write_id, status, affected_rows, changeset_hash, base, blob_facts)
              VALUES (?1, '\"pending\"', '[]', ?2, ?3, '{\"blobs\":[]}')",
-                rusqlite::params![
-                    stored_write_id.as_str(),
-                    empty_changeset_hash.to_string(),
-                    base
-                ],
+                    rusqlite::params![
+                        stored_write_id.as_str(),
+                        empty_changeset_hash.to_string(),
+                        base
+                    ],
+                )
+                .map_err(DbError::from)?;
+            transaction.set_payload_owner_claims(
+                &crate::payload_spool::store_write_owner_key(&stored_write_id),
+                &std::collections::BTreeSet::from([empty_changeset_hash]),
             )
-            .map_err(DbError::from)?;
-        crate::payload_spool::set_payload_owner_claims_on(
-            &transaction,
-            &crate::payload_spool::store_write_owner_key(&stored_write_id),
-            &std::collections::BTreeSet::from([empty_changeset_hash]),
-        )?;
-        transaction.commit().map_err(DbError::from)
+        })
     })
     .await
     .expect("seed write");
@@ -278,30 +285,30 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     let blob_state = serde_json::to_string(&blob_remote).expect("blob remote state");
     let second_blob_state =
         serde_json::to_string(&second_blob_remote).expect("second blob remote state");
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-            rusqlite::params![package_remote_id.to_string(), package_state],
-        )
-        .map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-            rusqlite::params![blob_remote_id.to_string(), blob_state],
-        )
-        .map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-            rusqlite::params![second_blob_remote_id.to_string(), second_blob_state],
-        )
-        .map_err(DbError::from)?;
-        crate::StoreDatabase::persist_prepared_audience_objects_on(
-            crate::payload_spool::StoreRecords::new(&tx, &store_dir),
-            &persisted_write_id,
-            &[prepared_package],
-            &[prepared_blob, second_prepared_blob],
-        )?;
-        tx.commit().map_err(DbError::from)
+    db.test_sql(move |conn| {
+        conn.transaction(|tx| {
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![package_remote_id.to_string(), package_state],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![blob_remote_id.to_string(), blob_state],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![second_blob_remote_id.to_string(), second_blob_state],
+            )
+            .map_err(DbError::from)?;
+            tx.persist_prepared_audience_objects(
+                &store_dir,
+                &persisted_write_id,
+                &[prepared_package],
+                &[prepared_blob, second_prepared_blob],
+            )
+        })
     })
     .await
     .expect("persist prepared objects");

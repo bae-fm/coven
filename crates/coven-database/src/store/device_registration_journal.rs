@@ -86,16 +86,15 @@ impl LocalRegistrationRecord {
     /// against a different one.
     pub(crate) fn require_installed_store_root(
         &self,
-        conn: &rusqlite::Connection,
+        root: &coven_protocol::store_commit::StoreRootRef,
         subject: &str,
-    ) -> Result<coven_protocol::store_commit::StoreRootRef, DbError> {
-        let root = required_store_root_authority_on(conn)?;
-        if self.registration.value.store_root != root {
+    ) -> Result<(), DbError> {
+        if &self.registration.value.store_root != root {
             return Err(DbError::Message(format!(
                 "{subject} belongs to another Store root"
             )));
         }
-        Ok(root)
+        Ok(())
     }
 
     /// The journal's seven object columns, in table order.
@@ -148,8 +147,12 @@ impl StoreDatabase {
         let record =
             LocalRegistrationRecord::checked(registration, initial_ack_ref, initial_ack, SUBJECT)?;
         self.connection
-            .call(move |conn| {
-                record.require_installed_store_root(conn, SUBJECT)?;
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let root = authority.required_root_authority_on(records)?;
+                record.require_installed_store_root(&root, SUBJECT)?;
                 let expected = record.columns(SUBJECT)?;
                 let existing: Option<PreparedLocalDeviceRegistrationRow> = conn
                 .query_row(
@@ -220,9 +223,15 @@ impl StoreDatabase {
             SUBJECT,
         )?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let root = record.require_installed_store_root(&tx, SUBJECT)?;
+                let transaction_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let root = authority.required_root_authority_on(transaction_records)?;
+                record.require_installed_store_root(&root, SUBJECT)?;
                 let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
                     &record.registration().origin
                 else {
@@ -230,7 +239,11 @@ impl StoreDatabase {
                         "existing local founder device has a non-founder origin".to_string(),
                     ));
                 };
-                let activated = load_activated_registration_on(&tx, &root, record.reference())?;
+                let activated = authority.activated_registration_on(
+                    transaction_records,
+                    &root,
+                    record.reference(),
+                )?;
                 if activated != *record.registration() {
                     return Err(DbError::Message(
                         "existing local founder device differs from its installed activation"
@@ -379,9 +392,15 @@ impl StoreDatabase {
             SUBJECT,
         )?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                record.require_installed_store_root(&tx, SUBJECT)?;
+                let transaction_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let root = authority.required_root_authority_on(transaction_records)?;
+                record.require_installed_store_root(&root, SUBJECT)?;
                 let objects = record.columns(SUBJECT)?;
                 let exact_registration_ref =
                     encode(record.reference(), SUBJECT, "registration ref")?;
@@ -487,7 +506,10 @@ impl StoreDatabase {
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 conn.query_row(sql, [], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -525,7 +547,7 @@ impl StoreDatabase {
                             })?;
                         let registration = StoreDeviceRegistration::parse_at(
                             &bytes,
-                            &required_store_root_authority_on(conn)?,
+                            &authority.required_root_authority_on(records)?,
                             device_id,
                         )
                         .map_err(|error| {
@@ -579,7 +601,8 @@ impl StoreDatabase {
         initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let registration_ref = StoreDeviceRegistrationRef::from_registration(
                     &registration.value,

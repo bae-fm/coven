@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::test_helpers::TestStore;
-use coven_database::{Database, StoreDatabase};
+use coven_database::{StoreDatabase, SyntheticDatabase};
 
 struct CircleSnapshotFixture {
     directory: tempfile::TempDir,
-    database: Database,
+    database: SyntheticDatabase,
     store_database: StoreDatabase,
     store: std::sync::Arc<TestStore>,
 }
@@ -14,7 +14,7 @@ struct CircleSnapshotFixture {
 impl CircleSnapshotFixture {
     async fn initialize(local_device_id: &str) -> Self {
         let directory = tempfile::tempdir().expect("snapshot database directory");
-        let database = Database::open(
+        let database = SyntheticDatabase::open(
             &directory.path().join("store.sqlite3"),
             crate::sync::test_helpers::test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,

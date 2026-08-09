@@ -10,11 +10,12 @@ impl StoreDatabase {
     /// covers. `retain_snapshot_replay_inputs_on` keeps exactly this set, and
     /// `validate_snapshot_retained_inputs_on` expects exactly it, so the two
     /// share this one derivation.
-    pub fn snapshot_required_retained_refs(
+    pub(crate) fn snapshot_required_retained_refs(
         records: StoreRecords<'_>,
+        authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<BTreeSet<String>, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let references = query_mapped_rows(
             conn,
             "SELECT DISTINCT activation_commit
@@ -61,7 +62,12 @@ impl StoreDatabase {
             let reference: StoreBatchCommitRef = serde_json::from_str(&encoded)
                 .map_err(|error| DbError::context("snapshot retained Circle commit", error))?;
             let materialization =
-                Self::load_retained_merge_materialization_by_ref_on(records, root, &reference)?;
+                authority.retained_materialization_by_ref_on(records, &reference)?;
+            if materialization.root() != root {
+                return Err(DbError::Message(
+                    "snapshot retained materialization belongs to another Store root".to_string(),
+                ));
+            }
             let has_uncovered_circle_package = materialization.packages().iter().any(|package| {
                 let coven_protocol::audience_package::PackageAudience::Circle { circle_id, .. } =
                     package.audience()
@@ -79,12 +85,17 @@ impl StoreDatabase {
         Ok(required)
     }
 
-    pub fn retain_snapshot_replay_inputs_on(
+    pub(crate) fn retain_snapshot_replay_inputs_on(
         records: StoreRecordTransaction<'_, '_>,
+        authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let conn = records.transaction();
-        let required = Self::snapshot_required_retained_refs(records.records(), root)?;
+        let conn = records.transaction;
+        let required = Self::snapshot_required_retained_refs(
+            StoreRecords::new(records.transaction, records.store_dir),
+            authority,
+            root,
+        )?;
         let mut retained = Vec::with_capacity(required.len());
         for encoded in required {
             let reference: StoreBatchCommitRef =
@@ -92,8 +103,9 @@ impl StoreDatabase {
                     DbError::context("snapshot author exclusion activation commit", error)
                 })?;
             Self::load_retained_merge_materialization_by_ref_on(
-                records.records(),
+                StoreRecords::new(records.transaction, records.store_dir),
                 root,
+                authority,
                 &reference,
             )?;
             let StoreCommitCoord {
@@ -165,12 +177,13 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub fn retain_snapshot_device_states_on(
+    pub(crate) fn retain_snapshot_device_states_on(
         records: StoreRecordTransaction<'_, '_>,
+        authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         coverage: BTreeMap<String, StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
-        let conn = records.transaction();
+        let conn = records.transaction;
         let mut required = coverage.into_values().collect::<BTreeSet<_>>();
         let retained = query_mapped_rows(
             conn,
@@ -184,8 +197,9 @@ impl StoreDatabase {
                     DbError::context("snapshot retained device-state authority", error)
                 })?;
             let materialization = Self::load_retained_merge_materialization_by_ref_on(
-                records.records(),
+                StoreRecords::new(records.transaction, records.store_dir),
                 root,
+                authority,
                 &reference,
             )?;
             required.insert(reference);
@@ -263,11 +277,12 @@ impl StoreDatabase {
         Ok(())
     }
 
-    pub fn validate_snapshot_retained_inputs_on(
+    pub(crate) fn validate_snapshot_retained_inputs_on(
         records: StoreRecords<'_>,
+        authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         // Each recorded author-exclusion activation must still match its
         // exclusion locator, so the image's exclusion table is internally exact.
         let stored = query_mapped_rows(
@@ -281,7 +296,8 @@ impl StoreDatabase {
         for (encoded_exclusion, activation_commit) in stored {
             let exclusion = serde_json::from_str(&encoded_exclusion)
                 .map_err(|error| DbError::context("snapshot author exclusion reference", error))?;
-            let locator = load_author_exclusion_activation_locator_on(records, root, &exclusion)?;
+            let locator =
+                load_author_exclusion_activation_locator_on(records, authority, root, &exclusion)?;
             let encoded_locator =
                 serde_json::to_string(locator.activation_commit()).map_err(|error| {
                     DbError::context("serialize snapshot author exclusion activation", error)
@@ -295,7 +311,7 @@ impl StoreDatabase {
         // The image's retained inputs must be exactly the set the retention rule
         // keeps — an extra row is unjustified replay baseline, a missing one is
         // coverage the Circle retained replay needs.
-        let expected = Self::snapshot_required_retained_refs(records, root)?;
+        let expected = Self::snapshot_required_retained_refs(records, authority, root)?;
         let mut statement = conn
             .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
             .map_err(DbError::from)?;

@@ -8,10 +8,10 @@
 //! Hosts open coven with `Coven::builder` and run app SQL through
 //! `CovenHandle::sql` or `CovenHandle::write`.
 
-pub use crate::blob_records::{load_activated_registration_on, remote_audience_to_db};
-pub use crate::circle_snapshot_records::{
-    load_outbound_circle_snapshot_on, load_published_circle_snapshot_on,
-};
+pub(crate) use crate::blob_records::load_activated_registration_on;
+pub use crate::blob_records::remote_audience_to_db;
+pub(crate) use crate::circle_snapshot_records::load_outbound_circle_snapshot_on;
+pub use crate::circle_snapshot_records::load_published_circle_snapshot_on;
 pub use crate::cloud_outbox_records::{
     outbox_identity, row_to_outbox_entry, CloudOutboxRecords, OutboxIdentity,
 };
@@ -31,14 +31,15 @@ pub use crate::remote_object_records::candidate_graph_exact_objects;
 pub use crate::remote_object_records::finish_remote_candidate_nonactivation_on;
 pub use crate::remote_object_records::index_retained_replay_owner_on;
 pub use crate::remote_object_records::load_protocol_inert_object_on;
+pub use crate::remote_object_records::load_remote_object_on;
 pub use crate::remote_object_records::mark_remote_object_uploaded_on;
 pub use crate::remote_object_records::mark_reusable_retained_authority_uploaded_on;
 pub use crate::remote_object_records::persist_exact_remote_object_on;
 pub use crate::remote_object_records::persist_prepared_remote_object_on;
 pub use crate::remote_object_records::record_reclaimed_store_package_on;
+pub(crate) use crate::remote_object_records::reopen_remote_object_on;
 pub use crate::remote_object_records::replace_prepared_merge_head_remote_on;
 pub use crate::remote_object_records::update_remote_object_on;
-pub use crate::remote_object_records::{load_remote_object_on, reopen_remote_object_on};
 pub use crate::remote_object_records::{
     validate_prepared_blob_on, validate_prepared_package_on, validate_remote_object_on,
 };
@@ -48,9 +49,8 @@ pub use crate::snapshot_objects::{
     snapshot_generation_as_i64, validate_snapshot_author, validate_snapshot_blob_plans_on,
     validate_snapshot_image, verify_snapshot_blob_spools,
 };
-pub use crate::snapshot_records::{
-    load_outbound_store_snapshot_on, load_published_store_snapshot_on,
-};
+pub(crate) use crate::snapshot_records::load_outbound_store_snapshot_on;
+pub use crate::snapshot_records::load_published_store_snapshot_on;
 pub use crate::store_ack_records::{
     finish_outbound_store_ack_on, load_published_store_ack_on, store_snapshot_first_slot,
     verify_next_local_store_ack_on,
@@ -143,7 +143,8 @@ pub use test_sql::DatabaseTestSql;
 pub use test_support::synthetic_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::{
-    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
+    synthetic_store::SyntheticDatabase, DatabaseImageTest, OutboxAttempt,
+    RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_transaction::DatabaseTestTransaction;
@@ -183,8 +184,7 @@ pub use gate::{
     from_tables_call_count as gate_from_tables_call_count,
     reset_from_tables_call_count as reset_gate_from_tables_call_count,
 };
-pub use local_store_identity::local_merge_stream_id_on;
-pub use local_store_identity::{local_activated_registration_ref_on, local_store_authority_on};
+pub(crate) use local_store_identity::local_activated_registration_ref_on;
 pub use migration::{ensure_schema_supported, run_migrations_in_transaction, supported_version};
 pub use migration::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use operation_models::{
@@ -242,14 +242,14 @@ pub use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTr
 pub use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
-pub use store_authority_records::{
-    ensure_founder_replay_baseline_on, founder_graph_identity,
-    install_generation_zero_replay_baseline_on, install_snapshot_replay_baseline_on,
-    install_store_root_authority_on, load_local_store_founder_graph_on,
-    load_store_root_authority_on, DurableFounderMembershipJournal,
+pub use store_authority_records::DurableFounderMembershipJournal;
+pub(crate) use store_authority_records::{
+    ensure_founder_replay_baseline_on, install_generation_zero_replay_baseline_on,
+    install_snapshot_replay_baseline_on, load_generation_zero_replay_baseline_on,
 };
-pub use store_authority_records::{
-    load_generation_zero_replay_baseline_on, required_store_root_authority_on,
+pub(crate) use store_authority_records::{
+    founder_graph_identity, install_store_root_authority_on, load_local_store_founder_graph_on,
+    load_store_root_authority_on,
 };
 pub use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
@@ -786,6 +786,7 @@ impl<K: Clone + PartialEq> TestPausePoints<K> {
 struct DatabaseCore {
     store_dir: coven_foundation::store_dir::StoreDir,
     conn: Connection,
+    verified_store_authority: store::VerifiedStoreAuthority,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
@@ -794,6 +795,13 @@ struct DatabaseCore {
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: coven_protocol::blob::TransferLimits,
+}
+
+/// One operation scoped to the connection thread's database-wide state.
+/// The connection remains private to the database implementation while leaf
+/// SQL functions borrow it during the operation.
+pub(crate) struct DatabaseSession<'session> {
+    conn: &'session Connection,
 }
 
 /// One Circle image selected against the restoring identity's re-resolved
@@ -899,7 +907,7 @@ impl VerifiedSnapshotBootstrapInstall {
         routing_hash: ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
-        let conn = records.conn();
+        let conn = records.transaction;
         let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: self.store_root.value.descriptor.store_root_id(),
             store_root_hash: self.store_root.semantic_hash,
@@ -951,7 +959,7 @@ impl VerifiedSnapshotBootstrapInstall {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            records.records(),
+            crate::payload_spool::StoreRecords::new(records.transaction, records.store_dir),
             schema_version,
             routing_hash,
             self.stability.clone(),
@@ -974,7 +982,7 @@ impl VerifiedSnapshotBootstrapInstall {
         let CircleRestoreSelection::Selected(circle_installs) = &self.circle_selection else {
             return Ok(());
         };
-        let conn = records.transaction();
+        let conn = records.transaction;
         #[cfg(any(test, feature = "test-utils"))]
         if self.fail_circle_install {
             return Err(DbError::Message(
@@ -982,9 +990,11 @@ impl VerifiedSnapshotBootstrapInstall {
             ));
         }
         StoreDatabase::clear_imported_circle_bootstrap_coverage_on(records)?;
+        let mut verified_authority = store::VerifiedStoreAuthority::default();
         for install in circle_installs {
             let activation = StoreDatabase::verified_circle_activation_on(
-                records.records(),
+                crate::payload_spool::StoreRecords::new(records.transaction, records.store_dir),
+                &mut verified_authority,
                 root,
                 install.image.circle_id(),
                 install.image.control(),
@@ -1004,6 +1014,7 @@ impl VerifiedSnapshotBootstrapInstall {
             )?;
             StoreDatabase::record_one_circle_bootstrap_coverage_on(
                 records,
+                &mut verified_authority,
                 root,
                 &install.activation_commit,
                 &install.image,

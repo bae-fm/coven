@@ -1,6 +1,6 @@
 //! Tests for the device-local blob cache.
 //!
-//! These drive the real cache free functions over a real [`Database`] and a real
+//! These drive the real cache free functions over a real [`SyntheticDatabase`] and a real
 //! temp store directory, with a [`TestStore`] standing in for the cloud, so
 //! a hit/miss and a folder move are exercised against actual files on disk. The
 //! load-bearing properties: presence is the file (no table), pinned-ness is which
@@ -14,7 +14,7 @@ use crate::sync::test_helpers::{
     open_test_db_with_user_and_host_blobs, photo_decl, read_test_db,
     read_test_db_with_download_limit, remote_root_db, temp_store_dir, test_migrations, TestStore,
 };
-use coven_database::{Database, StoreDatabase};
+use coven_database::{StoreDatabase, SyntheticDatabase};
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::synced_schema::BlobDecl;
@@ -22,7 +22,7 @@ use coven_protocol::synced_schema::SyncedTable;
 use coven_storage::CloudSyncObjectStorage;
 
 /// The synthetic test db opens with a single migration, so its
-/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+/// [`coven_database::Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
 
 trait BlobTestStoreDirOps {
@@ -97,7 +97,7 @@ fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
 
 /// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
 /// scope, host-provided · `CacheEager` (fetched into the cache on pull).
-fn plain_blob_db(decl: BlobDecl) -> Database {
+fn plain_blob_db(decl: BlobDecl) -> SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -119,7 +119,7 @@ fn plain_blob_db(decl: BlobDecl) -> Database {
 }
 
 async fn create_store(
-    db: &Database,
+    db: &SyntheticDatabase,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
     TestStore::create(
@@ -133,12 +133,12 @@ async fn create_store(
 }
 
 struct ExactRemoteBlobFixture<'a> {
-    database: &'a Database,
+    database: &'a SyntheticDatabase,
     store: &'a TestStore,
 }
 
 impl<'a> ExactRemoteBlobFixture<'a> {
-    fn new(database: &'a Database, store: &'a TestStore) -> Self {
+    fn new(database: &'a SyntheticDatabase, store: &'a TestStore) -> Self {
         Self { database, store }
     }
 

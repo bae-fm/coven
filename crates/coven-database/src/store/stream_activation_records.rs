@@ -60,7 +60,8 @@ impl StoreDatabase {
     ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
         let key = activation_id.as_hash().to_string();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let stored = conn
                     .query_row(
                         "SELECT activation_id, author_stream_id, activation, activating_commit

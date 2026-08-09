@@ -1,16 +1,105 @@
 use crate::*;
+use coven_protocol::provider::{
+    DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+};
 
 use super::*;
+
+impl StoreSession<'_> {
+    fn prepare_device_join_challenge_publication(
+        &self,
+        key: &str,
+        value: &str,
+        prepared: &coven_protocol::provider::DeviceJoinChallengePublicationRecord,
+    ) -> Result<coven_protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+            (key, value),
+        )
+        .map_err(DbError::from)?;
+        let actual = crate::required_protocol_state_on(&tx, key)?;
+        tx.commit().map_err(DbError::from)?;
+        let actual: coven_protocol::provider::DeviceJoinChallengePublicationRecord =
+            serde_json::from_str(&actual).map_err(|error| {
+                DbError::context("parse device join challenge publication", error)
+            })?;
+        if actual.challenge != prepared.challenge {
+            return Err(DbError::Message(
+                "device join challenge probe id was reused with different bytes".to_string(),
+            ));
+        }
+        Ok(actual)
+    }
+
+    fn publish_device_join_challenge(
+        &self,
+        key: &str,
+        authorization: coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: coven_protocol::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<(), DbError> {
+        use coven_protocol::provider::{
+            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+        };
+
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let previous_json = crate::required_protocol_state_on(&tx, key)?;
+        let previous: DeviceJoinChallengePublicationRecord = serde_json::from_str(&previous_json)
+            .map_err(|error| {
+            DbError::context("parse device join challenge publication", error)
+        })?;
+        if previous.challenge != challenge {
+            return Err(DbError::Message(
+                "device join challenge publication differs from prepared bytes".to_string(),
+            ));
+        }
+        match &previous.progress {
+            DeviceJoinChallengePublicationProgress::Prepared => {
+                let next = DeviceJoinChallengePublicationRecord {
+                    challenge,
+                    progress: DeviceJoinChallengePublicationProgress::Published { authorization },
+                };
+                let next_json = serde_json::to_string(&next).map_err(|error| {
+                    DbError::context("serialize device join challenge publication", error)
+                })?;
+                let changed = tx
+                    .execute(
+                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                        (&next_json, key, &previous_json),
+                    )
+                    .map_err(DbError::from)?;
+                if changed != 1 {
+                    return Err(DbError::Message(
+                        "device join challenge publication lost its exact predecessor".to_string(),
+                    ));
+                }
+            }
+            DeviceJoinChallengePublicationProgress::Published {
+                authorization: existing,
+            } if existing == &authorization => {}
+            DeviceJoinChallengePublicationProgress::Published { .. } => {
+                return Err(DbError::Message(
+                    "device join challenge publication authorization changed".to_string(),
+                ));
+            }
+        }
+        tx.commit().map_err(DbError::from)
+    }
+}
 
 impl StoreDatabase {
     pub async fn prepare_device_join_challenge_publication(
         &self,
         challenge: coven_protocol::provider::CrossPrincipalProbeChallenge,
     ) -> Result<coven_protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
-        use coven_protocol::provider::{
-            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
-        };
-
         let key = format!(
             "device_join_challenge_publication/{}",
             hex::encode(challenge.probe_id.as_bytes())
@@ -23,26 +112,8 @@ impl StoreDatabase {
             DbError::context("serialize device join challenge publication", error)
         })?;
         self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                    (&key, &value),
-                )
-                .map_err(DbError::from)?;
-                let actual = crate::required_protocol_state_on(&tx, &key)?;
-                tx.commit().map_err(DbError::from)?;
-                let actual: DeviceJoinChallengePublicationRecord = serde_json::from_str(&actual)
-                    .map_err(|error| {
-                        DbError::context("parse device join challenge publication", error)
-                    })?;
-                if actual.challenge != prepared.challenge {
-                    return Err(DbError::Message(
-                        "device join challenge probe id was reused with different bytes"
-                            .to_string(),
-                    ));
-                }
-                Ok(actual)
+            .call_store(move |session| {
+                session.prepare_device_join_challenge_publication(&key, &value, &prepared)
             })
             .await
     }
@@ -52,61 +123,13 @@ impl StoreDatabase {
         authorization: coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
         challenge: coven_protocol::provider::CrossPrincipalProbeChallenge,
     ) -> Result<(), DbError> {
-        use coven_protocol::provider::{
-            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
-        };
-
         let key = format!(
             "device_join_challenge_publication/{}",
             hex::encode(challenge.probe_id.as_bytes())
         );
         self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let previous_json = crate::required_protocol_state_on(&tx, &key)?;
-                let previous: DeviceJoinChallengePublicationRecord =
-                    serde_json::from_str(&previous_json).map_err(|error| {
-                        DbError::context("parse device join challenge publication", error)
-                    })?;
-                if previous.challenge != challenge {
-                    return Err(DbError::Message(
-                        "device join challenge publication differs from prepared bytes".to_string(),
-                    ));
-                }
-                match &previous.progress {
-                    DeviceJoinChallengePublicationProgress::Prepared => {
-                        let next = DeviceJoinChallengePublicationRecord {
-                            challenge,
-                            progress: DeviceJoinChallengePublicationProgress::Published {
-                                authorization,
-                            },
-                        };
-                        let next_json = serde_json::to_string(&next).map_err(|error| {
-                            DbError::context("serialize device join challenge publication", error)
-                        })?;
-                        let changed = tx
-                        .execute(
-                            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                            (&next_json, &key, &previous_json),
-                        )
-                        .map_err(DbError::from)?;
-                        if changed != 1 {
-                            return Err(DbError::Message(
-                                "device join challenge publication lost its exact predecessor"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    DeviceJoinChallengePublicationProgress::Published {
-                        authorization: existing,
-                    } if existing == &authorization => {}
-                    DeviceJoinChallengePublicationProgress::Published { .. } => {
-                        return Err(DbError::Message(
-                            "device join challenge publication authorization changed".to_string(),
-                        ));
-                    }
-                }
-                tx.commit().map_err(DbError::from)
+            .call_store(move |session| {
+                session.publish_device_join_challenge(&key, authorization, challenge)
             })
             .await
     }

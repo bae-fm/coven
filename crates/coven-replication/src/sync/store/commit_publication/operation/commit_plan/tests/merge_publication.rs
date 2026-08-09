@@ -631,7 +631,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("store.sqlite3");
         let open = || {
-            Database::open(
+            SyntheticDatabase::open(
                 &path,
                 crate::sync::test_helpers::test_synced_tables(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -774,10 +774,9 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         coven_protocol::write::WriteStatus::Publishing
     );
     drop(writer);
-    assert!(matches!(
-        crate::sync::test_helpers::TestDevice::load(&db, storage.clone(), keypair.clone()).await,
-        Err(StoreError::MissingState { .. })
-    ));
+    crate::sync::test_helpers::TestDevice::load(&db, storage.clone(), keypair.clone())
+        .await
+        .expect("same connection retains its verified Store authority");
 }
 
 #[tokio::test]

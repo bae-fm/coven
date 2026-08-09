@@ -3,13 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
-use coven_database::Database;
 use coven_database::StoreDatabase;
+use coven_database::SyntheticDatabase;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> Database {
-    Database::open(
+fn open(path: &Path, device_id: &str) -> SyntheticDatabase {
+    SyntheticDatabase::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -21,7 +21,7 @@ fn open(path: &Path, device_id: &str) -> Database {
     .expect("open snapshot test database")
 }
 
-fn store_database(database: &Database) -> StoreDatabase {
+fn store_database(database: &SyntheticDatabase) -> StoreDatabase {
     StoreDatabase::new(database)
 }
 
@@ -39,7 +39,7 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConne
 }
 
 async fn initialize(
-    db: &Database,
+    db: &SyntheticDatabase,
     storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> crate::sync::test_helpers::TestDevice {
@@ -324,7 +324,7 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
             .collect::<Vec<_>>()
     );
     for hash in [image_hash, stored_hash] {
-        assert!(db.store_dir_for_test().payload_spool_path(hash).is_file());
+        assert!(db.store_dir.payload_spool_path(hash).is_file());
     }
     assert!(home
         .get(pending.image.prepared.reference().slot().logical_key())
@@ -345,7 +345,7 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
         .expect("read completed snapshot payload claims")
         .is_empty());
     for hash in [image_hash, stored_hash] {
-        assert!(!db.store_dir_for_test().payload_spool_path(hash).exists());
+        assert!(!db.store_dir.payload_spool_path(hash).exists());
     }
 }
 

@@ -171,16 +171,15 @@ impl StoreDatabase {
             }
         }
 
-        self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let activated =
-                    load_activated_registration_on(&tx, &root, &continuation.registration)?;
-                if activated != registration {
+        self.connection.call_store(move |session| {
+                let activated = session.activated_registration(&continuation.registration)?;
+                if activated.value() != &registration {
                     return Err(DbError::Message(
                         "continued registration differs from activated Store state".into(),
                     ));
                 }
+                let conn = session.records.conn;
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let stored_authority: String = tx
                     .query_row(
                         "SELECT activation_authority FROM store_device_registration_activations \
@@ -222,7 +221,7 @@ impl StoreDatabase {
                         row.get(0)
                     })
                     .map_err(DbError::from)?;
-                let existing_snapshot = load_published_store_snapshot_on(&tx)?;
+                let existing_snapshot = load_published_store_snapshot_on(&tx, &activated)?;
                 let existing_device =
                     crate::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
                 let state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {

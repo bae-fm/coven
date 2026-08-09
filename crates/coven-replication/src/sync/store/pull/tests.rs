@@ -3,7 +3,7 @@ use crate::sync::store::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
-use coven_database::Database;
+use coven_database::SyntheticDatabase;
 use coven_keys::keys::MasterKeyCustody;
 use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 
@@ -11,7 +11,7 @@ use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 mod effective_access_failure;
 
 async fn one_retained_checkpoint() -> (
-    Database,
+    SyntheticDatabase,
     std::sync::Arc<crate::sync::test_helpers::TestStore>,
     coven_keys::keys::UserKeypair,
     MembershipChain,
@@ -313,14 +313,14 @@ fn scoped_replay_schema() -> (
     )
 }
 
-fn open_scoped_replay_database() -> Database {
+fn open_scoped_replay_database() -> SyntheticDatabase {
     let (tables, migrations) = scoped_replay_schema();
     crate::sync::test_helpers::open_test_db_schema(tables, migrations)
 }
 
-fn open_scoped_replay_database_at(path: &std::path::Path) -> Database {
+fn open_scoped_replay_database_at(path: &std::path::Path) -> SyntheticDatabase {
     let (tables, migrations) = scoped_replay_schema();
-    Database::open(
+    SyntheticDatabase::open(
         path,
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -340,7 +340,7 @@ fn exact_circle_package_slot(commit: &StoreBatchCommit) -> coven_protocol::objec
 }
 
 struct EffectiveAccessFixture {
-    owner_database: Database,
+    owner_database: SyntheticDatabase,
     owner_device: crate::sync::test_helpers::TestDevice,
     member_device: crate::sync::test_helpers::TestDevice,
     owner: coven_keys::keys::UserKeypair,
@@ -430,7 +430,7 @@ impl EffectiveAccessFixture {
 
     async fn create(
         label: &str,
-        member_database: &Database,
+        member_database: &SyntheticDatabase,
         owner_store_dir: &coven_foundation::store_dir::StoreDir,
         member_store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Self {

@@ -12,7 +12,13 @@ impl StoreDatabase {
     pub async fn outbound_snapshot_publication(
         &self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-        let pending = self.call_records(load_outbound_store_snapshot_on).await?;
+        let pending = self
+            .connection
+            .call_store(|session| {
+                let authority = session.local_store_authority()?;
+                load_outbound_store_snapshot_on(session.records, &authority)
+            })
+            .await?;
         if let Some(pending) = &pending {
             verify_snapshot_blob_spools(&pending.blobs, "prepared").await?;
         }
@@ -28,10 +34,12 @@ impl StoreDatabase {
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
         let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates();
+        let gates = self.gates.clone();
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                let conn = session.records.conn;
                 let image_facts =
                     crate::payload_spool::write_payload_file_blocking(&store_dir, image.path())
                         .map_err(|error| {
@@ -47,7 +55,6 @@ impl StoreDatabase {
                 .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
                 let image_prepared_size = image_prepared.stored_bytes().len() as u64;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let authority = local_store_authority_on(&tx)?;
                 let registration_ref = authority.reference();
                 let registration = authority.value();
                 validate_snapshot_author(&meta.author_registration, registration_ref, "Store")?;
@@ -85,7 +92,7 @@ impl StoreDatabase {
                         "staged Store snapshot changed during exact verification".to_string(),
                     ));
                 }
-                let previous = load_published_store_snapshot_on(&tx)?;
+                let previous = load_published_store_snapshot_on(&tx, &authority)?;
                 let (expected_generation, expected_predecessor, expected_slot) = match &previous {
                     Some(previous) => (
                         previous
@@ -178,7 +185,12 @@ impl StoreDatabase {
     pub async fn latest_local_store_snapshot(
         &self,
     ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
-        self.connection.call(load_published_store_snapshot_on).await
+        self.connection
+            .call_store(|session| {
+                let authority = session.local_store_authority()?;
+                load_published_store_snapshot_on(session.records.conn, &authority)
+            })
+            .await
     }
 
     pub async fn complete_snapshot_publication(
@@ -187,10 +199,13 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let outbound = load_outbound_store_snapshot_on(
                     crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                    &authority,
                 )?
                 .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
                 if outbound.reference != accepted {
@@ -256,7 +271,8 @@ impl StoreDatabase {
 
     pub async fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let conn = session.records.conn;
                 let mut statement = conn
                     .prepare("SELECT path FROM snapshot_blob_spool_cleanup ORDER BY path")
                     .map_err(DbError::from)?;
@@ -273,7 +289,8 @@ impl StoreDatabase {
     pub async fn complete_snapshot_blob_spool_cleanup(&self, path: &Path) -> Result<(), DbError> {
         let path = path.to_string_lossy().into_owned();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let deleted = conn
                     .execute(
                         "DELETE FROM snapshot_blob_spool_cleanup WHERE path = ?1",

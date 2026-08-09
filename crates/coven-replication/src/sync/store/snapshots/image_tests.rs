@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use coven_database::SyntheticDatabase;
 use coven_database::{verify_circle_bootstrap_image, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::CommitFrontier;
 
-fn open_scoped_snapshot_test_db() -> Database {
+fn open_scoped_snapshot_test_db() -> SyntheticDatabase {
     crate::sync::test_helpers::open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -38,7 +39,7 @@ fn open_scoped_snapshot_test_db() -> Database {
     )
 }
 
-async fn seed_scoped_snapshot_rows(source: &Database) -> coven_protocol::circle::CircleId {
+async fn seed_scoped_snapshot_rows(source: &SyntheticDatabase) -> coven_protocol::circle::CircleId {
     let database = StoreDatabase::new(source);
     let circle = database
         .install_test_active_circle("snapshot-route-circle".to_string())
@@ -113,7 +114,7 @@ async fn seed_scoped_snapshot_rows(source: &Database) -> coven_protocol::circle:
 }
 
 fn circle_bootstrap_reference(
-    source: &Database,
+    source: &SyntheticDatabase,
     image: &[u8],
 ) -> coven_protocol::circle::CircleBootstrapRef {
     let image_hash = coven_protocol::store_commit::ObjectHash::digest(image);
@@ -358,7 +359,7 @@ enum ScopedSnapshotImage {
 }
 
 struct PublishedScopedSnapshot {
-    source: Database,
+    source: SyntheticDatabase,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     membership: coven_protocol::membership::MembershipChain,
     _store_dir_temp: tempfile::TempDir,

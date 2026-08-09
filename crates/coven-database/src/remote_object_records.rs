@@ -89,11 +89,11 @@ pub fn load_remote_object_on(
 /// The row and the files are one record; the flows that upload or re-encrypt an
 /// object need both halves, and reading them here keeps "the row's claims and
 /// the bytes agree" a single check rather than a per-caller convention.
-pub fn reopen_remote_object_on(
+pub(crate) fn reopen_remote_object_on(
     records: crate::payload_spool::StoreRecords<'_>,
     object_id: ObjectHash,
 ) -> Result<coven_protocol::remote_object::ClosedRemoteObject, DbError> {
-    let remote = load_remote_object_on(records.conn(), object_id)?;
+    let remote = load_remote_object_on(records.conn, object_id)?;
     let mut payloads = std::collections::BTreeMap::new();
     for hash in remote.payload_claims() {
         let bytes = records
@@ -281,6 +281,7 @@ pub(crate) fn load_reclaimed_store_package_on(
 
 pub fn record_reclaimed_store_package_on(
     conn: &Connection,
+    snapshot_root_hash: Option<ObjectHash>,
     reclaimed: &ReclaimedStorePackage,
 ) -> Result<(), DbError> {
     reclaimed.validate().map_err(store_reclaim_journal_error)?;
@@ -346,9 +347,13 @@ pub fn record_reclaimed_store_package_on(
                     &target.coverage.activation_commit,
                 ),
             coven_protocol::reclaim::ReclaimTarget::CircleSnapshotImage(target) => {
-                let root = required_store_root_authority_on(conn)?;
+                let root_hash = snapshot_root_hash.ok_or_else(|| {
+                    DbError::Message(
+                        "Circle snapshot reclaim closure has no verified Store root".to_string(),
+                    )
+                })?;
                 let owner = target
-                    .snapshot_owner(root.store_root_hash)
+                    .snapshot_owner(root_hash)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }

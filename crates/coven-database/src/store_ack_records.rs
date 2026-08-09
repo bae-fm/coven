@@ -1,4 +1,3 @@
-use crate::local_store_identity::local_store_authority_on;
 use crate::query_mapped_rows;
 use coven_protocol::store_commit::CircleAck;
 
@@ -6,10 +5,10 @@ use super::*;
 
 pub fn verify_next_local_store_ack_on(
     conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
     bytes: &[u8],
     prepared: &PreparedExactObject,
 ) -> Result<(StoreAckRef, StoreAck), DbError> {
-    let authority = local_store_authority_on(conn)?;
     let registration_ref = authority.reference();
     let registration = authority.value();
     let root = &registration.store_root;
@@ -161,8 +160,8 @@ pub fn finish_outbound_store_ack_on(
 
 pub(crate) fn load_outbound_circle_acks_on(
     conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Vec<coven_protocol::prepared_commit::CircleAckActivation>, DbError> {
-    let authority = local_store_authority_on(conn)?;
     let registration = authority.value();
     let root = &registration.store_root;
     let rows = query_mapped_rows(
@@ -208,10 +207,11 @@ pub(crate) fn load_outbound_circle_acks_on(
 /// `expected`; `mismatch` is the error when another acknowledgement is queued.
 pub(crate) fn load_expected_outbound_store_ack_on(
     conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
     expected: &coven_protocol::store_commit::StoreAckRef,
     mismatch: &str,
 ) -> Result<OutboundStoreAck, DbError> {
-    let outbound = load_outbound_store_ack_on(conn)?
+    let outbound = load_outbound_store_ack_on(conn, authority)?
         .ok_or_else(|| DbError::Message("outbound Store acknowledgement is absent".to_string()))?;
     if &outbound.reference != expected {
         return Err(DbError::Message(mismatch.to_string()));
@@ -252,6 +252,7 @@ pub(crate) fn set_outbound_store_ack_activation_on(
 
 pub(crate) fn load_outbound_store_ack_on(
     conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<OutboundStoreAck>, DbError> {
     conn.query_row(
         "SELECT ack_ref, ack_bytes, prepared_object, activation \
@@ -282,7 +283,6 @@ pub(crate) fn load_outbound_store_ack_on(
                 "outbound Store acknowledgement ref differs from its prepared object".to_string(),
             ));
         }
-        let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
         let value = StoreAck::parse_at(&bytes, &author.store_root, &reference, author)
@@ -299,7 +299,7 @@ pub(crate) fn load_outbound_store_ack_on(
                 bytes,
                 prepared,
             },
-            circle_acknowledgements: load_outbound_circle_acks_on(conn)?,
+            circle_acknowledgements: load_outbound_circle_acks_on(conn, authority)?,
             activation,
         })
     })

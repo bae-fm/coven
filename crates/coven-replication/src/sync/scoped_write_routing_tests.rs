@@ -18,7 +18,7 @@ async fn capture_scoped_write_then_reopen(
     name: &str,
 ) -> (
     tempfile::TempDir,
-    Database,
+    SyntheticDatabase,
     Vec<(String, Option<String>, Vec<u8>)>,
 ) {
     let temp = tempfile::tempdir().expect("temporary scoped Store");
@@ -37,7 +37,7 @@ async fn capture_scoped_write_then_reopen(
             _updated_at TEXT NOT NULL
          ) STRICT;",
     )];
-    let db = Database::open(
+    let db = SyntheticDatabase::open(
         &path,
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -95,7 +95,7 @@ async fn capture_scoped_write_then_reopen(
     }));
     drop(db);
 
-    let reopened = Database::open(
+    let reopened = SyntheticDatabase::open(
         &path,
         tables,
         BLOB_TOMBSTONE_GRACE,
@@ -163,7 +163,7 @@ async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
         .test_sql(move |database| database.first_store_write_partition_hash(write_id.as_str()))
         .await
         .expect("read partition payload hash");
-    std::fs::remove_file(reopened.store_dir_for_test().payload_spool_path(hash))
+    std::fs::remove_file(reopened.store_dir.payload_spool_path(hash))
         .expect("remove partition payload");
 
     let error = match database.prepare_store_write().await {
@@ -312,7 +312,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
-    let db = Database::open(
+    let db = SyntheticDatabase::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -423,7 +423,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
-    let db = Database::open(
+    let db = SyntheticDatabase::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
@@ -545,7 +545,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         )
         .inherits_audience_through("note_id"),
     ];
-    let db = Database::open(
+    let db = SyntheticDatabase::open(
         Path::new(":memory:"),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,

@@ -39,10 +39,70 @@ pub trait CloudSyncObjectStorage: Send + Sync {
 
     async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError>;
 
-    /// The two independent provider clients this session retains for
-    /// cross-principal probing. The probe protocol is a surface of its own: an
-    /// adapter hands it over rather than restating each of its steps.
-    fn provider_probes(&self) -> &crate::provider_probe::ProviderProbeStorage;
+    async fn reserve_cross_principal_response_slot(
+        &self,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+    ) -> Result<ObjectSlot, coven_protocol::provider::ProviderProbeError>;
+
+    async fn prepare_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        store: &coven_protocol::StoreProviderBinding,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    >;
+
+    async fn settle_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        authorization: &coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        store: &coven_protocol::StoreProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    >;
+
+    async fn create_cross_principal_response(
+        &self,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signing_pubkey: &str,
+        peer_signer: &coven_keys::keys::UserKeypair,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeResponse,
+        coven_protocol::provider::ProviderProbeError,
+    >;
+
+    async fn complete_cross_principal_probe(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        response: &coven_protocol::provider::CrossPrincipalProbeResponse,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+        peer_signing_pubkey: &str,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    >;
+
+    async fn probe_exact_slots(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        binding: &ResolvedProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::ExactSlotProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    >;
 
     /// Observe the exact object identity currently occupying `slot` without
     /// opening its protocol bytes.

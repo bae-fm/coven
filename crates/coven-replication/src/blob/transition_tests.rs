@@ -2,7 +2,7 @@
 //!
 //! These drive the real transition owners (`LocalBlobTransitions` and
 //! `ConnectedBlobTransitions`) and the upload
-//! drain's completion flip against a real [`Database`] and a [`TestStore`] that serves as both
+//! drain's completion flip against a real [`SyntheticDatabase`] and a [`TestStore`] that serves as both
 //! the sync storage and the cloud home. A `Plaintext` cipher + `Plain` blob-path
 //! scheme keep what the drain writes and what a read fetches byte-identical through
 //! the mock, so a blob round-trips as plaintext across devices.
@@ -26,9 +26,9 @@ use crate::sync::test_helpers::{
     open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
-use coven_database::Database;
 use coven_database::Migration;
 use coven_database::StoreDatabase;
+use coven_database::SyntheticDatabase;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -80,7 +80,7 @@ fn cover_lazy_decl() -> BlobDecl {
         .with_cloud_path_column("cloud_path")
 }
 
-fn scoped_blob_transition_db() -> Database {
+fn scoped_blob_transition_db() -> SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new("notes", RowIdentity::SharedKey).gated_by("shared"),
@@ -104,7 +104,7 @@ fn scoped_blob_transition_db() -> Database {
 }
 
 async fn create_store(
-    db: &Database,
+    db: &SyntheticDatabase,
     signer: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
@@ -116,7 +116,7 @@ async fn create_store(
 /// A photo-carrying test database, the Store that publishes for it, a fresh
 /// Store directory, and the owner graph over both.
 async fn photo_transition_fixture() -> (
-    Database,
+    SyntheticDatabase,
     std::sync::Arc<TestStore>,
     tempfile::TempDir,
     StoreDir,
@@ -134,13 +134,13 @@ async fn photo_transition_fixture() -> (
     (db, storage, tmp, lib, owners)
 }
 
-async fn photo_ref(db: &Database, id: &str) -> RowBlobRef {
+async fn photo_ref(db: &SyntheticDatabase, id: &str) -> RowBlobRef {
     db.row_blob_ref("note_photos", id)
         .await
         .expect("load exact photo row blob reference")
 }
 
-async fn cover_ref(db: &Database, id: &str) -> RowBlobRef {
+async fn cover_ref(db: &SyntheticDatabase, id: &str) -> RowBlobRef {
     db.row_blob_ref("note_covers", id)
         .await
         .expect("load exact cover row blob reference")
@@ -186,7 +186,7 @@ impl BlobTransitionObserver for Recorder {
     }
 }
 
-async fn shared_flag(db: &Database, note_id: &str) -> i64 {
+async fn shared_flag(db: &SyntheticDatabase, note_id: &str) -> i64 {
     let v = db
         .query_test_text(&format!(
             "SELECT CAST(shared AS TEXT) FROM notes WHERE id = '{note_id}'"
@@ -197,14 +197,14 @@ async fn shared_flag(db: &Database, note_id: &str) -> i64 {
 
 /// The note's gate stamp (`_updated_at`), to prove a refused transition leaves the
 /// gate row — value and causal stamp — untouched.
-async fn gate_stamp(db: &Database, note_id: &str) -> String {
+async fn gate_stamp(db: &SyntheticDatabase, note_id: &str) -> String {
     db.query_test_text(&format!(
         "SELECT _updated_at FROM notes WHERE id = '{note_id}'"
     ))
     .await
 }
 
-async fn pending_uploads(db: &Database) -> usize {
+async fn pending_uploads(db: &SyntheticDatabase) -> usize {
     coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
@@ -213,7 +213,7 @@ async fn pending_uploads(db: &Database) -> usize {
 }
 
 async fn created_upload_blob(
-    db: &Database,
+    db: &SyntheticDatabase,
     blob_id: &str,
 ) -> coven_protocol::blob::locator::StoredBlobRef {
     coven_database::StoreDatabase::new(db)
@@ -233,7 +233,7 @@ async fn created_upload_blob(
         .expect("blob has a Created exact upload journal")
 }
 
-async fn pending_deletes(db: &Database) -> Vec<String> {
+async fn pending_deletes(db: &SyntheticDatabase) -> Vec<String> {
     coven_database::StoreDatabase::new(db)
         .pending_blob_deletes()
         .await
@@ -251,7 +251,7 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
 }
 
 async fn assert_scoped_flip_journaled_atomically(
-    db: &Database,
+    db: &SyntheticDatabase,
     expected_changes: &[(&str, coven_foundation::changeset::ChangeOp)],
 ) {
     assert!(
@@ -468,7 +468,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 }
 
 /// The mutable upload facts attached to the exact pending Local row version.
-async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
+async fn pending_upload_state(db: &SyntheticDatabase, id: &str) -> (PathBuf, bool) {
     let expected = db
         .row_blob_ref("note_photos", id)
         .await

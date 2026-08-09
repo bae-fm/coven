@@ -139,10 +139,10 @@ fn store_sync(
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
-    database: coven_database::Database,
+    database: coven_database::SyntheticDatabase,
     store_dir: &StoreDir,
 ) -> StoreSync {
-    let database = StoreDatabase::from_database(database);
+    let database = StoreDatabase::from_database(database.into_database());
     let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
         database.clone(),
         store_dir.clone(),
@@ -213,8 +213,9 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let cloud_keys = keys.clone();
     let master_keys: Arc<dyn MasterKeyCustody> = Arc::new(NoKeyCustody);
     let security = store_security(keys, master_keys.clone(), established_identity_custody());
-    let database =
-        StoreDatabase::from_database(coven_replication::sync::test_helpers::open_test_db());
+    let database = StoreDatabase::from_database(
+        coven_replication::sync::test_helpers::open_test_db().into_database(),
+    );
     let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
         database.clone(),
         store_dir.clone(),

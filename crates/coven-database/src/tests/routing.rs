@@ -15,19 +15,16 @@ async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
     .expect("open database");
 
     let column = db
-        .call(|conn| {
-            let rows = query_mapped_rows(
-                conn,
-                "PRAGMA table_info(blob_make_remote_intents)",
-                [],
-                |row| {
+        .test_sql(|conn| {
+            let rows = conn
+                .query("PRAGMA table_info(blob_make_remote_intents)", [], |row| {
                     Ok((
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, Option<String>>(4)?,
                     ))
-                },
-            )?;
+                })
+                .map_err(DbError::from)?;
             for (name, notnull, default_value) in rows {
                 if name == "retain_pinned" {
                     return Ok(Some((notnull, default_value)));

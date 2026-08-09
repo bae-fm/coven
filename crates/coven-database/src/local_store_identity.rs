@@ -1,40 +1,6 @@
 use super::*;
 
-pub fn local_store_authority_on(
-    conn: &Connection,
-) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
-    let root = required_store_root_authority_on(conn)?;
-    let reference = local_activated_registration_ref_on(conn)?.ok_or_else(|| {
-        DbError::Message("local Store device has no activated registration".to_string())
-    })?;
-    let (bytes, encoded): (Vec<u8>, String) = conn
-        .query_row(
-            "SELECT registration_bytes, registration_object \
-             FROM store_device_registration_activations WHERE device_id = ?1",
-            [reference.device_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(DbError::from)?;
-    let stored_reference: StoreDeviceRegistrationRef = serde_json::from_str(&encoded)
-        .map_err(|error| DbError::context("local Store registration exact ref", error))?;
-    if stored_reference != reference {
-        return Err(DbError::Message(
-            "local Store registration changed during exact load".to_string(),
-        ));
-    }
-    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, reference.device_id)
-        .map_err(|error| DbError::context("local Store registration", error))?;
-    reference
-        .verify_registration(&registration)
-        .map_err(|error| DbError::Message(error.to_string()))?;
-    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-        reference,
-        registration,
-    )
-    .map_err(|error| DbError::Message(error.to_string()))
-}
-
-pub fn local_activated_registration_ref_on(
+pub(crate) fn local_activated_registration_ref_on(
     conn: &Connection,
 ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
     let device_id = get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
@@ -61,22 +27,6 @@ pub fn local_activated_registration_ref_on(
         ));
     }
     Ok(Some(reference))
-}
-
-pub fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError> {
-    let local_device_id = get_protocol_state_on(conn, LOCAL_DEVICE_ID_STATE_KEY)?;
-    let Some(_) = local_device_id else {
-        return Ok(None);
-    };
-    let registration = local_store_authority_on(conn)?;
-    Ok(Some(
-        coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
-            registration.value().store_root.store_root_hash,
-            registration.reference(),
-            coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
-        )
-        .to_string(),
-    ))
 }
 
 pub(crate) fn pin_host_device_id_on(

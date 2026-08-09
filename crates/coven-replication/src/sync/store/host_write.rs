@@ -36,7 +36,7 @@ impl HostWriteBlobStaging {
 
     pub(crate) fn stage_audience_move_blobs_on(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
@@ -61,7 +61,7 @@ impl HostWriteBlobStaging {
 
     async fn stage_audience_move_blobs_inner(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],
@@ -203,7 +203,7 @@ impl HostWriteBlobStaging {
 
     fn opening_protection(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
@@ -233,7 +233,7 @@ impl HostWriteBlobStaging {
 
     async fn move_source_plaintext(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
         spool_path: &Path,
@@ -288,7 +288,7 @@ impl HostWriteBlobStaging {
 
     async fn stage_local_destination(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
         files: &mut StagedAudienceBlobFiles,
@@ -553,7 +553,7 @@ fn move_materialization_error(fact: &StoreWriteBlobFact, reason: impl Into<DbErr
 impl coven_database::AudienceBlobMoveStaging for HostWriteBlobStaging {
     fn stage_audience_move_blobs_on(
         &self,
-        transaction: &HostWriteBlobTransaction<'_, '_>,
+        transaction: &mut HostWriteBlobTransaction<'_, '_>,
         facts: &mut StoreWriteBlobFacts,
         moves: &[AudienceMove],
         partitions: &[AudiencePartition],

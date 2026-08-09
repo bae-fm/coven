@@ -7,7 +7,6 @@ use coven_protocol::write::WriteId;
 use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 
-use super::candidate_records::parse_prepared_merge_candidate_on;
 use super::publication_state::PreparedStoreWriteState;
 use super::*;
 
@@ -37,14 +36,14 @@ impl UploadedBlobSpool {
 }
 
 impl StoreDatabase {
-    pub fn persist_prepared_audience_objects_on(
+    pub(crate) fn persist_prepared_audience_objects_on(
         records: crate::payload_spool::StoreRecords<'_>,
         write_id: &WriteId,
         packages: &[PreparedAudiencePackage],
         blobs: &[PreparedAudienceBlob],
     ) -> Result<(), DbError> {
-        let conn = records.conn();
-        let store_dir = records.store_dir();
+        let conn = records.conn;
+        let store_dir = records.store_dir;
         let package_audiences = packages
             .iter()
             .map(|prepared| {
@@ -131,51 +130,56 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let write_id = write_id.clone();
-        self.call_records(move |records| {
-            let conn = records.conn();
-            let raw_prepared: String = conn
-                .query_row(
-                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::context("prepared remote graph", error))?;
-            let commit = parse_prepared_merge_candidate_on(conn, &prepared)?.commit;
-            let mut ids = candidate_graph_exact_objects(&commit)?
-                .iter()
-                .map(|object| (remote_object_id(object).to_string(), None))
-                .collect::<Vec<_>>();
-            let mut statement = conn
-                .prepare(
-                    "SELECT remote_object_id, spool_path
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let raw_prepared: String = conn
+                    .query_row(
+                        "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                        [write_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| DbError::context("prepared remote graph", error))?;
+                let commit = authority
+                    .prepared_merge_candidate_on(records, &prepared)?
+                    .commit;
+                let mut ids = candidate_graph_exact_objects(&commit)?
+                    .iter()
+                    .map(|object| (remote_object_id(object).to_string(), None))
+                    .collect::<Vec<_>>();
+                let mut statement = conn
+                    .prepare(
+                        "SELECT remote_object_id, spool_path
                      FROM store_write_blobs WHERE write_id = ?1
                      ORDER BY remote_object_id",
-                )
-                .map_err(DbError::from)?;
-            let blobs = statement
-                .query_map([write_id.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            ids.extend(blobs);
-            ids.sort_by(|left, right| left.0.cmp(&right.0));
-            ids.into_iter()
-                .map(|(encoded, spool_path)| {
-                    let id = encoded
-                        .parse()
-                        .map_err(|error| DbError::context("prepared remote object id", error))?;
-                    Ok(PreparedRemoteObject {
-                        closed: crate::reopen_remote_object_on(records, id)?,
-                        spool_path: spool_path.map(PathBuf::from),
+                    )
+                    .map_err(DbError::from)?;
+                let blobs = statement
+                    .query_map([write_id.as_str()], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                     })
-                })
-                .collect()
-        })
-        .await
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                ids.extend(blobs);
+                ids.sort_by(|left, right| left.0.cmp(&right.0));
+                ids.into_iter()
+                    .map(|(encoded, spool_path)| {
+                        let id = encoded.parse().map_err(|error| {
+                            DbError::context("prepared remote object id", error)
+                        })?;
+                        Ok(PreparedRemoteObject {
+                            closed: crate::reopen_remote_object_on(records, id)?,
+                            spool_path: spool_path.map(PathBuf::from),
+                        })
+                    })
+                    .collect()
+            })
+            .await
     }
 
     pub async fn mark_remote_object_uploaded(
@@ -183,14 +187,17 @@ impl StoreDatabase {
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
         self.connection
-            .call(move |conn| mark_remote_object_uploaded_on(conn, expected))
+            .call_store(move |session| {
+                mark_remote_object_uploaded_on(session.records.conn, expected)
+            })
             .await
     }
 
     pub async fn retire_uploaded_blob_spools(&self) -> Result<(), DbError> {
         let spools = self
             .connection
-            .call(|conn| {
+            .call_database(|session| {
+                let conn = session.conn;
                 let mut statement = conn
                     .prepare(
                         "SELECT write_id, remote_object_id, spool_path
@@ -240,7 +247,8 @@ impl StoreDatabase {
 
     async fn clear_uploaded_blob_spool(&self, spool: UploadedBlobSpool) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let remote = load_remote_object_on(conn, spool.remote_object_id)?;
                 if !remote_object_is_uploaded(&remote) {
                     return Err(DbError::Message(format!(
@@ -292,7 +300,9 @@ impl StoreDatabase {
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
         self.connection
-            .call(move |conn| mark_reusable_retained_authority_uploaded_on(conn, expected))
+            .call_store(move |session| {
+                mark_reusable_retained_authority_uploaded_on(session.records.conn, expected)
+            })
             .await
     }
 
@@ -300,7 +310,8 @@ impl StoreDatabase {
         &self,
         commit: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        self.connection.call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
             let object_id = remote_object_id(&commit.object);
             let current = load_remote_object_on(conn, object_id)?;
             if matches!(
@@ -336,8 +347,8 @@ impl StoreDatabase {
         &self,
         head: coven_protocol::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
                 let object_id = remote_object_id(&head.object);
                 let current = load_remote_object_on(conn, object_id)?;
                 if !matches!(
@@ -370,7 +381,9 @@ impl StoreDatabase {
         let write_id = write_id.clone();
         let loaded = self
             .connection
-            .call(move |conn| load_prepared_audience_objects_on(conn, &store_dir, &write_id))
+            .call_database(move |session| {
+                load_prepared_audience_objects_on(session.conn, &store_dir, &write_id)
+            })
             .await?;
 
         let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
@@ -407,7 +420,8 @@ impl StoreDatabase {
         object: ExactObjectRef,
     ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let object_id = remote_object_id(&object);
                 let exists: bool = conn
                     .query_row(

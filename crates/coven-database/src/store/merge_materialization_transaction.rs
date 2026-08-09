@@ -26,7 +26,10 @@ use super::store_device_state::{
 };
 use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
-    RetainedReplayCache, StoreDatabase,
+    verified_store_authority::{
+        RetainedReplayTransaction, VerifiedRegistrationLookup, VerifiedStoreLookup,
+    },
+    StoreDatabase,
 };
 use crate::blob_records::{
     live_blob_row, validate_live_blob_row, validate_stored_locator_on,
@@ -39,9 +42,8 @@ use crate::remote_object_records::validate_remote_object_on;
 use crate::ReclaimCommitActivation;
 use crate::{
     candidate_graph_exact_objects, finish_remote_candidate_nonactivation_on,
-    insert_store_reclaim_operation_on, load_activated_registration_on, load_remote_object_on,
-    load_store_reclaim_operation_on, record_reclaimed_store_package_on,
-    required_store_root_authority_on, store_reclaim_journal_error, update_remote_object_on,
+    insert_store_reclaim_operation_on, load_remote_object_on, load_store_reclaim_operation_on,
+    record_reclaimed_store_package_on, store_reclaim_journal_error, update_remote_object_on,
     update_store_reclaim_operation_on, BlobActivation, BlobDecls, Database, DbError,
     DurableStoreReclaimOperation, OwnedVerifiedMergeMaterialization, ReclaimedStorePackage,
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
@@ -65,7 +67,7 @@ use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteSt
 
 pub(crate) use commit_records::derive_materialized_store_device_state_on;
 
-pub struct AppliedMergeMaterialization {
+pub(crate) struct AppliedMergeMaterialization {
     pub outcome: ApplyOutcome,
     pub max_updated_at: Option<coven_protocol::hlc::Timestamp>,
     pub write_status_notifications: Vec<(
@@ -73,6 +75,15 @@ pub struct AppliedMergeMaterialization {
         coven_protocol::write::WriteStatus,
     )>,
     pub retained: Option<crate::OwnedVerifiedMergeMaterialization>,
+}
+
+pub(super) fn retract_verified_merge_materializations(
+    transaction: &MergeMaterializationTransaction<'_, '_>,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    retained_replay: &mut RetainedReplayTransaction,
+    retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
+    transaction.retract_verified_merge_materializations(root, retained_replay, retractions)
 }
 
 pub enum MergeSubsetOutcome {
@@ -176,18 +187,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             transaction,
             store_dir,
         }
-    }
-
-    /// This transaction's rows together with the payload files they name.
-    pub fn records(&self) -> crate::payload_spool::StoreRecords<'transaction> {
-        crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir)
-    }
-
-    /// The same pair, carrying the transaction the writes commit in.
-    pub fn record_transaction(
-        &self,
-    ) -> crate::payload_spool::StoreRecordTransaction<'transaction, 'connection> {
-        crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir)
     }
 
     pub fn circle_current_state_is_deleted(

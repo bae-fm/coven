@@ -148,7 +148,8 @@ impl DeviceJoinJournalStore {
         let pending_path = self.path.to_string_lossy().into_owned();
         database
             .connection
-            .call(move |connection| {
+            .call_database(move |session| {
+                let connection = session.conn;
                 connection
                     .execute("ATTACH DATABASE ?1 AS pending_join_source", [&pending_path])
                     .map_err(crate::DbError::from)?;
@@ -227,7 +228,8 @@ impl StoreDatabase {
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute(
                         "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -270,7 +272,8 @@ impl StoreDatabase {
         let next = serde_json::to_string(&next)?;
         let changed = self
             .connection
-            .call(move |connection| {
+            .call_database(move |session| {
+                let connection = session.conn;
                 connection
                     .execute(
                         "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
@@ -296,7 +299,8 @@ impl StoreDatabase {
         let value = serde_json::to_string(&record)?;
         let durable = self
             .connection
-            .call(move |connection| {
+            .call_database(move |session| {
+                let connection = session.conn;
                 connection
                     .execute(
                         "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -318,7 +322,8 @@ impl StoreDatabase {
     ) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinJournalError> {
         let rows = self
             .connection
-            .call(|connection| {
+            .call_database(|session| {
+                let connection = session.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT key, value FROM protocol_state
@@ -376,7 +381,8 @@ impl StoreDatabase {
     ) -> Result<(), DeviceJoinJournalError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 connection
                     .execute("DELETE FROM protocol_state WHERE key = ?1", [&key])
                     .map(|_| ())
@@ -391,7 +397,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<(), DeviceJoinJournalError> {
         self.connection
-            .call(|connection| {
+            .call_store(|session| {
+                let connection = session.records.conn;
                 connection
                     .execute(
                         "DELETE FROM protocol_state

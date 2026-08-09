@@ -1,9 +1,20 @@
 use super::*;
-use crate::payload_spool::StoreRecords;
+use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
+use crate::store::retained_merge_replay::CircleReplayEpochIndex;
+use crate::{
+    activated_merge_membership_remote_objects, MembershipAuthorityBytes, ObjectHash,
+    PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
+};
+use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
+use coven_protocol::objects::ExactObjectRef;
+use coven_protocol::store_commit::{CommitFrontier, StoreRootRef};
+use coven_protocol::synced_schema::SyncedTable;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 #[derive(Clone, Default)]
-pub struct RetainedReplayCache {
+pub(super) struct RetainedReplayCache {
     baseline: Option<RetainedReplayBaseline>,
     verified: BTreeMap<(String, u64), RetainedReplayEntry>,
 }
@@ -14,12 +25,45 @@ struct RetainedReplayEntry {
     history_checkpoint_verified: bool,
 }
 
-pub enum RetainedCommitAuthority<'a> {
-    StoredBytes,
-    Operation(&'a coven_protocol::store_commit::VerifiedStoreBatchCommit),
+struct ReplayVerifiedStoreLookup<'lookup, 'root> {
+    cache: &'lookup mut RetainedReplayCache,
+    registrations: &'lookup mut dyn VerifiedRegistrationLookup,
+    root: &'root StoreRootRef,
 }
 
-pub enum RetainedCommitAuthorities<'a> {
+impl VerifiedRegistrationLookup for ReplayVerifiedStoreLookup<'_, '_> {
+    fn activated_registration_on(
+        &mut self,
+        records: StoreRecords<'_>,
+        root: &StoreRootRef,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<coven_protocol::store_commit::StoreDeviceRegistration, DbError> {
+        self.registrations
+            .activated_registration_on(records, root, reference)
+    }
+}
+
+impl VerifiedStoreLookup for ReplayVerifiedStoreLookup<'_, '_> {
+    fn retained_materialization_by_ref_on(
+        &mut self,
+        records: StoreRecords<'_>,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        if let Some(materialization) = self.cache.cached_by_ref(reference)? {
+            return Ok(materialization.clone());
+        }
+        let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            records,
+            self.root,
+            self.registrations,
+            reference,
+        )?;
+        self.cache.insert_verified(materialization.clone())?;
+        Ok(materialization)
+    }
+}
+
+enum RetainedCommitAuthorities<'a> {
     StoredBytes,
     Operation(
         &'a BTreeMap<
@@ -30,7 +74,7 @@ pub enum RetainedCommitAuthorities<'a> {
 }
 
 impl RetainedReplayCache {
-    pub fn baseline_on(
+    pub(super) fn baseline_on(
         &mut self,
         records: StoreRecords<'_>,
     ) -> Result<&RetainedReplayBaseline, DbError> {
@@ -43,7 +87,7 @@ impl RetainedReplayCache {
             .expect("retained replay baseline was installed in the cache"))
     }
 
-    pub fn validate_insert_verified(
+    pub(super) fn validate_insert_verified(
         &self,
         materialization: &OwnedVerifiedMergeMaterialization,
     ) -> Result<(), DbError> {
@@ -64,7 +108,7 @@ impl RetainedReplayCache {
         }
     }
 
-    pub fn insert_verified(
+    pub(super) fn insert_verified(
         &mut self,
         materialization: OwnedVerifiedMergeMaterialization,
     ) -> Result<(), DbError> {
@@ -80,31 +124,41 @@ impl RetainedReplayCache {
         Ok(())
     }
 
-    pub fn verified_by_ref(
+    fn verified_by_ref(
         &self,
         reference: &StoreBatchCommitRef,
     ) -> Result<&OwnedVerifiedMergeMaterialization, DbError> {
+        self.cached_by_ref(reference)?.ok_or_else(|| {
+            DbError::Message(format!(
+                "retained Merge materialization cache omits {reference:?}"
+            ))
+        })
+    }
+
+    pub(super) fn cached_by_ref(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<Option<&OwnedVerifiedMergeMaterialization>, DbError> {
         let key = (
             reference.coord.stream_id.to_string(),
             reference.coord.sequence(),
         );
-        let verified = self.verified.get(&key).ok_or_else(|| {
-            DbError::Message(format!(
-                "retained Merge materialization cache omits {reference:?}"
-            ))
-        })?;
+        let Some(verified) = self.verified.get(&key) else {
+            return Ok(None);
+        };
         if verified.materialization.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge materialization cache coordinate contains another commit"
                     .to_string(),
             ));
         }
-        Ok(&verified.materialization)
+        Ok(Some(&verified.materialization))
     }
 
-    pub fn retained_history_checkpoint_on(
+    pub(super) fn retained_history_checkpoint_on(
         &mut self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
     ) -> Result<RetainedMergeHistoryCheckpoint, DbError> {
         let key = (
@@ -124,7 +178,8 @@ impl RetainedReplayCache {
         }
         if !entry.history_checkpoint_verified {
             let checkpoint = StoreDatabase::open_retained_merge_history_checkpoint_on(
-                conn,
+                records,
+                registrations,
                 reference,
                 &entry.materialization,
             )?;
@@ -136,22 +191,25 @@ impl RetainedReplayCache {
         )))
     }
 
-    pub fn replay_inputs_on(
+    pub(super) fn replay_inputs_on(
         &mut self,
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.replay_inputs_with_authorities_on(
             records,
             root,
+            registrations,
             RetainedCommitAuthorities::StoredBytes,
         )
     }
 
-    pub fn replay_inputs_with_verified_commits_on(
+    pub(super) fn replay_inputs_with_verified_commits_on(
         &mut self,
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         verified: &BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
             coven_protocol::store_commit::VerifiedStoreBatchCommit,
@@ -160,18 +218,20 @@ impl RetainedReplayCache {
         self.replay_inputs_with_authorities_on(
             records,
             root,
+            registrations,
             RetainedCommitAuthorities::Operation(verified),
         )
     }
 
-    pub fn replay_inputs_with_authorities_on(
+    fn replay_inputs_with_authorities_on(
         &mut self,
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         authorities: RetainedCommitAuthorities<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
-            records.conn(),
+            records.conn,
             "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
@@ -217,6 +277,7 @@ impl RetainedReplayCache {
                             StoreDatabase::load_retained_merge_materialization_on(
                                 records,
                                 root,
+                                registrations,
                                 &stream_id,
                                 sequence,
                                 &commit_ref,
@@ -232,6 +293,7 @@ impl RetainedReplayCache {
                             StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
                                 records,
                                 root,
+                                registrations,
                                 &stream_id,
                                 sequence,
                                 &commit_ref,
@@ -256,14 +318,14 @@ impl RetainedReplayCache {
         Ok(replay_inputs)
     }
 
-    pub fn verified_circle_activation_on(
+    pub(super) fn verified_circle_activation_on(
         &self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         let Some(activation_commit) =
-            StoreDatabase::circle_activation_commit_ref_on(conn, circle_id, control)?
+            StoreDatabase::circle_activation_commit_ref_on(records.conn, circle_id, control)?
         else {
             return Ok(None);
         };
@@ -272,12 +334,12 @@ impl RetainedReplayCache {
             .map(Some)
     }
 
-    pub fn circle_replay_epoch_index_on(
+    pub(super) fn circle_replay_epoch_index_on(
         &self,
-        conn: &Connection,
+        records: StoreRecords<'_>,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         let rows = query_mapped_rows(
-            conn,
+            records.conn,
             "SELECT circle_id, control_coord
                  FROM circle_control_activations
                  ORDER BY circle_id, control_coord",
@@ -302,7 +364,7 @@ impl RetainedReplayCache {
                 )
             })?;
             let activation = self
-                .verified_circle_activation_on(conn, circle_id, &control)?
+                .verified_circle_activation_on(records, circle_id, &control)?
                 .ok_or_else(|| {
                     DbError::Message(format!(
                         "Circle replay index activation for {circle_id} disappeared"
@@ -313,11 +375,11 @@ impl RetainedReplayCache {
         Ok(index)
     }
 
-    pub fn replay_projection_on(
+    pub(super) fn replay_projection_on(
         &mut self,
-        live: &rusqlite::Transaction<'_>,
-        store_dir: &coven_foundation::store_dir::StoreDir,
+        transaction_records: StoreRecordTransaction<'_, '_>,
         root: &StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[SyncedTable],
@@ -326,22 +388,26 @@ impl RetainedReplayCache {
         history_cut: Option<&CommitFrontier>,
         include_local_write_overlays: bool,
         local_store_membership: LocalStoreMembership,
-    ) -> Result<rusqlite::Connection, DbError> {
-        let baseline = self
-            .baseline_on(StoreRecords::new(live, store_dir))?
-            .clone();
-        let replay = baseline.open_image(store_dir)?;
+    ) -> Result<ReplayProjection, DbError> {
+        let live = transaction_records.transaction;
+        let store_dir = transaction_records.store_dir;
+        let records = StoreRecords::new(live, store_dir);
+        let baseline = self.baseline_on(records)?.clone();
+        let replay = crate::open_database_image(&baseline.image_bytes(store_dir)?)
+            .map_err(|error| DbError::context("open retained replay database image", error))?;
         replay
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
         let schema = Arc::new(TableSchema::for_apply(&replay, synced_tables, gates)?);
-        let records = StoreRecords::new(live, store_dir);
         let circle_bootstraps = StoreDatabase::claimed_circle_bootstrap_coverage_refs_on(records)?;
         let mut circle_bootstrap_cuts = BTreeMap::new();
         for coverage in &circle_bootstraps {
-            let source = records
-                .open_database_payload(coverage.bootstrap.image.image_hash)
-                .map_err(DbError::from)?;
+            let source = crate::open_database_image(
+                &records
+                    .verified_payload(coverage.bootstrap.image.image_hash)
+                    .map_err(DbError::from)?,
+            )
+            .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
             crate::store::verify_circle_bootstrap_connection(
                 &source,
                 &coverage.bootstrap,
@@ -375,8 +441,9 @@ impl RetainedReplayCache {
                 )));
             }
         }
-        let retained = self.replay_inputs_on(StoreRecords::new(live, store_dir), root)?;
-        let circle_epochs = self.circle_replay_epoch_index_on(live)?;
+        let retained =
+            self.replay_inputs_on(StoreRecords::new(live, store_dir), root, registrations)?;
+        let circle_epochs = self.circle_replay_epoch_index_on(records)?;
         let active_references = retained
             .iter()
             .filter(|materialization| {
@@ -614,25 +681,33 @@ impl RetainedReplayCache {
                     package_application,
                 };
                 let tx = replay.unchecked_transaction().map_err(DbError::from)?;
-                let outcome = MergeMaterializationTransaction::new(&tx, store_dir)
-                    .apply_prepared_merge_materialization(
-                        blob_decls,
-                        gates,
-                        synced_tables,
-                        routing_key,
-                        local_store_membership,
-                        timestamp_policy,
-                        Some(&circle_bootstrap_cuts),
-                        replay_materialization,
-                    )
-                    .map_err(|error| {
-                        DbError::context(
-                            format!(
-                                "apply retained Merge commit {reference:?} during canonical replay"
-                            ),
-                            error,
+                let outcome = {
+                    let mut authority = ReplayVerifiedStoreLookup {
+                        cache: self,
+                        registrations,
+                        root,
+                    };
+                    MergeMaterializationTransaction::new(&tx, store_dir)
+                        .apply_prepared_merge_materialization(
+                            &mut authority,
+                            blob_decls,
+                            gates,
+                            synced_tables,
+                            routing_key,
+                            local_store_membership,
+                            timestamp_policy,
+                            Some(&circle_bootstrap_cuts),
+                            replay_materialization,
                         )
-                    })?;
+                }
+                .map_err(|error| {
+                    DbError::context(
+                        format!(
+                            "apply retained Merge commit {reference:?} during canonical replay"
+                        ),
+                        error,
+                    )
+                })?;
                 match outcome.outcome {
                     ApplyOutcome::Applied(_) => {
                         tx.commit().map_err(DbError::from)?;
@@ -699,7 +774,10 @@ impl RetainedReplayCache {
             }
             tx.commit().map_err(DbError::from)?;
         }
-        Ok(replay)
+        Ok(ReplayProjection {
+            connection: replay,
+            store_dir: store_dir.clone(),
+        })
     }
 }
 
@@ -725,115 +803,4 @@ fn replay_dependency_is_baseline_covered(
             covered.coord.sequence() > dependency.coord.sequence
                 || (covered.coord.sequence() == dependency.coord.sequence && covered == dependency)
         })
-}
-
-pub struct CircleReplayEpochIndex {
-    pub control_epochs: BTreeMap<
-        (
-            coven_protocol::circle::CircleId,
-            coven_protocol::circle::CircleControlCoord,
-        ),
-        coven_protocol::circle::CircleEpochId,
-    >,
-    pub cutoffs: BTreeMap<
-        (
-            coven_protocol::circle::CircleId,
-            coven_protocol::circle::CircleEpochId,
-        ),
-        CommitFrontier,
-    >,
-}
-
-pub struct CircleRestoreSelectionIndex {
-    pub circles: Vec<(
-        coven_protocol::circle::CircleId,
-        Vec<coven_protocol::circle::CircleControlCoord>,
-    )>,
-    pub preserved_bootstraps: Vec<coven_protocol::circle::CircleBootstrapCoverageRef>,
-}
-
-impl CircleReplayEpochIndex {
-    pub fn record_control(
-        &mut self,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::PreparedCircleControl,
-    ) -> Result<(), DbError> {
-        let control_key = (circle_id, control.coord.clone());
-        match self.control_epochs.entry(control_key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(control.value.epoch_id());
-            }
-            std::collections::btree_map::Entry::Occupied(entry)
-                if *entry.get() == control.value.epoch_id() => {}
-            std::collections::btree_map::Entry::Occupied(_) => {
-                return Err(DbError::Message(format!(
-                    "Circle replay index maps one control for {circle_id} to conflicting epochs"
-                )));
-            }
-        }
-        let coven_protocol::circle::CircleEpochOrigin::Closed {
-            closed_epoch_id,
-            cutoff,
-            ..
-        } = &control.value.active_common().origin
-        else {
-            return Ok(());
-        };
-        match self.cutoffs.entry((circle_id, *closed_epoch_id)) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(cutoff.clone());
-            }
-            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == cutoff => {}
-            std::collections::btree_map::Entry::Occupied(_) => {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} has conflicting cutoffs for epoch {closed_epoch_id}"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn include_verified_activations(
-        &mut self,
-        activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
-    ) -> Result<(), DbError> {
-        for activation in activations {
-            self.record_control(activation.circle_id, &activation.control)?;
-        }
-        Ok(())
-    }
-
-    pub fn permits(
-        &self,
-        commit_ref: &StoreBatchCommitRef,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<bool, DbError> {
-        let epoch_id = self
-            .control_epochs
-            .get(&(circle_id, control.clone()))
-            .ok_or_else(|| {
-                DbError::Message(format!(
-                    "Circle package {} names an unretained control",
-                    circle_id
-                ))
-            })?;
-        let Some(cutoff) = self.cutoffs.get(&(circle_id, *epoch_id)) else {
-            return Ok(true);
-        };
-        if cutoff.covers_commit(commit_ref) {
-            Ok(true)
-        } else if cutoff
-            .0
-            .get(&commit_ref.coord.stream_id)
-            .is_some_and(|accepted| accepted.coord.sequence() == commit_ref.coord.sequence())
-        {
-            Err(DbError::Message(format!(
-                "Circle package {} conflicts with its accepted epoch cutoff",
-                circle_id
-            )))
-        } else {
-            Ok(false)
-        }
-    }
 }

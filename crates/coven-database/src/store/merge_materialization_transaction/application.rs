@@ -215,8 +215,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(MergeSubsetOutcome::Applied(winning_rows))
     }
 
-    pub fn apply_prepared_merge_materialization(
+    pub(crate) fn apply_prepared_merge_materialization(
         &self,
+        registrations_lookup: &mut dyn VerifiedStoreLookup,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[SyncedTable],
@@ -419,7 +420,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             commit_ref,
             &membership_remote_objects,
         )?;
-        let retained = self.record_verified_merge_materialization(verified)?;
+        let retained =
+            self.record_verified_merge_materialization(registrations_lookup, verified)?;
         Ok(AppliedMergeMaterialization {
             outcome: ApplyOutcome::Applied(returned_changes),
             max_updated_at: changeset_max,

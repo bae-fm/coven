@@ -1,6 +1,3 @@
-use crate::database_open::load_coven_metadata;
-use crate::database_open::validate_initialized_coven_schema;
-
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -190,7 +187,7 @@ pub struct FounderMembershipRefs {
     pub head: MembershipHeadRef,
 }
 
-pub fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
+pub(crate) fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
     let membership = serde_json::to_vec(&(
         &graph.membership.entry_ref,
         &graph.membership.entry.bytes,
@@ -215,7 +212,7 @@ pub fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
     )
 }
 
-pub fn load_store_root_authority_on(
+pub(crate) fn load_store_root_authority_on(
     conn: &Connection,
 ) -> Result<
     Option<(
@@ -263,19 +260,11 @@ pub fn load_store_root_authority_on(
     .transpose()
 }
 
-pub fn required_store_root_authority_on(
-    conn: &Connection,
-) -> Result<coven_protocol::store_commit::StoreRootRef, DbError> {
-    load_store_root_authority_on(conn)?
-        .map(|(reference, _)| reference)
-        .ok_or(DbError::StoreRootHashMissing)
-}
-
-pub fn install_store_root_authority_on(
+pub(crate) fn install_store_root_authority_on(
     conn: &Connection,
     reference: &coven_protocol::store_commit::StoreRootRef,
     bytes: &[u8],
-) -> Result<(), DbError> {
+) -> Result<StoreProtocolRoot, DbError> {
     let value = StoreProtocolRoot::parse(bytes)
         .map_err(|error| DbError::context("install Store root authority", error))?;
     if value.object_hash() != reference.store_root_hash {
@@ -288,7 +277,7 @@ pub fn install_store_root_authority_on(
     let existing = load_store_root_authority_on(conn)?;
     if let Some((existing_reference, existing_value)) = existing {
         if existing_reference == *reference && existing_value == value {
-            return Ok(());
+            return Ok(value);
         }
         return Err(DbError::Message(
             "database already trusts a different exact Store root".to_string(),
@@ -300,8 +289,8 @@ pub fn install_store_root_authority_on(
          VALUES (1, ?1, ?2, ?3)",
         rusqlite::params![reference.store_root_hash.to_string(), bytes, object],
     )
-    .map(|_| ())
-    .map_err(DbError::from)
+    .map_err(DbError::from)?;
+    Ok(value)
 }
 
 pub(crate) fn validate_replay_authority_on(
@@ -376,10 +365,10 @@ struct StoredGenerationZeroReplayBaseline {
     authority_hash: String,
 }
 
-pub fn load_generation_zero_replay_baseline_on(
+pub(crate) fn load_generation_zero_replay_baseline_on(
     records: crate::payload_spool::StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
-    let conn = records.conn();
+    let conn = records.conn;
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn
         .query_row(
             "SELECT generation, exact_cut, schema_version,
@@ -442,21 +431,12 @@ pub fn load_generation_zero_replay_baseline_on(
             .map_err(|error| DbError::context("retained replay image hash", error))?,
         authority,
     };
-    baseline.validate_image(records.store_dir())?;
+    baseline.validate_image(records.store_dir)?;
     validate_replay_authority_on(conn, &baseline)?;
-    let image = baseline.open_image(records.store_dir())?;
-    let routing = load_coven_metadata(&image)?;
-    if routing.hash() != baseline.routing_hash {
-        return Err(DbError::Message(
-            "retained replay image routing contract differs from its baseline".to_string(),
-        ));
-    }
-    validate_initialized_coven_schema(&image, routing.has_scoped_graph())?;
-    validate_replay_authority_on(&image, &baseline)?;
     Ok(Some(baseline))
 }
 
-pub fn install_generation_zero_replay_baseline_on(
+pub(crate) fn install_generation_zero_replay_baseline_on(
     records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
@@ -472,7 +452,7 @@ pub fn install_generation_zero_replay_baseline_on(
     insert_retained_replay_baseline_on(records, &baseline)
 }
 
-pub fn install_snapshot_replay_baseline_on(
+pub(crate) fn install_snapshot_replay_baseline_on(
     records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
@@ -492,7 +472,7 @@ pub(crate) fn insert_retained_replay_baseline_on(
     records: crate::payload_spool::StoreRecords<'_>,
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
-    let conn = records.conn();
+    let conn = records.conn;
     validate_replay_authority_on(conn, baseline)?;
     let authority_hash = records
         .install_payload(&baseline.canonical_authority_bytes()?)
@@ -532,13 +512,13 @@ pub(crate) fn insert_retained_replay_baseline_on(
     Ok(())
 }
 
-pub fn ensure_founder_replay_baseline_on(
+pub(crate) fn ensure_founder_replay_baseline_on(
     records: crate::payload_spool::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<(), DbError> {
-    let conn = records.conn();
+    let conn = records.conn;
     if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
@@ -664,7 +644,7 @@ pub fn install_store_founder_state_on(
     Ok(())
 }
 
-pub fn load_local_store_founder_graph_on(
+pub(crate) fn load_local_store_founder_graph_on(
     conn: &Connection,
 ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
     let owned_rows: i64 = conn

@@ -153,7 +153,8 @@ impl<'operation> LocalBlobCleanup<'operation> {
 
         let intents = database
             .connection
-            .call(|connection| {
+            .call_database(|session| {
+                let connection = session.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT intent.namespace, intent.blob_id, intent.copy_identity, EXISTS (
@@ -219,7 +220,8 @@ impl<'operation> LocalBlobCleanup<'operation> {
             let blob_id = intent.blob_id().to_string();
             database
                 .connection
-                .call(move |connection| {
+                .call_database(move |session| {
+                    let connection = session.conn;
                     connection
                         .execute(
                             "DELETE FROM local_cleanup_intents
@@ -257,9 +259,9 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let decls = StoreDatabase::new(&db).blob_decls();
+        let decls = StoreDatabase::new(&db).blob_decls.clone();
 
-        db.call(move |conn| {
+        db.test_sql(move |conn| {
             conn.execute_batch(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES ('parent', 'parent', 1, '0000000001000-0000-test', '2026-01-01');
@@ -309,16 +311,13 @@ mod tests {
                 "note_photos",
                 "removed-row",
             );
-            record_obsolete_copy_intents_on(conn, &decls, &intent)?;
-            let mut statement = conn
-                .prepare(
+            conn.record_obsolete_copy_intents(&decls, &intent)?;
+            let identities = conn
+                .query(
                     "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
+                    [],
+                    |row| row.get::<_, String>(0),
                 )
-                .map_err(DbError::from)?;
-            let identities = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from)?;
             Ok(identities)
         })

@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::{MergeMaterializationTransaction, StoreDatabase};
-use crate::{
-    install_store_founder_state_on, required_store_root_authority_on, DbError,
-    VerifiedMergeMaterialization,
-};
+use crate::{install_store_founder_state_on, DbError, VerifiedMergeMaterialization};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::store_commit::{
@@ -23,8 +20,8 @@ impl StoreDatabase {
     ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
         let store_dir = self.store_dir.clone();
         let root = materialization.root.clone();
-        let blob_decls = self.blob_decls();
-        let gates = self.gates();
+        let blob_decls = self.blob_decls.clone();
+        let gates = self.gates.clone();
         let synced_tables = self.synced_tables().to_vec();
         let activates_circle_epoch_cutoff = materialization
             .circle_activations
@@ -50,9 +47,12 @@ impl StoreDatabase {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure_injection();
         let applied = self
-            .with_retained_replay(move |records, retained_cache| {
+            .connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
                 let tx = records
-                    .conn()
+                    .conn
                     .unchecked_transaction()
                     .map_err(DbError::from)?;
                 let materialized_frontier =
@@ -71,6 +71,7 @@ impl StoreDatabase {
                     !candidate_predecessors.covers(&materialized_frontier);
                 let merge_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
                 let mut applied = merge_transaction.apply_prepared_merge_materialization(
+                    authority,
                     &blob_decls,
                     &gates,
                     &synced_tables,
@@ -84,7 +85,8 @@ impl StoreDatabase {
                     applied.outcome,
                     coven_protocol::membership::ApplyOutcome::Applied(_)
                 ) {
-                    let mut transaction_cache = retained_cache.clone();
+                    let mut transaction_cache =
+                        authority.begin_retained_replay_transaction_on(records)?;
                     let retained = applied.retained.take().ok_or_else(|| {
                         DbError::Message(
                             "applied Merge materialization omitted its verified retained input"
@@ -112,8 +114,9 @@ impl StoreDatabase {
                         })
                         .collect::<Result<BTreeSet<_>, _>>()?;
                     if !retractions.is_empty() {
-                        applied.write_status_notifications = merge_transaction
-                            .retract_verified_merge_materializations(
+                        applied.write_status_notifications =
+                            super::merge_materialization_transaction::retract_verified_merge_materializations(
+                                &merge_transaction,
                                 &root,
                                 &mut transaction_cache,
                                 retractions,
@@ -133,9 +136,7 @@ impl StoreDatabase {
                         || !retracted.is_empty()
                     {
                         let replay = transaction_cache.replay_projection_on(
-                            &tx,
-                            &store_dir,
-                            &root,
+                            crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
                             &blob_decls,
                             &gates,
                             &synced_tables,
@@ -162,9 +163,10 @@ impl StoreDatabase {
                             tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                                 .map_err(DbError::from)?;
                         }
-                        for table in &tables {
-                            crate::copy_table_with_conflicts(&replay, &tx, table, false)?;
-                        }
+                        replay.replace_tables_on(
+                            crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
+                            &tables,
+                        )?;
                         let violations: bool = tx
                             .query_row(
                                 "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
@@ -196,7 +198,8 @@ impl StoreDatabase {
                                 "injected failure after Merge projection replacement".to_string(),
                             ));
                         }
-                        merge_transaction.replace_store_device_exclusion_freezes_from_replay()?;
+                        merge_transaction
+                            .replace_store_device_exclusion_freezes_from_replay(&root)?;
                         let old_projection = crate::walk_old_changeset(&projection_changeset)
                             .map_err(DbError::Message)?;
                         let new_projection = crate::walk_changeset(&projection_changeset)
@@ -221,13 +224,13 @@ impl StoreDatabase {
                         }
                     }
                     tx.commit().map_err(DbError::from)?;
-                    *retained_cache = transaction_cache;
+                    authority.commit_retained_replay_transaction(transaction_cache);
                 }
                 Ok(applied)
             })
             .await?;
         if let Some(max_applied) = applied.max_updated_at.as_ref() {
-            self.hlc().advance_past(max_applied);
+            self.hlc.advance_past(max_applied);
         }
         for (write_id, status) in applied.write_status_notifications {
             self.notify_write_status(write_id, status);
@@ -254,52 +257,57 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
         let store_dir = self.store_dir.clone();
-        self.with_retained_replay(move |records, retained_cache| {
-            let conn = records.conn();
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
-            if let Some(object_ids) = operation_object_ids {
-                store_transaction
-                    .activate_store_operation_remote_objects(&reference, &object_ids)?;
-            }
-            if !registrations.is_empty() {
-                super::record_activated_store_device_registrations_on(
-                    &tx,
-                    verified_commit.value(),
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
+                if let Some(object_ids) = operation_object_ids {
+                    store_transaction
+                        .activate_store_operation_remote_objects(&reference, &object_ids)?;
+                }
+                if !registrations.is_empty() {
+                    super::record_activated_store_device_registrations_on(
+                        &tx,
+                        verified_commit.value(),
+                        &registrations,
+                    )?;
+                }
+                let materialization = VerifiedMergeMaterialization::verify(
+                    &root,
+                    &verified_commit,
                     &registrations,
+                    &device_operations,
+                    &circle_activations,
+                    &activation_head,
+                    &activation_head_object,
+                    &history_evidence,
+                    membership_objects.as_ref(),
+                    &[],
+                    None,
                 )?;
-            }
-            let materialization = VerifiedMergeMaterialization::verify(
-                &root,
-                &verified_commit,
-                &registrations,
-                &device_operations,
-                &circle_activations,
-                &activation_head,
-                &activation_head_object,
-                &history_evidence,
-                membership_objects.as_ref(),
-                &[],
-                None,
-            )?;
-            if let Some(completion) = membership_completion {
-                store_transaction
-                    .complete_membership_journal(completion, &reference)
+                if let Some(completion) = membership_completion {
+                    store_transaction
+                        .complete_membership_journal(completion, &reference)
+                        .map_err(|error| {
+                            DbError::context("complete exact membership journal", error)
+                        })?;
+                }
+                let retained = store_transaction
+                    .record_verified_merge_materialization(authority, materialization)
                     .map_err(|error| {
-                        DbError::context("complete exact membership journal", error)
+                        DbError::context("record exact Merge materialization", error)
                     })?;
-            }
-            let retained = store_transaction
-                .record_verified_merge_materialization(materialization)
-                .map_err(|error| DbError::context("record exact Merge materialization", error))?;
-            retained_cache.validate_insert_verified(&retained)?;
-            tx.commit().map_err(DbError::from)?;
-            retained_cache
-                .insert_verified(retained)
-                .expect("committed retained Merge materialization passed cache validation");
-            Ok(())
-        })
-        .await
+                authority.validate_retained_materialization_insert(&retained)?;
+                tx.commit().map_err(DbError::from)?;
+                authority
+                    .insert_retained_materialization(retained)
+                    .expect("committed retained Merge materialization passed cache validation");
+                Ok(())
+            })
+            .await
     }
 
     pub async fn materialize_device_join_activation(
@@ -316,8 +324,10 @@ impl StoreDatabase {
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
         let store_dir = self.store_dir.clone();
-        self.with_retained_replay(move |records, retained_cache| {
-                let conn = records.conn();
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 if let Some(materialized) =
                     StoreDatabase::materialized_commit_ref_on(&tx, &stream_id, sequence)?
@@ -354,11 +364,11 @@ impl StoreDatabase {
                     None,
                 )?;
                 let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
-                    .record_verified_merge_materialization(materialization)?;
-                retained_cache.validate_insert_verified(&retained)?;
+                    .record_verified_merge_materialization(authority, materialization)?;
+                authority.validate_retained_materialization_insert(&retained)?;
                 tx.commit().map_err(DbError::from)?;
-                retained_cache
-                    .insert_verified(retained)
+                authority
+                    .insert_retained_materialization(retained)
                     .expect("committed device-join materialization passed cache validation");
                 Ok(())
             })
@@ -371,11 +381,15 @@ impl StoreDatabase {
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
-        self.with_retained_replay(move |records, retained_cache| {
-            let conn = records.conn();
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let authority = &mut *session.verified_store_authority;
+            let conn = records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut newly_retained = Vec::new();
-            let installed_root = required_store_root_authority_on(&tx)?;
+            let installed_root = authority.required_root_authority_on(
+                crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            )?;
             if installed_root != root || plan.founder.store_root != root {
                 return Err(DbError::Message(
                     "device join bootstrap root differs from the installed exact root".to_string(),
@@ -487,13 +501,13 @@ impl StoreDatabase {
                     None,
                 )?;
                 let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
-                    .record_verified_merge_materialization(materialization)?;
-                retained_cache.validate_insert_verified(&retained)?;
+                    .record_verified_merge_materialization(authority, materialization)?;
+                authority.validate_retained_materialization_insert(&retained)?;
                 newly_retained.push(retained);
             }
             tx.commit().map_err(DbError::from)?;
             for retained in newly_retained {
-                retained_cache.insert_verified(retained).expect(
+                authority.insert_retained_materialization(retained).expect(
                     "committed device-join bootstrap materialization passed cache validation",
                 );
             }
@@ -511,31 +525,37 @@ impl StoreDatabase {
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
-        self.with_retained_replay(move |records, retained_cache| {
-            let conn = records.conn();
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let root = required_store_root_authority_on(&tx)?;
-            let registrations = vec![registration];
-            let commit = verified_commit.value();
-            super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
-            let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
-                .record_materialized_merge_commit(
-                    &root,
-                    &verified_commit,
-                    &registrations,
-                    &activation_head,
-                    &activation_head_object,
-                    &history_evidence,
-                    &[],
-                    None,
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let root = authority.required_root_authority_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
                 )?;
-            retained_cache.validate_insert_verified(&retained)?;
-            tx.commit().map_err(DbError::from)?;
-            retained_cache
-                .insert_verified(retained)
-                .expect("committed Owner-recovery materialization passed cache validation");
-            Ok(())
-        })
-        .await
+                let registrations = vec![registration];
+                let commit = verified_commit.value();
+                super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
+                let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
+                    .record_materialized_merge_commit(
+                        authority,
+                        &root,
+                        &verified_commit,
+                        &registrations,
+                        &activation_head,
+                        &activation_head_object,
+                        &history_evidence,
+                        &[],
+                        None,
+                    )?;
+                authority.validate_retained_materialization_insert(&retained)?;
+                tx.commit().map_err(DbError::from)?;
+                authority
+                    .insert_retained_materialization(retained)
+                    .expect("committed Owner-recovery materialization passed cache validation");
+                Ok(())
+            })
+            .await
     }
 }

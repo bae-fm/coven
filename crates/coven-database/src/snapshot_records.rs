@@ -1,9 +1,8 @@
-use crate::local_store_identity::local_store_authority_on;
-
 use super::*;
 
 pub fn load_published_store_snapshot_on(
     conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
     conn.query_row(
         "SELECT generation, snapshot_ref, successor_slot, meta_bytes \
@@ -34,7 +33,6 @@ pub fn load_published_store_snapshot_on(
         }
         let successor_slot = serde_json::from_str(&successor_slot)
             .map_err(|error| DbError::context("published Store snapshot successor slot", error))?;
-        let authority = local_store_authority_on(conn)?;
         let author_ref = authority.reference();
         let author = authority.value();
         let meta = SnapshotMeta::parse_at(
@@ -58,10 +56,11 @@ pub fn load_published_store_snapshot_on(
     .transpose()
 }
 
-pub fn load_outbound_store_snapshot_on(
+pub(crate) fn load_outbound_store_snapshot_on(
     records: crate::payload_spool::StoreRecords<'_>,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-    let conn = records.conn();
+    let conn = records.conn;
     conn.query_row(
         "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs \
          FROM outbound_store_snapshot WHERE singleton = 1",
@@ -113,7 +112,6 @@ pub fn load_outbound_store_snapshot_on(
                         .to_string(),
                 ));
             }
-            let authority = local_store_authority_on(conn)?;
             let author_ref = authority.reference();
             let author = authority.value();
             let meta = SnapshotMeta::parse_at(

@@ -17,6 +17,108 @@ pub struct MaterializedLocalBlob {
     pub destination: Option<std::path::PathBuf>,
 }
 
+impl StoreSession<'_> {
+    fn gated_root_locality(
+        &self,
+        root_table: &str,
+        gate_column: &str,
+        root_id: &str,
+    ) -> Result<Option<bool>, DbError> {
+        crate::query_truth(self.records.conn, root_table, gate_column, root_id)
+            .map_err(|error| DbError::Message(error.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_make_remote(
+        &self,
+        root_table: &str,
+        gate_column: &str,
+        root_id: &str,
+        pin: bool,
+        created_at: &str,
+        uploads: &[(RowBlobRef, std::path::PathBuf)],
+        gates: &crate::Gates,
+        tables: &[coven_protocol::synced_schema::SyncedTable],
+    ) -> Result<Option<bool>, DbError> {
+        let transaction = self.records.conn.unchecked_transaction()?;
+        let locality = crate::query_truth(&transaction, root_table, gate_column, root_id)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        if locality == Some(false) {
+            let current = Database::row_blob_refs_for_root_on(
+                &transaction,
+                gates,
+                tables,
+                root_table,
+                root_id,
+            )?;
+            if current.len() != uploads.len()
+                || current
+                    .iter()
+                    .zip(uploads)
+                    .any(|(current, (verified, _))| current != verified)
+            {
+                return Err(DbError::Message(format!(
+                    "blob rows below {root_table:?}/{root_id:?} changed while make_remote verified their sources"
+                )));
+            }
+            Database::insert_make_remote_intent_on(&transaction, root_table, root_id, pin)?;
+            let cloud_outbox = CloudOutboxRecords::new(&transaction);
+            for (reference, source_path) in uploads {
+                cloud_outbox.enqueue_upload(
+                    root_table,
+                    root_id,
+                    reference,
+                    source_path,
+                    pin,
+                    created_at,
+                )?;
+            }
+            transaction.commit().map_err(DbError::from)?;
+        }
+        Ok(locality)
+    }
+
+    fn cancel_make_remote(&self, root_table: &str, root_id: &str) -> Result<(), DbError> {
+        let transaction = self.records.conn.unchecked_transaction()?;
+        match Database::make_remote_intent_state(&transaction, root_table, root_id)? {
+            Some(MakeRemoteIntentState::Uploading) => {
+                let updated = transaction
+                    .execute(
+                        "UPDATE blob_make_remote_intents SET state = 'cancelling'
+                         WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
+                        (root_table, root_id),
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(format!(
+                        "make_remote intent {root_table:?}/{root_id:?} cannot enter cancellation"
+                    )));
+                }
+                transaction
+                    .execute(
+                        "UPDATE cloud_outbox
+                         SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
+                         WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                        (root_table, root_id),
+                    )
+                    .map_err(DbError::from)?;
+            }
+            Some(MakeRemoteIntentState::Cancelling) => {}
+            Some(MakeRemoteIntentState::Publishing(write_id)) => {
+                return Err(DbError::Message(format!(
+                    "make_remote for {root_table:?}/{root_id:?} is already publishing as {write_id}"
+                )));
+            }
+            None => {
+                return Err(DbError::Message(format!(
+                    "make_remote for {root_table:?}/{root_id:?} does not exist"
+                )));
+            }
+        }
+        transaction.commit().map_err(DbError::from)
+    }
+}
+
 impl StoreDatabase {
     pub async fn gated_root_locality(
         &self,
@@ -28,9 +130,8 @@ impl StoreDatabase {
         let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
         self.connection
-            .call(move |connection| {
-                crate::query_truth(connection, &root_table, &gate_column, &root_id)
-                    .map_err(|error| DbError::Message(error.to_string()))
+            .call_store(move |session| {
+                session.gated_root_locality(&root_table, &gate_column, &root_id)
             })
             .await
     }
@@ -47,56 +148,20 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
-        let gates = self.gates();
+        let gates = self.gates.clone();
         let tables = self.synced_tables().to_vec();
         self.connection
-            .call(move |connection| {
-                let transaction = connection.unchecked_transaction()?;
-                let locality = crate::query_truth(
-                    &transaction,
+            .call_store(move |session| {
+                session.begin_make_remote(
                     &root_table,
                     &gate_column,
                     &root_id,
+                    pin,
+                    &created_at,
+                    &uploads,
+                    &gates,
+                    &tables,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?;
-                if locality == Some(false) {
-                    let current = Database::row_blob_refs_for_root_on(
-                        &transaction,
-                        &gates,
-                        &tables,
-                        &root_table,
-                        &root_id,
-                    )?;
-                    if current.len() != uploads.len()
-                        || current
-                            .iter()
-                            .zip(&uploads)
-                            .any(|(current, (verified, _))| current != verified)
-                    {
-                        return Err(DbError::Message(format!(
-                            "blob rows below {root_table:?}/{root_id:?} changed while make_remote verified their sources"
-                        )));
-                    }
-                    Database::insert_make_remote_intent_on(
-                        &transaction,
-                        &root_table,
-                        &root_id,
-                        pin,
-                    )?;
-                    let cloud_outbox = CloudOutboxRecords::new(&transaction);
-                    for (reference, source_path) in &uploads {
-                        cloud_outbox.enqueue_upload(
-                            &root_table,
-                            &root_id,
-                            reference,
-                            source_path,
-                            pin,
-                            &created_at,
-                        )?;
-                    }
-                    transaction.commit().map_err(DbError::from)?;
-                }
-                Ok(locality)
             })
             .await
     }
@@ -105,49 +170,7 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         self.connection
-            .call(move |connection| {
-                let transaction = connection.unchecked_transaction()?;
-                match Database::make_remote_intent_state(
-                    &transaction,
-                    &root_table,
-                    &root_id,
-                )? {
-                    Some(MakeRemoteIntentState::Uploading) => {
-                        let updated = transaction
-                            .execute(
-                                "UPDATE blob_make_remote_intents SET state = 'cancelling'
-                                 WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
-                                (&root_table, &root_id),
-                            )
-                            .map_err(DbError::from)?;
-                        if updated != 1 {
-                            return Err(DbError::Message(format!(
-                                "make_remote intent {root_table:?}/{root_id:?} cannot enter cancellation"
-                            )));
-                        }
-                        transaction
-                            .execute(
-                                "UPDATE cloud_outbox
-                                 SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
-                                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
-                                (&root_table, &root_id),
-                            )
-                            .map_err(DbError::from)?;
-                    }
-                    Some(MakeRemoteIntentState::Cancelling) => {}
-                    Some(MakeRemoteIntentState::Publishing(write_id)) => {
-                        return Err(DbError::Message(format!(
-                            "make_remote for {root_table:?}/{root_id:?} is already publishing as {write_id}"
-                        )));
-                    }
-                    None => {
-                        return Err(DbError::Message(format!(
-                            "make_remote for {root_table:?}/{root_id:?} does not exist"
-                        )));
-                    }
-                }
-                transaction.commit().map_err(DbError::from)
-            })
+            .call_store(move |session| session.cancel_make_remote(&root_table, &root_id))
             .await
     }
 
@@ -188,11 +211,13 @@ impl StoreDatabase {
         let row = row.clone();
         let store_dir = self.store_dir.clone();
         let tables = self.synced_tables().to_vec();
-        let gates = self.gates();
-        let blob_decls = self.blob_decls();
+        let gates = self.gates.clone();
+        let blob_decls = self.blob_decls.clone();
         let write_id = self.new_store_write_id();
-        self.connection
-            .call(move |connection| {
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
+                let connection = records.conn;
                 let resolved_root = gates
                     .resolve_root_of(connection, row.table(), row.row_id())
                     .map_err(|error| DbError::Message(error.to_string()))?
@@ -283,6 +308,7 @@ impl StoreDatabase {
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
+                    verified_authority,
                     write_id,
                 )?
                 .execute(|transaction| {
@@ -332,17 +358,19 @@ impl StoreDatabase {
         let store_dir = self.store_dir.clone();
         let tables = self.synced_tables().to_vec();
         let write_id = self.new_store_write_id();
-        let gates = self.gates();
-        let blob_decls = self.blob_decls();
-        self.connection
-            .call(move |connection| {
+        let gates = self.gates.clone();
+        let blob_decls = self.blob_decls.clone();
+        self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
                 super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-                    connection,
+                    records.conn,
                     &store_dir,
                     &tables,
                     &gates,
                     &blob_decls,
                     routing_encryption.as_ref(),
+                    verified_authority,
                     write_id,
                 )?
                 .execute(|transaction| {

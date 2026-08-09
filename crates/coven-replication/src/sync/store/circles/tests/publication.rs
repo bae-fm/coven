@@ -1,4 +1,5 @@
 use super::*;
+use coven_database::SyntheticDatabase;
 use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
@@ -23,14 +24,14 @@ fn circle_routing_test_schema() -> (
     )
 }
 
-fn open_circle_routing_test_db() -> Database {
+fn open_circle_routing_test_db() -> SyntheticDatabase {
     let (tables, migrations) = circle_routing_test_schema();
     crate::sync::test_helpers::open_test_db_schema(tables, migrations)
 }
 
-fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
+fn open_circle_routing_test_db_at(path: &std::path::Path) -> SyntheticDatabase {
     let (tables, migrations) = circle_routing_test_schema();
-    Database::open(
+    SyntheticDatabase::open(
         path,
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -44,8 +45,8 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> Database {
 
 /// The Circle operation database on disk, so the restart cases can close it and
 /// open the same file again.
-fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
-    Database::open(
+fn open_persistent_circle_test_db(path: &std::path::Path) -> SyntheticDatabase {
+    SyntheticDatabase::open(
         path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -58,7 +59,7 @@ fn open_persistent_circle_test_db(path: &std::path::Path) -> Database {
 }
 
 /// A Circle-scoped `documents` table whose rows carry a blob.
-fn open_circle_blob_test_db() -> Database {
+fn open_circle_blob_test_db() -> SyntheticDatabase {
     crate::sync::test_helpers::open_test_db_schema(
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
@@ -86,7 +87,7 @@ fn open_circle_blob_test_db() -> Database {
 
 /// A Circle-scoped `documents` table whose rows carry their bytes inline, so a
 /// single row can make the Circle's database image arbitrarily large.
-fn open_circle_bulk_row_test_db() -> Database {
+fn open_circle_bulk_row_test_db() -> SyntheticDatabase {
     crate::sync::test_helpers::open_test_db_schema(
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
@@ -109,7 +110,7 @@ fn open_circle_bulk_row_test_db() -> Database {
 /// The materialized `documents` row a recipient installed, as
 /// `(audience, size, hash, stamp)`.
 async fn installed_document_row(
-    db: &Database,
+    db: &SyntheticDatabase,
     row_id: &str,
 ) -> Result<(String, i64, String, String), DbError> {
     let row_id = row_id.to_string();
@@ -1437,7 +1438,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .await
     .expect("copy pre-close Circle database");
     crate::sync::test_helpers::copy_payload_spool(
-        db.store_dir_for_test(),
+        &db.store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(candidate_base_temp.path()),
     );
 
@@ -2002,9 +2003,7 @@ async fn uploaded_circle_steps_reopen_the_local_spool_after_restart_before_activ
             .prepared_objects
             .get("metadata")
             .expect("operation carries exact metadata object");
-        let payload_path = db
-            .store_dir_for_test()
-            .payload_spool_path(metadata.stored_hash());
+        let payload_path = db.store_dir.payload_spool_path(metadata.stored_hash());
         let exact_reads = _home.exact_reads().len();
         if corrupt {
             std::fs::write(&payload_path, b"corrupt metadata bytes")
@@ -2153,14 +2152,14 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
 
 struct ClosingFounderCircle {
     _temp: tempfile::TempDir,
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
     components: crate::sync::cycle::SyncComponents,
     circle_id: CircleId,
     member: UserKeypair,
-    member_db: Database,
+    member_db: SyntheticDatabase,
     _member_temp: tempfile::TempDir,
     member_pubkey: String,
     remaining_member_pubkey: String,
@@ -3137,7 +3136,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
 /// independently: pull the old epoch, author under it, or reset from a successor.
 struct SilentParticipantCircle {
     _temp: tempfile::TempDir,
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     owner_device: crate::sync::test_helpers::TestDevice,
@@ -3147,14 +3146,14 @@ struct SilentParticipantCircle {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_device_id: coven_protocol::store_commit::StoreDeviceId,
-    silent_db: Database,
+    silent_db: SyntheticDatabase,
     silent_storage: Arc<coven_storage::CloudSyncConnection>,
     prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 
 struct SilentParticipantClose {
     _temp: tempfile::TempDir,
-    db: Database,
+    db: SyntheticDatabase,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
@@ -3163,7 +3162,7 @@ struct SilentParticipantClose {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_device_id: coven_protocol::store_commit::StoreDeviceId,
-    silent_db: Database,
+    silent_db: SyntheticDatabase,
     operation_id: CircleOperationId,
     prior_epoch: coven_protocol::circle::CircleEpochId,
 }

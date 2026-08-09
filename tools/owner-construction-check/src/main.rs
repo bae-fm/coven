@@ -7,7 +7,9 @@ use syn::visit::{self, Visit};
 
 mod capability_boundaries;
 mod module_dependencies;
+mod owner_dependency_boundary;
 use module_dependencies::{find_module_dependency_violations, ModuleDependencyViolation};
+use owner_dependency_boundary::{find_owner_dependency_leaks, OwnerDependencyLeak};
 
 use capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation, GatedCapability,
@@ -54,7 +56,6 @@ const NON_OWNER_TYPES: &[&str] = &[
     "RemoteBlobSourceInner",
     "ResolvedBlobAccess",
     "ResolvedBlobConnection",
-    "StoreDatabaseConnection",
     "StoreRecords",
 ];
 
@@ -104,6 +105,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open_with_hlc_and_coven_metadata",
+    ),
+    (
+        "crates/coven-database/src/database_runtime.rs",
+        "Database",
+        "open_in_store_dir_for_test",
     ),
     (
         "crates/coven-database/src/database_runtime.rs",
@@ -713,6 +719,7 @@ fn find_retained_capability_parameters_in_items(
 struct CheckResult {
     owner_construction: Vec<Violation>,
     database_boundary: Vec<DatabaseBoundaryViolation>,
+    owner_dependency_leaks: Vec<OwnerDependencyLeak>,
     service_returns: Vec<ServiceReturnViolation>,
     retained_service_construction: Vec<RetainedServiceConstructionViolation>,
     retained_capability_parameters: Vec<RetainedCapabilityParameterViolation>,
@@ -733,6 +740,7 @@ const CAPABILITY_BOUNDARY_FLAGS: &[(&str, &[GatedCapability])] = &[
 
 fn main() {
     let mut database_boundary = false;
+    let mut owner_dependency_boundary = false;
     let mut retained_service_returns = false;
     let mut retained_service_construction = false;
     let mut retained_capability_parameters = false;
@@ -745,6 +753,8 @@ fn main() {
             module_dependencies = true;
         } else if argument == "--database-boundary" {
             database_boundary = true;
+        } else if argument == "--owner-dependency-boundary" {
+            owner_dependency_boundary = true;
         } else if argument == "--retained-service-returns" {
             retained_service_returns = true;
         } else if argument == "--retained-service-construction" {
@@ -762,7 +772,7 @@ fn main() {
             root = Some(PathBuf::from(argument));
         } else {
             eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
+                "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
             );
             std::process::exit(2);
         }
@@ -771,6 +781,7 @@ fn main() {
     match check(
         &root,
         database_boundary,
+        owner_dependency_boundary,
         retained_service_returns,
         retained_service_construction,
         retained_capability_parameters,
@@ -781,6 +792,7 @@ fn main() {
         Ok(result)
             if result.owner_construction.is_empty()
                 && result.database_boundary.is_empty()
+                && result.owner_dependency_leaks.is_empty()
                 && result.service_returns.is_empty()
                 && result.retained_service_construction.is_empty()
                 && result.retained_capability_parameters.is_empty()
@@ -800,6 +812,28 @@ fn main() {
                     "{}:{}: {} is forbidden outside the database module",
                     violation.path, violation.line, violation.kind
                 );
+            }
+            for violation in &result.owner_dependency_leaks {
+                match violation {
+                    OwnerDependencyLeak::Return {
+                        path,
+                        line,
+                        owner,
+                        method,
+                        dependency,
+                    } => eprintln!(
+                        "{path}:{line}: {owner}::{method} returns retained dependency {dependency}"
+                    ),
+                    OwnerDependencyLeak::Parameter {
+                        path,
+                        line,
+                        owner,
+                        method,
+                        dependency,
+                    } => eprintln!(
+                        "{path}:{line}: {owner}::{method} accepts raw dependency {dependency}"
+                    ),
+                }
             }
             for violation in &result.service_returns {
                 eprintln!(
@@ -884,6 +918,11 @@ fn main() {
                     "database operations retain SQLite state and expose domain methods; move raw SQLite and SQL under crates/coven-database"
                 );
             }
+            if !result.owner_dependency_leaks.is_empty() {
+                eprintln!(
+                    "owners use retained dependencies internally and expose closed operations to callers"
+                );
+            }
             if !result.service_returns.is_empty() {
                 eprintln!(
                     "composition-root services use their retained children; owners do not return those children to callers"
@@ -931,6 +970,7 @@ fn main() {
 fn check(
     root: &Path,
     check_database_boundary: bool,
+    check_owner_dependency_boundary: bool,
     check_retained_service_returns: bool,
     check_retained_service_construction: bool,
     check_retained_capability_parameters: bool,
@@ -954,6 +994,11 @@ fn check(
         owner_construction: find_violations(&files, &owners, &constructors, &free_constructors),
         database_boundary: if check_database_boundary {
             find_database_boundary_violations(&files)
+        } else {
+            Vec::new()
+        },
+        owner_dependency_leaks: if check_owner_dependency_boundary {
+            find_owner_dependency_leaks(&files)
         } else {
             Vec::new()
         },

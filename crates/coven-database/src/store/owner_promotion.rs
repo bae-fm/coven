@@ -11,8 +11,8 @@ impl StoreDatabase {
     ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         let key = format!("owner_promotion/{promotion_id}");
-        self.connection
-            .call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
                 crate::get_protocol_state_on(conn, &key)?
                     .map(|value| {
                         let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
@@ -35,7 +35,8 @@ impl StoreDatabase {
     ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let value = crate::get_protocol_state_on(conn, &key)?;
                 let Some(value) = value else {
                     return Ok(None);
@@ -80,7 +81,8 @@ impl StoreDatabase {
         let value = serde_json::to_string(&journal)
             .map_err(|error| DbError::context("serialize Owner-promotion journal", error))?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 tx.execute(
                     "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -118,7 +120,8 @@ impl StoreDatabase {
             DbError::context("serialize Owner-promotion candidate acceptance", error)
         })?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 conn.execute(
                     "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
                     (&journal_key, &value),
@@ -146,7 +149,8 @@ impl StoreDatabase {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 Self::advance_owner_promotion_journal_on(
                     crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
@@ -189,7 +193,8 @@ impl StoreDatabase {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
                     &tx,
@@ -221,14 +226,15 @@ impl StoreDatabase {
         objects: Vec<coven_protocol::objects::ExactObjectRef>,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 super::candidate_records::candidate_cleanup_targets_on(conn, &candidate, &objects)
             })
             .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_owner_promotion_journal_on(
+    pub(crate) fn advance_owner_promotion_journal_on(
         records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
         journal_key: String,
         target_key: String,
@@ -236,7 +242,7 @@ impl StoreDatabase {
         next_value: String,
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     ) -> Result<(), DbError> {
-        let tx = records.transaction();
+        let tx = records.transaction;
         let mut object_ids = BTreeSet::new();
         for remote in &remote_objects {
             if !object_ids.insert(remote.object_id()) {
@@ -246,7 +252,7 @@ impl StoreDatabase {
             }
             persist_exact_remote_object_on(
                 tx,
-                records.store_dir(),
+                records.store_dir,
                 remote,
                 "Owner-promotion candidate object",
             )?;
@@ -298,7 +304,8 @@ impl StoreDatabase {
             DbError::context("serialize replacement Owner-promotion journal", error)
         })?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let inserted = tx
                     .execute(

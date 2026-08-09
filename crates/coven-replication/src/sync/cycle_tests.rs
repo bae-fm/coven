@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::sync::cycle;
 use crate::sync::test_helpers::*;
-use coven_database::Database;
 use coven_database::StoreDatabase;
+use coven_database::SyntheticDatabase;
 use coven_foundation::clock::{FixedClock, SystemClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -31,7 +31,7 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 const T0: &str = "2024-01-01T00:00:00Z";
 
 /// The synthetic test db opens with a single migration, so its
-/// [`Database::schema_version`] is 1. Changesets are stored at that version.
+/// [`coven_database::Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,7 +103,7 @@ fn cycle_cloud_storage(
 }
 
 async fn cycle_test_store(
-    db: &Database,
+    db: &SyntheticDatabase,
     signer: &UserKeypair,
     home: Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
@@ -115,7 +115,7 @@ async fn cycle_test_store(
 /// A fresh owner Store plus the second identity its device-join cases admit.
 struct OwnerAndMember {
     owner: UserKeypair,
-    owner_db: Database,
+    owner_db: SyntheticDatabase,
     storage: Arc<TestStore>,
     member: UserKeypair,
 }
@@ -140,7 +140,7 @@ async fn owner_and_member() -> OwnerAndMember {
 /// Invites `member` into the owner's Store as an ordinary member.
 async fn invite_test_member(
     storage: &TestStore,
-    owner_db: &Database,
+    owner_db: &SyntheticDatabase,
     owner: &UserKeypair,
     member: &UserKeypair,
     encryption: &EncryptionService,
@@ -161,7 +161,10 @@ async fn invite_test_member(
 
 /// A `note_photos` schema whose rows carry a blob at `fill`, plus the Store its
 /// owner publishes through.
-async fn blob_cycle_store(keypair: &UserKeypair, fill: CacheFill) -> (Database, Arc<TestStore>) {
+async fn blob_cycle_store(
+    keypair: &UserKeypair,
+    fill: CacheFill,
+) -> (SyntheticDatabase, Arc<TestStore>) {
     let db = open_test_db_with_blob(BlobDecl::new("photos", Provenance::HostProvided, fill));
     let storage =
         cycle_test_store(&db, keypair, crate::sync::test_helpers::test_cloud_home()).await;
@@ -225,7 +228,7 @@ trait CycleTestDatabaseOps {
     async fn pending_write_count(&self) -> i64;
 }
 
-impl CycleTestDatabaseOps for Database {
+impl CycleTestDatabaseOps for SyntheticDatabase {
     async fn local_store_stream_id(&self) -> String {
         let local_device = self
             .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
@@ -287,15 +290,25 @@ impl CycleTestDatabaseOps for Database {
 }
 
 trait CycleTestStoreOps {
-    async fn store_package_exists(&self, db: &Database, stream_id: &str, sequence: u64) -> bool;
-    async fn local_store_package_exists(&self, db: &Database, sequence: u64) -> bool;
-    async fn stored_blob_exists(&self, db: &Database, table: &str, row_id: &str) -> bool;
-    async fn retain_store_packages_for_assertion(&self, db: &Database, marker: &[u8]);
-    async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &Database);
+    async fn store_package_exists(
+        &self,
+        db: &SyntheticDatabase,
+        stream_id: &str,
+        sequence: u64,
+    ) -> bool;
+    async fn local_store_package_exists(&self, db: &SyntheticDatabase, sequence: u64) -> bool;
+    async fn stored_blob_exists(&self, db: &SyntheticDatabase, table: &str, row_id: &str) -> bool;
+    async fn retain_store_packages_for_assertion(&self, db: &SyntheticDatabase, marker: &[u8]);
+    async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &SyntheticDatabase);
 }
 
 impl CycleTestStoreOps for TestStore {
-    async fn store_package_exists(&self, db: &Database, stream_id: &str, sequence: u64) -> bool {
+    async fn store_package_exists(
+        &self,
+        db: &SyntheticDatabase,
+        stream_id: &str,
+        sequence: u64,
+    ) -> bool {
         let device = self
             .bind_founder_device(db)
             .await
@@ -318,12 +331,12 @@ impl CycleTestStoreOps for TestStore {
         }
     }
 
-    async fn local_store_package_exists(&self, db: &Database, sequence: u64) -> bool {
+    async fn local_store_package_exists(&self, db: &SyntheticDatabase, sequence: u64) -> bool {
         let stream_id = db.local_store_stream_id().await;
         self.store_package_exists(db, &stream_id, sequence).await
     }
 
-    async fn stored_blob_exists(&self, db: &Database, table: &str, row_id: &str) -> bool {
+    async fn stored_blob_exists(&self, db: &SyntheticDatabase, table: &str, row_id: &str) -> bool {
         let Some(stored) = db.stored_blob_for_row(table, row_id).await else {
             return false;
         };
@@ -332,7 +345,7 @@ impl CycleTestStoreOps for TestStore {
             .expect("verify exact stored blob object")
     }
 
-    async fn retain_store_packages_for_assertion(&self, db: &Database, marker: &[u8]) {
+    async fn retain_store_packages_for_assertion(&self, db: &SyntheticDatabase, marker: &[u8]) {
         let device = self
             .open_into(db)
             .await
@@ -358,7 +371,7 @@ impl CycleTestStoreOps for TestStore {
 
     /// The acknowledgement the cycle writes records its completion time as an RFC
     /// 3339 wall-clock string, never the HLC string used to order row writes.
-    async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &Database) {
+    async fn assert_latest_ack_timestamp_is_rfc3339(&self, db: &SyntheticDatabase) {
         let published = store_database(db)
             .latest_local_store_ack()
             .await
@@ -1613,7 +1626,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let database_dir = tempfile::tempdir().expect("snapshot cleanup database directory");
     let database_path = database_dir.path().join("store.db");
     let open = || {
-        Database::open(
+        SyntheticDatabase::open(
             &database_path,
             tables.clone(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -2521,7 +2534,7 @@ use coven_protocol::objects::StorageError;
 
 /// A [`CloudSyncObjectStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
-/// INSERT through the same `Database` the cycle holds, once, before delegating
+/// INSERT through the same `SyntheticDatabase` the cycle holds, once, before delegating
 /// the immutable package read to the inner mock.
 ///
 /// This models the real hazard in issue #92: a host edit committed while the
@@ -2542,7 +2555,7 @@ enum CycleStorageInterception {
         protocol_read_calls: AtomicUsize,
     },
     InjectHostWrite {
-        db: Database,
+        db: SyntheticDatabase,
         write_sql: String,
         fired: AtomicBool,
         protocol_read_calls: AtomicUsize,
@@ -2577,7 +2590,11 @@ impl CycleStorageInterceptor {
         )
     }
 
-    fn inject_host_write(inner: std::sync::Arc<TestStore>, db: Database, write_sql: &str) -> Self {
+    fn inject_host_write(
+        inner: std::sync::Arc<TestStore>,
+        db: SyntheticDatabase,
+        write_sql: &str,
+    ) -> Self {
         Self::new(
             inner,
             CycleStorageInterception::InjectHostWrite {
@@ -2641,8 +2658,8 @@ impl CycleStorageInterceptor {
 
     async fn activate_joined_device(
         &self,
-        observer_db: &Database,
-        joining_db: &Database,
+        observer_db: &SyntheticDatabase,
+        joining_db: &SyntheticDatabase,
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<crate::sync::test_helpers::TestDevice, String> {
@@ -2821,7 +2838,7 @@ impl crate::sync::test_helpers::StorageInterceptor for CycleStorageInterception 
 /// injected row is (a) present locally on M and (b) carried in M's next outgoing
 /// changeset — proven by pulling that changeset into a fresh peer.
 ///
-/// Mutation proof: route the injected write through raw `Database::call` instead
+/// Mutation proof: route the injected write through raw `SyntheticDatabase::call` instead
 /// of the host journal. The row commits locally, but it is absent from M's next
 /// changeset and assertion (b) fails.
 #[tokio::test]
@@ -4825,7 +4842,7 @@ struct SamePrincipalApprovalFixture<'storage> {
 
 impl<'storage> SamePrincipalApprovalFixture<'storage> {
     async fn prepare(
-        owner_db: &Database,
+        owner_db: &SyntheticDatabase,
         storage: &'storage TestStore,
         owner: &UserKeypair,
         member: &UserKeypair,
@@ -5742,7 +5759,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
     let directory = tempfile::tempdir().expect("pending-rotation database directory");
     let path = directory.path().join("store.sqlite3");
     let open = || {
-        coven_database::Database::open(
+        coven_database::SyntheticDatabase::open(
             &path,
             test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,

@@ -25,7 +25,8 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let mut statement = connection
                     .prepare(
                         "SELECT write_id, status, affected_rows FROM store_writes
@@ -76,7 +77,8 @@ impl StoreDatabase {
         let write_id = write_id.clone();
         let statuses = self.write_statuses.clone();
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let raw: String = connection
                     .query_row(
                         "SELECT status FROM store_writes WHERE write_id = ?1",
@@ -97,9 +99,11 @@ impl StoreDatabase {
     }
 
     fn unpublished_write_cleanup_on(
-        tx: &rusqlite::Transaction<'_>,
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        authority: &mut VerifiedStoreAuthority,
         write_id: &WriteId,
     ) -> Result<UnpublishedWriteCleanup, DbError> {
+        let tx = records.transaction;
         let raw_prepared: Option<String> = tx
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -112,7 +116,11 @@ impl StoreDatabase {
         if let Some(raw_prepared) = raw_prepared.as_deref() {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
-            let merge = parse_prepared_merge_candidate_on(tx, &prepared)?;
+            let merge = parse_prepared_merge_candidate_on(
+                crate::payload_spool::StoreRecords::new(tx, records.store_dir),
+                authority,
+                &prepared,
+            )?;
             removable.push(remote_object_id(&merge.reference.object));
             match load_merge_candidate_head_cleanup_on(tx, &merge.head_object, &merge.reference)? {
                 MergeCandidateHeadCleanup::Remote { .. } => {
@@ -170,14 +178,16 @@ impl StoreDatabase {
         Ok(true)
     }
 
-    pub fn resolve_unpublished_writes_on(
-        tx: &rusqlite::Transaction<'_>,
+    fn resolve_unpublished_writes_on(
+        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        authority: &mut VerifiedStoreAuthority,
         write_ids: &[WriteId],
         resolution: &WriteResolution,
     ) -> Result<(), DbError> {
+        let tx = records.transaction;
         let status = WriteStatus::Resolved(resolution.clone());
         for write_id in write_ids {
-            let cleanup = Self::unpublished_write_cleanup_on(tx, write_id)?;
+            let cleanup = Self::unpublished_write_cleanup_on(records, authority, write_id)?;
             if !Self::unpublished_write_cleanup_complete_on(tx, &cleanup)? {
                 return Err(DbError::Message(format!(
                     "candidate cleanup for write {write_id} is incomplete"
@@ -244,7 +254,8 @@ impl StoreDatabase {
         let stored_id = write_id.clone();
         let stored_status = status.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 Database::set_write_status_on(conn, &stored_id, &stored_status)?;
                 Ok(())
             })
@@ -262,7 +273,8 @@ impl StoreDatabase {
         let notified_write_id = write_id.clone();
         let outcome = self
             .connection
-            .call(move |conn| {
+            .call_database(move |session| {
+                let conn = session.conn;
                 let raw: String = conn
                     .query_row(
                         "SELECT status FROM store_writes WHERE write_id = ?1",
@@ -302,7 +314,10 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub async fn retry_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
         let write_id = write_id.clone();
-        let retried = self.connection.call(move |conn| {
+        let retried = self.connection.call_store(move |session| {
+            let records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
+            let conn = records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let (raw_status, prepared): (String, Option<String>) = tx
                 .query_row(
@@ -322,7 +337,12 @@ impl StoreDatabase {
                     .map_err(|error| {
                         DbError::context(format!("blocked write {write_id} preparation"), error)
                     })?;
-                let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?.reference;
+                let candidate = parse_prepared_merge_candidate_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
+                    &prepared,
+                )?
+                .reference;
                 let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
                 if matches!(
                     remote,
@@ -388,9 +408,11 @@ impl StoreDatabase {
     ) -> Result<BlockedWriteDiscard, DbError> {
         let write_id = write_id.clone();
         let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates();
-        let store_dir = self.store_dir.clone();
-        let discarded_ids = self.connection.call(move |conn| {
+        let gates = self.gates.clone();
+        let discarded_ids = self.connection.call_store(move |session| {
+            let session_records = session.records;
+            let verified_authority = &mut *session.verified_store_authority;
+            let conn = session_records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let (raw_status, target_ordinal): (String, i64) = tx
                 .query_row(
@@ -446,13 +468,21 @@ impl StoreDatabase {
                 )));
             }
             for (discarded_id, _) in &discarded {
-                let cleanup = Self::unpublished_write_cleanup_on(&tx, discarded_id)?;
+                let cleanup = Self::unpublished_write_cleanup_on(
+                    crate::payload_spool::StoreRecordTransaction::new(
+                        &tx,
+                        session_records.store_dir,
+                    ),
+                    verified_authority,
+                    discarded_id,
+                )?;
                 if !Self::unpublished_write_cleanup_complete_on(&tx, &cleanup)? {
                     return Ok(BlockedWriteDiscard::RemoteResolutionRequired);
                 }
             }
             let schema = Arc::new(crate::TableSchema::for_apply(&tx, &synced_tables, &gates)?);
-            let records = crate::payload_spool::StoreRecords::new(&tx, &store_dir);
+            let records =
+                crate::payload_spool::StoreRecords::new(&tx, session_records.store_dir);
             for (_, changeset_hash) in discarded.iter().rev() {
                 let changeset = records.payload(*changeset_hash)?;
                 let inverse = StoreDatabase::invert_changeset(&changeset)?;
@@ -461,7 +491,7 @@ impl StoreDatabase {
                     schema.clone(),
                 )
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
-                MergeMaterializationTransaction::new(&tx, &store_dir)
+                MergeMaterializationTransaction::new(&tx, session_records.store_dir)
                     .apply_changeset_strict(inverse)
                     .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
             }
@@ -470,7 +500,15 @@ impl StoreDatabase {
                 .map(|(write_id, _)| write_id)
                 .collect();
             let resolution = WriteResolution::Discarded;
-            Self::resolve_unpublished_writes_on(&tx, &discarded_ids, &resolution)?;
+            Self::resolve_unpublished_writes_on(
+                crate::payload_spool::StoreRecordTransaction::new(
+                    &tx,
+                    session_records.store_dir,
+                ),
+                verified_authority,
+                &discarded_ids,
+                &resolution,
+            )?;
             tx.commit().map_err(DbError::from)?;
             Ok(BlockedWriteDiscard::Discarded(discarded_ids))
         })

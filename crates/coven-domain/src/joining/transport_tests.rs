@@ -38,7 +38,7 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
     owner_store: TestDevice,
-    owner_db: coven_database::Database,
+    owner_db: coven_database::SyntheticDatabase,
     owner_database: coven_database::StoreDatabase,
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
@@ -96,7 +96,8 @@ impl TransportFixture {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
         let owner_db = open_test_db();
-        let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
+        let owner_database =
+            coven_database::StoreDatabase::from_database(owner_db.clone().into_database());
         let create_store_db = owner_db.clone();
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();

@@ -480,10 +480,17 @@ enum RemoteBlobStorage<'storage> {
 }
 
 impl RemoteBlobStorage<'_> {
-    fn as_ref(&self) -> &dyn CloudSyncObjectStorage {
+    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
         match self {
-            Self::Borrowed(storage) => *storage,
-            Self::Shared(storage) => storage.as_ref(),
+            Self::Borrowed(storage) => storage.store_blob_protection(),
+            Self::Shared(storage) => storage.store_blob_protection(),
+        }
+    }
+
+    fn access(&self, protection: BlobSpoolProtection) -> ExactRemoteBlobAccess<'_> {
+        match self {
+            Self::Borrowed(storage) => ExactRemoteBlobAccess::new(*storage, protection),
+            Self::Shared(storage) => ExactRemoteBlobAccess::new(storage.as_ref(), protection),
         }
     }
 }
@@ -642,7 +649,6 @@ impl RemoteBlobSourceInner<'_> {
         match blob_opening_authority(authority, stored)? {
             coven_protocol::blob::BlobOpeningAuthority::Store => self
                 .storage
-                .as_ref()
                 .store_blob_protection()
                 .map_err(BlobCacheError::Storage),
             coven_protocol::blob::BlobOpeningAuthority::Circle {
@@ -663,7 +669,7 @@ impl RemoteBlobSourceInner<'_> {
     }
 
     pub(super) fn store_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
-        self.storage.as_ref().store_blob_protection()
+        self.storage.store_blob_protection()
     }
 
     pub(super) async fn stage_verified_plaintext(
@@ -674,10 +680,9 @@ impl RemoteBlobSourceInner<'_> {
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         let protection = self.protection(authority, stored).await?;
         self.storage
-            .as_ref()
-            .stage_verified_blob_plaintext(stored, protection, stage)
+            .access(protection)
+            .stage_verified_plaintext(stored, stage)
             .await
-            .map_err(BlobCacheError::Storage)
     }
 
     pub(super) async fn verify_plaintext(
@@ -702,7 +707,7 @@ impl RemoteBlobSourceInner<'_> {
         protection: BlobSpoolProtection,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
-        let remote = ExactRemoteBlobAccess::new(self.storage.as_ref(), protection);
+        let remote = self.storage.access(protection);
         cache_owner
             .verify_remote_plaintext(&remote, stored, retain)
             .await
@@ -718,10 +723,7 @@ impl RemoteBlobSourceInner<'_> {
                 id: reference.blob().id.clone(),
             })?;
         let protection = self.protection(reference.authority(), stored).await?;
-        Ok(ExactRemoteBlobAccess::new(
-            self.storage.as_ref(),
-            protection,
-        ))
+        Ok(self.storage.access(protection))
     }
 }
 

@@ -8,6 +8,93 @@ use crate::Migration;
 use crate::{Database, DbError};
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
+/// A test database and the Store directory the fixture supplied when opening
+/// it. Tests that compose replication services keep this explicit dependency;
+/// they do not recover it from the database owner.
+#[derive(Clone)]
+pub struct SyntheticDatabase {
+    database: Database,
+    pub store_dir: coven_foundation::store_dir::StoreDir,
+}
+
+impl std::ops::Deref for SyntheticDatabase {
+    type Target = Database;
+
+    fn deref(&self) -> &Self::Target {
+        &self.database
+    }
+}
+
+impl SyntheticDatabase {
+    pub fn open(
+        path: &std::path::Path,
+        tables: Vec<SyncedTable>,
+        grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        device_id: String,
+        clock: coven_foundation::clock::ClockRef,
+        migrations: &[Migration],
+    ) -> Result<Self, crate::OpenError> {
+        let store_dir = store_dir_for_test_database(path);
+        let database = Database::open_in_store_dir_for_test(
+            path,
+            store_dir.clone(),
+            tables,
+            grace,
+            transfer_limits,
+            device_id,
+            clock,
+            migrations,
+        )?;
+        Ok(Self {
+            database,
+            store_dir,
+        })
+    }
+
+    pub fn open_with_hlc(
+        path: &std::path::Path,
+        tables: Vec<SyncedTable>,
+        grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
+        migrations: &[Migration],
+    ) -> Result<Self, crate::OpenError> {
+        let store_dir = store_dir_for_test_database(path);
+        let database = Database::open_with_hlc_in_store_dir_for_test(
+            path,
+            store_dir.clone(),
+            tables,
+            grace,
+            transfer_limits,
+            hlc,
+            migrations,
+        )?;
+        Ok(Self {
+            database,
+            store_dir,
+        })
+    }
+
+    pub fn into_database(self) -> Database {
+        self.database
+    }
+}
+
+fn store_dir_for_test_database(path: &std::path::Path) -> coven_foundation::store_dir::StoreDir {
+    if path == std::path::Path::new(":memory:") {
+        coven_foundation::store_dir::StoreDir::new_ephemeral(
+            std::env::temp_dir().join(format!("coven-test-store-{}", uuid::Uuid::new_v4())),
+        )
+    } else {
+        coven_foundation::store_dir::StoreDir::new(
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        )
+    }
+}
+
 /// The synthetic, domain-free schema the sync tests run against. Three synced
 /// tables exercising the engine's generic mechanics: a *gated root* (`notes`,
 /// gated by its `shared` boolean), a child with a foreign key (`note_tags`,
@@ -115,7 +202,7 @@ pub fn test_synced_tables_with_user_and_host_blobs(
 
 /// Open a test [`Database`] over the synthetic schema with `note_photos` declared
 /// blob-bearing per `decl`.
-pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
+pub fn open_test_db_with_blob(decl: BlobDecl) -> SyntheticDatabase {
     open_test_db_schema(test_synced_tables_with_blob(decl), test_migrations())
 }
 
@@ -126,7 +213,7 @@ pub fn open_test_db_with_blob(decl: BlobDecl) -> Database {
 /// blob's namespace); its provenance/fill don't matter to that resolution (the read
 /// reads the row → root → gate, and takes provenance off the `BlobRef`), so this fixes
 /// them. Pair with [`Database::plant_blob_row_for_test`].
-pub fn read_test_db(namespace: &str) -> Database {
+pub fn read_test_db(namespace: &str) -> SyntheticDatabase {
     open_test_db_with_blob(BlobDecl::new(
         namespace,
         coven_protocol::blob::Provenance::UserProvided,
@@ -136,7 +223,7 @@ pub fn read_test_db(namespace: &str) -> Database {
 
 /// Like [`read_test_db`] but with a chosen `max_concurrent_downloads`, so a pin test
 /// can drive the download loop concurrently. Uploads run one at a time (not exercised here).
-pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Database {
+pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> SyntheticDatabase {
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         namespace,
         coven_protocol::blob::Provenance::UserProvided,
@@ -146,16 +233,19 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
         uploads: std::num::NonZeroUsize::MIN,
         downloads: std::num::NonZeroUsize::new(downloads).expect("downloads limit is nonzero"),
     };
-    Database::open(
-        std::path::Path::new(":memory:"),
+    open_synthetic_database(
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         limits,
-        "test-device".to_string(),
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
-        &test_migrations(),
+        std::sync::Arc::new(
+            coven_protocol::hlc::Hlc::try_new(
+                "test-device".to_string(),
+                std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            )
+            .expect("create test register clock"),
+        ),
+        test_migrations(),
     )
-    .expect("open test database")
 }
 
 /// Open a test [`Database`] with both `note_photos` (per `photo_decl`) and
@@ -164,7 +254,7 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
 pub fn open_test_db_with_user_and_host_blobs(
     photo_decl: BlobDecl,
     cover_decl: BlobDecl,
-) -> Database {
+) -> SyntheticDatabase {
     open_test_db_schema(
         test_synced_tables_with_user_and_host_blobs(photo_decl, cover_decl),
         test_migrations(),
@@ -226,17 +316,20 @@ pub fn create_synced_schema(conn: &crate::MigrationContext<'_>) -> Result<(), Db
 
 /// Open a [`Database`] over a fresh in-memory connection with the synthetic test
 /// schema and the [`test_synced_tables`] synced set.
-pub fn open_test_db() -> Database {
+pub fn open_test_db() -> SyntheticDatabase {
     open_test_db_schema(test_synced_tables(), test_migrations())
 }
 
-pub fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> Database {
+pub fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> SyntheticDatabase {
     open_test_db_schema_with_tombstone_grace(test_synced_tables(), test_migrations(), grace)
 }
 
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
-pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>) -> Database {
+pub fn open_test_db_schema(
+    tables: Vec<SyncedTable>,
+    migrations: Vec<Migration>,
+) -> SyntheticDatabase {
     open_test_db_schema_with_tombstone_grace(
         tables,
         migrations,
@@ -248,18 +341,47 @@ fn open_test_db_schema_with_tombstone_grace(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
     grace: chrono::Duration,
-) -> Database {
-    // `:memory:` is unique per connection; the Database owns exactly one.
-    Database::open(
-        std::path::Path::new(":memory:"),
+) -> SyntheticDatabase {
+    let hlc = std::sync::Arc::new(
+        coven_protocol::hlc::Hlc::try_new(
+            "test-device".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        )
+        .expect("create test register clock"),
+    );
+    open_synthetic_database(
         tables,
         grace,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
-        "test-device".to_string(),
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        hlc,
+        migrations,
+    )
+}
+
+fn open_synthetic_database(
+    tables: Vec<SyncedTable>,
+    grace: chrono::Duration,
+    transfer_limits: coven_protocol::blob::TransferLimits,
+    hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
+    migrations: Vec<Migration>,
+) -> SyntheticDatabase {
+    let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(
+        std::env::temp_dir().join(format!("coven-test-store-{}", uuid::Uuid::new_v4())),
+    );
+    let database = Database::open_with_hlc_in_store_dir_for_test(
+        std::path::Path::new(":memory:"),
+        store_dir.clone(),
+        tables,
+        grace,
+        transfer_limits,
+        hlc,
         &migrations,
     )
-    .expect("open test database")
+    .expect("open test database");
+    SyntheticDatabase {
+        database,
+        store_dir,
+    }
 }
 
 /// Open a test [`Database`] over the synthetic schema with a caller-supplied
@@ -274,20 +396,18 @@ pub fn open_test_db_with_hlc(
         + Send
         + Sync
         + 'static,
-) -> Database {
+) -> SyntheticDatabase {
     let migrations = vec![Migration::run(1, "test-schema", move |conn| {
         create_synced_schema(conn)?;
         seed(conn)
     })];
-    Database::open_with_hlc(
-        std::path::Path::new(":memory:"),
+    open_synthetic_database(
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
         hlc,
-        &migrations,
+        migrations,
     )
-    .expect("open test database with hlc")
 }
 /// The Store view of a test database. Every sync test builds one; naming it here
 /// keeps the three test modules that used to declare it from drifting apart.
@@ -305,7 +425,7 @@ pub fn photo_decl() -> BlobDecl {
 }
 
 /// The notes schema with a remote-root parent, carrying `decl` on `note_photos`.
-pub fn remote_root_db(decl: BlobDecl) -> Database {
+pub fn remote_root_db(decl: BlobDecl) -> SyntheticDatabase {
     open_test_db_schema(
         vec![
             SyncedTable::new(

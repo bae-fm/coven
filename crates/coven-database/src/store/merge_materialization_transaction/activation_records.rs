@@ -121,61 +121,21 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(())
     }
 
-    pub fn record_author_exclusion_activations(
+    pub(super) fn record_author_exclusion_activations(
         &self,
-        verified_commit: &VerifiedStoreBatchCommit,
-        device_operations: &VerifiedStoreDeviceOperations,
-        activation_head: &StoreDeviceHead,
-        activation_head_object: &ExactObjectRef,
+        materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
-        let root = required_store_root_authority_on(conn)?;
-        let commit = verified_commit.value();
-        let commit_ref = verified_commit.reference();
-        if commit.store_root_hash != root.store_root_hash
-            || activation_head.author_registration != commit.author_registration
-            || activation_head.commit != *commit_ref
-        {
-            return Err(DbError::Message(
-                "author exclusion activation head differs from its exact commit authority"
-                    .to_string(),
-            ));
-        }
-        let author =
-            load_activated_registration_on(conn, &root, &activation_head.author_registration)?;
-        StoreDeviceHead::parse_at(
-            &activation_head.to_bytes(),
-            root.store_root_hash,
-            &author,
-            commit_ref,
-        )
-        .map_err(|error| DbError::context("verify author exclusion activation head", error))?;
-        activation_head_object
-            .verify(&activation_head.to_bytes())
-            .map_err(|error| {
-                DbError::context("verify author exclusion activation head object", error)
-            })?;
-        let expected_head_key = format!(
-            "{}.json",
-            coven_protocol::store_commit::head_slot_prefix(
-                &activation_head.author_registration.device_id.to_string(),
-                commit_ref.coord.sequence(),
-            )
-        );
-        if activation_head_object.slot().logical_key() != expected_head_key {
-            return Err(DbError::Message(
-                "author exclusion activation head object occupies another protocol slot"
-                    .to_string(),
-            ));
-        }
+        let commit_ref = materialization.commit_ref();
+        let activation_head = materialization.activation_head();
         let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
             head_hash: activation_head.head_hash(),
-            object: activation_head_object.clone(),
+            object: materialization.activation_head_object().clone(),
         };
         let activation_commit = serde_json::to_string(commit_ref).map_err(|error| {
             DbError::context("serialize author exclusion activation commit", error)
         })?;
-        for (exclusion, accepted_cut) in device_operations.exclusions() {
+        for (exclusion, accepted_cut) in materialization.device_operations().exclusions() {
             let StoreHistoryCut(accepted_cut) = accepted_cut;
             let exclusion_json = serde_json::to_string(exclusion)
                 .map_err(|error| DbError::context("serialize author exclusion reference", error))?;

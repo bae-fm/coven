@@ -14,7 +14,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
-            .call(|connection| {
+            .call_store(|session| {
+                let connection = session.records.conn;
                 Self::load_rotation_gate_on(connection).map(|gate| gate.map(|(_, gate)| gate))
             })
             .await
@@ -24,7 +25,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let conn = session.records.conn;
                 conn.query_row(
                     "SELECT intent_hash, plan_bytes, progress_bytes \
                  FROM outbound_membership_mutation WHERE singleton = 1",
@@ -81,7 +83,8 @@ impl StoreDatabase {
             ObjectHash::digest(self.ids.new_id().as_bytes()),
         );
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let existing = crate::get_protocol_state_on(conn, &key)?
                     .map(|value| {
                         value.parse().map_err(|error| {
@@ -110,7 +113,8 @@ impl StoreDatabase {
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let intent_hash = ObjectHash::digest(&plan_bytes);
                 let existing = tx
@@ -159,7 +163,8 @@ impl StoreDatabase {
     ) -> Result<ObjectHash, DbError> {
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let intent_hash = ObjectHash::digest(&plan_bytes);
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = tx
@@ -303,7 +308,8 @@ impl StoreDatabase {
         generation: u64,
     ) -> Result<coven_protocol::objects::RotationGate, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?;
                 let next = coven_protocol::objects::RotationGate::merge_peer_commit(
@@ -328,7 +334,8 @@ impl StoreDatabase {
         adopted_generation: u64,
     ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
                     DbError::Message(
@@ -358,7 +365,8 @@ impl StoreDatabase {
         generation: u64,
     ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
                     DbError::Message(
@@ -401,7 +409,8 @@ impl StoreDatabase {
         progress_bytes: Vec<u8>,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let updated = conn
                     .execute(
                         "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
@@ -474,7 +483,8 @@ impl StoreDatabase {
         let replacement_hash = ObjectHash::digest(&plan_bytes);
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let previous_id = previous.object_id();
                 let current = load_remote_object_on(&tx, previous_id)?;
@@ -566,7 +576,8 @@ impl StoreDatabase {
         }
         let nonactivation = nonactivation.into_durable();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let exists: bool = tx
                     .query_row(
@@ -620,7 +631,8 @@ impl StoreDatabase {
         retained_authorities: Vec<ExactObjectRef>,
         rotation_generation: Option<u64>,
     ) -> Result<(), DbError> {
-        self.connection.call(move |conn| {
+        self.connection.call_store(move |session| {
+                let conn = session.records.conn;
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut unique = BTreeSet::new();
             for object in &candidate_objects {
@@ -760,7 +772,8 @@ impl StoreDatabase {
         objects: Vec<ExactObjectRef>,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let exists: bool = conn
                     .query_row(
                         "SELECT EXISTS(
@@ -833,7 +846,8 @@ impl StoreDatabase {
         generation: u64,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 if tx
                     .execute(
@@ -909,7 +923,8 @@ impl StoreDatabase {
         intent_hash: ObjectHash,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let deleted = conn
                     .execute(
                         "DELETE FROM outbound_membership_mutation \

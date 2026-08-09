@@ -1,12 +1,13 @@
 use super::*;
 
 pub(crate) fn derive_materialized_store_device_state_on(
-    conn: &rusqlite::Connection,
+    records: crate::payload_spool::StoreRecords<'_>,
+    registrations: &mut dyn VerifiedRegistrationLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     commit: &StoreBatchCommit,
     device_operations: &VerifiedStoreDeviceOperations,
 ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-    let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
+    let mut device_state = load_declared_store_device_state_on(records.conn, &commit.device_state)?;
     let recovery_author = commit
         .device_registrations()
         .iter()
@@ -24,7 +25,8 @@ pub(crate) fn derive_materialized_store_device_state_on(
             Some((&activation.registration, node))
         })
         .map(|(registration_ref, node)| {
-            let registration = load_activated_registration_on(conn, root, registration_ref)?;
+            let registration =
+                registrations.activated_registration_on(records, root, registration_ref)?;
             let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
                 owner_grant,
                 ..
@@ -99,7 +101,8 @@ pub(crate) fn derive_materialized_store_device_state_on(
     }
     let owner_recovery = match owner_recovery {
         Some((registration, grant_id, anchor)) => {
-            let registration = load_activated_registration_on(conn, root, registration)?;
+            let registration =
+                registrations.activated_registration_on(records, root, registration)?;
             Some((
                 grant_id.clone(),
                 coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
@@ -124,6 +127,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
     pub fn record_store_reclaim_activation(
         &self,
+        root: &coven_protocol::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         activation: &ReclaimCommitActivation,
@@ -246,15 +250,21 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 activation.clone(),
             )
             .map_err(store_reclaim_journal_error)?;
-            record_reclaimed_store_package_on(self.transaction, &reclaimed)?;
+            record_reclaimed_store_package_on(
+                self.transaction,
+                Some(root.store_root_hash),
+                &reclaimed,
+            )?;
             update_store_reclaim_operation_on(self.transaction, &expected, &next)?;
         }
         Ok(())
     }
 
-    pub fn replace_store_device_exclusion_freezes_from_replay(&self) -> Result<(), DbError> {
-        let root = required_store_root_authority_on(self.transaction)?;
-        let existing = load_store_device_exclusion_freezes_on(self.transaction, &root)?;
+    pub fn replace_store_device_exclusion_freezes_from_replay(
+        &self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<(), DbError> {
+        let existing = load_store_device_exclusion_freezes_on(self.transaction, root)?;
         let frontier = StoreDatabase::materialized_frontier_on(self.transaction, None)?
             .into_values()
             .map(|reference| (reference.coord.stream_id, reference))
@@ -355,7 +365,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
                 StoreDatabase::advance_owner_promotion_journal_on(
-                    self.record_transaction(),
+                    crate::payload_spool::StoreRecordTransaction::new(
+                        self.transaction,
+                        self.store_dir,
+                    ),
                     journal_key,
                     target_key,
                     previous_value,
@@ -378,8 +391,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )
     }
 
-    pub fn record_materialized_merge_commit(
+    pub(crate) fn record_materialized_merge_commit(
         &self,
+        registrations_lookup: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
         registrations: &[ActivatedStoreDeviceRegistration],
@@ -408,35 +422,33 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             packages,
             package_application,
         )?;
-        self.record_verified_merge_materialization(materialization)
+        self.record_verified_merge_materialization(registrations_lookup, materialization)
     }
 
-    pub fn record_verified_merge_materialization(
+    pub(crate) fn record_verified_merge_materialization(
         &self,
+        registrations_lookup: &mut dyn VerifiedStoreLookup,
         materialization: VerifiedMergeMaterialization<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = self.transaction;
-        self.record_author_exclusion_activations(
-            materialization.verified_commit(),
-            materialization.device_operations(),
-            materialization.activation_head(),
-            materialization.activation_head_object(),
-        )?;
-        let root = required_store_root_authority_on(conn)?;
+        self.record_author_exclusion_activations(&materialization)?;
+        let root = materialization.root();
         self.derive_materialized_store_device_state(
-            &root,
+            registrations_lookup,
+            root,
             materialization.commit(),
             materialization.device_operations(),
         )?;
         let (retained_commit_ref, retained) =
             crate::StoreDatabase::retain_merge_materialization_on(
-                self.record_transaction(),
-                &root,
+                crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
+                registrations_lookup,
+                root,
                 &materialization,
             )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
-            self.record_transaction(),
-            &root,
+            crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
+            registrations_lookup,
+            root,
             materialization.commit_ref(),
             materialization.circle_activations(),
         )?;
@@ -449,6 +461,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )
         .map_err(store_reclaim_journal_error)?;
         self.record_materialized_commit_with_device_operations(
+            registrations_lookup,
+            root,
             materialization.verified_commit(),
             materialization.device_operations(),
             materialization.circle_activations().stream_activations(),
@@ -458,17 +472,26 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(retained)
     }
 
-    pub fn derive_materialized_store_device_state(
+    pub(crate) fn derive_materialized_store_device_state(
         &self,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-        derive_materialized_store_device_state_on(self.transaction, root, commit, device_operations)
+        derive_materialized_store_device_state_on(
+            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            registrations,
+            root,
+            commit,
+            device_operations,
+        )
     }
 
-    pub fn record_materialized_commit_with_device_operations(
+    pub(crate) fn record_materialized_commit_with_device_operations(
         &self,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
         verified_commit: &VerifiedStoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
         stream_activations: &VerifiedStreamActivations,
@@ -497,7 +520,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 "materialized commit author registration differs from its activation".to_string(),
             ));
         }
-        let root = required_store_root_authority_on(conn)?;
         if root.store_root_hash != commit.store_root_hash {
             return Err(DbError::Message(
                 "materialized commit belongs to a different Store root".to_string(),
@@ -554,8 +576,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 predecessor
             )));
         }
-        let device_state =
-            self.derive_materialized_store_device_state(&root, commit, device_operations)?;
+        let device_state = self.derive_materialized_store_device_state(
+            registrations,
+            root,
+            commit,
+            device_operations,
+        )?;
         self.record_activated_store_ack(commit, commit_ref)?;
         self.record_activated_circle_acks(commit, commit_ref)?;
         let seq = Database::sequence_to_sqlite(&stream_id, commit.seq())?;
@@ -607,7 +633,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             stream_activations,
             &commit_ref_json,
         )?;
-        apply_store_device_exclusion_freezes_on(conn, &root, &device_state, device_operations)?;
-        self.record_store_reclaim_activation(commit, commit_ref, activation)
+        apply_store_device_exclusion_freezes_on(conn, root, &device_state, device_operations)?;
+        self.record_store_reclaim_activation(root, commit, commit_ref, activation)
     }
 }

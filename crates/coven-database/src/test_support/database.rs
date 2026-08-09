@@ -2,13 +2,6 @@ use crate::{Database, DatabaseTestSql, DbError};
 use rusqlite::OptionalExtension;
 
 impl Database {
-    /// The directory this database opened under, and with it the payload spool
-    /// its rows name. Tests that reach past the async API into `test_sql` need
-    /// the same pair the real read paths carry.
-    pub fn store_dir_for_test(&self) -> &coven_foundation::store_dir::StoreDir {
-        &self.state.store_dir
-    }
-
     pub async fn remove_store_protocol_root_for_test(&self) {
         self.test_sql(|database| database.remove_store_protocol_root())
             .await
@@ -776,7 +769,9 @@ impl Database {
     {
         let store_dir = self.state.store_dir.clone();
         self.connection
-            .call(move |connection| operation(DatabaseTestSql::for_store(connection, &store_dir)))
+            .call_database(move |session| {
+                operation(DatabaseTestSql::for_store(session.conn, &store_dir))
+            })
             .await
     }
 }

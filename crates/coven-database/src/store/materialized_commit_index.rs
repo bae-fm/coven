@@ -21,7 +21,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
         self.connection
-            .call(|conn| Self::materialized_frontier_on(conn, None))
+            .call_store(|session| Self::materialized_frontier_on(session.records.conn, None))
             .await
     }
 
@@ -29,7 +29,12 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.with_retained_replay(move |records, cache| cache.replay_inputs_on(records, &root))
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                authority.retained_replay_inputs_on(records, &root)
+            })
             .await
     }
 
@@ -37,7 +42,8 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         self.connection
-            .call(|conn| {
+            .call_store(|session| {
+                let conn = session.records.conn;
                 let mut statement = conn
                     .prepare(
                         "SELECT device_id, seq, commit_ref
@@ -69,10 +75,13 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.with_retained_replay(move |records, cache| {
-            cache.replay_inputs_with_verified_commits_on(records, &root, &verified)
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                authority.retained_replay_inputs_with_verified_commits_on(records, &root, &verified)
+            })
+            .await
     }
 
     pub async fn retained_merge_materialization(
@@ -80,19 +89,22 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.with_retained_replay(move |records, cache| {
-            cache
-                .replay_inputs_on(records, &root)?
-                .into_iter()
-                .find(|materialization| materialization.commit_ref() == &reference)
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "retained Merge materialization is absent at its exact coordinate"
-                            .to_string(),
-                    )
-                })
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                authority
+                    .retained_replay_inputs_on(records, &root)?
+                    .into_iter()
+                    .find(|materialization| materialization.commit_ref() == &reference)
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "retained Merge materialization is absent at its exact coordinate"
+                                .to_string(),
+                        )
+                    })
+            })
+            .await
     }
 
     pub async fn retained_merge_history_frontier(
@@ -100,42 +112,45 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
-        self.with_retained_replay(move |records, cache| {
-            let retained = { cache.replay_inputs_on(records, &root)? };
-            let by_reference = retained
-                .iter()
-                .map(|materialization| (materialization.commit_ref().clone(), materialization))
-                .collect::<BTreeMap<_, _>>();
-            let mut pending = references;
-            let mut visited = std::collections::BTreeSet::new();
-            let mut checkpoints = Vec::new();
-            while let Some(reference) = pending.pop() {
-                if !visited.insert(reference.clone()) {
-                    continue;
-                }
-                match by_reference.get(&reference) {
-                    Some(materialization) => {
-                        pending.extend(
-                            materialization
-                                .commit()
-                                .order
-                                .predecessor_cut()
-                                .map_err(|error| DbError::Message(error.to_string()))?
-                                .0
-                                .into_values(),
-                        );
-                        checkpoints.push(
-                            cache.retained_history_checkpoint_on(records.conn(), &reference)?,
-                        );
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let retained = authority.retained_replay_inputs_on(records, &root)?;
+                let by_reference = retained
+                    .iter()
+                    .map(|materialization| (materialization.commit_ref().clone(), materialization))
+                    .collect::<BTreeMap<_, _>>();
+                let mut pending = references;
+                let mut visited = std::collections::BTreeSet::new();
+                let mut checkpoints = Vec::new();
+                while let Some(reference) = pending.pop() {
+                    if !visited.insert(reference.clone()) {
+                        continue;
                     }
-                    None => checkpoints.push(Self::load_retained_merge_history_checkpoint_on(
-                        records, &root, &reference,
-                    )?),
+                    match by_reference.get(&reference) {
+                        Some(materialization) => {
+                            pending.extend(
+                                materialization
+                                    .commit()
+                                    .order
+                                    .predecessor_cut()
+                                    .map_err(|error| DbError::Message(error.to_string()))?
+                                    .0
+                                    .into_values(),
+                            );
+                            checkpoints.push(
+                                authority.retained_history_checkpoint_on(records, &reference)?,
+                            );
+                        }
+                        None => checkpoints.push(Self::load_retained_merge_history_checkpoint_on(
+                            records, &root, authority, &reference,
+                        )?),
+                    }
                 }
-            }
-            Ok(checkpoints)
-        })
-        .await
+                Ok(checkpoints)
+            })
+            .await
     }
 
     pub async fn exact_materialized_ref(
@@ -145,13 +160,16 @@ impl StoreDatabase {
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let stream_id = stream_id.to_string();
         self.connection
-            .call(move |conn| Self::materialized_commit_ref_on(conn, &stream_id, sequence))
+            .call_store(move |session| {
+                Self::materialized_commit_ref_on(session.records.conn, &stream_id, sequence)
+            })
             .await
     }
 
     pub async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let mut stmt = conn
                     .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
                     .map_err(DbError::from)?;
@@ -388,7 +406,9 @@ impl StoreDatabase {
             .predecessor_cut()
             .map_err(|error| DbError::Message(error.to_string()))?;
         self.connection
-            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .call_store(move |session| {
+                store_device_state_for_history_cut_on(session.records.conn, &cut)
+            })
             .await
     }
 
@@ -398,7 +418,9 @@ impl StoreDatabase {
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
         let cut = cut.clone();
         self.connection
-            .call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .call_store(move |session| {
+                store_device_state_for_history_cut_on(session.records.conn, &cut)
+            })
             .await
     }
 
@@ -408,7 +430,9 @@ impl StoreDatabase {
     ) -> Result<ResolvedStoreDeviceState, DbError> {
         let reference = reference.clone();
         self.connection
-            .call(move |conn| load_declared_store_device_state_on(conn, &reference))
+            .call_store(move |session| {
+                load_declared_store_device_state_on(session.records.conn, &reference)
+            })
             .await
     }
 
@@ -419,7 +443,8 @@ impl StoreDatabase {
             DbError::Message("Store root is absent while loading exclusion freezes".to_string())
         })?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 Ok(load_store_device_exclusion_freezes_on(conn, &root)?
                     .into_values()
                     .collect())
@@ -434,11 +459,13 @@ impl StoreDatabase {
             DbError::Message("Store root is absent while loading activated devices".to_string())
         })?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let mut statement = conn
                     .prepare(
-                        "SELECT device_id, registration_hash, registration_bytes,
-                            registration_object
+                        "SELECT device_id, registration_hash, registration_object
                      FROM store_device_registration_activations ORDER BY device_id",
                     )
                     .map_err(DbError::from)?;
@@ -447,14 +474,12 @@ impl StoreDatabase {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(2)?,
                         ))
                     })
                     .map_err(DbError::from)?;
                 rows.map(|row| {
-                    let (device_id, registration_hash, bytes, object) =
-                        row.map_err(DbError::from)?;
+                    let (device_id, registration_hash, object) = row.map_err(DbError::from)?;
                     let device_id = device_id
                         .parse()
                         .map_err(|error| DbError::context("activated Store device id", error))?;
@@ -473,13 +498,8 @@ impl StoreDatabase {
                                 .to_string(),
                         ));
                     }
-                    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, device_id)
-                        .map_err(|error| {
-                            DbError::context(
-                                format!("activated Store device registration {device_id}"),
-                                error,
-                            )
-                        })?;
+                    let registration =
+                        authority.activated_registration_on(records, &root, &reference)?;
                     coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                         reference,
                         registration,
@@ -506,8 +526,11 @@ impl StoreDatabase {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.connection
-            .call(move |conn| {
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
+            .call_store(move |session| {
+                let records = session.records;
+                let authority = &mut *session.verified_store_authority;
+                let registration =
+                    authority.activated_registration_on(records, &root, &reference)?;
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
                     reference,
                     registration,
@@ -524,14 +547,16 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
         self.connection
-            .call(local_activated_registration_ref_on)
+            .call_store(|session| local_activated_registration_ref_on(session.records.conn))
             .await
     }
 
     pub async fn local_blob_write_authority(
         &self,
     ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
-        self.connection.call(local_store_authority_on).await
+        self.connection
+            .call_store(|session| session.local_store_authority())
+            .await
     }
 
     pub async fn activated_store_device_registration_with_authority(
@@ -541,8 +566,12 @@ impl StoreDatabase {
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
         let root = root.clone();
         self.connection
-            .call(move |conn| {
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let registration =
+                    verified_authority.activated_registration_on(records, &root, &reference)?;
                 let authority: String = conn
                     .query_row(
                         "SELECT activation_authority FROM store_device_registration_activations \
@@ -574,7 +603,10 @@ impl StoreDatabase {
             DbError::Message("Store root is absent while loading an activated device".to_string())
         })?;
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let stored: Option<(String, String)> = conn
                     .query_row(
                         "SELECT registration_object, activation_authority \
@@ -594,7 +626,8 @@ impl StoreDatabase {
                         "activated Store registration row names another device".to_string(),
                     ));
                 }
-                let registration = load_activated_registration_on(conn, &root, &reference)?;
+                let registration =
+                    verified_authority.activated_registration_on(records, &root, &reference)?;
                 let authority = serde_json::from_str(&authority).map_err(|error| {
                     DbError::context("activated Store registration authority", error)
                 })?;

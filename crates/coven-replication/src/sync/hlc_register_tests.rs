@@ -84,7 +84,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "A's Store publication must finish its initial edit"
     );
 
-    // B's join bootstrap pulls the signed cut into its own Database (clock =
+    // B's join bootstrap pulls the signed cut into its own SyntheticDatabase (clock =
     // b_hlc), including A's edit, before it activates the local registration.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_store_dir();
@@ -438,7 +438,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     assert_eq!(updated.get(&member_device_id), None);
 }
 
-/// `Database::open` seeds the register from the persisted high-water mark, so the
+/// `SyntheticDatabase::open` seeds the register from the persisted high-water mark, so the
 /// very first host stamp after a restart does not regress below existing rows.
 #[tokio::test]
 async fn register_seeds_from_persisted_high_water() {
@@ -448,7 +448,7 @@ async fn register_seeds_from_persisted_high_water() {
     let temp = tempfile::tempdir().expect("create register restart directory");
     let path = temp.path().join("register.sqlite");
     let migrations = test_migrations();
-    let before_restart = coven_database::Database::open(
+    let before_restart = coven_database::SyntheticDatabase::open(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -464,7 +464,7 @@ async fn register_seeds_from_persisted_high_water() {
         .expect("persist high-water before restart");
     drop(before_restart);
 
-    let db = coven_database::Database::open_with_hlc(
+    let db = coven_database::SyntheticDatabase::open_with_hlc(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -730,7 +730,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 }
 
 /// Regression: a sync cycle that errors mid-cycle must still leave host-write
-/// capture working. The `Database` and its connection thread outlive the cycle and
+/// capture working. The `SyntheticDatabase` and its connection thread outlive the cycle and
 /// are reused every cycle. Capture is structural — each host write records into the
 /// pending-changeset journal inside its own transaction, and the journal already
 /// holds any change a failed cycle didn't manage to push — so there is no
@@ -746,7 +746,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // Open normally, then make `protocol_state` reject every INSERT so a
     // `set_protocol_state` inside the cycle fails. Reads remain available.
     let migrations = test_migrations();
-    let db = coven_database::Database::open(
+    let db = coven_database::SyntheticDatabase::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,

@@ -8,8 +8,7 @@ use super::{
     MergeMaterializationTransaction, StoreDatabase,
 };
 use crate::{
-    candidate_graph_exact_objects, load_activated_registration_on,
-    load_prepared_audience_objects_on, load_remote_object_on, required_store_root_authority_on,
+    candidate_graph_exact_objects, load_prepared_audience_objects_on, load_remote_object_on,
     update_remote_object_on, BlobActivation, CloudOutboxRecords, CompletePreparedStoreWriteOutcome,
     Database, DbError, PreparedAudienceBlob, RetainedPackageApplication, LOCAL_DEVICE_ID_STATE_KEY,
 };
@@ -26,7 +25,6 @@ impl StoreDatabase {
         accepted: StoreBatchCommitRef,
         nonactivations: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<CompletePreparedStoreWriteOutcome, DbError> {
-        let store_dir = self.store_dir.clone();
         let nonactivations = nonactivations
             .into_iter()
             .map(|verified| {
@@ -36,11 +34,13 @@ impl StoreDatabase {
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-        let gates = self.gates();
+        let gates = self.gates.clone();
         let synced_tables = self.synced_tables().to_vec();
         let (outcome, notification) = self
-            .with_retained_replay(move |records, retained_cache| {
-                let conn = records.conn();
+            .connection.call_store(move |session| {
+            let records = session.records;
+            let state = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let local_device_id =
                     crate::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
@@ -70,9 +70,13 @@ impl StoreDatabase {
                     })?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| DbError::context("prepared Store write", error))?;
-                let exclusion_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
+                let transaction_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let exclusion_candidate =
+                    state.prepared_merge_candidate_on(transaction_records, &prepared)?;
                 if author_exclusion_activation_for_candidate_on(
-                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir()),
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    state,
                     &root,
                     &exclusion_candidate.reference,
                     &exclusion_candidate.commit.author_registration,
@@ -146,21 +150,23 @@ impl StoreDatabase {
                     ..
                 } = &prepared
                 {
-                    let root = required_store_root_authority_on(&tx)?;
+                    let root = state.required_root_authority_on(transaction_records)?;
                     let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
-                    candidate_commit.semantic_bytes(),
-                    candidate_commit.prepared().reference(),
-                    candidate_head.semantic_bytes(),
-                    candidate_head.prepared().reference(),
-                )?;
+                        transaction_records,
+                        state,
+                        candidate_commit.semantic_bytes(),
+                        candidate_commit.prepared().reference(),
+                        candidate_head.semantic_bytes(),
+                        candidate_head.prepared().reference(),
+                    )?;
                     let authority = parse_prepared_merge_candidate_parts_on(
-                    &tx,
-                    authority_commit.semantic_bytes(),
-                    authority_commit.prepared().reference(),
-                    authority_head.semantic_bytes(),
-                    authority_head.prepared().reference(),
-                )?;
+                        transaction_records,
+                        state,
+                        authority_commit.semantic_bytes(),
+                        authority_commit.prepared().reference(),
+                        authority_head.semantic_bytes(),
+                        authority_head.prepared().reference(),
+                    )?;
                     if authority.commit.write_id.as_str() != stored_write_id
                         || accepted != authority.reference
                         || !matches!(
@@ -173,8 +179,8 @@ impl StoreDatabase {
                                 .to_string(),
                         ));
                     }
-                    let registration = load_activated_registration_on(
-                        &tx,
+                    let registration = state.activated_registration_on(
+                        transaction_records,
                         &root,
                         &authority.commit.author_registration,
                     )?;
@@ -214,7 +220,11 @@ impl StoreDatabase {
                         true,
                         &[],
                     )?;
-                    let retained = MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
+                    let retained = MergeMaterializationTransaction::new(
+                        &tx,
+                        records.store_dir,
+                    ).record_materialized_merge_commit(
+                        state,
                         &root,
                         &authority.commit,
                         &[],
@@ -224,7 +234,7 @@ impl StoreDatabase {
                         &[],
                         None,
                     )?;
-                    retained_cache.validate_insert_verified(&retained)?;
+                    state.validate_retained_materialization_insert(&retained)?;
                     let mut completed_preparation = prepared.clone();
                     let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
                         &mut completed_preparation
@@ -263,8 +273,8 @@ impl StoreDatabase {
                     let write_id = authority.commit.write_id.clone();
                     Database::set_write_status_on(&tx, &write_id, &blocked)?;
                     tx.commit().map_err(DbError::from)?;
-                    retained_cache
-                        .insert_verified(retained)
+                    state
+                        .insert_retained_materialization(retained)
                         .expect("committed Merge abandonment passed cache validation");
                     return Ok((
                         CompletePreparedStoreWriteOutcome::Published,
@@ -283,11 +293,16 @@ impl StoreDatabase {
                         "Merge abandonment reached ordinary publication completion".to_string(),
                     ));
                 };
-                let root = required_store_root_authority_on(&tx)?;
+                let transaction_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let root = state.required_root_authority_on(transaction_records)?;
                 let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
                     .map_err(|error| DbError::context("prepared Store commit", error))?;
-                let registration =
-                    load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
+                let registration = state.activated_registration_on(
+                    transaction_records,
+                    &root,
+                    &unverified.author_registration,
+                )?;
                 let expected_stream =
                     coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                         root.store_root_hash,
@@ -337,7 +352,8 @@ impl StoreDatabase {
                         "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
                     )));
                 }
-                let audiences = load_prepared_audience_objects_on(&tx, &store_dir, &write_id)?;
+                let audiences =
+                    load_prepared_audience_objects_on(&tx, records.store_dir, &write_id)?;
                 let retained_packages = audiences
                     .packages
                     .iter()
@@ -389,7 +405,8 @@ impl StoreDatabase {
                 };
                 let apply_schema =
                     crate::TableSchema::for_apply(&tx, &synced_tables, &gates)?;
-                let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
+                let store_transaction =
+                    MergeMaterializationTransaction::new(&tx, records.store_dir);
                 let cloud_outbox = CloudOutboxRecords::new(&tx);
                 let mut consumed_uploads = 0;
                 for package in &audiences.packages {
@@ -475,7 +492,11 @@ impl StoreDatabase {
                     [write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-                let retained = MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
+                let retained = MergeMaterializationTransaction::new(
+                    &tx,
+                    records.store_dir,
+                ).record_materialized_merge_commit(
+                    state,
                     &root,
                     &commit_value,
                     &[],
@@ -486,7 +507,7 @@ impl StoreDatabase {
                     (!retained_packages.is_empty())
                         .then_some(RetainedPackageApplication::LocallyAuthored),
                 )?;
-                retained_cache.validate_insert_verified(&retained)?;
+                state.validate_retained_materialization_insert(&retained)?;
                 let cleared = tx
                     .execute(
                         "UPDATE store_writes SET prepared = NULL
@@ -505,8 +526,8 @@ impl StoreDatabase {
                 }));
                 Database::set_write_status_on(&tx, &write_id, &status)?;
                 tx.commit().map_err(DbError::from)?;
-                retained_cache
-                    .insert_verified(retained)
+                state
+                    .insert_retained_materialization(retained)
                     .expect("committed local Store publication passed cache validation");
                 Ok((
                     CompletePreparedStoreWriteOutcome::Published,
@@ -576,7 +597,10 @@ impl StoreDatabase {
         let notified_write_id = write_id.clone();
         let blocked = self
             .connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -594,8 +618,11 @@ impl StoreDatabase {
                 }
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                     .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-                let prepared_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
-                let publication = parse_prepared_merge_publication_on(&tx, &prepared)?;
+                let tx_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let prepared_candidate =
+                    parse_prepared_merge_candidate_on(tx_records, verified_authority, &prepared)?;
+                let publication =
+                    parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
                 if winner_head.object.slot() != publication.head_object.slot()
                     || winner_head.object == publication.head_object
                 {

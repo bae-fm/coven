@@ -7,7 +7,7 @@ use crate::sync::test_helpers::{
     TestStore,
 };
 use coven_database::StoreDatabase;
-use coven_database::{Database, DbError};
+use coven_database::{DbError, SyntheticDatabase};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
@@ -30,7 +30,7 @@ use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
 async fn create_test_store_in_its_own_task(
-    db: &Database,
+    db: &SyntheticDatabase,
     name: &str,
     signer: &UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
@@ -45,7 +45,7 @@ async fn create_test_store_in_its_own_task(
 }
 
 async fn persist_merge_operation(
-    db: &Database,
+    db: &SyntheticDatabase,
     name: &str,
 ) -> (
     std::sync::Arc<TestStore>,
@@ -198,7 +198,7 @@ fn circle_test_cloud_storage(
 
 /// The initialized production sync components a Circle test's owner drives.
 async fn prepare_owner_sync_components(
-    db: &Database,
+    db: &SyntheticDatabase,
     store: &TestStore,
     home: &Arc<coven_storage::InMemoryCloudHome>,
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -231,7 +231,7 @@ async fn prepare_owner_sync_components(
 /// after the operation that opened the close.
 async fn finalize_circle_epoch_close(
     store: &TestStore,
-    db: &Database,
+    db: &SyntheticDatabase,
     signer: &UserKeypair,
     components: &crate::sync::cycle::SyncComponents,
 ) {

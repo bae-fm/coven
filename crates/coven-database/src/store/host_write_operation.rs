@@ -399,7 +399,10 @@ impl StoreRowWrites {
 
         let outcome = database
             .connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let connection = records.conn;
                 let mut staged = staged;
                 let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
                     connection,
@@ -409,6 +412,7 @@ impl StoreRowWrites {
                     &blob_decls,
                     routing_encryption.as_ref(),
                     blob_staging.as_deref(),
+                    verified_authority,
                     write_id,
                 )
                 .map_err(HostWriteError::from)

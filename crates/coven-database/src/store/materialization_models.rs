@@ -241,6 +241,7 @@ pub struct RetainedMergeMaterializationKey {
 }
 
 pub struct VerifiedMergeMaterialization<'a> {
+    root: &'a coven_protocol::store_commit::StoreRootRef,
     verified_commit: &'a coven_protocol::store_commit::VerifiedStoreBatchCommit,
     device_operations: &'a VerifiedStoreDeviceOperations,
     circle_activations: &'a VerifiedCircleActivations,
@@ -401,6 +402,10 @@ impl OwnedVerifiedMergeMaterialization {
 }
 
 impl<'a> VerifiedMergeMaterialization<'a> {
+    pub fn root(&self) -> &coven_protocol::store_commit::StoreRootRef {
+        self.root
+    }
+
     pub fn commit(&self) -> &StoreBatchCommit {
         self.verified_commit.value()
     }
@@ -450,7 +455,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
     }
 
     pub fn verify(
-        root: &coven_protocol::store_commit::StoreRootRef,
+        root: &'a coven_protocol::store_commit::StoreRootRef,
         verified_commit: &'a coven_protocol::store_commit::VerifiedStoreBatchCommit,
         registrations: &'a [ActivatedStoreDeviceRegistration],
         device_operations: &'a VerifiedStoreDeviceOperations,
@@ -469,6 +474,8 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         if verified_commit.store_root_hash() != root.store_root_hash
             || commit.store_root_hash != root.store_root_hash
+            || activation_head.author_registration != commit.author_registration
+            || activation_head.commit != *commit_ref
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()
             || circle_activations.circles().len() != commit.circle_controls().len()
@@ -484,9 +491,37 @@ impl<'a> VerifiedMergeMaterialization<'a> {
                 "verified Merge materialization differs from its exact Store commit".to_string(),
             ));
         }
+        let verified_head = StoreDeviceHead::parse_at(
+            &activation_head.to_bytes(),
+            root.store_root_hash,
+            verified_commit.author(),
+            commit_ref,
+        )
+        .map_err(|error| DbError::context("verify Merge materialization head", error))?;
+        if &verified_head != activation_head {
+            return Err(DbError::Message(
+                "Merge materialization head differs from its verified bytes".to_string(),
+            ));
+        }
+        activation_head_object
+            .verify(&activation_head.to_bytes())
+            .map_err(|error| DbError::context("verify Merge materialization head object", error))?;
+        let expected_head_key = format!(
+            "{}.json",
+            coven_protocol::store_commit::head_slot_prefix(
+                &activation_head.author_registration.device_id.to_string(),
+                commit_ref.coord.sequence(),
+            )
+        );
+        if activation_head_object.slot().logical_key() != expected_head_key {
+            return Err(DbError::Message(
+                "Merge materialization head object occupies another protocol slot".to_string(),
+            ));
+        }
         RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
             .map_err(|error| DbError::Message(error.to_string()))?;
         Ok(Self {
+            root,
             verified_commit,
             device_operations,
             circle_activations,

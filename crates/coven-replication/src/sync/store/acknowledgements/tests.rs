@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::test_helpers::TestDevice;
-use coven_database::Database;
+use coven_database::SyntheticDatabase;
 use coven_keys::keys::UserKeypair;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> Database {
-    Database::open(
+fn open(path: &Path, device_id: &str) -> SyntheticDatabase {
+    SyntheticDatabase::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -21,7 +21,7 @@ fn open(path: &Path, device_id: &str) -> Database {
     .expect("open acknowledgement test database")
 }
 
-fn store_database(database: &Database) -> StoreDatabase {
+fn store_database(database: &SyntheticDatabase) -> StoreDatabase {
     StoreDatabase::new(database)
 }
 
@@ -39,7 +39,7 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConne
 }
 
 async fn initialize(
-    db: &Database,
+    db: &SyntheticDatabase,
     storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> TestDevice {
@@ -52,7 +52,7 @@ struct LosingAckFixture {
     home: InMemoryCloudHome,
     signer: UserKeypair,
     storage: Arc<CloudSyncConnection>,
-    db: Database,
+    db: SyntheticDatabase,
     device: TestDevice,
     outbound: coven_database::OutboundStoreAck,
     losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,

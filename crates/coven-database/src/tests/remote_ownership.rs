@@ -1,9 +1,4 @@
-use crate::remote_object_records::load_reclaimed_store_package_on;
-use crate::remote_object_records::load_remote_object_on;
-use crate::remote_object_records::persist_exact_remote_object_on;
-use crate::remote_object_records::record_reclaimed_store_package_on;
 use crate::snapshot_objects::validate_snapshot_object_owner_records_on;
-use crate::store_reclaim_records::insert_store_reclaim_operation_on;
 
 use crate::*;
 
@@ -150,9 +145,8 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let store_dir_for_insert = closure_store_dir.clone();
     let saved_remote_for_insert = package_remote.clone();
     closure_db
-        .call(move |conn| {
-            persist_exact_remote_object_on(
-                conn,
+        .test_sql(move |conn| {
+            conn.persist_exact_remote_object(
                 &store_dir_for_insert,
                 &saved_remote_for_insert,
                 "reclaim closure fixture package",
@@ -163,11 +157,11 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let operation_for_insert = operation.clone();
     let absence_for_insert = absence.clone();
     closure_db
-        .call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            insert_store_reclaim_operation_on(&tx, &operation_for_insert)?;
-            record_reclaimed_store_package_on(&tx, &absence_for_insert)?;
-            tx.commit().map_err(DbError::from)
+        .test_sql(move |conn| {
+            conn.transaction(|tx| {
+                tx.insert_store_reclaim_operation(&operation_for_insert)?;
+                tx.record_reclaimed_store_package(&absence_for_insert)
+            })
         })
         .await
         .expect("close reclaimed package");
@@ -175,19 +169,16 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let store_dir_for_revival = closure_store_dir.clone();
     let saved_remote_for_revival = package_remote.clone();
     closure_db
-        .call(move |conn| {
-            assert!(load_remote_object_on(conn, object_id).is_err());
-            assert_eq!(
-                load_reclaimed_store_package_on(conn, object_id)?,
-                Some(absence)
-            );
-            assert!(persist_exact_remote_object_on(
-                conn,
-                &store_dir_for_revival,
-                &saved_remote_for_revival,
-                "revived Store package",
-            )
-            .is_err());
+        .test_sql(move |conn| {
+            assert!(conn.load_remote_object(object_id).is_err());
+            assert_eq!(conn.load_reclaimed_store_package(object_id)?, Some(absence));
+            assert!(conn
+                .persist_exact_remote_object(
+                    &store_dir_for_revival,
+                    &saved_remote_for_revival,
+                    "revived Store package",
+                )
+                .is_err());
             Ok(())
         })
         .await
@@ -207,12 +198,12 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     .expect("valid receipt closure");
     let receipted_for_insert = receipted.clone();
     closure_db
-        .call(move |conn| record_reclaimed_store_package_on(conn, &receipted_for_insert))
+        .test_sql(move |conn| conn.record_reclaimed_store_package(&receipted_for_insert))
         .await
         .expect("attach receipt to reclaimed package");
     assert_eq!(
         closure_db
-            .call(move |conn| load_reclaimed_store_package_on(conn, object_id))
+            .test_sql(move |conn| conn.load_reclaimed_store_package(object_id))
             .await
             .expect("load receipted closure"),
         Some(receipted)
@@ -277,8 +268,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
     let db = open_outbox_database("prepared-upload-retry");
     let row = local_row_blob("photo", "0000000001000-0000-a", b"photo bytes");
     let initial_row = row.clone();
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_upload(
+    db.test_sql(move |conn| {
+        conn.enqueue_blob_upload(
             "photos",
             "photo",
             &initial_row,
@@ -310,8 +301,8 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .await
         .expect("record prepared object");
 
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_upload(
+    db.test_sql(move |conn| {
+        conn.enqueue_blob_upload(
             "photos",
             "photo",
             &row,
@@ -370,11 +361,9 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
         .blob()
         .clone();
     let delete_stored = stored.clone();
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_delete(&delete_stored, "2026-07-16T10:00:00Z")
-    })
-    .await
-    .expect("enqueue delete");
+    db.test_sql(move |conn| conn.enqueue_blob_delete(&delete_stored, "2026-07-16T10:00:00Z"))
+        .await
+        .expect("enqueue delete");
     let failed = crate::StoreDatabase::new(&db)
         .pending_blob_deletes()
         .await
@@ -386,11 +375,9 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
         .await
         .expect("record delete failure");
     let retry_stored = stored.clone();
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_delete(&retry_stored, "2026-07-16T10:01:00Z")
-    })
-    .await
-    .expect("repeat exact delete");
+    db.test_sql(move |conn| conn.enqueue_blob_delete(&retry_stored, "2026-07-16T10:01:00Z"))
+        .await
+        .expect("repeat exact delete");
 
     let deletes = crate::StoreDatabase::new(&db)
         .pending_blob_deletes()
@@ -411,16 +398,12 @@ async fn exact_deletes_for_distinct_objects_remain_distinct() {
     let second = exact_blob_binding("photo-b", "0000000001000-0000-a", b"photo b")
         .blob()
         .clone();
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_delete(&first, "2026-07-16T10:00:00Z")
-    })
-    .await
-    .expect("enqueue first delete");
-    db.call(move |conn| {
-        CloudOutboxRecords::new(conn).enqueue_delete(&second, "2026-07-16T10:01:00Z")
-    })
-    .await
-    .expect("enqueue second delete");
+    db.test_sql(move |conn| conn.enqueue_blob_delete(&first, "2026-07-16T10:00:00Z"))
+        .await
+        .expect("enqueue first delete");
+    db.test_sql(move |conn| conn.enqueue_blob_delete(&second, "2026-07-16T10:01:00Z"))
+        .await
+        .expect("enqueue second delete");
 
     let deletes = crate::StoreDatabase::new(&db)
         .pending_blob_deletes()

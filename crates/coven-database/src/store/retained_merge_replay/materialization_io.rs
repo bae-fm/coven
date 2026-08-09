@@ -1,4 +1,3 @@
-use super::cache::*;
 use super::*;
 use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
@@ -27,15 +26,16 @@ fn spooled_semantic_payload(
 }
 
 impl StoreDatabase {
-    pub fn open_retained_merge_materialization_input_with_authority_on(
+    fn open_retained_merge_materialization_input_with_authority_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registration_lookup: &mut dyn VerifiedRegistrationLookup,
         commit_ref: &StoreBatchCommitRef,
         input: &RetainedMergeMaterializationInput,
         input_hash: ObjectHash,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let sequence = &commit_ref.coord.sequence;
         if sequence == &0 {
             return Err(DbError::Message(
@@ -65,12 +65,32 @@ impl StoreDatabase {
             Ok(registration)
         };
         let introduced_author = introduced_registration(&unverified.author_registration)?;
+        let operation_author = match &authority {
+            RetainedCommitAuthority::Operation(verified)
+                if verified.reference() == commit_ref
+                    && verified.value().author_registration == unverified.author_registration
+                    && verified.value().to_bytes() == input.commit.stored_bytes() =>
+            {
+                Some(verified.author())
+            }
+            RetainedCommitAuthority::Operation(_) => {
+                return Err(DbError::Message(
+                    "retained Merge commit differs from its operation-verified exact commit"
+                        .to_string(),
+                ));
+            }
+            RetainedCommitAuthority::StoredBytes => None,
+        };
         let stored_author;
-        let author = match introduced_author {
-            Some(author) => author,
-            None => {
-                stored_author =
-                    load_activated_registration_on(conn, root, &unverified.author_registration)?;
+        let author = match (introduced_author, operation_author) {
+            (Some(author), _) => author,
+            (None, Some(author)) => author,
+            (None, None) => {
+                stored_author = registration_lookup.activated_registration_on(
+                    records,
+                    root,
+                    &unverified.author_registration,
+                )?;
                 &stored_author
             }
         };
@@ -84,11 +104,7 @@ impl StoreDatabase {
                 )
                 .map_err(|error| DbError::context("retained Merge commit", error))?
             }
-            RetainedCommitAuthority::Operation(verified)
-                if verified.reference() == commit_ref
-                    && verified.author() == author
-                    && verified.value().to_bytes() == input.commit.stored_bytes() =>
-            {
+            RetainedCommitAuthority::Operation(verified) if verified.author() == author => {
                 verified.clone()
             }
             RetainedCommitAuthority::Operation(_) => {
@@ -154,7 +170,9 @@ impl StoreDatabase {
         let local_identity = match local_activated_registration_ref_on(conn)? {
             Some(reference) => Some(match introduced_registration(&reference)? {
                 Some(registration) => registration.author_pubkey.clone(),
-                None => load_activated_registration_on(conn, root, &reference)?
+                None if reference == unverified.author_registration => author.author_pubkey.clone(),
+                None => registration_lookup
+                    .activated_registration_on(records, root, &reference)?
                     .author_pubkey
                     .clone(),
             }),
@@ -227,8 +245,9 @@ impl StoreDatabase {
         )
     }
 
-    pub fn retain_merge_materialization_on(
+    pub(crate) fn retain_merge_materialization_on(
         records: StoreRecordTransaction<'_, '_>,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<
@@ -240,14 +259,16 @@ impl StoreDatabase {
     > {
         Self::retain_merge_materialization_with_authority_on(
             records,
+            registrations,
             root,
             materialization,
             RetainedCommitAuthority::Operation(materialization.verified_commit()),
         )
     }
 
-    pub fn retain_merge_materialization_with_authority_on(
+    fn retain_merge_materialization_with_authority_on(
         records: StoreRecordTransaction<'_, '_>,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
         materialization: &VerifiedMergeMaterialization<'_>,
         authority: RetainedCommitAuthority<'_>,
@@ -296,14 +317,15 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            records.records(),
+            StoreRecords::new(records.transaction, records.store_dir),
             root,
+            registrations,
             materialization.commit_ref(),
             &input,
             input_hash,
             authority,
         )?;
-        let conn = records.transaction();
+        let conn = records.transaction;
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -365,9 +387,10 @@ impl StoreDatabase {
         ))
     }
 
-    pub fn load_retained_merge_materialization_on(
+    pub(crate) fn load_retained_merge_materialization_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
@@ -376,6 +399,7 @@ impl StoreDatabase {
         Self::load_retained_merge_materialization_with_authority_on(
             records,
             root,
+            registrations,
             stream_id,
             sequence,
             commit_ref,
@@ -384,9 +408,10 @@ impl StoreDatabase {
         )
     }
 
-    pub fn load_retained_merge_materialization_with_verified_commit_on(
+    pub(crate) fn load_retained_merge_materialization_with_verified_commit_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
@@ -396,6 +421,7 @@ impl StoreDatabase {
         Self::load_retained_merge_materialization_with_authority_on(
             records,
             root,
+            registrations,
             stream_id,
             sequence,
             commit_ref,
@@ -404,16 +430,17 @@ impl StoreDatabase {
         )
     }
 
-    pub fn load_retained_merge_materialization_with_authority_on(
+    fn load_retained_merge_materialization_with_authority_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         stream_id: &str,
         sequence: u64,
         commit_ref: &StoreBatchCommitRef,
         expected_input_hash: &str,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
         let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
             .query_row(
@@ -455,7 +482,13 @@ impl StoreDatabase {
             )
         })?;
         let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            records, root, commit_ref, &input, input_hash, authority,
+            records,
+            root,
+            registrations,
+            commit_ref,
+            &input,
+            input_hash,
+            authority,
         )?;
         Self::validate_retained_merge_pin_closure_on(
             conn,
@@ -468,12 +501,13 @@ impl StoreDatabase {
         Ok(verified)
     }
 
-    pub fn load_retained_merge_materialization_by_ref_on(
+    pub(crate) fn load_retained_merge_materialization_by_ref_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -497,6 +531,7 @@ impl StoreDatabase {
         Self::load_retained_merge_materialization_on(
             records,
             root,
+            registrations,
             &stream_id,
             *sequence,
             reference,
@@ -504,12 +539,13 @@ impl StoreDatabase {
         )
     }
 
-    pub fn load_retained_merge_history_checkpoint_on(
+    pub(crate) fn load_retained_merge_history_checkpoint_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
     ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -597,19 +633,27 @@ impl StoreDatabase {
         let retained = Self::load_retained_merge_materialization_on(
             records,
             root,
+            registrations,
             &stream_id.to_string(),
             *sequence,
             reference,
             &input_hash,
         )?;
-        Self::open_retained_merge_history_checkpoint_on(conn, reference, &retained)
+        Self::open_retained_merge_history_checkpoint_on(
+            records,
+            registrations,
+            reference,
+            &retained,
+        )
     }
 
-    pub fn open_retained_merge_history_checkpoint_on(
-        conn: &Connection,
+    pub(crate) fn open_retained_merge_history_checkpoint_on(
+        records: StoreRecords<'_>,
+        registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
         retained: &OwnedVerifiedMergeMaterialization,
     ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
+        let conn = records.conn;
         if retained.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge checkpoint materialization names another commit".to_string(),
@@ -620,7 +664,8 @@ impl StoreDatabase {
             .validate_canonical()
             .map_err(|error| DbError::context("retained Merge checkpoint state", error))?;
         let derived = crate::store::merge_materialization_transaction::derive_materialized_store_device_state_on(
-            conn,
+            records,
+            registrations,
             retained.root(),
             retained.commit(),
             retained.device_operations(),
@@ -636,12 +681,12 @@ impl StoreDatabase {
         )))
     }
 
-    pub fn load_merge_replay_write_overlays_on(
+    pub(crate) fn load_merge_replay_write_overlays_on(
         records: StoreRecords<'_>,
         active_accepted_writes: &BTreeSet<WriteId>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
-        let conn = records.conn();
+        let conn = records.conn;
         if !active_accepted_writes.is_disjoint(retracted_writes) {
             return Err(DbError::Message(
                 "retained replay classifies one write as active and retracted".to_string(),
@@ -735,7 +780,7 @@ impl StoreDatabase {
         Ok(overlays)
     }
 
-    pub fn generation_zero_replay_baseline_on(
+    pub(crate) fn generation_zero_replay_baseline_on(
         records: StoreRecords<'_>,
     ) -> Result<RetainedReplayBaseline, DbError> {
         load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
@@ -743,10 +788,10 @@ impl StoreDatabase {
         })
     }
 
-    pub fn load_merge_retraction_cleanup_on(
+    fn load_merge_retraction_cleanup_objects_on(
         conn: &Connection,
         candidate: &StoreBatchCommitRef,
-    ) -> Result<PreparedMergeCandidate, DbError> {
+    ) -> Result<(DurablePreparedProtocolObject, DurablePreparedProtocolObject), DbError> {
         let StoreCommitCoord {
             stream_id,
             sequence,
@@ -785,8 +830,19 @@ impl StoreDatabase {
             input.activation_head.stored_bytes().to_vec(),
             input.activation_head,
         );
+        Ok((commit, head))
+    }
+
+    pub(crate) fn load_merge_retraction_cleanup_on(
+        records: StoreRecords<'_>,
+        authority: &mut VerifiedStoreAuthority,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        let (commit, head) =
+            Self::load_merge_retraction_cleanup_objects_on(records.conn, candidate)?;
         let prepared = parse_prepared_merge_candidate_parts_on(
-            conn,
+            records,
+            authority,
             commit.semantic_bytes(),
             commit.prepared().reference(),
             head.semantic_bytes(),
@@ -800,13 +856,43 @@ impl StoreDatabase {
         Ok(prepared)
     }
 
+    pub(crate) fn load_merge_retraction_cleanup_for_verified_materialization_on(
+        conn: &Connection,
+        retained: &OwnedVerifiedMergeMaterialization,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        let (commit, head) =
+            Self::load_merge_retraction_cleanup_objects_on(conn, retained.commit_ref())?;
+        let unverified = serde_json::from_slice(commit.semantic_bytes())
+            .map_err(|error| DbError::context("signed Merge retraction cleanup", error))?;
+        let prepared = verify_prepared_merge_candidate_parts(
+            &retained.verified_commit().author().store_root,
+            unverified,
+            retained.verified_commit().author(),
+            commit.semantic_bytes(),
+            commit.prepared().reference(),
+            head.semantic_bytes(),
+            head.prepared().reference(),
+        )?;
+        if prepared.reference != *retained.commit_ref()
+            || prepared.commit.to_bytes() != retained.commit().to_bytes()
+            || prepared.head != *retained.activation_head()
+            || prepared.head_object != *retained.activation_head_object()
+        {
+            return Err(DbError::Message(
+                "Merge retraction cleanup differs from its verified materialization".to_string(),
+            ));
+        }
+        Ok(prepared)
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn load_retained_merge_replay_inputs_on(
+    pub(crate) fn load_retained_merge_replay_inputs_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = query_mapped_rows(
-            records.conn(),
+            records.conn,
             "SELECT device_id, seq, commit_ref, input_hash
                  FROM retained_merge_materializations
                  ORDER BY device_id, seq",
@@ -827,6 +913,7 @@ impl StoreDatabase {
                 Self::load_retained_merge_materialization_on(
                     records,
                     root,
+                    registrations,
                     &stream_id,
                     sequence,
                     &commit_ref,

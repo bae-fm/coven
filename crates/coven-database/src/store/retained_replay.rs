@@ -375,13 +375,13 @@ pub struct RetainedReplayBaseline {
 }
 
 impl RetainedReplayBaseline {
-    pub fn generation_zero(
+    pub(crate) fn generation_zero(
         source: StoreRecords<'_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplayGenesisAuthority,
     ) -> Result<Self, DbError> {
-        let image_bytes = project_generation_zero_image(source.conn())?;
+        let image_bytes = project_generation_zero_image(source.conn)?;
         let baseline = Self {
             generation: GENERATION_ZERO,
             exact_cut: CommitFrontier(Default::default()),
@@ -390,18 +390,18 @@ impl RetainedReplayBaseline {
             image_hash: install_image(source, &image_bytes)?,
             authority: RetainedReplayAuthority::Genesis(authority),
         };
-        baseline.validate_image(source.store_dir())?;
+        baseline.validate_image(source.store_dir)?;
         Ok(baseline)
     }
 
-    pub fn stable_snapshot(
+    pub(crate) fn stable_snapshot(
         source: StoreRecords<'_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: RetainedReplaySnapshotAuthority,
     ) -> Result<Self, DbError> {
         authority.validate()?;
-        let image_bytes = serialized_database(source.conn())?;
+        let image_bytes = serialized_database(source.conn)?;
         let baseline = Self {
             generation: GENERATION_ZERO,
             exact_cut: authority.metadata.coverage.clone(),
@@ -410,7 +410,7 @@ impl RetainedReplayBaseline {
             image_hash: install_image(source, &image_bytes)?,
             authority: RetainedReplayAuthority::StableSnapshot(authority),
         };
-        baseline.validate_image(source.store_dir())?;
+        baseline.validate_image(source.store_dir)?;
         Ok(baseline)
     }
 
@@ -419,17 +419,14 @@ impl RetainedReplayBaseline {
             .map_err(|error| DbError::context("serialize retained replay authority", error))
     }
 
-    /// A private copy of the baseline image, opened from the payload file
-    /// `image_hash` names. Replays write into what they open — installing
-    /// bootstrap tables, applying materializations — so this deserializes the
-    /// file into memory rather than opening it in place.
-    pub fn open_image(
+    /// The verified bytes of the baseline image. Replays open a private,
+    /// writable connection from these bytes inside the replay capability.
+    pub(super) fn image_bytes(
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<Connection, DbError> {
-        let image = crate::payload_spool::read_payload_blocking(store_dir, self.image_hash)
-            .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))?;
-        open_image(&image)
+    ) -> Result<Vec<u8>, DbError> {
+        crate::payload_spool::read_payload_blocking(store_dir, self.image_hash)
+            .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))
     }
 
     pub fn validate_image(
@@ -441,7 +438,7 @@ impl RetainedReplayBaseline {
                 "generation-zero retained replay baseline metadata is inconsistent".to_string(),
             ));
         }
-        let image = self.open_image(store_dir)?;
+        let image = open_image(&self.image_bytes(store_dir)?)?;
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {
@@ -486,7 +483,7 @@ impl RetainedReplayBaseline {
                         )));
                     }
                 }
-                validate_replay_image_foreign_keys(&image)
+                validate_replay_image_foreign_keys(&image)?;
             }
             RetainedReplayAuthority::StableSnapshot(authority) => {
                 authority.validate()?;
@@ -543,13 +540,26 @@ impl RetainedReplayBaseline {
                         "snapshot replay baseline contains materialized_commits rows".to_string(),
                     ));
                 }
+                let mut verified_authority = super::VerifiedStoreAuthority::default();
                 crate::StoreDatabase::validate_snapshot_retained_inputs_on(
                     StoreRecords::new(&image, store_dir),
+                    &mut verified_authority,
                     &authority.store_root,
                 )?;
-                validate_replay_image_foreign_keys(&image)
+                validate_replay_image_foreign_keys(&image)?;
             }
         }
+        let routing = crate::database_open::load_coven_metadata(&image)?;
+        if routing.hash() != self.routing_hash {
+            return Err(DbError::Message(
+                "retained replay image routing contract differs from its baseline".to_string(),
+            ));
+        }
+        crate::database_open::validate_initialized_coven_schema(
+            &image,
+            routing.has_scoped_graph(),
+        )?;
+        crate::store_authority_records::validate_replay_authority_on(&image, self)
     }
 
     fn validate_image_metadata(&self, image: &Connection) -> Result<(), DbError> {

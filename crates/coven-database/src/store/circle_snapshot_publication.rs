@@ -16,7 +16,11 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let pending = self
-            .call_records(move |records| load_outbound_circle_snapshot_on(records, circle_id))
+            .connection
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                load_outbound_circle_snapshot_on(session.records, &authority, circle_id)
+            })
             .await?;
         if let Some(pending) = &pending {
             verify_snapshot_blob_spools(&pending.blobs, "prepared Circle").await?;
@@ -29,7 +33,10 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleSnapshot>, DbError> {
         self.connection
-            .call(move |conn| load_published_circle_snapshot_on(conn, circle_id))
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                load_published_circle_snapshot_on(session.records.conn, &authority, circle_id)
+            })
             .await
     }
 
@@ -42,10 +49,12 @@ impl StoreDatabase {
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
         let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates();
+        let gates = self.gates.clone();
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                let conn = session.records.conn;
                 let image_facts =
                     crate::payload_spool::write_payload_file_blocking(&store_dir, image.path())
                         .map_err(|error| {
@@ -61,7 +70,6 @@ impl StoreDatabase {
                 .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
                 let image_prepared_size = image_prepared.stored_bytes().len() as u64;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let authority = local_store_authority_on(&tx)?;
                 let registration_ref = authority.reference();
                 let registration = authority.value();
                 validate_snapshot_author(&meta.author_registration, registration_ref, "Circle")?;
@@ -101,7 +109,7 @@ impl StoreDatabase {
                         "staged Circle snapshot changed during exact verification".to_string(),
                     ));
                 }
-                let previous = load_published_circle_snapshot_on(&tx, meta.circle_id)?;
+                let previous = load_published_circle_snapshot_on(&tx, &authority, meta.circle_id)?;
                 let (expected_generation, expected_slot) = match &previous {
                     Some(previous) => (
                         previous
@@ -207,7 +215,9 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let authority = session.local_store_authority()?;
+                let conn = session.records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let circle_id = {
                     let bytes: Vec<u8> = tx
@@ -232,6 +242,7 @@ impl StoreDatabase {
                 };
                 let outbound = load_outbound_circle_snapshot_on(
                     crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                    &authority,
                     circle_id,
                 )?
                 .ok_or_else(|| {

@@ -6,7 +6,8 @@ impl StoreDatabase {
         object: ExactObjectRef,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let conn = session.records.conn;
                 let object_id = remote_object_id(&object);
                 let mut remote = load_remote_object_on(conn, object_id)?;
                 if remote.cleanup_target() != Some(&object) {
@@ -27,7 +28,10 @@ impl StoreDatabase {
         write_id: WriteId,
     ) -> Result<Option<BlockedMergeCandidate>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let row: Option<(String, Option<String>)> = conn
                     .query_row(
                         "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -54,7 +58,8 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::Publication { .. } = &prepared else {
                     return Ok(None);
                 };
-                let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?;
+                let candidate =
+                    parse_prepared_merge_candidate_on(records, verified_authority, &prepared)?;
                 if candidate.commit.write_id != write_id {
                     return Err(DbError::Message(
                         "blocked Merge candidate differs from its write identity".to_string(),
@@ -76,7 +81,10 @@ impl StoreDatabase {
         write_id: WriteId,
     ) -> Result<Option<PreparedMergeAbandonmentCandidates>, DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let raw_prepared: Option<String> = conn
                     .query_row(
                         "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -103,7 +111,8 @@ impl StoreDatabase {
                 Ok(Some(PreparedMergeAbandonmentCandidates {
                     candidate: blocked_merge_candidate_from_prepared(
                         parse_prepared_merge_candidate_parts_on(
-                            conn,
+                            records,
+                            verified_authority,
                             candidate_commit.semantic_bytes(),
                             candidate_commit.prepared().reference(),
                             candidate_head.semantic_bytes(),
@@ -112,7 +121,8 @@ impl StoreDatabase {
                     ),
                     authority: blocked_merge_candidate_from_prepared(
                         parse_prepared_merge_candidate_parts_on(
-                            conn,
+                            records,
+                            verified_authority,
                             authority_commit.semantic_bytes(),
                             authority_commit.prepared().reference(),
                             authority_head.semantic_bytes(),
@@ -130,10 +140,18 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-        self.call_records(move |records| {
-            author_exclusion_activation_for_candidate_on(records, &root, &candidate, &author)
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                author_exclusion_activation_for_candidate_on(
+                    records,
+                    session.verified_store_authority,
+                    &root,
+                    &candidate,
+                    &author,
+                )
+            })
+            .await
     }
 
     pub async fn begin_blocked_merge_candidate_nonactivation(
@@ -143,43 +161,53 @@ impl StoreDatabase {
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
-        self.call_records(move |records| {
-            let conn = records.conn();
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let (raw_status, raw_prepared): (String, String) = tx
-                .query_row(
-                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(DbError::from)?;
-            let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
-            if !matches!(status, WriteStatus::Blocked(_)) {
-                return Err(DbError::Message(format!(
-                    "Merge candidate {write_id} is not blocked"
-                )));
-            }
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-                .map_err(|error| DbError::context("blocked Merge candidate preparation", error))?;
-            let PreparedStoreWriteState::Publication { .. } = &prepared else {
-                return Err(DbError::Message(
-                    "author exclusion reached a non-candidate Merge preparation".to_string(),
-                ));
-            };
-            let candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?;
-            begin_blocked_merge_candidate_nonactivation_on(
-                crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
-                &root,
-                &write_id,
-                &candidate,
-                &nonactivation,
-                true,
-                &[],
-            )?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
+                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+                let (raw_status, raw_prepared): (String, String) = tx
+                    .query_row(
+                        "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                        [write_id.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(DbError::from)?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::context("blocked Merge candidate status", error))?;
+                if !matches!(status, WriteStatus::Blocked(_)) {
+                    return Err(DbError::Message(format!(
+                        "Merge candidate {write_id} is not blocked"
+                    )));
+                }
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                    .map_err(|error| {
+                        DbError::context("blocked Merge candidate preparation", error)
+                    })?;
+                let PreparedStoreWriteState::Publication { .. } = &prepared else {
+                    return Err(DbError::Message(
+                        "author exclusion reached a non-candidate Merge preparation".to_string(),
+                    ));
+                };
+                let candidate = parse_prepared_merge_candidate_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
+                    &prepared,
+                )?;
+                begin_blocked_merge_candidate_nonactivation_on(
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
+                    verified_authority,
+                    &root,
+                    &write_id,
+                    &candidate,
+                    &nonactivation,
+                    true,
+                    &[],
+                )?;
+                tx.commit().map_err(DbError::from)
+            })
+            .await
     }
 
     pub async fn begin_prepared_merge_abandonment_nonactivation(
@@ -195,8 +223,11 @@ impl StoreDatabase {
             blocked_merge_candidate_nonactivation(authority_nonactivation)?;
         let notified_write_id = write_id.clone();
         let blocked = self
-            .call_records(move |records| {
-                let conn = records.conn();
+            .connection
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -235,21 +266,24 @@ impl StoreDatabase {
                     ));
                 }
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
                     candidate_head.prepared().reference(),
                 )?;
                 let authority = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     authority_commit.semantic_bytes(),
                     authority_commit.prepared().reference(),
                     authority_head.semantic_bytes(),
                     authority_head.prepared().reference(),
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
+                    verified_authority,
                     &root,
                     &write_id,
                     &candidate,
@@ -258,7 +292,8 @@ impl StoreDatabase {
                     &[],
                 )?;
                 begin_blocked_merge_candidate_nonactivation_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir()),
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
+                    verified_authority,
                     &root,
                     &write_id,
                     &authority,
@@ -304,7 +339,10 @@ impl StoreDatabase {
     ) -> Result<MergeAbandonmentState, DbError> {
         let write_id = write_id.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let raw_prepared: Option<String> = conn
                     .query_row(
                         "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -327,7 +365,8 @@ impl StoreDatabase {
                     return Ok(MergeAbandonmentState::None);
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    conn,
+                    records,
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
@@ -353,7 +392,10 @@ impl StoreDatabase {
     pub async fn resume_winning_merge_candidate(&self, write_id: WriteId) -> Result<(), DbError> {
         let notified_write_id = write_id.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -390,7 +432,8 @@ impl StoreDatabase {
                     ));
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
@@ -402,7 +445,8 @@ impl StoreDatabase {
                     ));
                 }
                 let authority = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     authority_commit.semantic_bytes(),
                     authority_commit.prepared().reference(),
                     authority_head.semantic_bytes(),
@@ -443,7 +487,10 @@ impl StoreDatabase {
 
     pub async fn finish_lost_merge_abandonment(&self, write_id: WriteId) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -480,7 +527,8 @@ impl StoreDatabase {
                     ));
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
@@ -492,7 +540,8 @@ impl StoreDatabase {
                     ));
                 }
                 let authority = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     authority_commit.semantic_bytes(),
                     authority_commit.prepared().reference(),
                     authority_head.semantic_bytes(),
@@ -530,7 +579,10 @@ impl StoreDatabase {
         write_id: WriteId,
     ) -> Result<(), DbError> {
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -568,14 +620,16 @@ impl StoreDatabase {
                     ));
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
                     candidate_head.prepared().reference(),
                 )?;
                 let authority = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     authority_commit.semantic_bytes(),
                     authority_commit.prepared().reference(),
                     authority_head.semantic_bytes(),

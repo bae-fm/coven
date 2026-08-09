@@ -278,7 +278,7 @@ pub fn load_prepared_audience_objects_on(
     Ok(PreparedAudienceObjects { packages, blobs })
 }
 
-pub fn load_activated_registration_on(
+pub(crate) fn load_activated_registration_on(
     conn: &Connection,
     root: &coven_protocol::store_commit::StoreRootRef,
     reference: &StoreDeviceRegistrationRef,

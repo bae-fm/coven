@@ -38,6 +38,8 @@ mod publication;
 pub mod publication_state;
 mod pull_replay;
 pub mod reclaim;
+mod replay_projection;
+use replay_projection::ReplayProjection;
 mod retained_merge_replay;
 mod retained_replay;
 mod snapshot_image;
@@ -45,16 +47,18 @@ mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
 mod store_device_state;
+mod store_session;
 mod stream_activation_records;
+mod verified_store_authority;
+pub(crate) use verified_store_authority::VerifiedStoreAuthority;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_support;
 mod write_lifecycle;
 
 use crate::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
-    load_activated_registration_on, load_protocol_inert_object_on, load_remote_object_on,
-    persist_exact_remote_object_on, replace_prepared_merge_head_remote_on,
-    required_store_root_authority_on, Database, DbError, OutboundStoreAckActivation,
+    load_protocol_inert_object_on, load_remote_object_on, persist_exact_remote_object_on,
+    replace_prepared_merge_head_remote_on, Database, DbError, OutboundStoreAckActivation,
 };
 use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
@@ -88,6 +92,7 @@ pub use host_write_capture::{
 pub use host_write_operation::StoreRowWrites;
 pub use host_write_operation::{BlobFileFailure, BlobFileFailures, WriteBatch};
 pub use host_write_operation::{HostWriteError, HostWriteOperation};
+pub(crate) use local_blob_cleanup::record_obsolete_copy_intents_on;
 pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
@@ -112,7 +117,6 @@ pub use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
 };
-pub use retained_merge_replay::RetainedReplayCache;
 pub use retained_replay::{
     copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
     RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
@@ -146,9 +150,6 @@ pub struct StoreDatabaseRuntime {
     /// Serializes staging and publication of the one exact snapshot generation
     /// held in `outbound_store_snapshot`.
     snapshot_publication: std::sync::Arc<tokio::sync::Mutex<()>>,
-    /// The replay baseline and Merge inputs verified on this open database,
-    /// extended only by fully opening newly retained inputs on its connection.
-    retained_replay: std::sync::Arc<std::sync::Mutex<RetainedReplayCache>>,
     /// Serializes this device's authorship of its own Store stream: reading the
     /// position a commit extends, and publishing the head that takes it.
     ///
@@ -170,9 +171,6 @@ impl StoreDatabaseRuntime {
             store_creation: Default::default(),
             device_exclusion: Default::default(),
             snapshot_publication: Default::default(),
-            retained_replay: std::sync::Arc::new(std::sync::Mutex::new(
-                RetainedReplayCache::default(),
-            )),
             own_stream_authorship: Default::default(),
             local_blob_cleanup: Default::default(),
         }
@@ -205,62 +203,20 @@ pub struct SnapshotPublicationPermit {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
-/// This store's connection, and the payload files the rows on it name.
+/// One connection-thread Store operation.
 ///
-/// Every call this store makes goes through here, which is what lets the payload
-/// deletions a call commits be paid by that same call. A flow that drops the
-/// last claim on a payload records the deletion in the transaction that drops
-/// the row; once that transaction commits the file is nobody's, and the
-/// discharge below removes it before the call returns — on the connection
-/// thread, where the claim transactions run, so nothing can re-claim a payload
-/// in between. Attaching it here rather than at each producing flow is what
-/// makes "every obligation has an owner that pays it" a fact of one function
-/// instead of a convention every future producer has to remember.
-#[derive(Clone)]
-struct StoreDatabaseConnection {
-    connection: crate::DatabaseConnection,
-    store_dir: coven_foundation::store_dir::StoreDir,
-}
-
-impl StoreDatabaseConnection {
-    fn new(
-        connection: crate::DatabaseConnection,
-        store_dir: coven_foundation::store_dir::StoreDir,
-    ) -> Self {
-        Self {
-            connection,
-            store_dir,
-        }
-    }
-
-    async fn call<F, R>(&self, operation: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&rusqlite::Connection) -> Result<R, DbError> + Send + 'static,
-        R: Send + 'static,
-    {
-        let store_dir = self.store_dir.clone();
-        self.connection
-            .call(move |conn| {
-                let outcome = operation(conn);
-                let cleanup = payload_spool::pay_owed_payload_deletions_on(conn, &store_dir);
-                match (outcome, cleanup) {
-                    (Ok(value), Ok(())) => Ok(value),
-                    (Err(operation), Ok(())) => Err(operation),
-                    (Ok(_), Err(cleanup)) => Err(cleanup),
-                    (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    }),
-                }
-            })
-            .await
-    }
+/// The Store implementation can combine its row-and-payload capability with
+/// authority verified by the same connection. Code outside this module cannot
+/// obtain either retained dependency.
+pub(crate) struct StoreSession<'session> {
+    records: payload_spool::StoreRecords<'session>,
+    verified_store_authority: &'session mut VerifiedStoreAuthority,
 }
 
 #[derive(Clone)]
 pub struct StoreDatabase {
     store_dir: coven_foundation::store_dir::StoreDir,
-    connection: StoreDatabaseConnection,
+    connection: crate::DatabaseConnection,
     runtime: StoreDatabaseRuntime,
     hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
     synced_tables: std::sync::Arc<Vec<coven_protocol::synced_schema::SyncedTable>>,
@@ -283,12 +239,151 @@ pub struct StoreDatabase {
     test_access: crate::StoreDatabaseTestAccess,
 }
 
+impl StoreSession<'_> {
+    fn protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
+        crate::get_protocol_state_on(self.records.conn, key)
+    }
+
+    fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
+        crate::set_protocol_state_on(self.records.conn, key, value)
+    }
+
+    fn write_status(
+        &self,
+        write_id: &coven_protocol::write::WriteId,
+    ) -> Result<coven_protocol::write::WriteStatus, DbError> {
+        let raw: String = self
+            .records
+            .conn
+            .query_row(
+                "SELECT status FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        serde_json::from_str(&raw)
+            .map_err(|error| DbError::context(format!("write {write_id} status"), error))
+    }
+
+    fn begin_store_creation_attempt(
+        &self,
+        value: &str,
+    ) -> Result<coven_protocol::store_creation::StoreCreationAttempt, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO NOTHING",
+            (
+                coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                value,
+            ),
+        )
+        .map_err(DbError::from)?;
+        let actual = crate::required_protocol_state_on(
+            &tx,
+            coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+        )?;
+        tx.commit().map_err(DbError::from)?;
+        serde_json::from_str(&actual)
+            .map_err(|error| DbError::context("parse Store creation attempt", error))
+    }
+
+    fn load_store_creation_attempt(
+        &self,
+    ) -> Result<Option<coven_protocol::store_creation::StoreCreationAttempt>, DbError> {
+        self.protocol_state(coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY)?
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|error| DbError::context("parse Store creation attempt", error))
+            })
+            .transpose()
+    }
+
+    fn advance_store_creation_attempt(&self, previous: &str, next: &str) -> Result<(), DbError> {
+        let changed = self
+            .records
+            .conn
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (
+                    next,
+                    coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    previous,
+                ),
+            )
+            .map_err(DbError::from)?;
+        if changed != 1 {
+            return Err(DbError::Message(
+                "Store creation attempt advance lost its exact predecessor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn scoped_snapshot_counts(&self) -> Result<(i64, i64, i64), DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM documents),
+                     (SELECT COUNT(*) FROM paragraphs),
+                     (SELECT COUNT(*) FROM _coven_row_routes)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn migrated_scoped_snapshot_facts(&self) -> Result<(i64, i64, String), DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM documents),
+                     (SELECT COUNT(*) FROM _coven_row_routes),
+                     (SELECT ordinary FROM documents)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn circle_bootstrap_coverage_ref(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        StoreDatabase::circle_bootstrap_coverage_ref_on(self.records.conn, circle_id)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn circle_control_activation_count(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<i64, DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+}
+
 impl StoreDatabase {
     #[doc(hidden)]
     pub fn from_database(database: Database) -> Self {
         let Database { connection, state } = database;
         Self {
-            connection: StoreDatabaseConnection::new(connection, state.store_dir.clone()),
+            connection,
             store_dir: state.store_dir,
             runtime: state.store_runtime,
             hlc: state.hlc,
@@ -316,28 +411,11 @@ impl StoreDatabase {
         E: Send + 'static,
     {
         self.connection
-            .call(move |connection| {
+            .call_store(move |session| {
+                let connection = session.records.conn;
                 let authorization = host_sql_transaction::HostSqlAuthorization::begin(connection)?;
                 Ok(authorization.run(|| read(SqlReadContext::new(connection))))
             })
-            .await
-    }
-
-    /// Run `operation` on the connection thread against this store's rows and
-    /// the payload files those rows name.
-    ///
-    /// The directory is bound here, from the one the database opened under, so
-    /// no flow picks a different one for the files a row it writes will name.
-    async fn call_records<F, R>(&self, operation: F) -> Result<R, DbError>
-    where
-        F: for<'records> FnOnce(payload_spool::StoreRecords<'records>) -> Result<R, DbError>
-            + Send
-            + 'static,
-        R: Send + 'static,
-    {
-        let store_dir = self.store_dir.clone();
-        self.connection
-            .call(move |conn| operation(payload_spool::StoreRecords::new(conn, &store_dir)))
             .await
     }
 
@@ -361,20 +439,8 @@ impl StoreDatabase {
         self.blob_tombstone_grace
     }
 
-    fn gates(&self) -> std::sync::Arc<crate::Gates> {
-        self.gates.clone()
-    }
-
     pub fn has_scoped_graph(&self) -> bool {
         self.gates.has_scoped_graph()
-    }
-
-    fn blob_decls(&self) -> std::sync::Arc<crate::BlobDecls> {
-        self.blob_decls.clone()
-    }
-
-    fn hlc(&self) -> std::sync::Arc<coven_protocol::hlc::Hlc> {
-        self.hlc.clone()
     }
 
     pub fn stamp(&self) -> String {
@@ -420,7 +486,7 @@ impl StoreDatabase {
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         self.connection
-            .call(move |connection| crate::get_protocol_state_on(connection, &key))
+            .call_store(move |session| session.protocol_state(&key))
             .await
     }
 
@@ -428,7 +494,7 @@ impl StoreDatabase {
         let key = key.to_string();
         let value = value.to_string();
         self.connection
-            .call(move |connection| crate::set_protocol_state_on(connection, &key, &value))
+            .call_store(move |session| session.set_protocol_state(&key, &value))
             .await
     }
 
@@ -457,17 +523,7 @@ impl StoreDatabase {
     ) -> Result<coven_protocol::write::WriteStatus, DbError> {
         let write_id = write_id.clone();
         self.connection
-            .call(move |connection| {
-                let raw: String = connection
-                    .query_row(
-                        "SELECT status FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                serde_json::from_str(&raw)
-                    .map_err(|error| DbError::context(format!("write {write_id} status"), error))
-            })
+            .call_store(move |session| session.write_status(&write_id))
             .await
     }
 
@@ -533,26 +589,6 @@ impl StoreDatabase {
         }
     }
 
-    async fn with_retained_replay<F, R>(&self, operation: F) -> Result<R, DbError>
-    where
-        F: for<'records> FnOnce(
-                payload_spool::StoreRecords<'records>,
-                &mut RetainedReplayCache,
-            ) -> Result<R, DbError>
-            + Send
-            + 'static,
-        R: Send + 'static,
-    {
-        let replay = self.runtime.retained_replay.clone();
-        self.call_records(move |records| {
-            let mut replay = replay.lock().map_err(|_| {
-                DbError::Message("retained replay cache lock is poisoned".to_string())
-            })?;
-            operation(records, &mut replay)
-        })
-        .await
-    }
-
     pub async fn begin_store_creation_attempt(
         &self,
         initialized: coven_protocol::store_creation::StoreCreationAttempt,
@@ -560,25 +596,7 @@ impl StoreDatabase {
         let value = serde_json::to_string(&initialized)
             .map_err(|error| DbError::context("serialize Store creation attempt", error))?;
         self.connection
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO NOTHING",
-                    (
-                        coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
-                        &value,
-                    ),
-                )
-                .map_err(DbError::from)?;
-                let actual = crate::required_protocol_state_on(
-                    &tx,
-                    coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                serde_json::from_str(&actual)
-                    .map_err(|error| DbError::context("parse Store creation attempt", error))
-            })
+            .call_store(move |session| session.begin_store_creation_attempt(&value))
             .await
     }
 
@@ -586,17 +604,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<coven_protocol::store_creation::StoreCreationAttempt>, DbError> {
         self.connection
-            .call(move |conn| {
-                crate::get_protocol_state_on(
-                    conn,
-                    coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
-                )?
-                .map(|value| {
-                    serde_json::from_str(&value)
-                        .map_err(|error| DbError::context("parse Store creation attempt", error))
-                })
-                .transpose()
-            })
+            .call_store(|session| session.load_store_creation_attempt())
             .await
     }
 
@@ -610,24 +618,7 @@ impl StoreDatabase {
         let next = serde_json::to_string(&next)
             .map_err(|error| DbError::context("serialize Store creation successor", error))?;
         self.connection
-            .call(move |conn| {
-                let changed = conn
-                    .execute(
-                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                        (
-                            &next,
-                            coven_protocol::store_creation::STORE_CREATION_ATTEMPT_STATE_KEY,
-                            &previous,
-                        ),
-                    )
-                    .map_err(DbError::from)?;
-                if changed != 1 {
-                    return Err(DbError::Message(
-                        "Store creation attempt advance lost its exact predecessor".to_string(),
-                    ));
-                }
-                Ok(())
-            })
+            .call_store(move |session| session.advance_store_creation_attempt(&previous, &next))
             .await
     }
 
@@ -663,25 +654,14 @@ impl StoreDatabase {
         &self,
     ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
         self.connection
-            .call(|connection| Ok(required_store_root_authority_on(connection)?.store_root_hash))
+            .call_store(|session| Ok(session.required_root_authority()?.store_root_hash))
             .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn scoped_snapshot_counts_for_test(&self) -> Result<(i64, i64, i64), DbError> {
         self.connection
-            .call(|connection| {
-                connection
-                    .query_row(
-                        "SELECT
-                             (SELECT COUNT(*) FROM documents),
-                             (SELECT COUNT(*) FROM paragraphs),
-                             (SELECT COUNT(*) FROM _coven_row_routes)",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .map_err(DbError::from)
-            })
+            .call_store(|session| session.scoped_snapshot_counts())
             .await
     }
 
@@ -690,18 +670,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<(i64, i64, String), DbError> {
         self.connection
-            .call(|connection| {
-                connection
-                    .query_row(
-                        "SELECT
-                             (SELECT COUNT(*) FROM documents),
-                             (SELECT COUNT(*) FROM _coven_row_routes),
-                             (SELECT ordinary FROM documents)",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .map_err(DbError::from)
-            })
+            .call_store(|session| session.migrated_scoped_snapshot_facts())
             .await
     }
 
@@ -709,7 +678,8 @@ impl StoreDatabase {
     pub async fn generation_zero_replay_baseline_for_test(
         &self,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        self.call_records(Self::generation_zero_replay_baseline_on)
+        self.connection
+            .call_store(|session| Self::generation_zero_replay_baseline_on(session.records))
             .await
     }
 
@@ -718,36 +688,39 @@ impl StoreDatabase {
         &self,
         authority_bytes: Vec<u8>,
     ) -> Result<(), DbError> {
-        self.call_records(move |records| {
-            let authority_hash = records.install_payload(&authority_bytes).map_err(|error| {
-                DbError::Message(format!("install retained replay authority: {error}"))
-            })?;
-            let transaction = records
-                .conn()
-                .unchecked_transaction()
-                .map_err(DbError::from)?;
-            transaction
-                .execute(
-                    "UPDATE retained_replay_baselines SET authority_hash = ?1
+        self.connection
+            .call_store(move |session| {
+                let records = session.records;
+                let authority_hash =
+                    records.install_payload(&authority_bytes).map_err(|error| {
+                        DbError::Message(format!("install retained replay authority: {error}"))
+                    })?;
+                let transaction = records
+                    .conn
+                    .unchecked_transaction()
+                    .map_err(DbError::from)?;
+                transaction
+                    .execute(
+                        "UPDATE retained_replay_baselines SET authority_hash = ?1
                      WHERE singleton = 1",
-                    [authority_hash.to_string()],
-                )
-                .map_err(DbError::from)?;
-            let image_hash: String = transaction
-                .query_row(
-                    "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            payload_spool::set_payload_owner_claims_on(
-                &transaction,
-                payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
-                &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
-            )?;
-            transaction.commit().map_err(DbError::from)
-        })
-        .await
+                        [authority_hash.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                let image_hash: String = transaction
+                    .query_row(
+                        "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                payload_spool::set_payload_owner_claims_on(
+                    &transaction,
+                    payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+                    &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
+                )?;
+                transaction.commit().map_err(DbError::from)
+            })
+            .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -756,7 +729,7 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
         self.connection
-            .call(move |connection| Self::circle_bootstrap_coverage_ref_on(connection, circle_id))
+            .call_store(move |session| session.circle_bootstrap_coverage_ref(circle_id))
             .await
     }
 
@@ -770,7 +743,8 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.call_records(Self::circle_bootstrap_replay_inputs_on)
+        self.connection
+            .call_store(|session| Self::circle_bootstrap_replay_inputs_on(session.records))
             .await
     }
 
@@ -780,15 +754,7 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
         self.connection
-            .call(move |connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                        [circle_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
+            .call_store(move |session| session.circle_control_activation_count(circle_id))
             .await
     }
 }

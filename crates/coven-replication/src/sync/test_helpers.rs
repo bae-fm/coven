@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use coven_database::Database;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{KeyError, MasterKeyCustody, UserKeypair};
@@ -307,9 +306,9 @@ mod test_device {
     }
 
     impl TestStoreDir {
-        pub fn from_database(database: &Database) -> Self {
+        pub fn from_database(database: &SyntheticDatabase) -> Self {
             Self {
-                dir: database.store_dir_for_test().clone(),
+                dir: database.store_dir.clone(),
             }
         }
 
@@ -334,7 +333,7 @@ mod test_device {
 
     impl TestDevice {
         pub async fn create(
-            db: &Database,
+            db: &SyntheticDatabase,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             founder_timestamp: &str,
             identity: UserKeypair,
@@ -402,7 +401,7 @@ mod test_device {
         }
 
         pub async fn load(
-            db: &Database,
+            db: &SyntheticDatabase,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
@@ -2547,13 +2546,16 @@ struct TestStoreProducers {
 }
 
 impl TestStore {
-    pub async fn bind_founder_device(&self, database: &Database) -> Result<TestDevice, String> {
+    pub async fn bind_founder_device(
+        &self,
+        database: &SyntheticDatabase,
+    ) -> Result<TestDevice, String> {
         self.bind_device(database, &self.signer).await
     }
 
     pub async fn open_store_with_identity(
         &self,
-        database: &Database,
+        database: &SyntheticDatabase,
         store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -2660,7 +2662,7 @@ impl TestStore {
 
     pub async fn pull_with_storage_for_test(
         &self,
-        database: &Database,
+        database: &SyntheticDatabase,
         storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: &StoreDir,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
@@ -2758,7 +2760,7 @@ impl TestStore {
 
     pub async fn pull_into_result(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         store_dir: &StoreDir,
     ) -> Result<
         (
@@ -2775,7 +2777,7 @@ impl TestStore {
 
     pub async fn pull_into(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         store_dir: &StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
@@ -2788,8 +2790,8 @@ impl TestStore {
 
     pub async fn promote_active_member_fixture(
         &self,
-        owner_db: &Database,
-        member_db: &Database,
+        owner_db: &SyntheticDatabase,
+        member_db: &SyntheticDatabase,
         owner: &UserKeypair,
         member: &UserKeypair,
         encryption: &coven_keys::encryption::EncryptionService,
@@ -2841,7 +2843,7 @@ impl TestStore {
     }
 
     pub async fn create(
-        db: &Database,
+        db: &SyntheticDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2860,7 +2862,7 @@ impl TestStore {
     }
 
     pub async fn create_encrypted(
-        db: &Database,
+        db: &SyntheticDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2903,7 +2905,7 @@ impl TestStore {
     /// (sealed under the store key, hashed paths). The pair is fixed per home,
     /// so a test that needs the browsable verification story needs this store.
     pub async fn create_browsable(
-        db: &Database,
+        db: &SyntheticDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2920,7 +2922,7 @@ impl TestStore {
     }
 
     async fn create_with_protection(
-        db: &Database,
+        db: &SyntheticDatabase,
         store_id: &str,
         signer: UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -3320,7 +3322,7 @@ impl TestStore {
 
     pub async fn publish_third_candidate_winner(
         &self,
-        peer_db: &Database,
+        peer_db: &SyntheticDatabase,
         candidate: &coven_database::BlockedMergeCandidate,
     ) {
         let registration = coven_database::StoreDatabase::new(peer_db)
@@ -3552,7 +3554,7 @@ impl TestStore {
 
     pub async fn bind_device(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
         TestDevice::load_with_database(
@@ -3584,8 +3586,8 @@ impl TestStore {
 
     pub async fn activate_joined_device(
         &self,
-        observer_db: &Database,
-        joining_db: &Database,
+        observer_db: &SyntheticDatabase,
+        joining_db: &SyntheticDatabase,
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
@@ -3602,7 +3604,7 @@ impl TestStore {
     async fn activate_joined_device_with_observer(
         &self,
         observer: TestDevice,
-        joining_db: &Database,
+        joining_db: &SyntheticDatabase,
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
@@ -3703,7 +3705,7 @@ impl TestStore {
 
     pub async fn invite_member(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         identity: &UserKeypair,
         member_pubkey: &str,
         invitee_email: Option<&str>,
@@ -3730,8 +3732,8 @@ impl TestStore {
 
     pub async fn invite_and_activate_peer(
         &self,
-        observer_db: &Database,
-        peer_db: &Database,
+        observer_db: &SyntheticDatabase,
+        peer_db: &SyntheticDatabase,
         peer: &UserKeypair,
     ) -> Result<TestDevice, String> {
         self.invite_member(
@@ -3751,7 +3753,7 @@ impl TestStore {
 
     pub async fn remove_member(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         identity: &UserKeypair,
         member_pubkey: &str,
         encryption: &coven_keys::encryption::EncryptionService,
@@ -3850,7 +3852,7 @@ impl TestStore {
             .clone())
     }
 
-    pub async fn open_into(&self, db: &Database) -> Result<TestDevice, String> {
+    pub async fn open_into(&self, db: &SyntheticDatabase) -> Result<TestDevice, String> {
         TestDevice::open_with_database(
             coven_database::StoreDatabase::new(db),
             TestStoreDir::from_database(db),
@@ -3877,7 +3879,7 @@ impl TestStore {
 
     pub async fn publish_pending(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
         self.publish_pending_store_database(&coven_database::StoreDatabase::new(db), store_dir)
@@ -4037,7 +4039,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn push_circle_snapshots(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         temp_dir: std::path::PathBuf,
         schema_version: u32,
         created_at: &str,
@@ -4066,7 +4068,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn load_circle_snapshot_metas(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
@@ -4090,7 +4092,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn verify_standalone_circle_snapshot_image(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
         store_routing: &coven_keys::encryption::EncryptionService,
@@ -4112,7 +4114,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn circle_snapshot_is_stable(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         circle_id: coven_protocol::circle::CircleId,
         snapshot_cut: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<bool, crate::sync::store::SnapshotError> {
@@ -4133,7 +4135,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn load_circle_acknowledgement(
         &self,
-        db: &Database,
+        db: &SyntheticDatabase,
         reference: &coven_protocol::store_commit::CircleAckRef,
     ) -> Result<coven_protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
         self.bind_device(db, &self.signer)
@@ -4574,8 +4576,120 @@ where
         self.inner.delete_provider_object(key).await
     }
 
-    fn provider_probes(&self) -> &coven_storage::provider_probe::ProviderProbeStorage {
-        self.inner.provider_probes()
+    async fn reserve_cross_principal_response_slot(
+        &self,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+    ) -> Result<coven_protocol::objects::ObjectSlot, coven_protocol::provider::ProviderProbeError>
+    {
+        self.inner
+            .reserve_cross_principal_response_slot(probe_id)
+            .await
+    }
+
+    async fn prepare_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        store: &coven_protocol::StoreProviderBinding,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.inner
+            .prepare_cross_principal_challenge(
+                publication_journal,
+                probe_id,
+                store,
+                context,
+                administrator_signer,
+            )
+            .await
+    }
+
+    async fn settle_cross_principal_challenge(
+        &self,
+        publication_journal: &dyn coven_protocol::provider::DeviceJoinChallengePublicationJournal,
+        authorization: &coven_protocol::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalChallengeContext,
+        store: &coven_protocol::StoreProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeChallenge,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.inner
+            .settle_cross_principal_challenge(
+                publication_journal,
+                authorization,
+                challenge,
+                context,
+                store,
+            )
+            .await
+    }
+
+    async fn create_cross_principal_response(
+        &self,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signing_pubkey: &str,
+        peer_signer: &coven_keys::keys::UserKeypair,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeResponse,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.inner
+            .create_cross_principal_response(
+                challenge,
+                context,
+                store,
+                administrator_signing_pubkey,
+                peer_signer,
+            )
+            .await
+    }
+
+    async fn complete_cross_principal_probe(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        challenge: &coven_protocol::provider::CrossPrincipalProbeChallenge,
+        response: &coven_protocol::provider::CrossPrincipalProbeResponse,
+        context: &coven_protocol::provider::CrossPrincipalResponseContext,
+        store: &coven_protocol::StoreProviderBinding,
+        administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
+        peer_signing_pubkey: &str,
+    ) -> Result<
+        coven_protocol::provider::CrossPrincipalProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.inner
+            .complete_cross_principal_probe(
+                journal,
+                challenge,
+                response,
+                context,
+                store,
+                administrator_signer,
+                peer_signing_pubkey,
+            )
+            .await
+    }
+
+    async fn probe_exact_slots(
+        &self,
+        journal: &dyn coven_protocol::provider::ProviderProbeJournal,
+        probe_id: coven_protocol::provider::ProviderProbeId,
+        binding: &coven_protocol::objects::ResolvedProviderBinding,
+    ) -> Result<
+        coven_protocol::provider::ExactSlotProbeReceipt,
+        coven_protocol::provider::ProviderProbeError,
+    > {
+        self.inner
+            .probe_exact_slots(journal, probe_id, binding)
+            .await
     }
 
     async fn observe_exact_slot(

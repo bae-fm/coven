@@ -7,8 +7,7 @@ use super::{
     StoreDatabase,
 };
 use crate::{
-    load_activated_registration_on, persist_exact_remote_object_on,
-    required_store_root_authority_on, DbError, DurablePreparedProtocolObject, StoreWriteBase,
+    persist_exact_remote_object_on, DbError, DurablePreparedProtocolObject, StoreWriteBase,
     LOCAL_DEVICE_ID_STATE_KEY,
 };
 use coven_protocol::remote_object::RemoteObjectRecord;
@@ -21,9 +20,11 @@ use rusqlite::OptionalExtension;
 impl StoreDatabase {
     pub async fn table_schema_for_apply(&self) -> Result<crate::TableSchema, DbError> {
         let tables = self.synced_tables().to_vec();
-        let gates = self.gates();
+        let gates = self.gates.clone();
         self.connection
-            .call(move |conn| crate::TableSchema::for_apply(conn, &tables, &gates))
+            .call_store(move |session| {
+                crate::TableSchema::for_apply(session.records.conn, &tables, &gates)
+            })
             .await
     }
 
@@ -32,16 +33,26 @@ impl StoreDatabase {
         stage: StoreWritePreparation,
     ) -> Result<(), DbError> {
         let write_id = stage.write_id.clone();
-        let store_dir = self.store_dir.clone();
-        self.connection.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        self.connection.call_store(move |session| {
+            let author = session
+                .activated_registration(&stage.commit.value.author_registration)?;
+            if author.value().store_root != stage.root {
+                return Err(DbError::Message(
+                    "prepared Store write belongs to another verified Store root".to_string(),
+                ));
+            }
+            let tx = session
+                .records
+                .conn
+                .unchecked_transaction()
+                .map_err(DbError::from)?;
             let local_device_id =
                 crate::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
-            let (registration_bytes, registration_object): (Vec<u8>, String) = tx.query_row(
-                "SELECT registration_bytes, registration_object \
+            let registration_object: String = tx.query_row(
+                "SELECT registration_object \
                  FROM store_device_registration_activations WHERE device_id = ?1",
                 [&local_device_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             ).map_err(DbError::from)?;
             let registration_ref: StoreDeviceRegistrationRef =
                 serde_json::from_str(&registration_object).map_err(|error| {
@@ -56,14 +67,12 @@ impl StoreDatabase {
                 ));
             }
             let registration = stage.commit.value.author();
-            if registration_bytes != registration.to_bytes() {
+            if author.value() != registration {
                 return Err(DbError::Message(
                     "prepared write author registration differs from its activated bytes"
                         .to_string(),
                 ));
             }
-            registration_ref.verify_registration(registration)
-                .map_err(|error| DbError::Message(error.to_string()))?;
             let stream_id = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 stage.root.store_root_hash,
                 &registration_ref,
@@ -122,7 +131,7 @@ impl StoreDatabase {
                 )));
             }
             let partitions = StoreDatabase::store_write_partitions_on(
-                crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                crate::payload_spool::StoreRecords::new(&tx, session.records.store_dir),
                 stage.write_id.as_str(),
             )?;
             let stored_base: StoreWriteBase =
@@ -183,9 +192,9 @@ impl StoreDatabase {
                 &stage.audiences,
             )?;
             for remote in &stage.remote_objects {
-                crate::persist_prepared_remote_object_on(
+                    crate::persist_prepared_remote_object_on(
                     &tx,
-                    &store_dir,
+                    session.records.store_dir,
                     remote,
                     &commit_ref,
                     "candidate audience object",
@@ -199,7 +208,12 @@ impl StoreDatabase {
             .map_err(|error| {
                 DbError::context("prepared candidate commit", error)
             })?;
-            persist_exact_remote_object_on(&tx, &store_dir, &commit_remote, "candidate commit")?;
+            persist_exact_remote_object_on(
+                &tx,
+                session.records.store_dir,
+                &commit_remote,
+                "candidate commit",
+            )?;
             let expected_partition_count = usize::from(partitions.store.is_some())
                 .checked_add(partitions.circles.len())
                 .ok_or_else(|| {
@@ -281,7 +295,7 @@ impl StoreDatabase {
             );
             debug_assert_eq!(indexed, object_ids);
             Self::persist_prepared_audience_objects_on(
-                crate::payload_spool::StoreRecords::new(&tx, &store_dir),
+                crate::payload_spool::StoreRecords::new(&tx, session.records.store_dir),
                 &stage.write_id,
                 &stage.audiences.packages,
                 &stage.audiences.blobs,
@@ -297,7 +311,12 @@ impl StoreDatabase {
                 commit_ref.clone(),
             )
             .map_err(|error| DbError::context("prepared Store head", error))?;
-            persist_exact_remote_object_on(&tx, &store_dir, &head_remote, "Store head")?;
+            persist_exact_remote_object_on(
+                &tx,
+                session.records.store_dir,
+                &head_remote,
+                "Store head",
+            )?;
 
             let prepared = PreparedStoreWriteState::Publication {
                 commit: DurablePreparedProtocolObject::new(
@@ -342,10 +361,11 @@ impl StoreDatabase {
         &self,
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
-        let store_dir = self.store_dir.clone();
         let notified_write_id = stage.write_id.clone();
-        self.connection
-            .call(move |conn| {
+        self.connection.call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let (raw_status, raw_prepared): (String, String) = tx
                     .query_row(
@@ -380,7 +400,8 @@ impl StoreDatabase {
                     ));
                 };
                 let candidate = parse_prepared_merge_candidate_parts_on(
-                    &tx,
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                    verified_authority,
                     candidate_commit.semantic_bytes(),
                     candidate_commit.prepared().reference(),
                     candidate_head.semantic_bytes(),
@@ -391,9 +412,11 @@ impl StoreDatabase {
                         "prepared Merge candidate differs from its write identity".to_string(),
                     ));
                 }
-                let root = required_store_root_authority_on(&tx)?;
-                let registration = load_activated_registration_on(
-                    &tx,
+                let tx_records =
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+                let root = verified_authority.required_root_authority_on(tx_records)?;
+                let registration = verified_authority.activated_registration_on(
+                    tx_records,
                     &root,
                     &candidate.commit.author_registration,
                 )?;
@@ -456,7 +479,7 @@ impl StoreDatabase {
                 .map_err(|error| DbError::context("Merge abandonment commit", error))?;
                 persist_exact_remote_object_on(
                     &tx,
-                    &store_dir,
+                    records.store_dir,
                     &authority_commit,
                     "Merge abandonment commit",
                 )?;
@@ -473,7 +496,7 @@ impl StoreDatabase {
                 .map_err(|error| DbError::context("Merge abandonment head", error))?;
                 persist_exact_remote_object_on(
                     &tx,
-                    &store_dir,
+                    records.store_dir,
                     &authority_head,
                     "Merge abandonment head",
                 )?;
@@ -534,12 +557,16 @@ impl StoreDatabase {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let write_id = self.new_store_write_id();
-        let blob_decls = self.blob_decls();
-        let store_dir = self.store_dir.clone();
+        let blob_decls = self.blob_decls.clone();
         self.connection
-            .call(move |conn| {
+            .call_store(move |session| {
+                let records = session.records;
+                let verified_authority = &mut *session.verified_store_authority;
+                let conn = records.conn;
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let local_stream_id = crate::local_merge_stream_id_on(&tx)?;
+                let local_stream_id = verified_authority.local_merge_stream_id_on(
+                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                )?;
                 let base = StoreWriteBase {
                     dependencies: crate::StoreDatabase::materialized_frontier_on(
                         &tx,
@@ -554,9 +581,9 @@ impl StoreDatabase {
                 let blob_facts =
                     StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
                 let changeset_hash =
-                    crate::payload_spool::write_payload_blocking(&store_dir, &changeset)?;
+                    crate::payload_spool::write_payload_blocking(records.store_dir, &changeset)?;
                 StoreDatabase::insert_store_write_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
+                    crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
                     &write_id,
                     &partitions,
                     changeset_hash,
