@@ -2,7 +2,170 @@ use std::collections::BTreeSet;
 
 use crate::{persist_exact_remote_object_on, DbError};
 
-use super::StoreDatabase;
+use super::{StoreDatabase, StoreSession};
+
+impl StoreSession<'_> {
+    fn begin_owner_promotion_journal(
+        &self,
+        journal_key: &str,
+        target_key: &str,
+        value: &str,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+            (journal_key, value),
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+            (target_key, value),
+        )
+        .map_err(DbError::from)?;
+        let by_id = crate::required_protocol_state_on(&tx, journal_key)?;
+        let by_target = crate::required_protocol_state_on(&tx, target_key)?;
+        if by_id != by_target {
+            return Err(DbError::Message(
+                "Owner-promotion id and target journals disagree".to_string(),
+            ));
+        }
+        tx.commit().map_err(DbError::from)?;
+        serde_json::from_str(&by_id)
+            .map_err(|error| DbError::context("parse begun Owner-promotion journal", error))
+    }
+
+    fn begin_owner_promotion_acceptance_journal(
+        &self,
+        journal_key: &str,
+        value: &str,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        self.records
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (journal_key, value),
+            )
+            .map_err(DbError::from)?;
+        let actual = crate::required_protocol_state_on(self.records.conn, journal_key)?;
+        if actual != value {
+            return Err(DbError::Message(
+                "Owner-promotion id is already bound to different candidate acceptance".to_string(),
+            ));
+        }
+        serde_json::from_str(&actual).map_err(|error| {
+            DbError::context("parse begun Owner-promotion candidate acceptance", error)
+        })
+    }
+
+    fn advance_owner_promotion_journal(
+        &self,
+        transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
+    ) -> Result<(), DbError> {
+        let (journal_key, target_key, previous_value, next_value, remote_objects) =
+            transition.into_values();
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        advance_owner_promotion_journal_on(
+            crate::payload_spool::StoreRecordTransaction::new(&tx, self.records.store_dir),
+            journal_key,
+            target_key,
+            previous_value,
+            next_value,
+            remote_objects,
+        )?;
+        tx.commit().map_err(DbError::from)
+    }
+
+    fn end_nonactivated_owner_promotion_candidate(
+        &self,
+        transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
+        candidate: coven_protocol::store_commit::StoreBatchCommitRef,
+        objects: Vec<coven_protocol::objects::ExactObjectRef>,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
+        let (journal_key, target_key, previous_value, next_value, remote_objects) =
+            transition.into_values();
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
+            &tx,
+            &candidate,
+            &objects,
+            &nonactivation,
+        )?;
+        advance_owner_promotion_journal_on(
+            crate::payload_spool::StoreRecordTransaction::new(&tx, self.records.store_dir),
+            journal_key,
+            target_key,
+            previous_value,
+            next_value,
+            remote_objects,
+        )?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(cleanup)
+    }
+
+    fn owner_promotion_candidate_cleanup_targets(
+        &self,
+        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
+        objects: &[coven_protocol::objects::ExactObjectRef],
+    ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
+        super::candidate_records::candidate_cleanup_targets_on(
+            self.records.conn,
+            candidate,
+            objects,
+        )
+    }
+
+    fn replace_failed_owner_promotion_journal(
+        &self,
+        replacement: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
+        target_key: String,
+        replacement_key: String,
+        previous_value: String,
+        replacement_value: String,
+    ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&replacement_key, &replacement_value),
+            )
+            .map_err(DbError::from)?;
+        if inserted != 1 {
+            return Err(DbError::Message(
+                "fresh Owner-promotion retry identity is already present".to_string(),
+            ));
+        }
+        let replaced = tx
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (&replacement_value, &target_key, &previous_value),
+            )
+            .map_err(DbError::from)?;
+        if replaced != 1 {
+            return Err(DbError::Message(
+                "Owner-promotion retry lost its exact failed target attempt".to_string(),
+            ));
+        }
+        tx.commit().map_err(DbError::from)?;
+        Ok(replacement)
+    }
+}
 
 impl StoreDatabase {
     pub async fn load_owner_promotion_journal(
@@ -11,9 +174,10 @@ impl StoreDatabase {
     ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         let key = format!("owner_promotion/{promotion_id}");
-        self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-                crate::get_protocol_state_on(conn, &key)?
+        self.connection
+            .call_store(move |session| {
+                session
+                    .protocol_state(&key)?
                     .map(|value| {
                         let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
                             serde_json::from_str(&value).map_err(|error| {
@@ -36,8 +200,7 @@ impl StoreDatabase {
     {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let value = crate::get_protocol_state_on(conn, &key)?;
+                let value = session.protocol_state(&key)?;
                 let Some(value) = value else {
                     return Ok(None);
                 };
@@ -49,7 +212,7 @@ impl StoreDatabase {
                     .validate_target_key(&key)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 let journal_key = format!("owner_promotion/{}", journal.promotion_id());
-                let by_id = crate::get_protocol_state_on(conn, &journal_key)?;
+                let by_id = session.protocol_state(&journal_key)?;
                 if by_id.as_deref() != Some(value.as_str()) {
                     return Err(DbError::Message(
                         "Owner-promotion target and id journals disagree".to_string(),
@@ -82,28 +245,7 @@ impl StoreDatabase {
             .map_err(|error| DbError::context("serialize Owner-promotion journal", error))?;
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                    (&journal_key, &value),
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                    (&target_key, &value),
-                )
-                .map_err(DbError::from)?;
-                let by_id = crate::required_protocol_state_on(&tx, &journal_key)?;
-                let by_target = crate::required_protocol_state_on(&tx, &target_key)?;
-                if by_id != by_target {
-                    return Err(DbError::Message(
-                        "Owner-promotion id and target journals disagree".to_string(),
-                    ));
-                }
-                tx.commit().map_err(DbError::from)?;
-                serde_json::from_str(&by_id)
-                    .map_err(|error| DbError::context("parse begun Owner-promotion journal", error))
+                session.begin_owner_promotion_journal(&journal_key, &target_key, &value)
             })
             .await
     }
@@ -121,22 +263,7 @@ impl StoreDatabase {
         })?;
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                conn.execute(
-                    "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                    (&journal_key, &value),
-                )
-                .map_err(DbError::from)?;
-                let actual = crate::required_protocol_state_on(conn, &journal_key)?;
-                if actual != value {
-                    return Err(DbError::Message(
-                        "Owner-promotion id is already bound to different candidate acceptance"
-                            .to_string(),
-                    ));
-                }
-                serde_json::from_str(&actual).map_err(|error| {
-                    DbError::context("parse begun Owner-promotion candidate acceptance", error)
-                })
+                session.begin_owner_promotion_acceptance_journal(&journal_key, &value)
             })
             .await
     }
@@ -145,23 +272,8 @@ impl StoreDatabase {
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
-        let store_dir = self.store_dir.clone();
-        let (journal_key, target_key, previous_value, next_value, remote_objects) =
-            transition.into_values();
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                Self::advance_owner_promotion_journal_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
-                    journal_key,
-                    target_key,
-                    previous_value,
-                    next_value,
-                    remote_objects,
-                )?;
-                tx.commit().map_err(DbError::from)
-            })
+            .call_store(move |session| session.advance_owner_promotion_journal(transition))
             .await
     }
 
@@ -179,7 +291,6 @@ impl StoreDatabase {
         objects: Vec<coven_protocol::objects::ExactObjectRef>,
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        let store_dir = self.store_dir.clone();
         if nonactivation
             .candidate_reference()
             .map_err(|error| DbError::Message(error.to_string()))?
@@ -190,28 +301,14 @@ impl StoreDatabase {
             ));
         }
         let nonactivation = nonactivation.into_durable();
-        let (journal_key, target_key, previous_value, next_value, remote_objects) =
-            transition.into_values();
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
-                    &tx,
-                    &candidate,
-                    &objects,
-                    &nonactivation,
-                )?;
-                Self::advance_owner_promotion_journal_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
-                    journal_key,
-                    target_key,
-                    previous_value,
-                    next_value,
-                    remote_objects,
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(cleanup)
+                session.end_nonactivated_owner_promotion_candidate(
+                    transition,
+                    candidate,
+                    objects,
+                    nonactivation,
+                )
             })
             .await
     }
@@ -227,54 +324,9 @@ impl StoreDatabase {
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                super::candidate_records::candidate_cleanup_targets_on(conn, &candidate, &objects)
+                session.owner_promotion_candidate_cleanup_targets(&candidate, &objects)
             })
             .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn advance_owner_promotion_journal_on(
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
-        journal_key: String,
-        target_key: String,
-        previous_value: String,
-        next_value: String,
-        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
-    ) -> Result<(), DbError> {
-        let tx = records.transaction;
-        let mut object_ids = BTreeSet::new();
-        for remote in &remote_objects {
-            if !object_ids.insert(remote.object_id()) {
-                return Err(DbError::Message(
-                    "Owner-promotion journal repeats a remote object".to_string(),
-                ));
-            }
-            persist_exact_remote_object_on(
-                tx,
-                records.store_dir,
-                remote,
-                "Owner-promotion candidate object",
-            )?;
-        }
-        let by_id = tx
-            .execute(
-                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                (&next_value, &journal_key, &previous_value),
-            )
-            .map_err(DbError::from)?;
-        let by_target = tx
-            .execute(
-                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                (&next_value, &target_key, &previous_value),
-            )
-            .map_err(DbError::from)?;
-        if by_id != 1 || by_target != 1 {
-            return Err(DbError::Message(
-                "Owner-promotion journal advance lost its exact predecessor".to_string(),
-            ));
-        }
-        Ok(())
     }
 
     pub async fn replace_failed_owner_promotion_journal(
@@ -305,33 +357,58 @@ impl StoreDatabase {
         })?;
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let inserted = tx
-                    .execute(
-                        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                        (&replacement_key, &replacement_value),
-                    )
-                    .map_err(DbError::from)?;
-                if inserted != 1 {
-                    return Err(DbError::Message(
-                        "fresh Owner-promotion retry identity is already present".to_string(),
-                    ));
-                }
-                let replaced = tx
-                    .execute(
-                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                        (&replacement_value, &target_key, &previous_value),
-                    )
-                    .map_err(DbError::from)?;
-                if replaced != 1 {
-                    return Err(DbError::Message(
-                        "Owner-promotion retry lost its exact failed target attempt".to_string(),
-                    ));
-                }
-                tx.commit().map_err(DbError::from)?;
-                Ok(replacement)
+                session.replace_failed_owner_promotion_journal(
+                    replacement,
+                    target_key,
+                    replacement_key,
+                    previous_value,
+                    replacement_value,
+                )
             })
             .await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_owner_promotion_journal_on(
+    records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+    journal_key: String,
+    target_key: String,
+    previous_value: String,
+    next_value: String,
+    remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+) -> Result<(), DbError> {
+    let tx = records.transaction;
+    let mut object_ids = BTreeSet::new();
+    for remote in &remote_objects {
+        if !object_ids.insert(remote.object_id()) {
+            return Err(DbError::Message(
+                "Owner-promotion journal repeats a remote object".to_string(),
+            ));
+        }
+        persist_exact_remote_object_on(
+            tx,
+            records.store_dir,
+            remote,
+            "Owner-promotion candidate object",
+        )?;
+    }
+    let by_id = tx
+        .execute(
+            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+            (&next_value, &journal_key, &previous_value),
+        )
+        .map_err(DbError::from)?;
+    let by_target = tx
+        .execute(
+            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+            (&next_value, &target_key, &previous_value),
+        )
+        .map_err(DbError::from)?;
+    if by_id != 1 || by_target != 1 {
+        return Err(DbError::Message(
+            "Owner-promotion journal advance lost its exact predecessor".to_string(),
+        ));
+    }
+    Ok(())
 }

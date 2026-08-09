@@ -364,7 +364,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 self.activate_store_operation_remote_objects(candidate, &object_ids)?;
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
-                StoreDatabase::advance_owner_promotion_journal_on(
+                advance_owner_promotion_journal_on(
                     crate::payload_spool::StoreRecordTransaction::new(
                         self.transaction,
                         self.store_dir,
