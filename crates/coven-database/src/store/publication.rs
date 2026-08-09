@@ -39,7 +39,7 @@ impl StoreDatabase {
         let gates = self.gates();
         let synced_tables = self.synced_tables().to_vec();
         let (outcome, notification) = self
-            .call_records(move |records| {
+            .with_retained_merge_materializations(move |records, retained_cache| {
                 let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let local_device_id =
@@ -214,7 +214,7 @@ impl StoreDatabase {
                         true,
                         &[],
                     )?;
-                    MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
+                    let retained = MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
                         &root,
                         &authority.commit,
                         &[],
@@ -224,6 +224,7 @@ impl StoreDatabase {
                         &[],
                         None,
                     )?;
+                    retained_cache.validate_insert_verified(&retained)?;
                     let mut completed_preparation = prepared.clone();
                     let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
                         &mut completed_preparation
@@ -262,6 +263,9 @@ impl StoreDatabase {
                     let write_id = authority.commit.write_id.clone();
                     Database::set_write_status_on(&tx, &write_id, &blocked)?;
                     tx.commit().map_err(DbError::from)?;
+                    retained_cache
+                        .insert_verified(retained)
+                        .expect("committed Merge abandonment passed cache validation");
                     return Ok((
                         CompletePreparedStoreWriteOutcome::Published,
                         Some((write_id, blocked)),
@@ -471,7 +475,7 @@ impl StoreDatabase {
                     [write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-                MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
+                let retained = MergeMaterializationTransaction::new(&tx, &store_dir).record_materialized_merge_commit(
                     &root,
                     &commit_value,
                     &[],
@@ -482,6 +486,7 @@ impl StoreDatabase {
                     (!retained_packages.is_empty())
                         .then_some(RetainedPackageApplication::LocallyAuthored),
                 )?;
+                retained_cache.validate_insert_verified(&retained)?;
                 let cleared = tx
                     .execute(
                         "UPDATE store_writes SET prepared = NULL
@@ -500,6 +505,9 @@ impl StoreDatabase {
                 }));
                 Database::set_write_status_on(&tx, &write_id, &status)?;
                 tx.commit().map_err(DbError::from)?;
+                retained_cache
+                    .insert_verified(retained)
+                    .expect("committed local Store publication passed cache validation");
                 Ok((
                     CompletePreparedStoreWriteOutcome::Published,
                     Some((write_id, status)),

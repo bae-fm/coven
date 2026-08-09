@@ -23,25 +23,36 @@ pub enum RetainedCommitAuthorities<'a> {
 }
 
 impl RetainedMergeMaterializationCache {
+    pub fn validate_insert_verified(
+        &self,
+        materialization: &OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), DbError> {
+        let coordinate = materialization.commit_ref().coord.clone();
+        let key = (coordinate.stream_id.to_string(), coordinate.sequence());
+        match self.verified.get(&key) {
+            None => Ok(()),
+            Some(existing)
+                if existing.commit_ref() == materialization.commit_ref()
+                    && existing.input_hash() == materialization.input_hash() =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(DbError::Message(
+                "retained Merge materialization cache coordinate contains another exact input"
+                    .to_string(),
+            )),
+        }
+    }
+
     pub fn insert_verified(
         &mut self,
         materialization: OwnedVerifiedMergeMaterialization,
     ) -> Result<(), DbError> {
+        self.validate_insert_verified(&materialization)?;
         let coordinate = materialization.commit_ref().coord.clone();
         let key = (coordinate.stream_id.to_string(), coordinate.sequence());
-        match self.verified.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(materialization);
-            }
-            std::collections::btree_map::Entry::Occupied(entry)
-                if entry.get().commit_ref() == materialization.commit_ref()
-                    && entry.get().input_hash() == materialization.input_hash() => {}
-            std::collections::btree_map::Entry::Occupied(_) => {
-                return Err(DbError::Message(
-                    "retained Merge materialization cache coordinate contains another exact input"
-                        .to_string(),
-                ))
-            }
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.verified.entry(key) {
+            entry.insert(materialization);
         }
         Ok(())
     }

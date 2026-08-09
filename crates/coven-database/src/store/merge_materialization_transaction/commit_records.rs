@@ -388,7 +388,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         history_evidence: &coven_protocol::store_commit::RetainedMergeCommitEvidence,
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
-    ) -> Result<(), DbError> {
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
         let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
@@ -408,8 +408,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             packages,
             package_application,
         )?;
-        self.record_verified_merge_materialization(materialization)?;
-        Ok(())
+        self.record_verified_merge_materialization(materialization)
     }
 
     pub fn record_verified_merge_materialization(

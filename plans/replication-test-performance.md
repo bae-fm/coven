@@ -64,3 +64,31 @@ slower without a build cache, and cached test execution removes 36.81 seconds.
 Set `profile.test.opt-level` to 1 at the workspace level and retain the existing
 level-3 wildcard for non-workspace dependencies. Test assertions and overflow
 checks remain enabled.
+
+## Connection-owned retained materializations
+
+The optimized Circle sample still spends CPU in
+`retain_merge_materialization_with_authority_on` and
+`load_retained_merge_materialization_with_authority_on`. The database runtime
+already owns a cache of fully verified retained inputs. Received commits clone
+that cache, add the verified input produced by the transaction, commit, and
+then replace the live cache. Locally published commits persist and return the
+same verified input but discard it, so the next replay hashes, parses, and
+verifies local history again.
+
+The existing retained-input corruption test establishes the intended boundary:
+an open connection continues using its verified value, while a reopened
+connection verifies the durable bytes and rejects corruption. Extend that same
+atomic cache update to every local transaction that retains a verified Merge
+materialization. The cache update must become visible only after its database
+transaction commits.
+
+The regression publishes a local Store commit, corrupts its durable retained
+input before any replay read, and requires the open connection to return the
+value verified by publication. It fails before the cache update because replay
+rehashes the corrupted row. After local publication, Circle activation, device
+join, bootstrap, and Owner recovery publish their retained values to the cache
+only after committing the transaction, the regression and all 638 replication
+tests pass. Circle execution falls from 9.44 seconds to 7.74 seconds. In the
+sample, SHA-256 stacks directly under retained materialization load/retain fall
+from 377 samples to 14.

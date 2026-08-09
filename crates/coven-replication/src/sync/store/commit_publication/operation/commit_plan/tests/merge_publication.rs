@@ -97,6 +97,26 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
 }
 
 #[tokio::test]
+async fn local_publication_extends_connection_owned_verified_history() {
+    let fixture = PreparedWriteFixture::prepare().await;
+    assert_eq!(
+        fixture
+            .drain_store_writes()
+            .await
+            .expect("publish prepared Store package"),
+        1,
+    );
+
+    fixture.corrupt_retained_input().await;
+    let retained = fixture
+        .retained_merge_replay_inputs()
+        .await
+        .expect("use the retained input verified by local publication");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].commit_ref(), &fixture.commit_ref);
+}
+
+#[tokio::test]
 async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_retryable() {
     for failed_call in 1..=3 {
         let fixture = PreparedWriteFixture::prepare().await;

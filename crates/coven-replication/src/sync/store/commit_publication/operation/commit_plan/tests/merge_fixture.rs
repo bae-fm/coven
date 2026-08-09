@@ -144,6 +144,25 @@ impl PreparedWriteFixture {
             .expect("load retained local package application")
     }
 
+    pub(super) async fn corrupt_retained_input(&self) {
+        let stream_id = commit_stream(&self.commit_ref);
+        self.db
+            .test_sql(move |database| {
+                database.corrupt_retained_materialization_input(&stream_id, 1)
+            })
+            .await
+            .expect("corrupt retained local materialization");
+    }
+
+    pub(super) async fn retained_merge_replay_inputs(
+        &self,
+    ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, coven_database::DbError>
+    {
+        self.database
+            .retained_merge_replay_inputs(self.root.clone())
+            .await
+    }
+
     pub(super) async fn write_retains_prepared(&self) -> bool {
         let write_id = self.write_id.clone();
         self.db

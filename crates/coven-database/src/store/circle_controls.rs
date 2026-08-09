@@ -383,8 +383,8 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let gates = self.gates();
         let store_dir = self.store_dir.clone();
-        self.connection
-            .call(move |conn| {
+        self.with_retained_merge_materializations(move |records, retained_cache| {
+                let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 journal
                     .validate_identity()
@@ -491,7 +491,7 @@ impl StoreDatabase {
                     }
                     Ok(commit)
                 };
-                let (commit, activation, head_object_id) = {
+                let (commit, activation, head_object_id, retained) = {
                     let head = &operation.policy.head;
                     let history_evidence = &operation.policy.history_evidence;
                     let commit = verify_commit()?;
@@ -533,10 +533,16 @@ impl StoreDatabase {
                         &[],
                         None,
                     )?;
-                    MergeMaterializationTransaction::new(&tx, &store_dir)
+                    let retained = MergeMaterializationTransaction::new(&tx, &store_dir)
                         .record_verified_merge_materialization(materialization)?;
-                    (commit, activation.clone(), Some(remote_object_id(prepared_head)))
+                    (
+                        commit,
+                        activation.clone(),
+                        Some(remote_object_id(prepared_head)),
+                        retained,
+                    )
                 };
+                retained_cache.validate_insert_verified(&retained)?;
                 let mut object_ids = candidate_graph_exact_objects(&commit)?
                     .iter()
                     .map(remote_object_id)
@@ -614,7 +620,11 @@ impl StoreDatabase {
                         ));
                     }
                 }
-                tx.commit().map_err(DbError::from)
+                tx.commit().map_err(DbError::from)?;
+                retained_cache
+                    .insert_verified(retained)
+                    .expect("committed Circle materialization passed cache validation");
+                Ok(())
             })
             .await
     }
