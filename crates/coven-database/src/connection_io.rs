@@ -139,4 +139,24 @@ mod tests {
         assert_eq!(synchronous, 2);
         assert_eq!(journal_mode, "wal");
     }
+
+    #[test]
+    fn bundled_sqlite_disables_global_memory_statistics() {
+        let connection = Connection::open_in_memory().expect("open database");
+        let disabled: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_compile_options
+                     WHERE compile_options = 'DEFAULT_MEMSTATUS=0'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read SQLite compile options");
+
+        assert!(
+            disabled,
+            "SQLite memory statistics serialize allocations from independent connections"
+        );
+    }
 }

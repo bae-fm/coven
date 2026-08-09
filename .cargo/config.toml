@@ -1,0 +1,5 @@
+[env]
+# Coven does not consume SQLite's process-wide allocation counters or heap
+# limits. Keeping them enabled serializes allocations across otherwise
+# independent connections through SQLITE_MUTEX_STATIC_MEM.
+LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0", force = true }
