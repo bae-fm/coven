@@ -59,6 +59,8 @@ impl DatabaseConnection {
                     &mut core.verified_store_authority,
                     &core.gates,
                     &core.synced_tables,
+                    &core.hlc,
+                    &core.blob_decls,
                 );
                 operation(&mut session)
             };

@@ -6,7 +6,7 @@ use coven_protocol::blob::BlobRef;
 use coven_protocol::write::WriteReceipt;
 
 use super::host_sql_transaction::HostSqlTransaction;
-use super::{SqlContext, StoreDatabase};
+use super::{SqlContext, StoreDatabase, StoreSession};
 
 pub struct WriteBatch {
     new_blobs: Vec<NewBlob>,
@@ -326,6 +326,137 @@ pub struct StoreRowWrites {
     database: StoreDatabase,
 }
 
+impl StoreSession<'_> {
+    fn execute_host_write<R, E>(
+        &mut self,
+        staged: StagedBlobBatch,
+        deleted: Vec<BlobRef>,
+        sql: HostSql<R, E>,
+        routing_encryption: Option<EncryptionService>,
+        blob_staging: Option<Box<dyn crate::AudienceBlobMoveStaging>>,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<Result<WriteReceipt<R>, HostWriteError<E>>, DbError> {
+        let records = self.records;
+        let verified_authority = &mut *self.verified_store_authority;
+        let mut staged = staged;
+        let stamper = coven_protocol::hlc::UpdatedAtStamper::new(self.hlc.clone());
+        let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
+            records.conn,
+            records.store_dir,
+            self.synced_tables,
+            self.gates,
+            self.blob_decls,
+            routing_encryption.as_ref(),
+            blob_staging.as_deref(),
+            verified_authority,
+            write_id,
+        )
+        .map_err(HostWriteError::from)
+        .and_then(|transaction| {
+            transaction.execute(|transaction| -> Result<R, HostWriteError<E>> {
+                let cleanup_intents = deleted
+                    .iter()
+                    .map(|blob| {
+                        self.blob_decls
+                            .row_for_blob_in_namespace(transaction, &blob.namespace, &blob.id)
+                            .map_err(|error| HostWriteError::Blob(error.to_string()))
+                            .map(|row| match row {
+                                Some((table, row_id)) => LocalBlobCleanupIntent::for_row(
+                                    &blob.namespace,
+                                    &blob.id,
+                                    table,
+                                    row_id,
+                                ),
+                                None => LocalBlobCleanupIntent::local(&blob.namespace, &blob.id),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                staged.publish(|namespace, id| {
+                    match self
+                        .blob_decls
+                        .row_for_blob_in_namespace(transaction, namespace, id)
+                    {
+                        Ok(Some(_)) => {
+                            return Err(HostWriteError::BlobAlreadyReferenced {
+                                namespace: namespace.to_string(),
+                                id: id.to_string(),
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return Err(HostWriteError::Blob(error.to_string()));
+                        }
+                    }
+                    let leased = transaction
+                        .query_row(
+                            "SELECT EXISTS(\
+                                 SELECT 1 FROM store_write_blob_leases \
+                                 WHERE namespace = ?1 AND blob_id = ?2\
+                             )",
+                            (namespace, id),
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(DbError::from)?;
+                    if leased {
+                        return Err(HostWriteError::BlobOwnedByPendingWrite {
+                            namespace: namespace.to_string(),
+                            id: id.to_string(),
+                        });
+                    }
+                    Ok(())
+                })?;
+
+                let host_sql = HostSqlTransaction::begin(transaction)?;
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    host_sql.run(|transaction| {
+                        sql(SqlContext::new(
+                            transaction,
+                            stamper,
+                            self.synced_tables,
+                            self.gates,
+                        ))
+                    })
+                })) {
+                    Ok(Ok(value)) => {
+                        for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
+                            let _ = records
+                                .store_dir
+                                .local_blob_path(&blob.namespace, &blob.id)?;
+                            if self
+                                .blob_decls
+                                .blob_id_is_referenced(transaction, &blob.namespace, &blob.id)
+                                .map_err(|error| DbError::Message(error.to_string()))?
+                            {
+                                return Err(HostWriteError::BlobStillReferenced {
+                                    namespace: blob.namespace.clone(),
+                                    id: blob.id.clone(),
+                                });
+                            }
+                            super::local_blob_cleanup::record_obsolete_copy_intents_on(
+                                transaction,
+                                self.blob_decls,
+                                intent,
+                            )?;
+                        }
+                        Ok(value)
+                    }
+                    Ok(Err(error)) => Err(HostWriteError::Host(error)),
+                    Err(_) => Err(HostWriteError::WriteClosurePanicked),
+                }
+            })
+        });
+
+        match result {
+            Ok(receipt) => {
+                staged.commit();
+                Ok(Ok(receipt))
+            }
+            Err(error) => Ok(Err(staged.rollback(error))),
+        }
+    }
+}
+
 impl StoreRowWrites {
     pub fn new(database: StoreDatabase) -> Self {
         Self { database }
@@ -388,136 +519,20 @@ impl StoreRowWrites {
         let database = &self.database;
         let HostWriteOperation { batch, sql } = operation;
         let staged = StagedBlobBatch::stage(&database.store_dir, batch.new_blobs).await?;
-        let tables = database.synced_tables.to_vec();
-        let gates = database.gates.clone();
-        let blob_decls = database.blob_decls.clone();
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
-        let store_dir = database.store_dir.clone();
-        let cleanup_store_dir = database.store_dir.clone();
-        let stamper = coven_protocol::hlc::UpdatedAtStamper::new(database.hlc.clone());
 
         let outcome = database
             .connection
             .call_store(move |session| {
-                let records = session.records;
-                let verified_authority = &mut *session.verified_store_authority;
-                let connection = records.conn;
-                let mut staged = staged;
-                let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-                    connection,
-                    &store_dir,
-                    &tables,
-                    &gates,
-                    &blob_decls,
-                    routing_encryption.as_ref(),
-                    blob_staging.as_deref(),
-                    verified_authority,
+                session.execute_host_write(
+                    staged,
+                    deleted,
+                    sql,
+                    routing_encryption,
+                    blob_staging,
                     write_id,
                 )
-                .map_err(HostWriteError::from)
-                .and_then(|transaction| {
-                    transaction.execute(|transaction| -> Result<R, HostWriteError<E>> {
-                        let cleanup_intents = deleted
-                            .iter()
-                            .map(|blob| {
-                                blob_decls
-                                    .row_for_blob_in_namespace(
-                                        transaction,
-                                        &blob.namespace,
-                                        &blob.id,
-                                    )
-                                    .map_err(|error| HostWriteError::Blob(error.to_string()))
-                                    .map(|row| match row {
-                                        Some((table, row_id)) => LocalBlobCleanupIntent::for_row(
-                                            &blob.namespace,
-                                            &blob.id,
-                                            table,
-                                            row_id,
-                                        ),
-                                        None => {
-                                            LocalBlobCleanupIntent::local(&blob.namespace, &blob.id)
-                                        }
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-
-                        staged.publish(|namespace, id| {
-                            match blob_decls.row_for_blob_in_namespace(transaction, namespace, id) {
-                                Ok(Some(_)) => {
-                                    return Err(HostWriteError::BlobAlreadyReferenced {
-                                        namespace: namespace.to_string(),
-                                        id: id.to_string(),
-                                    });
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    return Err(HostWriteError::Blob(error.to_string()));
-                                }
-                            }
-                            let leased = transaction
-                                .query_row(
-                                    "SELECT EXISTS(\
-                                         SELECT 1 FROM store_write_blob_leases \
-                                         WHERE namespace = ?1 AND blob_id = ?2\
-                                     )",
-                                    (namespace, id),
-                                    |row| row.get::<_, bool>(0),
-                                )
-                                .map_err(DbError::from)?;
-                            if leased {
-                                return Err(HostWriteError::BlobOwnedByPendingWrite {
-                                    namespace: namespace.to_string(),
-                                    id: id.to_string(),
-                                });
-                            }
-                            Ok(())
-                        })?;
-
-                        let host_sql = HostSqlTransaction::begin(transaction)?;
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            host_sql.run(|transaction| {
-                                sql(SqlContext::new(transaction, stamper, &tables, &gates))
-                            })
-                        })) {
-                            Ok(Ok(value)) => {
-                                for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
-                                    let _ = cleanup_store_dir
-                                        .local_blob_path(&blob.namespace, &blob.id)?;
-                                    if blob_decls
-                                        .blob_id_is_referenced(
-                                            transaction,
-                                            &blob.namespace,
-                                            &blob.id,
-                                        )
-                                        .map_err(|error| DbError::Message(error.to_string()))?
-                                    {
-                                        return Err(HostWriteError::BlobStillReferenced {
-                                            namespace: blob.namespace.clone(),
-                                            id: blob.id.clone(),
-                                        });
-                                    }
-                                    super::local_blob_cleanup::record_obsolete_copy_intents_on(
-                                        transaction,
-                                        &blob_decls,
-                                        intent,
-                                    )?;
-                                }
-                                Ok(value)
-                            }
-                            Ok(Err(error)) => Err(HostWriteError::Host(error)),
-                            Err(_) => Err(HostWriteError::WriteClosurePanicked),
-                        }
-                    })
-                });
-
-                match result {
-                    Ok(receipt) => {
-                        staged.commit();
-                        Ok(Ok(receipt))
-                    }
-                    Err(error) => Ok(Err(staged.rollback(error))),
-                }
             })
             .await;
 

@@ -78,6 +78,50 @@ pub struct HostWriteBlobTransaction<'transaction, 'connection> {
     verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
 }
 
+impl StoreSession<'_> {
+    fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
+        let stored = self
+            .records
+            .conn
+            .query_row(
+                "SELECT write_id, base, blob_facts FROM store_writes
+                 WHERE status = '\"pending\"'
+                   AND ordinal = (
+                       SELECT MIN(ordinal) FROM store_writes
+                       WHERE status != '\"local_only\"'
+                         AND json_extract(status, '$.published') IS NULL
+                         AND json_extract(status, '$.resolved') IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
+                   )
+                 ORDER BY ordinal LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((write_id, base, blob_facts)) = stored else {
+            return Ok(None);
+        };
+        let partitions = StoreDatabase::store_write_partitions_on(self.records, &write_id)?;
+        Ok(Some(PreparedStoreWrite {
+            write_id: WriteId::from_generated(write_id),
+            partitions,
+            base: serde_json::from_str(&base)
+                .map_err(|error| DbError::context("pending write base", error))?,
+            blob_facts: serde_json::from_str(&blob_facts)
+                .map_err(|error| DbError::context("pending write blob facts", error))?,
+        }))
+    }
+}
+
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
     fn new(
         transaction: &'transaction rusqlite::Transaction<'connection>,
@@ -584,47 +628,7 @@ impl StoreDatabase {
 
     pub async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let records = session.records;
-                let conn = records.conn;
-                let stored = conn
-                    .query_row(
-                        "SELECT write_id, base, blob_facts FROM store_writes
-                 WHERE status = '\"pending\"'
-                   AND ordinal = (
-                       SELECT MIN(ordinal) FROM store_writes
-                       WHERE status != '\"local_only\"'
-                         AND json_extract(status, '$.published') IS NULL
-                         AND json_extract(status, '$.resolved') IS NULL
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
-                   )
-                 ORDER BY ordinal LIMIT 1",
-                        [],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some((write_id, base, blob_facts)) = stored else {
-                    return Ok(None);
-                };
-                let partitions = Self::store_write_partitions_on(records, &write_id)?;
-                Ok(Some(PreparedStoreWrite {
-                    write_id: WriteId::from_generated(write_id),
-                    partitions,
-                    base: serde_json::from_str(&base)
-                        .map_err(|error| DbError::context("pending write base", error))?,
-                    blob_facts: serde_json::from_str(&blob_facts)
-                        .map_err(|error| DbError::context("pending write blob facts", error))?,
-                }))
-            })
+            .call_store(|session| session.prepare_store_write())
             .await
     }
 
