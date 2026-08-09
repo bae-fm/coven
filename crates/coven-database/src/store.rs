@@ -242,6 +242,14 @@ pub struct StoreDatabase {
 }
 
 impl StoreSession<'_> {
+    fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
+    where
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E>,
+    {
+        let authorization = host_sql_transaction::HostSqlAuthorization::begin(self.records.conn)?;
+        Ok(authorization.run(|| read(SqlReadContext::new(self.records.conn))))
+    }
+
     fn protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         crate::get_protocol_state_on(self.records.conn, key)
     }
@@ -378,6 +386,62 @@ impl StoreSession<'_> {
             )
             .map_err(DbError::from)
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn generation_zero_replay_baseline(&self) -> Result<crate::RetainedReplayBaseline, DbError> {
+        StoreDatabase::generation_zero_replay_baseline_on(self.records)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn replace_generation_zero_replay_authority(
+        &self,
+        authority_bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let authority_hash = self
+            .records
+            .install_payload(authority_bytes)
+            .map_err(|error| {
+                DbError::Message(format!("install retained replay authority: {error}"))
+            })?;
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE retained_replay_baselines SET authority_hash = ?1
+                 WHERE singleton = 1",
+                [authority_hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        let image_hash: String = transaction
+            .query_row(
+                "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        payload_spool::set_payload_owner_claims_on(
+            &transaction,
+            payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
+        )?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn circle_bootstrap_replay_inputs(
+        &self,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            coven_protocol::circle_activation::VerifiedCircleImage,
+        )>,
+        DbError,
+    > {
+        StoreDatabase::circle_bootstrap_replay_inputs_on(self.records)
+    }
 }
 
 impl StoreDatabase {
@@ -413,11 +477,7 @@ impl StoreDatabase {
         E: Send + 'static,
     {
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let authorization = host_sql_transaction::HostSqlAuthorization::begin(connection)?;
-                Ok(authorization.run(|| read(SqlReadContext::new(connection))))
-            })
+            .call_store(move |session| session.read(read))
             .await
     }
 
@@ -681,7 +741,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         self.connection
-            .call_store(|session| Self::generation_zero_replay_baseline_on(session.records))
+            .call_store(|session| session.generation_zero_replay_baseline())
             .await
     }
 
@@ -692,35 +752,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.connection
             .call_store(move |session| {
-                let records = session.records;
-                let authority_hash =
-                    records.install_payload(&authority_bytes).map_err(|error| {
-                        DbError::Message(format!("install retained replay authority: {error}"))
-                    })?;
-                let transaction = records
-                    .conn
-                    .unchecked_transaction()
-                    .map_err(DbError::from)?;
-                transaction
-                    .execute(
-                        "UPDATE retained_replay_baselines SET authority_hash = ?1
-                     WHERE singleton = 1",
-                        [authority_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?;
-                let image_hash: String = transaction
-                    .query_row(
-                        "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                payload_spool::set_payload_owner_claims_on(
-                    &transaction,
-                    payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
-                    &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
-                )?;
-                transaction.commit().map_err(DbError::from)
+                session.replace_generation_zero_replay_authority(&authority_bytes)
             })
             .await
     }
@@ -746,7 +778,7 @@ impl StoreDatabase {
         DbError,
     > {
         self.connection
-            .call_store(|session| Self::circle_bootstrap_replay_inputs_on(session.records))
+            .call_store(|session| session.circle_bootstrap_replay_inputs())
             .await
     }
 
