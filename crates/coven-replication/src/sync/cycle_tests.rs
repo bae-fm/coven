@@ -4919,7 +4919,7 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
 /// drain waits for that turn, and a queued write that finds its position taken
 /// re-prepares against the winner — it is the one composer that can lose a
 /// position safely.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_loop() {
     let OwnerAndMember {
         owner,

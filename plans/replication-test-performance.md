@@ -92,3 +92,27 @@ only after committing the transaction, the regression and all 638 replication
 tests pass. Circle execution falls from 9.44 seconds to 7.74 seconds. In the
 sample, SHA-256 stacks directly under retained materialization load/retain fall
 from 377 samples to 14.
+
+## Cycle-test isolation
+
+With retained inputs cached, the 60 cycle tests execute in 4.01 seconds. Running
+each test alone identifies two outliers: snapshot count cadence at 3.25 seconds
+and registration acceptance serialization at 2.10 seconds.
+
+The registration test spends two seconds in its assertion, not in Coven. It
+holds device-join acceptance after that operation has claimed the owner's Store
+stream position, starts the normal write drain, and requires a two-second
+`tokio::time::timeout` to expire before releasing acceptance. Keep that exact
+negative assertion, but run the test with Tokio's paused clock. Tokio advances
+the timeout only after the write drain has no runnable path, preserving the
+ordering check without consuming wall-clock time.
+
+The isolated registration test falls from 2.10 seconds to 0.09 seconds. The
+parallel cycle group remains 4.00 seconds because the snapshot cadence test is
+now its longest path.
+
+The snapshot cadence test is different: it publishes 100 signed local commits
+because 100 is the production count threshold. Do not replace those commits
+with reconstructed database state or lower the production threshold for the
+test. Profile that publication path before deciding whether the runtime is
+required protocol work or another repeated implementation bottleneck.
