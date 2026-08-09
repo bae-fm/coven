@@ -707,7 +707,7 @@ impl Store {
         store_id: &str,
         store_name: &str,
     ) -> Result<
-        coven_storage::join_code::InviteCode,
+        crate::sync::store::membership::MemberInvitation,
         crate::sync::store::membership::MembershipOpsError,
     > {
         let mut authorization = self.authorize_writer().await.map_err(|error| {

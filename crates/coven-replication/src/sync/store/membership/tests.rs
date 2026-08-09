@@ -72,7 +72,7 @@ impl MergeFixture {
         &self,
         member: &UserKeypair,
         role: MemberRole,
-    ) -> coven_storage::join_code::InviteCode {
+    ) -> crate::sync::store::MemberInvitation {
         self.store
             .invite_member(
                 &self.db,

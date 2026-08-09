@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
+use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
@@ -19,7 +20,6 @@ use coven_replication::sync::store::{
 };
 use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
-use coven_storage::join_code::encode;
 
 /// Fast enough that the drivers hand off within a test, generous enough that a
 /// loaded machine never trips the deadline.
@@ -129,7 +129,7 @@ impl TransportFixture {
         .expect("Store creation task")
         .expect("create Owner Store");
         let join_request =
-            coven_storage::join_code::generate_join_request(None).expect("generate join request");
+            crate::joining::generate_join_request(None).expect("generate join request");
         let member_pubkey = crate::joining::decode_join_request(&join_request)
             .expect("decode join request")
             .public_key;

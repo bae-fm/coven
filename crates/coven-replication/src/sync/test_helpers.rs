@@ -1324,7 +1324,7 @@ mod test_device {
             encryption: &coven_keys::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
-        ) -> Result<coven_storage::join_code::InviteCode, crate::sync::store::MembershipOpsError>
+        ) -> Result<crate::sync::store::MemberInvitation, crate::sync::store::MembershipOpsError>
         {
             self.store
                 .invite_member(
@@ -3719,7 +3719,7 @@ impl TestStore {
         role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_name: &str,
-    ) -> Result<coven_storage::join_code::InviteCode, crate::sync::store::MembershipOpsError> {
+    ) -> Result<crate::sync::store::MemberInvitation, crate::sync::store::MembershipOpsError> {
         let device = self.bind_device(db, identity).await.map_err(|error| {
             crate::sync::store::MembershipOpsError::Chain(
                 crate::sync::store::AnchoredChainError::LoadFailed(error),

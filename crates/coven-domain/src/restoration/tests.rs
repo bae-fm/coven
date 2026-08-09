@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::joining::BootstrapError;
 use crate::restoration::restore_from_code;
+use crate::restoration::{
+    decode_restore_code, encode_restore_code, RestoreCode, RESTORE_CODE_VERSION,
+};
 use crate::restoration::{OwnerRecoveryAuthority, RestoreAuthority, RestoreCodeError};
 use coven_database::Database;
 use coven_foundation::clock::SystemClock;
@@ -35,9 +38,6 @@ use coven_storage::cloud::cloudkit::{
 };
 use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use coven_storage::cloud::{CloudHomeError, CloudObjectVersion, CloudVersionedObject};
-use coven_storage::restore_code::{
-    decode_restore_code, encode_restore_code, RestoreCode, RESTORE_CODE_VERSION,
-};
 use coven_storage::CloudSyncObjectStorage;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 

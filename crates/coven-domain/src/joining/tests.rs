@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_replication::sync::test_helpers::*;
 use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
-use coven_storage::join_code::encode;
 
 /// A cancel receiver whose sender is dropped immediately: `borrow()` reads the
 /// initial `false` forever, so the join/restore flows run to completion exactly
@@ -45,8 +45,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     .await
     .expect("join Owner Store creation task")
     .expect("create Owner Store");
-    let join_request =
-        coven_storage::join_code::generate_join_request(None).expect("generate join request");
+    let join_request = crate::joining::generate_join_request(None).expect("generate join request");
     let member_pubkey = crate::joining::decode_join_request(&join_request)
         .expect("decode join request")
         .public_key;

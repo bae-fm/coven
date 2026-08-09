@@ -23,8 +23,8 @@ use coven_protocol::synced_schema::SyncedTable;
 use coven_replication::sync::store::{
     InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
+use coven_replication::sync::MemberInvitation;
 use coven_storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
-use coven_storage::join_code::InviteCode;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 /// Why joining or restoring a store failed. Both are the same operation —
@@ -332,7 +332,7 @@ async fn build_cloud_home_for_join(
 /// The journal lives outside the incomplete store directory, so every method
 /// can be retried after process termination without losing its exact predecessor.
 pub struct DeviceJoinClient {
-    code: InviteCode,
+    code: MemberInvitation,
     member_pubkey: String,
     layout: StoreLayout,
     synced_tables: Vec<SyncedTable>,

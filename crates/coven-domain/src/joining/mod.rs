@@ -1,4 +1,5 @@
 mod client;
+mod code;
 pub mod config;
 mod transport;
 
@@ -10,9 +11,10 @@ mod tests;
 mod transport_tests;
 
 pub use client::{BootstrapError, DeviceJoinClient};
-pub use coven_storage::join_code::{
-    abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
-    InviteCodeInfo, JoinCodeError, JoinRequestCode,
+pub use code::{
+    abandon_join_request, decode_invite_code_info, decode_join_request, encode,
+    encode_join_request, generate_join_request, generate_join_request_for_keypair, InviteCodeInfo,
+    JoinCodeError, JoinRequestCode,
 };
 pub use transport::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
@@ -25,5 +27,5 @@ pub use transport::{
 
 // What `restoration` shares with the join flow it grew out of.
 pub(crate) use client::{derive_credentials, BootstrapCleanup};
+pub(crate) use code::decode;
 pub(crate) use config::build_config;
-pub(crate) use coven_storage::join_code::decode;

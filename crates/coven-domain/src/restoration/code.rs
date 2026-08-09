@@ -14,13 +14,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cloud::CloudHomeJoinInfo;
 use coven_foundation::code_envelope::{self, EnvelopeError};
 use coven_protocol::membership::MembershipFloor;
 #[cfg(test)]
 use coven_protocol::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
 #[cfg(test)]
 use coven_protocol::store_commit::ObjectHash;
+use coven_storage::CloudHomeJoinInfo;
 
 pub const RESTORE_CODE_VERSION: u8 = 4;
 

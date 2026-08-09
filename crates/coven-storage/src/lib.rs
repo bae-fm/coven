@@ -10,13 +10,11 @@
 
 pub mod cloud;
 mod cloud_object_storage;
-pub mod join_code;
 mod local_file;
 pub mod oauth;
 mod objects;
 pub mod provider_probe;
 mod remote;
-pub mod restore_code;
 
 pub use cloud_object_storage::*;
 pub use objects::*;

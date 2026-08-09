@@ -458,7 +458,7 @@ pub async fn restore_from_code(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    let parsed = coven_storage::restore_code::decode_restore_code(code)
+    let parsed = super::code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
     coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,

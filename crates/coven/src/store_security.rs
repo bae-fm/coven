@@ -223,8 +223,8 @@ impl StoreSecurity {
         membership_floor: coven_protocol::membership::MembershipFloor,
         authority: coven_protocol::recovery::RestoreAuthority,
     ) -> Result<String, coven_storage::cloud::setup::SetupError> {
+        use coven_domain::restoration::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
         use coven_storage::cloud::CloudHomeJoinInfo;
-        use coven_storage::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
 
         let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
             coven_storage::cloud::setup::SetupError(

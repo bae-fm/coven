@@ -910,7 +910,7 @@ impl SyncComponents {
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<coven_storage::join_code::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<crate::sync::store::MemberInvitation, super::store::MembershipOpsError> {
         let encryption = self
             .current_encryption()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;

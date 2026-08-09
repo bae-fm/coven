@@ -35,6 +35,7 @@ mod tests;
 pub use error::SyncError;
 pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;
+pub use store::MemberInvitation;
 pub use store::Store;
 pub use store::{BlobCacheError, BlobStream};
 pub use store::{

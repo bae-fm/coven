@@ -706,7 +706,7 @@ impl SyncLoopHandle {
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<coven_storage::join_code::InviteCode, super::store::MembershipOpsError> {
+    ) -> Result<crate::sync::store::MemberInvitation, super::store::MembershipOpsError> {
         self.inner
             .components
             .invite_member(public_key_hex, invitee_email, role, store_name)

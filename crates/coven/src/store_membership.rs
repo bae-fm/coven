@@ -48,7 +48,7 @@ impl StoreMembership {
             .sync
             .invite_member(public_key_hex, invitee_email, role)
             .await?;
-        Ok(coven_storage::join_code::encode(&invite))
+        Ok(coven_domain::joining::encode(&invite))
     }
 
     pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<String, SyncError> {

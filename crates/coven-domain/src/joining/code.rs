@@ -2,53 +2,42 @@ use serde::{Deserialize, Serialize};
 
 use coven_foundation::code_envelope::{self, EnvelopeError};
 
-use crate::cloud::CloudHomeJoinInfo;
 #[cfg(test)]
 use coven_protocol::membership::{MembershipCoord, MembershipGrantId};
 #[cfg(test)]
 use coven_protocol::store_commit::ObjectHash;
+use coven_replication::sync::MemberInvitation;
 
-pub const INVITE_CODE_VERSION: u8 = 4;
+const INVITE_CODE_VERSION: u8 = 4;
 
-use coven_protocol::membership::MembershipFloor;
-
-/// An invite is always for a private home: sharing wraps and rotates the store
-/// key, which a public (plaintext) home has none of, so the joiner always builds
-/// an encrypted, obfuscated home. The invite therefore carries no visibility
-/// flag.
-///
-/// `Debug` is derived: `join_info` (`CloudHomeJoinInfo`) already hand-writes
-/// its own redacting `Debug`, and no other field here carries a secret.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InviteCode {
-    /// Wire-format version.
-    pub v: u8,
-    pub store_id: String,
-    pub store_name: String,
-    pub join_info: CloudHomeJoinInfo,
-    pub owner_pubkey: String,
-    pub wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
-    pub store_root: coven_protocol::store_commit::StoreRootRef,
-    /// The exact causal membership heads the joiner must observe.
-    pub membership_floor: MembershipFloor,
+struct InviteCode {
+    v: u8,
+    #[serde(flatten)]
+    invitation: MemberInvitation,
 }
 
-/// Encode an `InviteCode` into a prefixed base64url string.
-pub fn encode(code: &InviteCode) -> String {
-    code_envelope::encode_code(code_envelope::PREFIX, code)
+/// Encode a membership invitation into a prefixed base64url string.
+pub fn encode(invitation: &MemberInvitation) -> String {
+    let code = InviteCode {
+        v: INVITE_CODE_VERSION,
+        invitation: invitation.clone(),
+    };
+    code_envelope::encode_code(code_envelope::PREFIX, &code)
 }
 
-/// Decode an invite code string back into an `InviteCode`.
-pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
+/// Decode an invite code string back into its membership invitation.
+pub(crate) fn decode(s: &str) -> Result<MemberInvitation, JoinCodeError> {
     let code: InviteCode = code_envelope::decode_code(code_envelope::PREFIX, s)?;
     if code.v != INVITE_CODE_VERSION {
         return Err(JoinCodeError::UnsupportedVersion(code.v));
     }
+    let code = code.invitation;
     // An invite is unsigned, so `store_id` is attacker-controlled. It becomes the
     // name of a directory the joiner creates under `stores/` and recursively
     // deletes on a bootstrap failure, so a value carrying `..`, a separator, or an
     // absolute path would put that create/delete outside the stores root. Reject
-    // it the moment the code is parsed: a decoded `InviteCode` always carries a
+    // it the moment the code is parsed: a decoded invitation always carries a
     // `store_id` that is a single safe path component.
     coven_foundation::store_dir::validate_path_token(&code.store_id)
         .map_err(JoinCodeError::InvalidStoreId)?;
@@ -202,7 +191,8 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
-    use coven_protocol::membership::MembershipHeadRef;
+    use coven_protocol::membership::{MembershipFloor, MembershipHeadRef};
+    use coven_storage::CloudHomeJoinInfo;
 
     fn test_owner_pubkey() -> String {
         hex::encode([0xAB_u8; 32])
@@ -251,9 +241,8 @@ mod tests {
         }
     }
 
-    fn sample_s3_code(store_id: &str) -> InviteCode {
-        InviteCode {
-            v: INVITE_CODE_VERSION,
+    fn sample_s3_code(store_id: &str) -> MemberInvitation {
+        MemberInvitation {
             store_id: store_id.to_string(),
             store_name: "My Store".into(),
             join_info: CloudHomeJoinInfo::S3 {
@@ -284,13 +273,22 @@ mod tests {
         }
     }
 
+    fn encode_with_version(invitation: &MemberInvitation, version: u8) -> String {
+        code_envelope::encode_code(
+            code_envelope::PREFIX,
+            &InviteCode {
+                v: version,
+                invitation: invitation.clone(),
+            },
+        )
+    }
+
     #[test]
     fn round_trip_s3() {
         let code = sample_s3_code("lib-123");
         let encoded = encode(&code);
         assert!(encoded.starts_with(code_envelope::PREFIX));
         let decoded = decode(&encoded).unwrap();
-        assert_eq!(decoded.v, INVITE_CODE_VERSION);
         assert_eq!(decoded.store_id, "lib-123");
         assert_eq!(decoded.store_name, "My Store");
         assert_eq!(decoded.owner_pubkey, test_owner_pubkey());
@@ -407,9 +405,8 @@ mod tests {
 
     #[test]
     fn decode_obsolete_version() {
-        let mut code = sample_s3_code("lib-old");
-        code.v = 0;
-        let encoded = encode(&code);
+        let code = sample_s3_code("lib-old");
+        let encoded = encode_with_version(&code, 0);
         assert!(matches!(
             decode(&encoded),
             Err(JoinCodeError::UnsupportedVersion(0))
@@ -418,9 +415,8 @@ mod tests {
 
     #[test]
     fn decode_newer_version() {
-        let mut code = sample_s3_code("lib-new");
-        code.v = 99;
-        let encoded = encode(&code);
+        let code = sample_s3_code("lib-new");
+        let encoded = encode_with_version(&code, 99);
         assert!(matches!(
             decode(&encoded),
             Err(JoinCodeError::UnsupportedVersion(99))

@@ -77,6 +77,7 @@ pub(crate) use error::StorePreparationError;
 pub use host_write::HostWriteBlobStaging;
 pub use membership::AnchoredChainError;
 pub use membership::InviteError;
+pub use membership::MemberInvitation;
 pub(crate) use membership::MembershipOpsError;
 pub use merge_conflict::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
 pub use owner_role_promotion::OwnerPromotionError;

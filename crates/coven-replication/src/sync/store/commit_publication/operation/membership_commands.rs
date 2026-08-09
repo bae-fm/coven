@@ -11,7 +11,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         store_id: &str,
         store_name: &str,
     ) -> Result<
-        coven_storage::join_code::InviteCode,
+        crate::sync::store::membership::MemberInvitation,
         crate::sync::store::membership::MembershipOpsError,
     > {
         if role == coven_protocol::membership::MemberRole::Owner {
@@ -236,8 +236,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 ),
             ));
         }
-        Ok(coven_storage::join_code::InviteCode {
-            v: coven_storage::join_code::INVITE_CODE_VERSION,
+        Ok(crate::sync::store::membership::MemberInvitation {
             store_id: store_id.to_string(),
             store_name: store_name.to_string(),
             join_info,

@@ -7,6 +7,19 @@ use coven_keys::keys::KeyError;
 use coven_protocol::membership::MembershipConflict;
 use coven_protocol::objects::StorageError;
 use coven_protocol::objects::StoreObjectError;
+use coven_storage::CloudHomeJoinInfo;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct MemberInvitation {
+    pub store_id: String,
+    pub store_name: String,
+    pub join_info: CloudHomeJoinInfo,
+    pub owner_pubkey: String,
+    pub wrapped_key: coven_protocol::wrapped_store_key::WrappedStoreKeyRef,
+    pub store_root: coven_protocol::store_commit::StoreRootRef,
+    pub membership_floor: coven_protocol::membership::MembershipFloor,
+}
 
 /// Why a high-level membership operation (list members, invite, remove, rotate)
 /// failed. The security-critical orchestration layer that downloads the chain,
