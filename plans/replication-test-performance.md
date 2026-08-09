@@ -152,3 +152,48 @@ membership authorization path. The raw loader rejection, all 32 membership
 tests, all 60 cycle tests, and all 183 database tests pass. The isolated
 snapshot cadence test falls from 3.25 seconds to 2.50 seconds; the complete
 cycle group falls from 4.00 seconds to 3.03 seconds.
+
+## Connection-owned retained history checkpoints
+
+The next Time Profiler sample no longer includes replay-baseline validation in
+the publication hot path. Its dominant database operation is
+`retained_merge_history_frontier`: 628 inclusive samples, including 545 in
+`open_retained_merge_history_checkpoint_on`. Every successor walks its retained
+ancestors. Although their retained inputs already come from `RetainedReplayCache`,
+each walk reloads the corresponding device-state snapshot, parses and validates
+it, derives the state from the verified commit again, and compares both values.
+The resulting work grows with every retained successor.
+
+The state snapshot and retained materialization are written in one SQLite
+transaction. The retained input alone is not enough to trust a checkpoint after
+opening an existing database, because durable state could have been altered.
+Validate their relationship the first time the open connection uses that exact
+materialization as a checkpoint, then retain the verified relationship beside
+the cached input. Do not mark a newly inserted materialization checked: this
+keeps corruption before first checkpoint use observable. Rebuilding the cache
+from durable rows preserves a checked marker only when the coordinate, exact
+commit reference, and retained input hash still match.
+
+The regression publishes three commits, which makes the first two commits
+verified history checkpoints while preparing their successors, deletes the
+first commit's durable state row, and publishes a fourth commit through the
+same connection. Before the cache owns checkpoint verification, the fourth
+publication reloads the deleted ancestor and fails. The existing sabotage test
+still deletes or forges a checkpoint before its first use and must continue to
+fail publication.
+
+The regression fails before the cache change on the removed first-commit state
+and passes afterward. The missing/forged checkpoint sabotage test, all 11
+retained-history checkpoint tests, all 60 cycle tests, and the complete
+all-feature workspace test run pass. The isolated snapshot cadence test falls
+from 2.50 seconds to 1.91 seconds, and the cycle group falls from 3.03 seconds
+to 2.52 seconds.
+
+A new Time Profiler sample shows the intended boundary: retained-history
+frontier work falls from 628 inclusive samples to 96, and
+`open_retained_merge_history_checkpoint_on` falls from 545 to 2. The next
+dominant named application path is exact announcement-head loading and parsing:
+`load_exact_announcement_path` has 273 inclusive samples and Store device-head
+parsing has 308, with 544 samples in signature verification across the run.
+Trace that call path from current code before deciding which verification can
+be retained and which belongs to each new publication.

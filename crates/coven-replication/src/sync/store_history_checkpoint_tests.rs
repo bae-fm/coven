@@ -223,6 +223,27 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
 }
 
 #[tokio::test]
+async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
+    let fixture = PublishedHistory::publish(3).await;
+    let first = fixture
+        .retained_history()
+        .await
+        .into_iter()
+        .find(|materialization| materialization.commit_ref().coord.sequence() == 1)
+        .expect("retained history contains the first commit");
+    let encoded = serde_json::to_string(first.commit_ref()).expect("serialize first commit ref");
+    fixture
+        .db
+        .test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
+        .await
+        .expect("remove state after its checkpoint was verified");
+
+    HistoryPublisher::new(&fixture.db, &fixture.device, &fixture.store_dir)
+        .publish_note(4)
+        .await;
+}
+
+#[tokio::test]
 async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     let fixture = PublishedHistory::publish(1).await;
     let retained = fixture.retained_history().await;
@@ -257,17 +278,6 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .await
                 .expect("delete checkpoint state");
         } else {
-            let checkpoints = fixture
-                .device
-                .retained_merge_history_frontier_for_test(vec![retained[0].commit_ref().clone()])
-                .await
-                .expect("load retained checkpoint");
-            if !matches!(
-                checkpoints.as_slice(),
-                [coven_database::RetainedMergeHistoryCheckpoint::Commit(_)]
-            ) {
-                panic!("published commit unexpectedly resolved to a snapshot checkpoint");
-            }
             let database = coven_database::StoreDatabase::new(&fixture.db);
             let root = database
                 .local_store_root_ref()

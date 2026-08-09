@@ -5,7 +5,13 @@ use crate::query_mapped_rows;
 #[derive(Clone, Default)]
 pub struct RetainedReplayCache {
     baseline: Option<RetainedReplayBaseline>,
-    verified: BTreeMap<(String, u64), OwnedVerifiedMergeMaterialization>,
+    verified: BTreeMap<(String, u64), RetainedReplayEntry>,
+}
+
+#[derive(Clone)]
+struct RetainedReplayEntry {
+    materialization: OwnedVerifiedMergeMaterialization,
+    history_checkpoint_verified: bool,
 }
 
 pub enum RetainedCommitAuthority<'a> {
@@ -46,8 +52,8 @@ impl RetainedReplayCache {
         match self.verified.get(&key) {
             None => Ok(()),
             Some(existing)
-                if existing.commit_ref() == materialization.commit_ref()
-                    && existing.input_hash() == materialization.input_hash() =>
+                if existing.materialization.commit_ref() == materialization.commit_ref()
+                    && existing.materialization.input_hash() == materialization.input_hash() =>
             {
                 Ok(())
             }
@@ -66,7 +72,10 @@ impl RetainedReplayCache {
         let coordinate = materialization.commit_ref().coord.clone();
         let key = (coordinate.stream_id.to_string(), coordinate.sequence());
         if let std::collections::btree_map::Entry::Vacant(entry) = self.verified.entry(key) {
-            entry.insert(materialization);
+            entry.insert(RetainedReplayEntry {
+                materialization,
+                history_checkpoint_verified: false,
+            });
         }
         Ok(())
     }
@@ -84,13 +93,47 @@ impl RetainedReplayCache {
                 "retained Merge materialization cache omits {reference:?}"
             ))
         })?;
-        if verified.commit_ref() != reference {
+        if verified.materialization.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge materialization cache coordinate contains another commit"
                     .to_string(),
             ));
         }
-        Ok(verified)
+        Ok(&verified.materialization)
+    }
+
+    pub fn retained_history_checkpoint_on(
+        &mut self,
+        conn: &Connection,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<RetainedMergeHistoryCheckpoint, DbError> {
+        let key = (
+            reference.coord.stream_id.to_string(),
+            reference.coord.sequence(),
+        );
+        let entry = self.verified.get_mut(&key).ok_or_else(|| {
+            DbError::Message(format!(
+                "retained Merge materialization cache omits {reference:?}"
+            ))
+        })?;
+        if entry.materialization.commit_ref() != reference {
+            return Err(DbError::Message(
+                "retained Merge materialization cache coordinate contains another commit"
+                    .to_string(),
+            ));
+        }
+        if !entry.history_checkpoint_verified {
+            let checkpoint = StoreDatabase::open_retained_merge_history_checkpoint_on(
+                conn,
+                reference,
+                &entry.materialization,
+            )?;
+            entry.history_checkpoint_verified = true;
+            return Ok(checkpoint);
+        }
+        Ok(RetainedMergeHistoryCheckpoint::Commit(Box::new(
+            entry.materialization.clone(),
+        )))
     }
 
     pub fn replay_inputs_on(
@@ -158,42 +201,55 @@ impl RetainedReplayCache {
                 )
             })?;
             let key = (stream_id.clone(), sequence);
-            let materialization = match self.verified.get(&key) {
+            let (materialization, history_checkpoint_verified) = match self.verified.get(&key) {
                 Some(cached)
-                    if cached.commit_ref() == &commit_ref && cached.input_hash() == input_hash =>
+                    if cached.materialization.commit_ref() == &commit_ref
+                        && cached.materialization.input_hash() == input_hash =>
                 {
-                    cached.clone()
+                    (
+                        cached.materialization.clone(),
+                        cached.history_checkpoint_verified,
+                    )
                 }
-                _ => match &authorities {
-                    RetainedCommitAuthorities::StoredBytes => {
-                        StoreDatabase::load_retained_merge_materialization_on(
-                            records,
-                            root,
-                            &stream_id,
-                            sequence,
-                            &commit_ref,
-                            &encoded_input_hash,
-                        )?
-                    }
-                    RetainedCommitAuthorities::Operation(operation_verified) => {
-                        let commit = operation_verified.get(&commit_ref).ok_or_else(|| {
-                            DbError::Message(format!(
-                                "retained Merge commit {commit_ref:?} is absent from the operation-verified history"
-                            ))
-                        })?;
-                        StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
-                            records,
-                            root,
-                            &stream_id,
-                            sequence,
-                            &commit_ref,
-                            &encoded_input_hash,
-                            commit,
-                        )?
-                    }
-                },
+                _ => (
+                    match &authorities {
+                        RetainedCommitAuthorities::StoredBytes => {
+                            StoreDatabase::load_retained_merge_materialization_on(
+                                records,
+                                root,
+                                &stream_id,
+                                sequence,
+                                &commit_ref,
+                                &encoded_input_hash,
+                            )?
+                        }
+                        RetainedCommitAuthorities::Operation(operation_verified) => {
+                            let commit = operation_verified.get(&commit_ref).ok_or_else(|| {
+                                DbError::Message(format!(
+                                    "retained Merge commit {commit_ref:?} is absent from the operation-verified history"
+                                ))
+                            })?;
+                            StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
+                                records,
+                                root,
+                                &stream_id,
+                                sequence,
+                                &commit_ref,
+                                &encoded_input_hash,
+                                commit,
+                            )?
+                        }
+                    },
+                    false,
+                ),
             };
-            verified.insert(key, materialization.clone());
+            verified.insert(
+                key,
+                RetainedReplayEntry {
+                    materialization: materialization.clone(),
+                    history_checkpoint_verified,
+                },
+            );
             replay_inputs.push(materialization);
         }
         self.verified = verified;

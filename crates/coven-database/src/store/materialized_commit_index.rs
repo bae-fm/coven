@@ -124,11 +124,9 @@ impl StoreDatabase {
                                 .0
                                 .into_values(),
                         );
-                        checkpoints.push(Self::open_retained_merge_history_checkpoint_on(
-                            records.conn(),
-                            &reference,
-                            materialization,
-                        )?);
+                        checkpoints.push(
+                            cache.retained_history_checkpoint_on(records.conn(), &reference)?,
+                        );
                     }
                     None => checkpoints.push(Self::load_retained_merge_history_checkpoint_on(
                         records, &root, &reference,
