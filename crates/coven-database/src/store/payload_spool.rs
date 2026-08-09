@@ -486,7 +486,7 @@ impl StoreDatabase {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
         self.connection
-            .call_store(|session| payload_spool_cleanup_hashes_on(session.records.conn))
+            .call_store(|session| session.owed_payload_spool_cleanup())
             .await
     }
 
@@ -495,13 +495,21 @@ impl StoreDatabase {
     pub async fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
         let owner_key = owner_key.to_string();
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                Ok(payload_owner_claims_on(conn, &owner_key)?
-                    .into_iter()
-                    .collect())
-            })
+            .call_store(move |session| session.payload_owner_claims(&owner_key))
             .await
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl super::StoreSession<'_> {
+    fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
+        payload_spool_cleanup_hashes_on(self.records.conn)
+    }
+
+    fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
+        Ok(payload_owner_claims_on(self.records.conn, owner_key)?
+            .into_iter()
+            .collect())
     }
 }
 
