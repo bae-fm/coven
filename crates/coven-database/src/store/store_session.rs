@@ -8,10 +8,14 @@ impl<'session> StoreSession<'session> {
     pub(crate) fn new(
         records: StoreRecords<'session>,
         verified_store_authority: &'session mut VerifiedStoreAuthority,
+        gates: &'session crate::Gates,
+        synced_tables: &'session [coven_protocol::synced_schema::SyncedTable],
     ) -> Self {
         Self {
             records,
             verified_store_authority,
+            gates,
+            synced_tables,
         }
     }
 

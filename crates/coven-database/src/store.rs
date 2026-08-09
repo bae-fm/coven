@@ -211,6 +211,8 @@ pub struct SnapshotPublicationPermit {
 pub(crate) struct StoreSession<'session> {
     records: payload_spool::StoreRecords<'session>,
     verified_store_authority: &'session mut VerifiedStoreAuthority,
+    gates: &'session crate::Gates,
+    synced_tables: &'session [coven_protocol::synced_schema::SyncedTable],
 }
 
 #[derive(Clone)]

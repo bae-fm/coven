@@ -3,6 +3,56 @@ use coven_protocol::circle_activation::VerifiedStreamActivations;
 use coven_protocol::store_commit::StreamActivationId;
 use rusqlite::{Connection, OptionalExtension};
 
+impl StoreSession<'_> {
+    fn registered_stream_activation(
+        &self,
+        activation_id: StreamActivationId,
+    ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
+        let key = activation_id.as_hash().to_string();
+        let stored = self
+            .records
+            .conn
+            .query_row(
+                "SELECT activation_id, author_stream_id, activation, activating_commit
+                 FROM stream_activations WHERE activation_id = ?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((activation_id, author_stream_id, activation, activating_commit)) = stored else {
+            return Ok(None);
+        };
+        let activation_id = StreamActivationId::from_digest(
+            activation_id
+                .parse()
+                .map_err(|error| DbError::context("stored stream activation id", error))?,
+        );
+        let author_stream_id = author_stream_id
+            .parse()
+            .map_err(|error| DbError::Message(format!("stored author stream id: {error}")))?;
+        let activation = serde_json::from_slice(&activation)
+            .map_err(|error| DbError::context("stored stream activation descriptor", error))?;
+        let activating_commit = serde_json::from_str(&activating_commit)
+            .map_err(|error| DbError::context("stored stream activation commit ref", error))?;
+        coven_protocol::store_commit::RegisteredStreamActivation::from_stored(
+            activation_id,
+            author_stream_id,
+            activation,
+            activating_commit,
+        )
+        .map(Some)
+        .map_err(|error| DbError::Message(error.to_string()))
+    }
+}
+
 impl StoreDatabase {
     pub fn record_verified_stream_activations_on(
         conn: &Connection,
@@ -58,54 +108,8 @@ impl StoreDatabase {
         &self,
         activation_id: StreamActivationId,
     ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
-        let key = activation_id.as_hash().to_string();
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let stored = conn
-                    .query_row(
-                        "SELECT activation_id, author_stream_id, activation, activating_commit
-                         FROM stream_activations WHERE activation_id = ?1",
-                        [key],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, Vec<u8>>(2)?,
-                                row.get::<_, String>(3)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some((activation_id, author_stream_id, activation, activating_commit)) = stored
-                else {
-                    return Ok(None);
-                };
-                let activation_id = StreamActivationId::from_digest(
-                    activation_id
-                        .parse()
-                        .map_err(|error| DbError::context("stored stream activation id", error))?,
-                );
-                let author_stream_id = author_stream_id.parse().map_err(|error| {
-                    DbError::Message(format!("stored author stream id: {error}"))
-                })?;
-                let activation = serde_json::from_slice(&activation).map_err(|error| {
-                    DbError::context("stored stream activation descriptor", error)
-                })?;
-                let activating_commit =
-                    serde_json::from_str(&activating_commit).map_err(|error| {
-                        DbError::context("stored stream activation commit ref", error)
-                    })?;
-                coven_protocol::store_commit::RegisteredStreamActivation::from_stored(
-                    activation_id,
-                    author_stream_id,
-                    activation,
-                    activating_commit,
-                )
-                .map(Some)
-                .map_err(|error| DbError::Message(error.to_string()))
-            })
+            .call_store(move |session| session.registered_stream_activation(activation_id))
             .await
     }
 }

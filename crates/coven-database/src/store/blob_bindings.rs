@@ -1,43 +1,88 @@
 use super::*;
 use crate::{ExternalBlob, ExternalBlobRecords};
 
+impl StoreSession<'_> {
+    fn eager_row_blob_refs(&self) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
+        let mut references = Vec::new();
+        for table in self.synced_tables {
+            let Some(declaration) = table.blob() else {
+                continue;
+            };
+            if declaration.fill != coven_protocol::blob::CacheFill::CacheEager {
+                continue;
+            }
+            let sql = format!(
+                "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
+                crate::quote_ident(table.name()),
+                crate::quote_ident(&declaration.id_column),
+            );
+            let mut statement = self.records.conn.prepare(&sql).map_err(DbError::from)?;
+            let row_ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            for row_id in row_ids {
+                references.push(Database::row_blob_ref_on(
+                    self.records.conn,
+                    self.gates,
+                    table,
+                    &row_id,
+                )?);
+            }
+        }
+        Ok(references)
+    }
+
+    fn stored_blob_reference_state(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<crate::StoredBlobReferenceState, DbError> {
+        Database::stored_blob_reference_state_on(
+            self.records.conn,
+            self.gates,
+            self.synced_tables,
+            stored,
+        )
+    }
+
+    fn row_blob_ref(
+        &self,
+        table: &coven_protocol::synced_schema::SyncedTable,
+        row_id: &str,
+    ) -> Result<coven_protocol::blob::RowBlobRef, DbError> {
+        Database::row_blob_ref_on(self.records.conn, self.gates, table, row_id)
+    }
+
+    fn row_blob_refs_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
+        Database::row_blob_refs_for_root_on(
+            self.records.conn,
+            self.gates,
+            self.synced_tables,
+            root_table,
+            root_id,
+        )
+    }
+
+    fn external_blob_for_row(
+        &self,
+        reference: &coven_protocol::blob::RowBlobRef,
+    ) -> Result<Option<ExternalBlob>, DbError> {
+        ExternalBlobRecords::new(self.records.conn).load(reference)
+    }
+}
+
 impl StoreDatabase {
     pub async fn eager_row_blob_refs(
         &self,
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
-        let tables = self.synced_tables().to_vec();
-        let gates = self.gates.clone();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let mut references = Vec::new();
-                for table in &tables {
-                    let Some(declaration) = table.blob() else {
-                        continue;
-                    };
-                    if declaration.fill != coven_protocol::blob::CacheFill::CacheEager {
-                        continue;
-                    }
-                    let sql = format!(
-                        "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
-                        crate::quote_ident(table.name()),
-                        crate::quote_ident(&declaration.id_column),
-                    );
-                    let mut statement = connection.prepare(&sql).map_err(DbError::from)?;
-                    let row_ids = statement
-                        .query_map([], |row| row.get::<_, String>(0))
-                        .map_err(DbError::from)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(DbError::from)?;
-                    drop(statement);
-                    for row_id in row_ids {
-                        references.push(Database::row_blob_ref_on(
-                            connection, &gates, table, &row_id,
-                        )?);
-                    }
-                }
-                Ok(references)
-            })
+            .call_store(|session| session.eager_row_blob_refs())
             .await
     }
 
@@ -45,13 +90,8 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::StoredBlobReferenceState, DbError> {
-        let gates = self.gates.clone();
-        let tables = self.synced_tables().to_vec();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                Database::stored_blob_reference_state_on(connection, &gates, &tables, &stored)
-            })
+            .call_store(move |session| session.stored_blob_reference_state(&stored))
             .await
     }
 
@@ -74,12 +114,8 @@ impl StoreDatabase {
             )));
         }
         let row_id = row_id.to_string();
-        let gates = self.gates.clone();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                Database::row_blob_ref_on(connection, &gates, &table, &row_id)
-            })
+            .call_store(move |session| session.row_blob_ref(&table, &row_id))
             .await
     }
 
@@ -90,19 +126,8 @@ impl StoreDatabase {
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
-        let gates = self.gates.clone();
-        let tables = self.synced_tables().to_vec();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                Database::row_blob_refs_for_root_on(
-                    connection,
-                    &gates,
-                    &tables,
-                    &root_table,
-                    &root_id,
-                )
-            })
+            .call_store(move |session| session.row_blob_refs_for_root(&root_table, &root_id))
             .await
     }
 
@@ -131,9 +156,7 @@ impl StoreDatabase {
     ) -> Result<Option<ExternalBlob>, DbError> {
         let reference = reference.clone();
         self.connection
-            .call_store(move |session| {
-                ExternalBlobRecords::new(session.records.conn).load(&reference)
-            })
+            .call_store(move |session| session.external_blob_for_row(&reference))
             .await
     }
 
