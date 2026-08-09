@@ -13,8 +13,6 @@ jobs:
       # The pinned toolchain and components come from rust-toolchain.toml on the
       # first cargo invocation.
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
       - name: Format
         run: cargo fmt --all --check
       - name: Restricted-path Rust visibility
@@ -39,9 +37,7 @@ jobs:
       - name: Lib-only check (production feature sets, no test cfg)
         run: scripts/check-lib-only.sh
       - name: Test
-        run: cargo nextest run --workspace --all-features
-      - name: Documentation tests
-        run: cargo test --doc --workspace --all-features
+        run: cargo test --all-features
 
   check-windows:
     runs-on: windows-latest
