@@ -70,7 +70,7 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.with_retained_merge_materializations(move |records, cache| {
+        self.with_retained_replay(move |records, cache| {
             cache.replay_inputs_on(records, &root)?;
             cache.circle_replay_epoch_index_on(records.conn())
         })

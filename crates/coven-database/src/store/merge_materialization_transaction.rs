@@ -26,7 +26,7 @@ use super::store_device_state::{
 };
 use super::{
     apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
-    RetainedMergeMaterializationCache, StoreDatabase,
+    RetainedReplayCache, StoreDatabase,
 };
 use crate::blob_records::{
     live_blob_row, validate_live_blob_row, validate_stored_locator_on,

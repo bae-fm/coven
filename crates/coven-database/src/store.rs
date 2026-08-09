@@ -112,7 +112,7 @@ pub use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
 };
-pub use retained_merge_replay::RetainedMergeMaterializationCache;
+pub use retained_merge_replay::RetainedReplayCache;
 pub use retained_replay::{
     copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
     RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
@@ -146,10 +146,9 @@ pub struct StoreDatabaseRuntime {
     /// Serializes staging and publication of the one exact snapshot generation
     /// held in `outbound_store_snapshot`.
     snapshot_publication: std::sync::Arc<tokio::sync::Mutex<()>>,
-    /// Retained Merge inputs verified when this database opened, extended only
-    /// by fully opening newly retained inputs on the owned connection.
-    retained_merge_materializations:
-        std::sync::Arc<std::sync::Mutex<RetainedMergeMaterializationCache>>,
+    /// The replay baseline and Merge inputs verified on this open database,
+    /// extended only by fully opening newly retained inputs on its connection.
+    retained_replay: std::sync::Arc<std::sync::Mutex<RetainedReplayCache>>,
     /// Serializes this device's authorship of its own Store stream: reading the
     /// position a commit extends, and publishing the head that takes it.
     ///
@@ -171,8 +170,8 @@ impl StoreDatabaseRuntime {
             store_creation: Default::default(),
             device_exclusion: Default::default(),
             snapshot_publication: Default::default(),
-            retained_merge_materializations: std::sync::Arc::new(std::sync::Mutex::new(
-                RetainedMergeMaterializationCache::default(),
+            retained_replay: std::sync::Arc::new(std::sync::Mutex::new(
+                RetainedReplayCache::default(),
             )),
             own_stream_authorship: Default::default(),
             local_blob_cleanup: Default::default(),
@@ -534,24 +533,22 @@ impl StoreDatabase {
         }
     }
 
-    async fn with_retained_merge_materializations<F, R>(&self, operation: F) -> Result<R, DbError>
+    async fn with_retained_replay<F, R>(&self, operation: F) -> Result<R, DbError>
     where
         F: for<'records> FnOnce(
                 payload_spool::StoreRecords<'records>,
-                &mut RetainedMergeMaterializationCache,
+                &mut RetainedReplayCache,
             ) -> Result<R, DbError>
             + Send
             + 'static,
         R: Send + 'static,
     {
-        let retained = self.runtime.retained_merge_materializations.clone();
+        let replay = self.runtime.retained_replay.clone();
         self.call_records(move |records| {
-            let mut retained = retained.lock().map_err(|_| {
-                DbError::Message(
-                    "retained Merge materialization cache lock is poisoned".to_string(),
-                )
+            let mut replay = replay.lock().map_err(|_| {
+                DbError::Message("retained replay cache lock is poisoned".to_string())
             })?;
-            operation(records, &mut retained)
+            operation(records, &mut replay)
         })
         .await
     }

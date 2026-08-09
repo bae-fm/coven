@@ -45,7 +45,7 @@ impl StoreDatabase {
         expected_root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<String, DbError> {
         let expected_root = expected_root.clone();
-        self.call_records(move |records| {
+        self.with_retained_replay(move |records, replay| {
             let conn = records.conn();
             let (root, protocol_root) =
                 load_store_root_authority_on(conn)?.ok_or(DbError::StoreRootHashMissing)?;
@@ -62,7 +62,7 @@ impl StoreDatabase {
                     "Store owner anchor differs from its signed root".to_string(),
                 ));
             }
-            let baseline = StoreDatabase::generation_zero_replay_baseline_on(records)?;
+            let baseline = replay.baseline_on(records)?;
             let (baseline_root, founder_reference) = match &baseline.authority {
                 RetainedReplayAuthority::Genesis(authority) => {
                     (&authority.store_root, &authority.founder_registration)

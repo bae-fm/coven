@@ -511,6 +511,24 @@ async fn store_membership_reads_reject_tampered_founder_state() {
 }
 
 #[tokio::test]
+async fn open_store_reuses_its_verified_replay_baseline() {
+    let fixture = MergeFixture::new("store-membership-retained-replay-baseline").await;
+    fixture.load().await;
+    fixture
+        .database
+        .replace_generation_zero_replay_authority_for_test(
+            b"invalid retained replay authority".to_vec(),
+        )
+        .await
+        .expect("replace retained replay authority after verification");
+
+    fixture
+        .load_result()
+        .await
+        .expect("reuse the replay baseline verified by the open connection");
+}
+
+#[tokio::test]
 async fn store_prefix_projection_retains_direct_membership_heads() {
     let fixture = MergeFixture::new("project-direct-membership").await;
     let member = UserKeypair::generate();

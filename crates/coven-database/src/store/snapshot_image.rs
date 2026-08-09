@@ -700,7 +700,7 @@ impl StoreDatabase {
         let store_dir = self.store_dir.clone();
         let blob_decls = self.blob_decls();
         let gates = self.gates();
-        self.with_retained_merge_materializations(move |records, retained| {
+        self.with_retained_replay(move |records, retained| {
             let transaction = records
                 .conn()
                 .unchecked_transaction()

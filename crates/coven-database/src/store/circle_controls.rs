@@ -383,7 +383,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let gates = self.gates();
         let store_dir = self.store_dir.clone();
-        self.with_retained_merge_materializations(move |records, retained_cache| {
+        self.with_retained_replay(move |records, retained_cache| {
                 let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 journal

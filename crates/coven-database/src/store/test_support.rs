@@ -428,70 +428,68 @@ impl StoreDatabase {
         let blob_decls = self.blob_decls();
         let gates = self.gates();
         let tables = self.synced_tables().to_vec();
-        self.with_retained_merge_materializations(
-            move |records, retained_merge_materializations| {
-                let transaction = records
-                    .conn()
-                    .unchecked_transaction()
-                    .map_err(DbError::from)?;
-                let retained = retained_merge_materializations.replay_projection_on(
-                    &transaction,
-                    &store_dir,
-                    &root,
-                    &blob_decls,
-                    &gates,
-                    &tables,
-                    Some(&routing_key),
-                    &BTreeSet::new(),
-                    None,
-                    false,
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
-                let retained_count = retained.query_row(
-                    "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                    [historical_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                let retained_late_count = retained.query_row(
-                    "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                    [late_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                transaction
-                    .execute("DELETE FROM circle_bootstrap_coverage", [])
-                    .map_err(DbError::from)?;
-                let sabotaged = retained_merge_materializations.replay_projection_on(
-                    &transaction,
-                    &store_dir,
-                    &root,
-                    &blob_decls,
-                    &gates,
-                    &tables,
-                    Some(&routing_key),
-                    &BTreeSet::new(),
-                    None,
-                    false,
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
-                let sabotaged_count = sabotaged.query_row(
-                    "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                    [historical_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                let sabotaged_late_count = sabotaged.query_row(
-                    "SELECT COUNT(*) FROM documents WHERE id = ?1",
-                    [late_id.as_str()],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                transaction.rollback().map_err(DbError::from)?;
-                Ok((
-                    retained_count,
-                    retained_late_count,
-                    sabotaged_count,
-                    sabotaged_late_count,
-                ))
-            },
-        )
+        self.with_retained_replay(move |records, retained_replay| {
+            let transaction = records
+                .conn()
+                .unchecked_transaction()
+                .map_err(DbError::from)?;
+            let retained = retained_replay.replay_projection_on(
+                &transaction,
+                &store_dir,
+                &root,
+                &blob_decls,
+                &gates,
+                &tables,
+                Some(&routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                coven_protocol::membership::LocalStoreMembership::Current,
+            )?;
+            let retained_count = retained.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [historical_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let retained_late_count = retained.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [late_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?;
+            transaction
+                .execute("DELETE FROM circle_bootstrap_coverage", [])
+                .map_err(DbError::from)?;
+            let sabotaged = retained_replay.replay_projection_on(
+                &transaction,
+                &store_dir,
+                &root,
+                &blob_decls,
+                &gates,
+                &tables,
+                Some(&routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                coven_protocol::membership::LocalStoreMembership::Current,
+            )?;
+            let sabotaged_count = sabotaged.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [historical_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let sabotaged_late_count = sabotaged.query_row(
+                "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                [late_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?;
+            transaction.rollback().map_err(DbError::from)?;
+            Ok((
+                retained_count,
+                retained_late_count,
+                sabotaged_count,
+                sabotaged_late_count,
+            ))
+        })
         .await
     }
 

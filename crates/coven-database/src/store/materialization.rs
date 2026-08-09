@@ -50,7 +50,7 @@ impl StoreDatabase {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure_injection();
         let applied = self
-            .with_retained_merge_materializations(move |records, retained_cache| {
+            .with_retained_replay(move |records, retained_cache| {
                 let tx = records
                     .conn()
                     .unchecked_transaction()
@@ -254,7 +254,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
         let store_dir = self.store_dir.clone();
-        self.with_retained_merge_materializations(move |records, retained_cache| {
+        self.with_retained_replay(move |records, retained_cache| {
             let conn = records.conn();
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let store_transaction = MergeMaterializationTransaction::new(&tx, &store_dir);
@@ -316,7 +316,7 @@ impl StoreDatabase {
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
         let store_dir = self.store_dir.clone();
-        self.with_retained_merge_materializations(move |records, retained_cache| {
+        self.with_retained_replay(move |records, retained_cache| {
                 let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 if let Some(materialized) =
@@ -371,7 +371,7 @@ impl StoreDatabase {
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
-        self.with_retained_merge_materializations(move |records, retained_cache| {
+        self.with_retained_replay(move |records, retained_cache| {
             let conn = records.conn();
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let mut newly_retained = Vec::new();
@@ -511,7 +511,7 @@ impl StoreDatabase {
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
-        self.with_retained_merge_materializations(move |records, retained_cache| {
+        self.with_retained_replay(move |records, retained_cache| {
             let conn = records.conn();
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let root = required_store_root_authority_on(&tx)?;

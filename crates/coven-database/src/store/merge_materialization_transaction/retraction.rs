@@ -112,7 +112,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     pub fn retract_verified_merge_materializations(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
-        retained_merge_materializations: &mut RetainedMergeMaterializationCache,
+        retained_replay: &mut RetainedReplayCache,
         retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
         let conn = self.transaction;
@@ -124,7 +124,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = retained_merge_materializations.replay_inputs_on(self.records(), root)?;
+        let retained = retained_replay.replay_inputs_on(self.records(), root)?;
         let mut required = BTreeSet::new();
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(

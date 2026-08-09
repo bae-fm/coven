@@ -11,7 +11,7 @@ use crate::{
     PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
 };
 use crate::{RetainedReplayAuthority, RetainedReplayBaseline};
-pub use cache::RetainedMergeMaterializationCache;
+pub use cache::RetainedReplayCache;
 pub(crate) use cache::{CircleReplayEpochIndex, CircleRestoreSelectionIndex};
 use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::blob::locator::{RemoteAudience, StoredBlobRef};

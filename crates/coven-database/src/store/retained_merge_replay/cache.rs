@@ -3,7 +3,8 @@ use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
 
 #[derive(Clone, Default)]
-pub struct RetainedMergeMaterializationCache {
+pub struct RetainedReplayCache {
+    baseline: Option<RetainedReplayBaseline>,
     verified: BTreeMap<(String, u64), OwnedVerifiedMergeMaterialization>,
 }
 
@@ -22,7 +23,20 @@ pub enum RetainedCommitAuthorities<'a> {
     ),
 }
 
-impl RetainedMergeMaterializationCache {
+impl RetainedReplayCache {
+    pub fn baseline_on(
+        &mut self,
+        records: StoreRecords<'_>,
+    ) -> Result<&RetainedReplayBaseline, DbError> {
+        if self.baseline.is_none() {
+            self.baseline = Some(StoreDatabase::generation_zero_replay_baseline_on(records)?);
+        }
+        Ok(self
+            .baseline
+            .as_ref()
+            .expect("retained replay baseline was installed in the cache"))
+    }
+
     pub fn validate_insert_verified(
         &self,
         materialization: &OwnedVerifiedMergeMaterialization,
@@ -257,8 +271,9 @@ impl RetainedMergeMaterializationCache {
         include_local_write_overlays: bool,
         local_store_membership: LocalStoreMembership,
     ) -> Result<rusqlite::Connection, DbError> {
-        let baseline =
-            StoreDatabase::generation_zero_replay_baseline_on(StoreRecords::new(live, store_dir))?;
+        let baseline = self
+            .baseline_on(StoreRecords::new(live, store_dir))?
+            .clone();
         let replay = baseline.open_image(store_dir)?;
         replay
             .pragma_update(None, "foreign_keys", "ON")

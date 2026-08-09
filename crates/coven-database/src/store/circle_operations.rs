@@ -447,7 +447,7 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, DbError> {
-        self.with_retained_merge_materializations(move |records, retained| {
+        self.with_retained_replay(move |records, retained| {
             retained.replay_inputs_on(records, &root)?;
             let Some(activation) = retained.verified_circle_activation_on(
                 records.conn(),

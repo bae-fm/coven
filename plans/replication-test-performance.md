@@ -116,3 +116,39 @@ because 100 is the production count threshold. Do not replace those commits
 with reconstructed database state or lower the production threshold for the
 test. Profile that publication path before deciding whether the runtime is
 required protocol work or another repeated implementation bottleneck.
+
+## Connection-owned replay baseline
+
+Phase timing isolates 2.35 seconds of the cadence test in its 100 local
+publications and another 0.74 seconds in the final sync cycle. A Time Profiler
+sample finds both paths repeatedly calling
+`load_generation_zero_replay_baseline_on`: writer authorization reaches it
+through `validated_store_owner`, while canonical replay loads it directly.
+The loader opens and validates the baseline database image, parses and
+canonicalizes its authority, checks its payload hashes, validates its schema,
+and reconstructs founder device state. The baseline is installed once when the
+local Store authority is established and has no production update path.
+
+The database runtime already retains verified replay materializations for the
+life of the open connection, with durable bytes checked again when a database
+is reopened. The replay baseline has the same trust boundary and is the root
+input to those materializations. Extend that existing cache to own the verified
+baseline as well, and rename it from a materialization cache to the retained
+replay cache. Writer authorization must continue checking the live root, owner
+anchor, founder registration, and stored genesis on every operation; only the
+immutable baseline load is retained. Canonical replay opens a fresh writable
+copy of the retained baseline image on each run, but no longer re-verifies the
+immutable source bytes within one connection.
+
+Prove the boundary through the real Store authorization path: authorize once,
+replace the durable baseline authority bytes, and require a second
+authorization on the same open connection to use the already verified
+baseline. The existing raw baseline loader test continues proving that reading
+durable baseline bytes rejects altered authority.
+
+The regression fails before the cache change because the second authorization
+parses the replaced authority and passes afterward through the production
+membership authorization path. The raw loader rejection, all 32 membership
+tests, all 60 cycle tests, and all 183 database tests pass. The isolated
+snapshot cadence test falls from 3.25 seconds to 2.50 seconds; the complete
+cycle group falls from 4.00 seconds to 3.03 seconds.

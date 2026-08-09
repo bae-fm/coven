@@ -39,7 +39,7 @@ impl StoreDatabase {
         let gates = self.gates();
         let synced_tables = self.synced_tables().to_vec();
         let (outcome, notification) = self
-            .with_retained_merge_materializations(move |records, retained_cache| {
+            .with_retained_replay(move |records, retained_cache| {
                 let conn = records.conn();
                 let tx = conn.unchecked_transaction().map_err(DbError::from)?;
                 let local_device_id =
