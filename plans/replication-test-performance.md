@@ -45,3 +45,22 @@ and involuntary context switches fall from 8,092,954 to 902,179.
 The full 637-test replication suite executes in 55.85 seconds, down from 119.55
 seconds after the retained-history redesign. All 637 unit tests and the
 replication documentation test pass with the setting enabled.
+
+## Workspace test profile
+
+After removing SQLite contention, the Circle profile is dominated by protocol
+JSON serialization and parsing, object-hash hex conversion, signature checks,
+and database authority decoding. These paths live in workspace crates compiled
+at test `opt-level=0`; only `coven`, `coven-domain`, and `coven-replication` had
+package overrides.
+
+Using test `opt-level=1` for every workspace crate reduces Circle execution
+from 26.85 seconds to 9.44 seconds and the complete replication suite from
+57.76 seconds to 20.95 seconds. A cold internal-package rebuild with external
+dependencies retained takes 163.37 seconds including the test run, compared
+with 165.93 seconds for the prior profile. The compile-plus-test gate is not
+slower without a build cache, and cached test execution removes 36.81 seconds.
+
+Set `profile.test.opt-level` to 1 at the workspace level and retain the existing
+level-3 wildcard for non-workspace dependencies. Test assertions and overflow
+checks remain enabled.

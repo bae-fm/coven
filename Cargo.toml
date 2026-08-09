@@ -97,21 +97,11 @@ incremental = true
 
 [profile.test]
 incremental = true
-
-# Debug builds of the async Circle/membership operations reserve more stack per
-# `poll` frame than optimized builds. Optimize Coven's test build so the complete
-# composed flows fit within the test runner's thread stack.
-[profile.test.package.coven]
 opt-level = 1
 
-[profile.test.package.coven-domain]
-opt-level = 1
-
-[profile.test.package.coven-replication]
-opt-level = 1
-
-# Tests drive the complete signing, hashing, encryption, and SQLite paths.
-# Optimize their third-party implementations so test runtime measures Coven's
-# behavior rather than debug builds of those dependencies.
+# Tests drive complete flows through every workspace crate and their signing,
+# hashing, encryption, and SQLite dependencies. Optimize workspace code at level
+# 1 and third-party code at level 3 while retaining test-profile assertions and
+# overflow checks.
 [profile.test.package."*"]
 opt-level = 3
