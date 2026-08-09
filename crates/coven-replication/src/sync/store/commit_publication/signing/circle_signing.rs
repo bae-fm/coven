@@ -346,13 +346,12 @@ impl LocalStoreWriter {
         &self,
         root_hash: coven_protocol::store_commit::ObjectHash,
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        history_summary: coven_protocol::store_commit::ObjectHash,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<
         coven_protocol::store_commit::StoreDeviceHead,
         crate::sync::store::circles::CircleOperationError,
     > {
-        self.sign_device_head(root_hash, commit, history_summary, successor)
+        self.sign_device_head(root_hash, commit, successor)
             .map_err(|error| {
                 crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
             })

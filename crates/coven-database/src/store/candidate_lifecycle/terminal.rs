@@ -271,23 +271,23 @@ impl StoreDatabase {
                 let replacement = match prepared {
                     PreparedStoreWriteState::Publication {
                         commit,
-                        history_summary,
+                        history_evidence,
                         local_cleanup,
                         completion,
                         ..
                     } => PreparedStoreWriteState::Publication {
                         commit,
                         head: replacement_head,
-                        history_summary,
+                        history_evidence,
                         local_cleanup,
                         completion,
                     },
                     PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
                         candidate_head,
-                        candidate_history_summary,
+                        candidate_history_evidence,
                         authority_commit,
-                        authority_history_summary,
+                        authority_history_evidence,
                         outcome,
                         local_cleanup,
                         completion,
@@ -295,10 +295,10 @@ impl StoreDatabase {
                     } => PreparedStoreWriteState::MergeAbandonment {
                         candidate_commit,
                         candidate_head,
-                        candidate_history_summary,
+                        candidate_history_evidence,
                         authority_commit,
                         authority_head: replacement_head,
-                        authority_history_summary,
+                        authority_history_evidence,
                         outcome,
                         local_cleanup,
                         completion,

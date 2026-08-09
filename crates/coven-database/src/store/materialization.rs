@@ -245,7 +245,7 @@ impl StoreDatabase {
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         membership_objects: Option<crate::VerifiedMergeMembershipObjects>,
         operation_object_ids: Option<Vec<coven_protocol::store_commit::ObjectHash>>,
         membership_completion: Option<
@@ -277,7 +277,7 @@ impl StoreDatabase {
                     &circle_activations,
                     &activation_head,
                     &activation_head_object,
-                    &history_summary,
+                    &history_evidence,
                     membership_objects.as_ref(),
                     &[],
                     None,
@@ -307,7 +307,7 @@ impl StoreDatabase {
         device_operations: VerifiedStoreDeviceOperations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
     ) -> Result<(), DbError> {
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
@@ -345,7 +345,7 @@ impl StoreDatabase {
                     &circle_activations,
                     &activation_head,
                     &activation_head_object,
-                    &history_summary,
+                    &history_evidence,
                     None,
                     &[],
                     None,
@@ -471,7 +471,7 @@ impl StoreDatabase {
                     &circle_activations,
                     &activation.head,
                     &activation.object,
-                    &activation.history_summary,
+                    &activation.history_evidence,
                     None,
                     &[],
                     None,
@@ -489,7 +489,7 @@ impl StoreDatabase {
         verified_commit: VerifiedStoreBatchCommit,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         let store_dir = self.store_dir.clone();
@@ -507,7 +507,7 @@ impl StoreDatabase {
                         &registrations,
                         &activation_head,
                         &activation_head_object,
-                        &history_summary,
+                        &history_evidence,
                         &[],
                         None,
                     )?;

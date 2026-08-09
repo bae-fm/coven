@@ -87,14 +87,13 @@ impl Store {
     pub(crate) async fn sign_device_head_for_test(
         &self,
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        history_summary: coven_protocol::store_commit::ObjectHash,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
         let writer = self
             .authorize_writer()
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
-        writer.sign_device_head_for_test(commit, history_summary, successor)
+        writer.sign_device_head_for_test(commit, successor)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -498,10 +497,7 @@ impl Store {
     pub(crate) async fn retained_merge_history_frontier_for_test(
         &self,
         references: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
-    ) -> Result<
-        Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
-        coven_database::DbError,
-    > {
+    ) -> Result<Vec<coven_database::RetainedMergeHistoryCheckpoint>, coven_database::DbError> {
         self.database
             .retained_merge_history_frontier(self.root.reference().clone(), references)
             .await

@@ -4,7 +4,7 @@ use crate::sync::store::merge_conflict;
 use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
 use coven_protocol::membership::MembershipStatus;
 use coven_protocol::store_commit::{StoreDeviceStatus, StreamActivation, StreamAnchorDomain};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The reads, verifications, and materializations a pull performs, over the
 /// five capabilities they need.
@@ -853,22 +853,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
                     ));
                 }
             }
-        }
-        let removed = verified_by_reference
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if retained.iter().any(|materialization| {
-            !removed.contains(materialization.commit_ref())
-                && materialization
-                    .history_summary()
-                    .causal_cut
-                    .values()
-                    .any(|reference| removed.contains(reference))
-        }) {
-            return Err(StorePullError::InvalidState(
-                "surviving retained Merge summary contains a retracted dependency".to_string(),
-            ));
         }
         Ok(verified_by_reference.into_values().collect())
     }

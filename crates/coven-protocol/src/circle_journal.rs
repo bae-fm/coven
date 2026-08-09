@@ -20,7 +20,7 @@ pub struct CircleJournalError(pub(crate) String);
 #[serde(deny_unknown_fields)]
 pub struct CircleOperationPolicy {
     pub head: StoreDeviceHead,
-    pub history_summary: crate::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: crate::store_commit::RetainedMergeCommitEvidence,
 }
 
 /// One Circle operation as prepared: everything the publication pipeline needs

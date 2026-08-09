@@ -366,15 +366,10 @@ impl StoreOperationCommitPlan {
     pub(crate) fn sign_device_head(
         &self,
         commit: super::store_commit::StoreBatchCommitRef,
-        history_summary: ObjectHash,
         successor: super::store_commit::SuccessorLink,
     ) -> Result<super::store_commit::StoreDeviceHead, StoreError> {
-        self.writer.sign_device_head(
-            self.root.store_root_hash,
-            commit,
-            history_summary,
-            successor,
-        )
+        self.writer
+            .sign_device_head(self.root.store_root_hash, commit, successor)
     }
 
     pub(crate) fn sign_reclaim_receipt(

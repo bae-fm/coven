@@ -522,7 +522,7 @@ impl RetainedMergeMaterializationCache {
                     verified_commit: materialization.verified_commit().clone(),
                     activation_head: materialization.activation_head().clone(),
                     activation_head_object: materialization.activation_head_object().clone(),
-                    history_summary: materialization.history_summary().clone(),
+                    history_evidence: materialization.history_evidence().clone(),
                     membership_objects: materialization.membership_objects().cloned(),
                     membership_remote_objects,
                     registrations: materialization.registrations().to_vec(),

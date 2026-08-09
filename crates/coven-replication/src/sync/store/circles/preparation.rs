@@ -1838,7 +1838,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 commit_prepared.reference().clone(),
             )?;
             let commit_ref = verified_commit.reference().clone();
-            let history_summary = self
+            let history_successor = self
                 .history
                 .prepare_successor(
                 &verified_commit,
@@ -1867,12 +1867,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let head = local_writer.sign_circle_store_head(
                 store_root_hash,
                 commit_ref.clone(),
-                history_summary.summary.digest(),
                 SuccessorLink {
                     activation: local_writer
                         .announcement_activation_id()
                         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
-                    predecessor: history_summary
+                    predecessor: history_successor
                         .predecessor_head
                         .map(|reference| reference.object),
                     next_slot: next_head_slot,
@@ -1881,7 +1880,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let head_prepared = storage
                 .prepare_protocol_object(
                     &head_context,
-                    history_summary.head_slot,
+                    history_successor.head_slot,
                     &head_prefix,
                     head.to_bytes(),
                 )
@@ -1893,7 +1892,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 commit_ref,
                 CircleOperationPolicy {
                     head,
-                    history_summary: history_summary.summary,
+                    history_evidence: history_successor.history_evidence,
                 },
                 prepared_objects,
             )

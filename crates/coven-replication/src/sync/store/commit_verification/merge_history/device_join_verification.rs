@@ -428,7 +428,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 activation: DeviceJoinBootstrapActivation {
                     head: verified.activation_head.clone(),
                     object: verified.activation_head_object.clone(),
-                    history_summary: verified.history.summary.clone(),
+                    history_evidence: verified.history_evidence.clone(),
                 },
             });
             emitted.insert(reference);

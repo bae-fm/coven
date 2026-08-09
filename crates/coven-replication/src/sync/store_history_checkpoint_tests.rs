@@ -3,7 +3,7 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::objects::ObjectSlot;
-use coven_protocol::store_commit::{ObjectHash, StoreDeviceHeadRef};
+use coven_protocol::store_commit::ObjectHash;
 
 fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
     coven_database::StoreDatabase::new(db)
@@ -112,6 +112,23 @@ impl PublishedHistory {
             .expect("load retained verified Merge history")
     }
 
+    async fn retained_input_size(&self, sequence: u64) -> usize {
+        let retained = self.retained_history().await;
+        let stream_id = retained
+            .iter()
+            .find(|materialization| materialization.commit_ref().coord.sequence() == sequence)
+            .expect("retained history contains requested sequence")
+            .commit_ref()
+            .coord
+            .stream_id
+            .to_string();
+        self.db
+            .test_sql(move |database| database.retained_canonical_input(&stream_id, sequence))
+            .await
+            .expect("load retained materialization input")
+            .len()
+    }
+
     async fn historical_read_slots(&self) -> (Vec<ObjectSlot>, ObjectSlot) {
         let retained = self.retained_history().await;
         let history_length = retained.len() as u64;
@@ -170,30 +187,16 @@ impl PublishedHistory {
     }
 }
 
-async fn assert_signed_head_rejects_summary(
-    device: &crate::sync::test_helpers::TestDevice,
-    retained: &coven_database::OwnedVerifiedMergeMaterialization,
-    summary: &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
-) {
-    let state = device
-        .resolved_store_device_state_for_test(&retained.history_summary().post_state)
-        .await
-        .expect("load retained post-state");
-    let head_ref = StoreDeviceHeadRef {
-        head_hash: retained.activation_head().head_hash(),
-        object: retained.activation_head_object().clone(),
-    };
+#[tokio::test]
+async fn retained_materialization_rows_do_not_repeat_predecessor_history() {
+    let fixture = PublishedHistory::publish(12).await;
+    let first_successor = fixture.retained_input_size(2).await;
+    let last = fixture.retained_input_size(12).await;
+
     assert!(
-        summary
-            .open(
-                retained.commit(),
-                retained.commit_ref(),
-                retained.activation_head(),
-                &head_ref,
-                &state,
-            )
-            .is_err(),
-        "changed retained summary must fail its accepted signed head",
+        last <= first_successor + 1_024,
+        "retained input grew with predecessor history: first successor={first_successor} bytes, \
+         last={last} bytes",
     );
 }
 
@@ -254,16 +257,33 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .await
                 .expect("delete checkpoint state");
         } else {
-            let state = fixture
+            let checkpoints = fixture
                 .device
-                .resolved_store_device_state_for_test(&retained[0].history_summary().post_state)
+                .retained_merge_history_frontier_for_test(vec![retained[0].commit_ref().clone()])
                 .await
-                .expect("load canonical retained state");
-            let root = coven_database::StoreDatabase::new(&fixture.db)
+                .expect("load retained checkpoint");
+            if !matches!(
+                checkpoints.as_slice(),
+                [coven_database::RetainedMergeHistoryCheckpoint::Commit(_)]
+            ) {
+                panic!("published commit unexpectedly resolved to a snapshot checkpoint");
+            }
+            let database = coven_database::StoreDatabase::new(&fixture.db);
+            let root = database
                 .local_store_root_ref()
                 .await
                 .expect("load Store root")
                 .expect("Store root exists");
+            let state = database
+                .store_device_state_for_history_cut(&coven_protocol::store_commit::StoreHistoryCut(
+                    std::collections::BTreeMap::from([(
+                        retained[0].commit_ref().coord.stream_id,
+                        retained[0].commit_ref().clone(),
+                    )]),
+                ))
+                .await
+                .expect("resolve retained checkpoint state")
+                .1;
             let grant = coven_protocol::membership::MembershipGrantId(ObjectHash::digest(
                 b"forged-checkpoint-recovery",
             ));
@@ -295,103 +315,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
 }
 
 #[tokio::test]
-async fn changed_and_locally_rehashed_summary_omissions_are_rejected() {
-    let fixture = PublishedHistory::publish(2).await;
-    let retained = fixture.retained_history().await;
-    let current = retained.last().expect("two retained commits");
-    let state = fixture
-        .device
-        .resolved_store_device_state_for_test(&current.history_summary().post_state)
-        .await
-        .expect("load retained post-state");
-    let original_head_ref = StoreDeviceHeadRef {
-        head_hash: current.activation_head().head_hash(),
-        object: current.activation_head_object().clone(),
-    };
-    let mut omitted = current.history_summary().clone();
-    omitted
-        .registrations
-        .remove(&current.commit().author_registration.device_id);
-    assert!(
-        omitted
-            .open(
-                current.commit(),
-                current.commit_ref(),
-                current.activation_head(),
-                &original_head_ref,
-                &state,
-            )
-            .is_err(),
-        "changing summary bytes must fail the accepted head digest",
-    );
-
-    let forged_head = fixture
-        .device
-        .sign_device_head_for_test(
-            current.commit_ref().clone(),
-            omitted.digest(),
-            current.activation_head().successor.clone(),
-        )
-        .await
-        .expect("sign locally rehashed head through Store authority");
-    let forged_bytes = forged_head.to_bytes();
-    let forged_head_ref = StoreDeviceHeadRef {
-        head_hash: forged_head.head_hash(),
-        object: ExactObjectRef::new(
-            current.activation_head_object().slot().clone(),
-            forged_bytes.len() as u64,
-            ObjectHash::digest(&forged_bytes),
-        ),
-    };
-    assert!(
-        omitted
-            .open(
-                current.commit(),
-                current.commit_ref(),
-                &forged_head,
-                &forged_head_ref,
-                &state,
-            )
-            .is_err(),
-        "a locally rehashed summary cannot omit its current registration proof",
-    );
-
-    let mut omitted_head = current.history_summary().clone();
-    omitted_head.announcement_frontier.clear();
-    let forged_head = fixture
-        .device
-        .sign_device_head_for_test(
-            current.commit_ref().clone(),
-            omitted_head.digest(),
-            current.activation_head().successor.clone(),
-        )
-        .await
-        .expect("sign head-omitting checkpoint through Store authority");
-    let forged_bytes = forged_head.to_bytes();
-    let forged_head_ref = StoreDeviceHeadRef {
-        head_hash: forged_head.head_hash(),
-        object: ExactObjectRef::new(
-            current.activation_head_object().slot().clone(),
-            forged_bytes.len() as u64,
-            ObjectHash::digest(&forged_bytes),
-        ),
-    };
-    assert!(
-        omitted_head
-            .open(
-                current.commit(),
-                current.commit_ref(),
-                &forged_head,
-                &forged_head_ref,
-                &state,
-            )
-            .is_err(),
-        "a locally rehashed summary cannot omit the predecessor announcement head",
-    );
-}
-
-#[tokio::test]
-async fn signed_head_rejects_an_omitted_acknowledgement() {
+async fn retained_commit_evidence_rejects_an_omitted_acknowledgement() {
     let fixture = PublishedHistory::publish(1).await;
     let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
         store_database(&fixture.db)
@@ -408,21 +332,19 @@ async fn signed_head_rejects_an_omitted_acknowledgement() {
 
     let retained = fixture.retained_history().await;
     let current = retained.last().expect("acknowledgement commit is retained");
-    assert_eq!(
-        current.history_summary().acknowledgements.len(),
-        1,
-        "acknowledgement fixture retains one latest exact acknowledgement",
-    );
-    let mut omitted = current.history_summary().clone();
-    omitted.acknowledgements.clear();
-    assert_signed_head_rejects_summary(&fixture.device, current, &omitted).await;
+    assert!(current.history_evidence().acknowledgement.is_some());
+    let mut omitted = current.history_evidence().clone();
+    omitted.acknowledgement = None;
+    assert!(omitted
+        .validate_for(current.commit_ref(), current.commit())
+        .is_err());
 }
 
 struct MemberRemovalHistory {
     db: coven_database::Database,
     store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
-    summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    removal: coven_database::OwnedVerifiedMergeMaterialization,
 }
 
 impl MemberRemovalHistory {
@@ -474,51 +396,82 @@ impl MemberRemovalHistory {
             .retained_merge_replay_inputs_for_test()
             .await
             .expect("load retained removal history");
-        let summary = retained
-            .last()
-            .expect("removal activation is retained")
-            .history_summary()
-            .clone();
+        let removal = retained
+            .into_iter()
+            .find(|materialization| {
+                materialization
+                    .history_evidence()
+                    .membership_proof
+                    .as_ref()
+                    .is_some_and(|proof| {
+                        matches!(
+                            proof.entry_value.change,
+                            coven_protocol::membership::MembershipChange::RemoveMember { .. }
+                        )
+                    })
+            })
+            .expect("removal activation is retained");
         Self {
             db,
             store,
             device,
-            summary,
+            removal,
         }
+    }
+
+    async fn publish_snapshot(
+        &self,
+    ) -> (
+        coven_protocol::store_commit::SnapshotMeta,
+        coven_database::PublishedStoreSnapshot,
+    ) {
+        let directory = tempfile::tempdir().expect("create snapshot image directory");
+        let database = store_database(&self.db);
+        let image = database
+            .capture_snapshot_image_for_test(
+                self.store.root.clone(),
+                directory.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("create checkpoint snapshot image");
+        let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+            database
+                .materialized_frontier()
+                .await
+                .expect("load snapshot coverage"),
+        )
+        .expect("derive snapshot coverage");
+        let meta = self
+            .device
+            .publish_snapshot(image, coverage)
+            .await
+            .expect("publish checkpoint snapshot");
+        let published = database
+            .latest_local_store_snapshot()
+            .await
+            .expect("load published snapshot")
+            .expect("published snapshot is recorded");
+        (meta, published)
     }
 }
 
 #[tokio::test]
-async fn signed_head_rejects_an_omitted_membership_removal() {
+async fn retained_commit_evidence_rejects_an_omitted_membership_removal() {
     let fixture = Box::pin(MemberRemovalHistory::create()).await;
-    let retained = fixture
-        .device
-        .retained_merge_replay_inputs_for_test()
-        .await
-        .expect("load retained removal history");
-    let current = retained.last().expect("removal activation is retained");
-    let removal = fixture
-        .summary
-        .membership_proofs
-        .iter()
-        .find_map(|(reference, proof)| {
-            matches!(
-                proof.entry_value.change,
-                coven_protocol::membership::MembershipChange::RemoveMember { .. }
-            )
-            .then(|| reference.clone())
-        })
-        .expect("retained history contains the removal control proof");
-    let mut omitted = fixture.summary;
-    omitted.membership_proofs.remove(&removal);
-    assert_signed_head_rejects_summary(&fixture.device, current, &omitted).await;
+    let mut omitted = fixture.removal.history_evidence().clone();
+    omitted.membership_proof = None;
+    assert!(omitted
+        .validate_for(fixture.removal.commit_ref(), fixture.removal.commit())
+        .is_err());
 }
 
 #[tokio::test]
 async fn membership_checkpoint_floor_includes_the_activating_control() {
     let fixture = Box::pin(MemberRemovalHistory::create()).await;
-    let control = fixture
-        .summary
+    let (meta, _) = fixture.publish_snapshot().await;
+    let control = meta
+        .history_summary
         .membership_proofs
         .values()
         .find(|proof| {
@@ -528,8 +481,8 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
             )
         })
         .expect("retained history contains the removal control proof");
-    assert!(fixture
-        .summary
+    assert!(meta
+        .history_summary
         .membership_floor
         .effective_coordinates
         .contains(&control.entry.coord));
@@ -537,17 +490,11 @@ async fn membership_checkpoint_floor_includes_the_activating_control() {
 
 #[tokio::test]
 async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() {
-    let mut fixture = Box::pin(MemberRemovalHistory::create()).await;
-    let proof = fixture
-        .summary
-        .membership_proofs
-        .values_mut()
-        .find(|proof| {
-            matches!(
-                proof.entry_value.change,
-                coven_protocol::membership::MembershipChange::RemoveMember { .. }
-            )
-        })
+    let fixture = Box::pin(MemberRemovalHistory::create()).await;
+    let mut evidence = fixture.removal.history_evidence().clone();
+    let proof = evidence
+        .membership_proof
+        .as_mut()
         .expect("retained history contains a membership proof");
     let bytes = b"incomplete retained resolution authority";
     proof.resolution = Some(
@@ -566,7 +513,9 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
         },
     );
     assert!(
-        fixture.summary.validate_shape().is_err(),
+        evidence
+            .validate_for(fixture.removal.commit_ref(), fixture.removal.commit())
+            .is_err(),
         "retained membership proof accepted a resolution reference without its signed value",
     );
 }
@@ -574,30 +523,7 @@ async fn retained_membership_proof_rejects_an_incomplete_resolution_authority() 
 #[tokio::test]
 async fn signed_snapshot_rejects_an_omitted_pre_snapshot_membership_control() {
     let fixture = Box::pin(MemberRemovalHistory::create()).await;
-    let directory = tempfile::tempdir().expect("create snapshot image directory");
-    let snapshot_dir = directory.path().to_path_buf();
-    let database = store_database(&fixture.db);
-    let image = database
-        .capture_snapshot_image_for_test(fixture.store.root.clone(), snapshot_dir, None)
-        .await
-        .expect("create checkpoint snapshot image");
-    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-        database
-            .materialized_frontier()
-            .await
-            .expect("load snapshot coverage"),
-    )
-    .expect("derive snapshot coverage");
-    let meta = fixture
-        .device
-        .publish_snapshot(image, coverage)
-        .await
-        .expect("publish checkpoint snapshot");
-    let published = coven_database::StoreDatabase::new(&fixture.db)
-        .latest_local_store_snapshot()
-        .await
-        .expect("load published snapshot")
-        .expect("published snapshot is recorded");
+    let (meta, published) = fixture.publish_snapshot().await;
     let mut forged = meta;
     let summary = &mut forged.body_mut().history_summary;
     let removal = summary

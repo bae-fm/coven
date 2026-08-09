@@ -135,6 +135,118 @@ pub struct RetainedMergeMembershipProof {
     pub resolution_value: Option<StoreMembershipConflictResolution>,
 }
 
+/// The proof values introduced by one verified Merge commit and retained with
+/// that commit after its remote authority objects can be reclaimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedMergeCommitEvidence {
+    pub acknowledgement: Option<Box<RetainedVerifiedActivatedAck>>,
+    pub membership_proof: Option<Box<RetainedMergeMembershipProof>>,
+}
+
+impl RetainedMergeCommitEvidence {
+    pub fn none() -> Self {
+        Self {
+            acknowledgement: None,
+            membership_proof: None,
+        }
+    }
+
+    pub fn validate_for(
+        &self,
+        commit_ref: &StoreBatchCommitRef,
+        commit: &StoreBatchCommit,
+    ) -> Result<(), StoreProtocolError> {
+        commit_ref.verify_commit(commit)?;
+        if commit.acknowledgement().is_some() != self.acknowledgement.is_some()
+            || commit.control().is_some() != self.membership_proof.is_some()
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        if let Some(acknowledgement) = &self.acknowledgement {
+            let (reference, _) = acknowledgement
+                .latest()
+                .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+            acknowledgement
+                .activating_commit
+                .verify_commit(&acknowledgement.activating_commit_value)?;
+            if acknowledgement.activating_commit != *commit_ref
+                || acknowledgement.activating_commit_value != *commit
+                || commit.acknowledgement() != Some(reference)
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+        }
+        if let Some(proof) = &self.membership_proof {
+            if proof.commit != *commit_ref || proof.commit_value != *commit {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            let control = commit
+                .control()
+                .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+            if control.transition.body.entry != proof.entry
+                || proof.entry.coord != proof.entry_value.coord()
+                || !crate::membership::verify_membership_entry(&proof.entry_value)
+                || !control
+                    .transition
+                    .matches_head(&proof.head_value, &proof.head)
+                || !matches!(
+                    &proof.head_value.activation,
+                    crate::membership::MembershipHeadActivation::StoreCommit { commit }
+                        if commit == commit_ref
+                )
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            proof
+                .entry
+                .object
+                .verify(
+                    &serde_json::to_vec(&proof.entry_value)
+                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
+                )
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            proof
+                .head
+                .object
+                .verify(
+                    &serde_json::to_vec(&proof.head_value)
+                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
+                )
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            match (
+                &proof.entry_value.change,
+                &proof.resolution,
+                &proof.resolution_value,
+            ) {
+                (
+                    crate::membership::MembershipChange::ResolutionActivation { resolution },
+                    Some(reference),
+                    Some(value),
+                ) if resolution == reference
+                    && value.store_root_hash == commit.store_root_hash
+                    && value.resolution_ref(reference.object.clone()) == *reference
+                    && value.verify_signature() =>
+                {
+                    reference
+                        .object
+                        .verify(
+                            &serde_json::to_vec(value).map_err(|error| {
+                                StoreProtocolError::Malformed(error.to_string())
+                            })?,
+                        )
+                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                }
+                (crate::membership::MembershipChange::ResolutionActivation { .. }, _, _)
+                | (_, Some(_), _)
+                | (_, _, Some(_)) => return Err(StoreProtocolError::DeviceStateMismatch),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedVerifiedMergeHistorySummary {
@@ -162,10 +274,6 @@ pub struct OpenedRetainedMergeHistorySummary {
 }
 
 impl RetainedVerifiedMergeHistorySummary {
-    pub fn digest(&self) -> ObjectHash {
-        ObjectHash::digest(&domain_json(MERGE_HISTORY_SUMMARY_DOMAIN, self))
-    }
-
     pub fn frontier(
         &self,
     ) -> Result<BTreeMap<AuthorStreamId, StoreBatchCommitRef>, StoreProtocolError> {
@@ -395,142 +503,5 @@ impl RetainedVerifiedMergeHistorySummary {
             &announcement.value.commit,
         )?;
         Ok(())
-    }
-
-    pub fn open(
-        &self,
-        commit: &StoreBatchCommit,
-        commit_ref: &StoreBatchCommitRef,
-        head: &StoreDeviceHead,
-        head_ref: &StoreDeviceHeadRef,
-        state: &ResolvedStoreDeviceState,
-    ) -> Result<OpenedRetainedMergeHistorySummary, StoreProtocolError> {
-        self.validate_shape()?;
-        state.validate_canonical()?;
-        commit_ref.verify_commit(commit)?;
-        if self.store_root_hash != commit.store_root_hash
-            || self.digest() != head.history_summary
-            || head.commit != *commit_ref
-            || head.head_hash() != head_ref.head_hash
-            || !self.causal_cut.contains_key(&commit_ref.coord)
-            || self.causal_cut.get(&commit_ref.coord) != Some(commit_ref)
-            || self.post_state.state_hash() != state.state_hash
-            || self.post_state.recovery() != state.recovery
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        head_ref
-            .object
-            .verify(&head.to_bytes())
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        let registration = self
-            .registrations
-            .get(&commit.author_registration.device_id)
-            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-        if *registration.reference() != commit.author_registration
-            || registration.value().store_root.store_root_hash != self.store_root_hash
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        registration
-            .reference()
-            .verify_registration(registration.value())?;
-        StoreDeviceHead::parse_at(
-            &head.to_bytes(),
-            self.store_root_hash,
-            registration.value(),
-            commit_ref,
-        )?;
-        let stream_id = commit_ref.coord.stream_id;
-        let sequence = commit_ref.coord.sequence;
-        let frontier = self.frontier()?;
-        for (accepted_stream, accepted_commit) in &frontier {
-            if *accepted_stream == stream_id {
-                if accepted_commit != commit_ref {
-                    return Err(StoreProtocolError::DeviceStateMismatch);
-                }
-                continue;
-            }
-            if self
-                .announcement_frontier
-                .get(accepted_stream)
-                .map(|announcement| &announcement.value.commit)
-                != Some(accepted_commit)
-            {
-                return Err(StoreProtocolError::DeviceStateMismatch);
-            }
-        }
-        let current_membership_floor_matches = match commit.control() {
-            Some(_) => self.membership_proofs.get(commit_ref).is_some_and(|proof| {
-                self.membership_floor
-                    .effective_coordinates
-                    .contains(&proof.entry.coord)
-                    && proof.head_value.body.resolutions.iter().all(|resolution| {
-                        self.membership_floor
-                            .resolutions
-                            .binary_search(resolution)
-                            .is_ok()
-                    })
-            }),
-            _ => true,
-        };
-        if !current_membership_floor_matches
-            || self
-                .membership_proofs
-                .iter()
-                .any(|(reference, proof)| proof.announcement.is_none() && reference != commit_ref)
-            || commit.control().is_some() != self.membership_proofs.contains_key(commit_ref)
-            || commit.acknowledgement().is_some_and(|reference| {
-                self.acknowledgements
-                    .get(&reference.registration.device_id)
-                    .is_none_or(|acknowledgement| {
-                        acknowledgement
-                            .latest()
-                            .is_none_or(|(retained, _)| retained != reference)
-                            || acknowledgement.activating_commit != *commit_ref
-                    })
-            })
-            || commit.device_registrations().iter().any(|activation| {
-                self.registrations
-                    .get(&activation.registration.device_id)
-                    .is_none_or(|registration| registration.reference() != &activation.registration)
-            })
-        {
-            return Err(StoreProtocolError::DeviceStateMismatch);
-        }
-        let predecessor = self.announcement_frontier.get(&stream_id);
-        let first_slot = match &registration.value().store_commits {
-            DeviceStreamAnchor::StoreAnnouncements { first_slot } => first_slot,
-            _ => return Err(StoreProtocolError::DeviceStateMismatch),
-        };
-        if predecessor.is_none() && (sequence != 1 || head_ref.object.slot() != first_slot)
-            || predecessor
-                .as_ref()
-                .map(|accepted| accepted.value.commit.coord.sequence())
-                .is_some_and(|previous| previous.checked_add(1) != Some(sequence))
-            || head.successor.predecessor
-                != predecessor.map(|accepted| accepted.reference.object.clone())
-            || predecessor.is_some_and(|accepted| {
-                accepted.value.successor.next_slot != *head_ref.object.slot()
-            })
-        {
-            return Err(StoreProtocolError::Malformed(
-                "Merge history head does not exactly extend its retained announcement frontier"
-                    .to_string(),
-            ));
-        }
-        let mut announcement_frontier = self.announcement_frontier.clone();
-        announcement_frontier.insert(
-            stream_id,
-            RetainedAcceptedStoreAnnouncement {
-                reference: head_ref.clone(),
-                value: head.clone(),
-            },
-        );
-        Ok(OpenedRetainedMergeHistorySummary {
-            summary: self.clone(),
-            announcement_frontier,
-            post_state: state.clone(),
-        })
     }
 }

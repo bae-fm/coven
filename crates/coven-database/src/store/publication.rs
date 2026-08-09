@@ -142,7 +142,7 @@ impl StoreDatabase {
                     candidate_head,
                     authority_commit,
                     authority_head,
-                    authority_history_summary,
+                    authority_history_evidence,
                     ..
                 } = &prepared
                 {
@@ -220,7 +220,7 @@ impl StoreDatabase {
                         &[],
                         &authority.head,
                         &authority.head_object,
-                        authority_history_summary,
+                        authority_history_evidence,
                         &[],
                         None,
                     )?;
@@ -270,7 +270,7 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::Publication {
                     commit,
                     head,
-                    history_summary,
+                    history_evidence,
                     local_cleanup,
                     ..
                 } = prepared
@@ -477,7 +477,7 @@ impl StoreDatabase {
                     &[],
                     &head_value,
                     head.prepared().reference(),
-                    &history_summary,
+                    &history_evidence,
                     &retained_packages,
                     (!retained_packages.is_empty())
                         .then_some(RetainedPackageApplication::LocallyAuthored),

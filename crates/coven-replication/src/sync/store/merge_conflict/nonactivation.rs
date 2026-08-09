@@ -3,9 +3,7 @@ use super::MergeConflictHistory;
 use crate::sync::store::pull;
 use crate::sync::store::StoreError;
 use coven_protocol::membership::MembershipChain;
-use coven_protocol::store_commit::{
-    OpenedRetainedMergeHistorySummary, ResolvedStoreDeviceState, StoreDeviceStateRef,
-};
+use coven_protocol::store_commit::{ResolvedStoreDeviceState, StoreDeviceStateRef};
 
 pub(crate) struct MergeConflictResolutionAuthorization {
     pub(crate) membership: MembershipChain,
@@ -29,14 +27,15 @@ pub(crate) enum TerminalNonactivationCandidate {
 }
 
 pub(crate) fn validate_retained_membership_floors(
-    checkpoints: &[OpenedRetainedMergeHistorySummary],
+    checkpoints: &[coven_database::RetainedMergeHistoryCheckpoint],
     membership: &MembershipChain,
 ) -> Result<(), pull::StorePullError> {
     if checkpoints.iter().any(|checkpoint| {
-        !checkpoint
-            .summary
-            .membership_floor
-            .is_included_in(membership)
+        matches!(
+            checkpoint,
+            coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint)
+                if !checkpoint.summary.membership_floor.is_included_in(membership)
+        )
     }) {
         return Err(pull::StorePullError::InvalidState(
             "Merge membership omits retained effective predecessor authority".to_string(),

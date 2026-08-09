@@ -219,7 +219,7 @@ impl StoreDatabase {
             circle_activations,
             head,
             input.activation_head.reference().clone(),
-            input.history_summary.clone(),
+            input.history_evidence.clone(),
             input.membership_objects.clone(),
             package_values,
             input.activation.package_application,
@@ -274,7 +274,7 @@ impl StoreDatabase {
                 materialization.activation_head().to_bytes(),
             )
             .map_err(|error| DbError::Message(error.to_string()))?,
-            history_summary: materialization.history_summary().clone(),
+            history_evidence: materialization.history_evidence().clone(),
             membership_objects: materialization.membership_objects().cloned(),
             packages,
             activation: RetainedCommitActivationInput {
@@ -508,7 +508,7 @@ impl StoreDatabase {
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         reference: &StoreBatchCommitRef,
-    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+    ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
         let conn = records.conn();
         let StoreCommitCoord {
             stream_id,
@@ -571,13 +571,13 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint state differs from its signed reference".to_string(),
                 ));
             }
-            return Ok(
+            return Ok(crate::RetainedMergeHistoryCheckpoint::Snapshot(
                 coven_protocol::store_commit::OpenedRetainedMergeHistorySummary {
                     announcement_frontier: summary.announcement_frontier.clone(),
                     post_state: state,
                     summary,
                 },
-            );
+            ));
         }
         let (stored_ref, input_hash): (String, String) = conn
             .query_row(
@@ -609,27 +609,31 @@ impl StoreDatabase {
         conn: &Connection,
         reference: &StoreBatchCommitRef,
         retained: &OwnedVerifiedMergeMaterialization,
-    ) -> Result<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary, DbError> {
+    ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
         if retained.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge checkpoint materialization names another commit".to_string(),
             ));
         }
-        let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: retained.activation_head().head_hash(),
-            object: retained.activation_head_object().clone(),
-        };
         let state = load_store_device_snapshot_on(conn, reference)?;
-        retained
-            .history_summary()
-            .open(
-                retained.commit(),
-                reference,
-                retained.activation_head(),
-                &head_ref,
-                &state,
-            )
-            .map_err(|error| DbError::context("retained Merge checkpoint", error))
+        state
+            .validate_canonical()
+            .map_err(|error| DbError::context("retained Merge checkpoint state", error))?;
+        let derived = crate::store::merge_materialization_transaction::derive_materialized_store_device_state_on(
+            conn,
+            retained.root(),
+            retained.commit(),
+            retained.device_operations(),
+        )?;
+        if state != derived {
+            return Err(DbError::Message(
+                "retained Merge checkpoint state differs from its verified commit application"
+                    .to_string(),
+            ));
+        }
+        Ok(crate::RetainedMergeHistoryCheckpoint::Commit(Box::new(
+            retained.clone(),
+        )))
     }
 
     pub fn load_merge_replay_write_overlays_on(

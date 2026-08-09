@@ -228,12 +228,13 @@ pub use store::{
     LocalBlobCleanup, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry,
     OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
     PreparedCircleObjects, ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
-    RetainedMergeMaterializationKey, RetainedPackageApplication, RetainedReplayAuthority,
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
-    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
-    SnapshotPublicationPermit, StoreDatabase, StoreDatabaseRuntime, StoreReclaimJournalError,
-    StoreRowWrites, StoreWritePreparation, TableSchema, ValidatedChangeset,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow, GENERATION_ZERO,
+    RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
+    RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
+    RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotDatabaseImage,
+    SnapshotImageError, SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
+    StoreDatabaseRuntime, StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation,
+    TableSchema, ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
+    WinningRow, GENERATION_ZERO,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};

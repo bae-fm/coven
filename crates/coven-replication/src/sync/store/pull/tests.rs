@@ -61,12 +61,46 @@ async fn one_retained_checkpoint() -> (
         .await
         .expect("load checkpoint position")
         .expect("checkpoint position exists");
-    let mut retained = loaded_store
+    let snapshot_dir = tempfile::tempdir().expect("create checkpoint snapshot directory");
+    let database = coven_database::StoreDatabase::new(&db);
+    let image = database
+        .capture_snapshot_image_for_test(
+            store.root.clone(),
+            snapshot_dir.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("capture checkpoint snapshot");
+    let coverage = CommitFrontier::from_refs(
+        database
+            .materialized_frontier()
+            .await
+            .expect("load checkpoint coverage"),
+    )
+    .expect("derive checkpoint coverage");
+    let meta = loaded_store
+        .publish_snapshot(image, coverage)
+        .await
+        .expect("publish checkpoint snapshot");
+    let retained = loaded_store
         .retained_merge_history_frontier_for_test(vec![reference])
         .await
         .expect("open retained checkpoint");
     assert_eq!(retained.len(), 1);
-    (db, store, signer, membership, retained.remove(0))
+    let summary = meta.history_summary.clone();
+    let post_state = database
+        .store_device_state_for_history_cut(&StoreHistoryCut(
+            summary.frontier().expect("derive checkpoint frontier"),
+        ))
+        .await
+        .expect("resolve checkpoint state")
+        .1;
+    let checkpoint = OpenedRetainedMergeHistorySummary {
+        announcement_frontier: summary.announcement_frontier.clone(),
+        summary,
+        post_state,
+    };
+    (db, store, signer, membership, checkpoint)
 }
 
 #[tokio::test]
@@ -131,16 +165,18 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .await
         .expect("load acknowledgement commit")
         .expect("acknowledgement commit exists");
-    let mut retained = device
+    let retained = device
         .retained_merge_history_frontier_for_test(vec![acknowledgement_commit])
         .await
         .expect("open acknowledgement checkpoint");
     let acknowledgement = retained
-        .remove(0)
-        .summary
-        .acknowledgements
-        .into_values()
-        .next()
+        .into_iter()
+        .find_map(|checkpoint| match checkpoint {
+            coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization) => {
+                materialization.history_evidence().acknowledgement.clone()
+            }
+            coven_database::RetainedMergeHistoryCheckpoint::Snapshot(_) => None,
+        })
         .expect("checkpoint retains its acknowledgement");
     let mut forged_higher_fork = acknowledgement.clone();
     let (latest_ref, latest_value) = acknowledgement
@@ -160,9 +196,9 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .insert(higher_sequence, forked_at_same_sequence);
 
     let mut merged = checkpoint.summary.acknowledgements;
-    insert_latest_acknowledgement(&mut merged, device_id, acknowledgement)
+    insert_latest_acknowledgement(&mut merged, device_id, *acknowledgement)
         .expect("first acknowledgement establishes the retained stream");
-    assert!(insert_latest_acknowledgement(&mut merged, device_id, forged_higher_fork,).is_err());
+    assert!(insert_latest_acknowledgement(&mut merged, device_id, *forged_higher_fork,).is_err());
 }
 
 #[tokio::test]

@@ -1231,43 +1231,11 @@ impl<'storage> ExactPublishedCommit<'storage> {
         head_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
     ) -> coven_protocol::store_commit::StoreBatchCommitRef {
-        let replacement_commit: coven_protocol::store_commit::StoreBatchCommit =
-            serde_json::from_slice(&commit_bytes).expect("parse replacement exact Store commit");
-        let candidate_summary = self
-            .storage
-            .retained_merge_history_summary(&self.registration.device_id, self.reference.clone())
-            .await
-            .expect("load replacement candidate history summary");
         let reference = self
             .publish_replacement_commit(commit_bytes, commit_hash)
             .await;
-        let candidate = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
-            &self.commit.to_bytes(),
-            self.commit.store_root_hash,
-            &self.reference,
-            &self.registration,
-        )
-        .expect("authenticate replacement candidate");
-        let replacement_commit = coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
-            &replacement_commit.to_bytes(),
-            replacement_commit.store_root_hash,
-            &reference,
-            &self.registration,
-        )
-        .expect("authenticate replacement commit");
-        let history_summary = crate::sync::store::prepare_merge_abandonment_history_summary(
-            &candidate_summary,
-            &candidate,
-            &replacement_commit,
-        )
-        .expect("prepare replacement exact Store history summary");
-        self.replace_commit_head(
-            reference.clone(),
-            history_summary.digest(),
-            head_registration,
-            head_signer,
-        )
-        .await;
+        self.replace_commit_head(reference.clone(), head_registration, head_signer)
+            .await;
         reference
     }
 
@@ -1316,7 +1284,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
     async fn replace_commit_head(
         &self,
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
-        history_summary: coven_protocol::store_commit::ObjectHash,
         head_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
         head_signer: &UserKeypair,
     ) {
@@ -1335,7 +1302,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             self.storage.root.store_root_hash,
             head_registration,
             reference.clone(),
-            history_summary,
             self.head.successor.clone(),
             head_signer,
         )
@@ -1371,13 +1337,8 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let reference = self
             .publish_replacement_commit(commit_bytes, commit_hash)
             .await;
-        self.replace_commit_head(
-            reference.clone(),
-            self.head.history_summary,
-            head_registration,
-            head_signer,
-        )
-        .await;
+        self.replace_commit_head(reference.clone(), head_registration, head_signer)
+            .await;
         reference
     }
 
@@ -1402,7 +1363,6 @@ impl<'storage> ExactPublishedCommit<'storage> {
             self.storage.root.store_root_hash,
             author_registration,
             commit,
-            self.head.history_summary,
             self.head.successor.clone(),
             signer,
         )
@@ -1911,7 +1871,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
             "activation",
             "activation_head",
             "commit",
-            "history_summary",
+            "history_evidence",
             "membership_objects",
             "packages",
         ]

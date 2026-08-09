@@ -181,7 +181,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head = candidate.head.clone();
         let head_object = candidate.head_object.clone();
-        let history_summary = candidate.history_summary.clone();
+        let history_evidence = candidate.history_evidence.clone();
         self.publish(
             commit_plan::PreparedStoreOperationActivation {
                 candidate,
@@ -189,7 +189,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             },
             head,
             head_object,
-            history_summary,
+            history_evidence,
             membership_objects,
             membership_completion,
         )
@@ -201,7 +201,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         mut activation: commit_plan::PreparedStoreOperationActivation,
         head: coven_protocol::store_commit::StoreDeviceHead,
         head_object: coven_protocol::objects::ExactObjectRef,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
         membership_completion: Option<
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
@@ -361,7 +361,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 circle_activations,
                 head,
                 activation_head.object,
-                history_summary,
+                history_evidence,
                 membership_objects,
                 operation_object_ids,
                 membership_completion,
@@ -503,7 +503,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let head = plan.sign_device_head(
             common.reference.clone(),
-            successor.summary.digest(),
             coven_protocol::store_commit::SuccessorLink {
                 activation: plan.announcement_activation_id()?,
                 predecessor: successor.predecessor_head.map(|reference| reference.object),
@@ -524,7 +523,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             common,
             head,
             head_object: prepared_head.reference().clone(),
-            history_summary: successor.summary,
+            history_evidence: successor.history_evidence,
         })
     }
 

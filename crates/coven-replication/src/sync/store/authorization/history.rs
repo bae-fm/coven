@@ -34,6 +34,6 @@ use coven_protocol::membership::{
     AuthorStreamId, MembershipChain, MembershipHeadRef, MembershipStatus,
 };
 use coven_protocol::store_commit::{
-    CommitFrontier, OpenedRetainedMergeHistorySummary, ResolvedStoreDeviceState,
-    StoreBatchCommitRef, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreRootRef,
+    CommitFrontier, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceRegistrationRef,
+    StoreDeviceStateRef, StoreRootRef,
 };

@@ -230,10 +230,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .history_verifier
             .load_activation_head(&verified_commit)
             .await?;
-        let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-            head_hash: head.value.head_hash(),
-            object: head.object.clone(),
-        };
         let (_, predecessor_state) = self
             .database
             .store_device_state_for_order(&commit.order)
@@ -273,10 +269,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 },
             )
             .await?;
-        history
-            .summary
-            .open(&commit, reference, &head.value, &head_ref, &state_after)
-            .map_err(pull::StorePullError::Protocol)?;
         self.database
             .materialize_device_join_activation(
                 root,
@@ -285,7 +277,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 device_operations,
                 head.value,
                 head.object,
-                history.summary,
+                history.history_evidence,
             )
             .await?;
         Ok(())

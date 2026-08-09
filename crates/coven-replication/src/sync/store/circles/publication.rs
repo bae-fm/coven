@@ -110,11 +110,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     .to_string(),
             ));
         }
-        let (_, state_after) = self
-            .history
-            .retained_device_state_for_order(&commit.order)
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         if let CurrentMergeAuthority::Revoked { grant_id } =
             self.current_merge_authority(commit, &author)?
         {
@@ -127,7 +122,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         {
             let CircleOperationPolicy {
                 head,
-                history_summary,
+                history_evidence,
             } = &journal.operation().policy;
             let prepared_head = journal
                 .operation()
@@ -138,18 +133,18 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         "Merge Circle operation lacks its prepared Store head".to_string(),
                     )
                 })?;
-            let head_ref = coven_protocol::store_commit::StoreDeviceHeadRef {
-                head_hash: head.head_hash(),
-                object: prepared_head.clone(),
-            };
-            history_summary
-                .open(
-                    commit,
-                    &journal.operation().commit_ref,
-                    head,
-                    &head_ref,
-                    &state_after,
-                )
+            coven_protocol::store_commit::StoreDeviceHead::parse_at(
+                &head.to_bytes(),
+                store_root_hash,
+                &author,
+                &journal.operation().commit_ref,
+            )
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            prepared_head
+                .verify(&head.to_bytes())
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            history_evidence
+                .validate_for(&journal.operation().commit_ref, commit)
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         }
 

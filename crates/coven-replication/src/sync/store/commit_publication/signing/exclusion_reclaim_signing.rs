@@ -140,14 +140,12 @@ impl LocalStoreWriter {
         &self,
         root_hash: coven_protocol::store_commit::ObjectHash,
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        history_summary: coven_protocol::store_commit::ObjectHash,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError> {
         coven_protocol::store_commit::StoreDeviceHead::signed(
             root_hash,
             self.registration.reference().clone(),
             commit,
-            history_summary,
             successor,
             &self.device_signer,
         )

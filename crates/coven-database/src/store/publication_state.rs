@@ -15,7 +15,7 @@ pub struct StoreWritePreparation {
     pub audiences: PreparedAudienceObjects,
     pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
 }
@@ -24,7 +24,7 @@ pub struct MergeCandidateAbandonmentPreparation {
     pub write_id: WriteId,
     pub commit: PreparedProtocolObject<VerifiedStoreBatchCommit>,
     pub head: PreparedProtocolObject<StoreDeviceHead>,
-    pub history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,19 +33,17 @@ pub enum PreparedStoreWriteState {
     Publication {
         commit: DurablePreparedProtocolObject,
         head: DurablePreparedProtocolObject,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
     MergeAbandonment {
         candidate_commit: DurablePreparedProtocolObject,
         candidate_head: DurablePreparedProtocolObject,
-        candidate_history_summary:
-            coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        candidate_history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         authority_commit: DurablePreparedProtocolObject,
         authority_head: DurablePreparedProtocolObject,
-        authority_history_summary:
-            coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        authority_history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         outcome: MergeAbandonmentOutcome,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,

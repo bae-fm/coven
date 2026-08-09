@@ -271,7 +271,6 @@ impl AuthorizedWriterOperation<'_> {
             let head = self.writer.sign_device_head(
                 store_root_hash,
                 commit_ref.clone(),
-                successor.summary.digest(),
                 SuccessorLink {
                     activation,
                     predecessor: successor.predecessor_head.map(|reference| reference.object),
@@ -303,7 +302,7 @@ impl AuthorizedWriterOperation<'_> {
                     value: head,
                     prepared: head_prepared,
                 },
-                history_summary: successor.summary,
+                history_evidence: successor.history_evidence,
                 local_cleanup,
                 completion: coven_database::StoreBatchCompletion {},
             })

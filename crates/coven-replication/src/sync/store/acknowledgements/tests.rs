@@ -780,7 +780,6 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let alternate_head = device
         .sign_device_head_for_test(
             candidate.reference.clone(),
-            expected_head.history_summary,
             coven_protocol::store_commit::SuccessorLink {
                 activation: expected_head.successor.activation,
                 predecessor: expected_head.successor.predecessor.clone(),

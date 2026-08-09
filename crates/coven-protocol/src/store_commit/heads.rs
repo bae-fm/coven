@@ -7,7 +7,6 @@ pub struct StoreDeviceHeadBody {
     pub store_root_hash: ObjectHash,
     pub author_registration: StoreDeviceRegistrationRef,
     pub commit: StoreBatchCommitRef,
-    pub history_summary: ObjectHash,
     pub successor: SuccessorLink,
 }
 
@@ -22,7 +21,6 @@ impl StoreDeviceHead {
         store_root_hash: ObjectHash,
         author_registration: StoreDeviceRegistrationRef,
         commit: StoreBatchCommitRef,
-        history_summary: ObjectHash,
         successor: SuccessorLink,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -34,7 +32,6 @@ impl StoreDeviceHead {
                 store_root_hash,
                 author_registration,
                 commit,
-                history_summary,
                 successor,
             },
             signer,

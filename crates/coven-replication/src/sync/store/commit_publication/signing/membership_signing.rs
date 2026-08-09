@@ -222,23 +222,9 @@ impl LocalStoreWriter {
         candidate: &mut crate::sync::store::commit_publication::operation::commit_plan::PreparedStoreOperationCommit,
         publication: &coven_protocol::membership_mutation::PreparedMembershipPublication,
         resolution: Option<&coven_protocol::membership::StoreMembershipConflictResolution>,
-        prepare_head: impl FnOnce(
-            &coven_protocol::objects::ProtocolObjectContext,
-            coven_protocol::objects::ObjectSlot,
-            &str,
-            Vec<u8>,
-        ) -> Result<
-            coven_protocol::objects::PreparedExactObject,
-            coven_protocol::objects::StoreObjectError,
-        >,
     ) -> Result<(), crate::sync::store::StoreError> {
         candidate
-            .attach_merge_membership_proof_with(
-                publication,
-                resolution,
-                &self.identity,
-                prepare_head,
-            )
+            .attach_merge_membership_proof_with(publication, resolution)
             .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
     }
 

@@ -543,7 +543,6 @@ impl<'storage> RestoringStore<'storage> {
             root.store_root_hash,
             registration_ref.clone(),
             commit_ref.clone(),
-            prepared_history.summary.digest(),
             SuccessorLink {
                 activation: registration
                     .store_announcement_activation(&registration_ref)
@@ -588,7 +587,7 @@ impl<'storage> RestoringStore<'storage> {
                 verified_commit,
                 head,
                 head_prepared.reference().clone(),
-                prepared_history.summary,
+                prepared_history.history_evidence,
                 registration,
             )
             .await

@@ -14,7 +14,7 @@ use coven_protocol::store_commit::{
     StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
-    RetainedVerifiedMergeHistorySummary, StoreRootRef, VerifiedStoreBatchCommit,
+    RetainedMergeCommitEvidence, StoreRootRef, VerifiedStoreBatchCommit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22,7 +22,7 @@ use coven_protocol::store_commit::{
 pub struct RetainedMergeMaterializationInput {
     pub commit: PreparedExactObject,
     pub activation_head: PreparedExactObject,
-    pub history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: RetainedMergeCommitEvidence,
     pub membership_objects: Option<VerifiedMergeMembershipObjects>,
     pub packages: Vec<RetainedAudiencePackage>,
     pub activation: RetainedCommitActivationInput,
@@ -246,7 +246,7 @@ pub struct VerifiedMergeMaterialization<'a> {
     circle_activations: &'a VerifiedCircleActivations,
     activation_head: &'a StoreDeviceHead,
     activation_head_object: &'a ExactObjectRef,
-    history_summary: &'a coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    history_evidence: &'a RetainedMergeCommitEvidence,
     membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
     packages: &'a [AudiencePackage],
     package_application: Option<RetainedPackageApplication>,
@@ -262,11 +262,16 @@ pub struct OwnedVerifiedMergeMaterialization {
     circle_activations: VerifiedCircleActivations,
     activation_head: StoreDeviceHead,
     activation_head_object: ExactObjectRef,
-    history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+    history_evidence: RetainedMergeCommitEvidence,
     membership_objects: Option<VerifiedMergeMembershipObjects>,
     packages: Vec<AudiencePackage>,
     package_application: Option<RetainedPackageApplication>,
     input_hash: ObjectHash,
+}
+
+pub enum RetainedMergeHistoryCheckpoint {
+    Snapshot(coven_protocol::store_commit::OpenedRetainedMergeHistorySummary),
+    Commit(Box<OwnedVerifiedMergeMaterialization>),
 }
 
 impl OwnedVerifiedMergeMaterialization {
@@ -278,7 +283,7 @@ impl OwnedVerifiedMergeMaterialization {
         circle_activations: VerifiedCircleActivations,
         activation_head: StoreDeviceHead,
         activation_head_object: ExactObjectRef,
-        history_summary: coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: RetainedMergeCommitEvidence,
         membership_objects: Option<VerifiedMergeMembershipObjects>,
         packages: Vec<AudiencePackage>,
         package_application: Option<RetainedPackageApplication>,
@@ -292,7 +297,7 @@ impl OwnedVerifiedMergeMaterialization {
             &circle_activations,
             &activation_head,
             &activation_head_object,
-            &history_summary,
+            &history_evidence,
             membership_objects.as_ref(),
             &packages,
             package_application,
@@ -305,7 +310,7 @@ impl OwnedVerifiedMergeMaterialization {
             circle_activations,
             activation_head,
             activation_head_object,
-            history_summary,
+            history_evidence,
             membership_objects,
             packages,
             package_application,
@@ -378,10 +383,8 @@ impl OwnedVerifiedMergeMaterialization {
         &self.activation_head_object
     }
 
-    pub fn history_summary(
-        &self,
-    ) -> &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary {
-        &self.history_summary
+    pub fn history_evidence(&self) -> &RetainedMergeCommitEvidence {
+        &self.history_evidence
     }
 
     pub fn membership_objects(&self) -> Option<&VerifiedMergeMembershipObjects> {
@@ -430,10 +433,8 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         self.activation_head_object
     }
 
-    pub fn history_summary(
-        &self,
-    ) -> &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary {
-        self.history_summary
+    pub fn history_evidence(&self) -> &RetainedMergeCommitEvidence {
+        self.history_evidence
     }
 
     pub fn membership_objects(&self) -> Option<&VerifiedMergeMembershipObjects> {
@@ -456,21 +457,18 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         circle_activations: &'a VerifiedCircleActivations,
         activation_head: &'a StoreDeviceHead,
         activation_head_object: &'a ExactObjectRef,
-        history_summary: &'a coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: &'a RetainedMergeCommitEvidence,
         membership_objects: Option<&'a VerifiedMergeMembershipObjects>,
         packages: &'a [AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<Self, DbError> {
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
-        history_summary
-            .validate_shape()
+        history_evidence
+            .validate_for(commit_ref, commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
         if verified_commit.store_root_hash() != root.store_root_hash
             || commit.store_root_hash != root.store_root_hash
-            || history_summary.store_root_hash != root.store_root_hash
-            || history_summary.digest() != activation_head.history_summary
-            || history_summary.causal_cut.get(&commit_ref.coord) != Some(commit_ref)
             || circle_activations.stream_activations().activating_commit() != commit_ref
             || circle_activations.stream_activations().as_slice() != commit.stream_activations()
             || circle_activations.circles().len() != commit.circle_controls().len()
@@ -494,7 +492,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             circle_activations,
             activation_head,
             activation_head_object,
-            history_summary,
+            history_evidence,
             membership_objects,
             packages,
             package_application,
@@ -513,7 +511,7 @@ pub struct PreparedMergeMaterialization {
     pub verified_commit: VerifiedStoreBatchCommit,
     pub activation_head: StoreDeviceHead,
     pub activation_head_object: ExactObjectRef,
-    pub history_summary: RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: RetainedMergeCommitEvidence,
     pub membership_objects: Option<VerifiedMergeMembershipObjects>,
     pub membership_remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
     pub registrations: Vec<ActivatedStoreDeviceRegistration>,
@@ -613,7 +611,7 @@ pub struct DeviceJoinBootstrapCommit {
 pub struct DeviceJoinBootstrapActivation {
     pub head: StoreDeviceHead,
     pub object: ExactObjectRef,
-    pub history_summary: RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: RetainedMergeCommitEvidence,
 }
 
 pub struct DeviceJoinBootstrapPlan {

@@ -106,16 +106,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         publication: &PreparedMembershipPublication,
         resolution: Option<&membership::StoreMembershipConflictResolution>,
     ) -> Result<(), StoreError> {
-        self.writer.attach_merge_membership_proof(
-            candidate,
-            publication,
-            resolution,
-            |context, slot, prefix, bytes| {
-                self.storage
-                    .prepare_protocol_object(context, slot, prefix, bytes)
-                    .map_err(StoreObjectError::from)
-            },
-        )
+        self.writer
+            .attach_merge_membership_proof(candidate, publication, resolution)
     }
 
     pub(super) fn attach_membership_proof(

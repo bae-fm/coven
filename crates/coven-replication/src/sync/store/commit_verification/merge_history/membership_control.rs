@@ -79,57 +79,72 @@ pub(crate) enum VerifiedMergePrefixHeadStatus {
 
 impl VerifiedMergeMembershipPrefix {
     pub(crate) fn from_retained(
-        checkpoints: &[OpenedRetainedMergeHistorySummary],
+        checkpoints: &[coven_database::RetainedMergeHistoryCheckpoint],
     ) -> Result<Self, StorePullError> {
         let mut prefix = Self::default();
         for checkpoint in checkpoints {
-            for reference in checkpoint.summary.causal_cut.values() {
-                prefix.commits.insert(reference.clone());
-            }
-            for proof in checkpoint.summary.membership_proofs.values() {
-                let Some(store_commit::StoreControl { transition }) = proof.commit_value.control()
-                else {
-                    return Err(StorePullError::InvalidState(
-                        "retained Merge membership proof has no membership control".to_string(),
-                    ));
-                };
-                let activation = VerifiedMergeMembershipHeadActivation {
-                    commit: proof.commit.clone(),
-                    transition: transition.clone(),
-                };
-                match prefix.head_activations.entry(proof.commit.clone()) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(activation);
-                    }
-                    std::collections::btree_map::Entry::Occupied(entry)
-                        if entry.get() == &activation => {}
-                    std::collections::btree_map::Entry::Occupied(_) => {
-                        return Err(StorePullError::InvalidState(
-                            "retained checkpoints disagree on a membership activation".to_string(),
-                        ));
+            match checkpoint {
+                coven_database::RetainedMergeHistoryCheckpoint::Snapshot(checkpoint) => {
+                    prefix
+                        .commits
+                        .extend(checkpoint.summary.causal_cut.values().cloned());
+                    for proof in checkpoint.summary.membership_proofs.values() {
+                        prefix.insert_retained_proof(proof)?;
                     }
                 }
-                if let Some(reference) = &proof.resolution {
-                    let activation = VerifiedMergeConflictResolutionActivation {
-                        reference: reference.clone(),
-                    };
-                    match prefix.conflict_resolutions.entry(reference.clone()) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(activation);
-                        }
-                        std::collections::btree_map::Entry::Occupied(entry)
-                            if entry.get() == &activation => {}
-                        std::collections::btree_map::Entry::Occupied(_) => {
-                            return Err(StorePullError::InvalidState(
-                                "retained checkpoints disagree on a conflict resolution"
-                                    .to_string(),
-                            ));
-                        }
+                coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization) => {
+                    prefix.commits.insert(materialization.commit_ref().clone());
+                    if let Some(proof) = &materialization.history_evidence().membership_proof {
+                        prefix.insert_retained_proof(proof)?;
                     }
                 }
             }
         }
         Ok(prefix)
+    }
+
+    fn insert_retained_proof(
+        &mut self,
+        proof: &store_commit::RetainedMergeMembershipProof,
+    ) -> Result<(), StorePullError> {
+        let Some(store_commit::StoreControl { transition }) = proof.commit_value.control() else {
+            return Err(StorePullError::InvalidState(
+                "retained Merge membership proof has no membership control".to_string(),
+            ));
+        };
+        let activation = VerifiedMergeMembershipHeadActivation {
+            commit: proof.commit.clone(),
+            transition: transition.clone(),
+        };
+        match self.head_activations.entry(proof.commit.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(activation);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &activation => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(StorePullError::InvalidState(
+                    "retained checkpoints disagree on a membership activation".to_string(),
+                ));
+            }
+        }
+        if let Some(reference) = &proof.resolution {
+            let activation = VerifiedMergeConflictResolutionActivation {
+                reference: reference.clone(),
+            };
+            match self.conflict_resolutions.entry(reference.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(activation);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() == &activation => {}
+                std::collections::btree_map::Entry::Occupied(_) => {
+                    return Err(StorePullError::InvalidState(
+                        "retained checkpoints disagree on a conflict resolution".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn head_activation(

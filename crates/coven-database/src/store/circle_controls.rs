@@ -493,7 +493,7 @@ impl StoreDatabase {
                 };
                 let (commit, activation, head_object_id) = {
                     let head = &operation.policy.head;
-                    let history_summary = &operation.policy.history_summary;
+                    let history_evidence = &operation.policy.history_evidence;
                     let commit = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
@@ -528,7 +528,7 @@ impl StoreDatabase {
                         &verified,
                         head,
                         prepared_head,
-                        history_summary,
+                        history_evidence,
                         None,
                         &[],
                         None,

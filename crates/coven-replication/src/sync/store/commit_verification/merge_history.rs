@@ -66,8 +66,7 @@ pub(crate) use snapshots::SelectedStableStoreSnapshot;
 pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
-    compose_merge_history_successor, compose_merge_snapshot_history_summary,
-    prepare_merge_abandonment_history_summary,
+    compose_merge_snapshot_history_summary, compose_verified_merge_snapshot_history_summary,
 };
 #[cfg(test)]
 pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_history};
@@ -90,7 +89,7 @@ pub(crate) struct VerifiedMergeHistoryCommit {
     pub(crate) membership_control: Option<VerifiedMergeMembershipControl>,
     pub(crate) activation_head: StoreDeviceHead,
     pub(crate) activation_head_object: ExactObjectRef,
-    pub(crate) history: OpenedRetainedMergeHistorySummary,
+    pub(crate) history_evidence: store_commit::RetainedMergeCommitEvidence,
 }
 
 pub(crate) struct VerifiedMergeHistoryAuthority {

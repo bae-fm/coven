@@ -303,7 +303,10 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains(
-        "retained Merge checkpoint: Store device state differs from its signed predecessor state"
-    ));
+    assert!(
+        error.to_string().contains(
+            "retained Merge checkpoint state differs from its verified commit application"
+        ),
+        "{error}",
+    );
 }

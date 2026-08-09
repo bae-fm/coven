@@ -90,13 +90,12 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             ))
         })?;
         let old_head = journal.operation().policy.head.clone();
-        let history_summary = journal.operation().policy.history_summary.clone();
+        let history_evidence = journal.operation().policy.history_evidence.clone();
         let head = self
             .local_writer
             .sign_device_head(
                 commit.store_root_hash,
                 commit_ref.clone(),
-                history_summary.digest(),
                 old_head.successor.clone(),
             )
             .map_err(|error| {
@@ -149,7 +148,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .insert("store-head".to_string(), head_prepared.reference().clone());
         operation.policy = CircleOperationPolicy {
             head,
-            history_summary,
+            history_evidence,
         };
         journal.uploaded.clear();
         Ok(())

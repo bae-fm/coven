@@ -19,15 +19,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn sign_device_head_for_test(
         &self,
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
-        history_summary: coven_protocol::store_commit::ObjectHash,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        self.writer.sign_device_head(
-            self.store_root().store_root_hash,
-            commit,
-            history_summary,
-            successor,
-        )
+        self.writer
+            .sign_device_head(self.store_root().store_root_hash, commit, successor)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

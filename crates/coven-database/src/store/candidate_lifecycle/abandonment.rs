@@ -71,34 +71,6 @@ impl StoreDatabase {
             .await
     }
 
-    pub async fn blocked_merge_history_summary(
-        &self,
-        write_id: WriteId,
-    ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, DbError> {
-        self.connection
-            .call(move |conn| {
-                let raw: String = conn
-                    .query_row(
-                        "SELECT prepared FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let prepared: PreparedStoreWriteState = serde_json::from_str(&raw)
-                    .map_err(|error| DbError::context("blocked Merge history summary", error))?;
-                let PreparedStoreWriteState::Publication {
-                    history_summary, ..
-                } = prepared
-                else {
-                    return Err(DbError::Message(
-                        "blocked Merge history summary has no original candidate".to_string(),
-                    ));
-                };
-                Ok(history_summary)
-            })
-            .await
-    }
-
     pub async fn prepared_merge_abandonment_candidates(
         &self,
         write_id: WriteId,
@@ -404,10 +376,10 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
-                    candidate_history_summary,
+                    candidate_history_evidence,
                     authority_commit,
                     authority_head,
-                    authority_history_summary: _,
+                    authority_history_evidence: _,
                     outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
                     local_cleanup,
                     completion,
@@ -440,7 +412,7 @@ impl StoreDatabase {
                 let replacement = PreparedStoreWriteState::Publication {
                     commit: candidate_commit,
                     head: candidate_head,
-                    history_summary: candidate_history_summary,
+                    history_evidence: candidate_history_evidence,
                     local_cleanup,
                     completion,
                 };
@@ -494,10 +466,10 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
-                    candidate_history_summary,
+                    candidate_history_evidence,
                     authority_commit,
                     authority_head,
-                    authority_history_summary: _,
+                    authority_history_evidence: _,
                     outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
                     local_cleanup,
                     completion,
@@ -530,7 +502,7 @@ impl StoreDatabase {
                 let replacement = PreparedStoreWriteState::Publication {
                     commit: candidate_commit,
                     head: candidate_head,
-                    history_summary: candidate_history_summary,
+                    history_evidence: candidate_history_evidence,
                     local_cleanup,
                     completion,
                 };
@@ -582,10 +554,10 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
-                    candidate_history_summary,
+                    candidate_history_evidence,
                     authority_commit,
                     authority_head,
-                    authority_history_summary: _,
+                    authority_history_evidence: _,
                     outcome: MergeAbandonmentOutcome::AuthorExcluded,
                     local_cleanup,
                     completion,
@@ -622,7 +594,7 @@ impl StoreDatabase {
                 let replacement = PreparedStoreWriteState::Publication {
                     commit: candidate_commit,
                     head: candidate_head,
-                    history_summary: candidate_history_summary,
+                    history_evidence: candidate_history_evidence,
                     local_cleanup,
                     completion,
                 };

@@ -93,9 +93,9 @@ pub use materialization_models::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
     OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
-    PreparedMergeMaterializationPackage, RetainedAudiencePackage, RetainedMergeMaterializationKey,
-    RetainedPackageApplication, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
-    VerifiedStoreSnapshotStability,
+    PreparedMergeMaterializationPackage, RetainedAudiencePackage, RetainedMergeHistoryCheckpoint,
+    RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};

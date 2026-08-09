@@ -116,7 +116,6 @@ pub(crate) const STORE_MEMBERSHIP_HEAD_PREFIX: &str = "store-v1/membership/heads
 const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
 const HEAD_DOMAIN: &[u8] = b"coven.store-device-head.v1\0";
-const MERGE_HISTORY_SUMMARY_DOMAIN: &[u8] = b"coven.retained-merge-history-summary.v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"coven.store-device-registration.v1\0";
 const DEVICE_JOIN_ATTEMPT_DOMAIN: &[u8] = b"coven.device-join-attempt.v1\0";
 const DEVICE_READINESS_DOMAIN: &[u8] = b"coven.device-readiness.v1\0";

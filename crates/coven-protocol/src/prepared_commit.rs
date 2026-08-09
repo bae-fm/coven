@@ -3,16 +3,11 @@
 //! activation derives from them.
 
 use crate::membership_mutation::{PreparedMembershipPublication, PreparedMembershipTransition};
-use crate::objects::{
-    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
-    StoreObjectError,
-};
-use crate::store_commit::head_slot_prefix;
+use crate::objects::{ExactObjectRef, PreparedExactObject, StoreObjectError};
 use crate::store_commit::{
     ActivatedStoreDeviceRegistration, StoreBatchCommit, StoreBatchCommitRef, StoreControl,
     StoreDeviceHead, StoreDeviceHeadRef,
 };
-use coven_keys::keys::UserKeypair;
 
 /// A prepared commit whose parts contradict each other or cannot form valid
 /// remote-object records. Workflow errors wrap it at the operation boundary.
@@ -61,7 +56,7 @@ pub struct PreparedStoreOperationCommit {
     pub common: PreparedStoreOperationCommon,
     pub head: StoreDeviceHead,
     pub head_object: ExactObjectRef,
-    pub history_summary: super::store_commit::RetainedVerifiedMergeHistorySummary,
+    pub history_evidence: super::store_commit::RetainedMergeCommitEvidence,
 }
 
 impl std::ops::Deref for PreparedStoreOperationCommit {
@@ -318,19 +313,14 @@ impl PreparedStoreOperationCommit {
         }
         if self.head.commit != self.reference
             || self.head_object.verify(&self.head.to_bytes()).is_err()
-            || self.head.history_summary != self.history_summary.digest()
-            || self.history_summary.causal_cut.get(&self.reference.coord) != Some(&self.reference)
-            || self.history_summary.validate_shape().is_err()
-            || self.commit.control().is_some()
-                != self
-                    .history_summary
-                    .membership_proofs
-                    .contains_key(&self.reference)
         {
             return Err(
                 "prepared Store operation does not bind its exact activation head".to_string(),
             );
         }
+        self.history_evidence
+            .validate_for(&self.reference, &self.commit)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -340,7 +330,7 @@ impl PreparedStoreOperationCommit {
             && self.registration_activation == other.registration_activation
             && self.head.to_bytes() == other.head.to_bytes()
             && self.head_object == other.head_object
-            && self.history_summary == other.history_summary
+            && self.history_evidence == other.history_evidence
     }
 
     /// The activation head prepared for upload: its canonical bytes, re-derived
@@ -463,14 +453,12 @@ impl PreparedStoreOperationCommit {
     ) -> Result<(), PreparedCommitError> {
         let current = &mut self.head;
         let current_object = &mut self.head_object;
-        let history_summary = &self.history_summary;
         if winner.commit != self.common.reference
             || object.slot() != current_object.slot()
             || object == *current_object
             || winner.author_registration != current.author_registration
             || winner.successor.activation != current.successor.activation
             || winner.successor.predecessor != current.successor.predecessor
-            || winner.history_summary != history_summary.digest()
         {
             return Err(PreparedCommitError(
                 "alternate Merge head differs from the prepared activation point".to_string(),
@@ -485,22 +473,12 @@ impl PreparedStoreOperationCommit {
         &mut self,
         publication: &PreparedMembershipPublication,
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
-        identity_signer: &UserKeypair,
-        prepare_head: impl FnOnce(
-            &ProtocolObjectContext,
-            crate::objects::ObjectSlot,
-            &str,
-            Vec<u8>,
-        ) -> Result<PreparedExactObject, StoreObjectError>,
     ) -> Result<(), PreparedCommitError> {
         publication
             .validate()
             .map_err(|error| PreparedCommitError(error.to_string()))?;
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();
-        let head = &mut self.head;
-        let head_object = &mut self.head_object;
-        let history_summary = &mut self.history_summary;
         let Some(StoreControl { transition }) = commit.control() else {
             return Err(PreparedCommitError(
                 "Merge membership proof accompanies another Store control".to_string(),
@@ -534,8 +512,7 @@ impl PreparedStoreOperationCommit {
                 ))
             }
         };
-        history_summary.membership_proofs.insert(
-            reference.clone(),
+        self.history_evidence.membership_proof = Some(Box::new(
             super::store_commit::RetainedMergeMembershipProof {
                 commit: reference,
                 commit_value: commit,
@@ -547,56 +524,7 @@ impl PreparedStoreOperationCommit {
                 resolution: resolution.0,
                 resolution_value: resolution.1,
             },
-        );
-        history_summary
-            .membership_floor
-            .advance(
-                publication.entry_ref.coord.clone(),
-                &publication.head.body.resolutions,
-            )
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        history_summary
-            .validate_shape()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        let author = history_summary
-            .registrations
-            .get(&head.author_registration.device_id)
-            .filter(|registration| registration.reference() == &head.author_registration)
-            .ok_or_else(|| {
-                PreparedCommitError(
-                    "Merge membership proof lacks its exact author registration".to_string(),
-                )
-            })?;
-        let device_signer = author
-            .value()
-            .device_signer(identity_signer)
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        let replacement = StoreDeviceHead::signed(
-            head.store_root_hash,
-            head.author_registration.clone(),
-            head.commit.clone(),
-            history_summary.digest(),
-            head.successor.clone(),
-            &device_signer,
-        )
-        .map_err(|error| PreparedCommitError(error.to_string()))?;
-        let context = ProtocolObjectContext::signed_plaintext(
-            head.store_root_hash,
-            ProtocolObjectDomain::StoreHead,
-        );
-        let prefix = head_slot_prefix(
-            &head.author_registration.device_id.to_string(),
-            head.commit.coord.sequence(),
-        );
-        *head_object = prepare_head(
-            &context,
-            head_object.slot().clone(),
-            &prefix,
-            replacement.to_bytes(),
-        )?
-        .reference()
-        .clone();
-        *head = replacement;
+        ));
         self.validate_closed_shape().map_err(PreparedCommitError)?;
         Ok(())
     }

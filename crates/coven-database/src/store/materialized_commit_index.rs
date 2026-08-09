@@ -101,27 +101,43 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
-    ) -> Result<Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>, DbError> {
+    ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
         self.with_retained_merge_materializations(move |records, cache| {
             let retained = { cache.replay_inputs_on(records, &root)? };
-            references
+            let by_reference = retained
                 .iter()
-                .map(|reference| {
-                    match retained
-                        .iter()
-                        .find(|materialization| materialization.commit_ref() == reference)
-                    {
-                        Some(materialization) => Self::open_retained_merge_history_checkpoint_on(
+                .map(|materialization| (materialization.commit_ref().clone(), materialization))
+                .collect::<BTreeMap<_, _>>();
+            let mut pending = references;
+            let mut visited = std::collections::BTreeSet::new();
+            let mut checkpoints = Vec::new();
+            while let Some(reference) = pending.pop() {
+                if !visited.insert(reference.clone()) {
+                    continue;
+                }
+                match by_reference.get(&reference) {
+                    Some(materialization) => {
+                        pending.extend(
+                            materialization
+                                .commit()
+                                .order
+                                .predecessor_cut()
+                                .map_err(|error| DbError::Message(error.to_string()))?
+                                .0
+                                .into_values(),
+                        );
+                        checkpoints.push(Self::open_retained_merge_history_checkpoint_on(
                             records.conn(),
-                            reference,
+                            &reference,
                             materialization,
-                        ),
-                        None => Self::load_retained_merge_history_checkpoint_on(
-                            records, &root, reference,
-                        ),
+                        )?);
                     }
-                })
-                .collect()
+                    None => checkpoints.push(Self::load_retained_merge_history_checkpoint_on(
+                        records, &root, &reference,
+                    )?),
+                }
+            }
+            Ok(checkpoints)
         })
         .await
     }

@@ -3,7 +3,7 @@ use super::*;
 struct VerifiedMergeSnapshotState {
     common: VerifiedSnapshotState,
     membership: MembershipChain,
-    checkpoints: Vec<OpenedRetainedMergeHistorySummary>,
+    commit_refs: BTreeSet<StoreBatchCommitRef>,
 }
 
 pub(crate) struct SelectedStableStoreSnapshot {
@@ -78,28 +78,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commit_verifier
             .load_active_registrations(&authority.device_state)
             .await?;
-        let checkpoints = frontier
-            .values()
-            .map(|reference| {
-                self.history
-                    .commits
-                    .get(reference)
-                    .map(|commit| commit.history.clone())
-                    .ok_or_else(|| {
-                        StorePullError::InvalidState(
-                            "Merge snapshot frontier is absent from its verified history"
-                                .to_string(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let commit_refs =
+            verified_merge_commit_closure(&self.history.commits, frontier.values().cloned())?;
         Ok(VerifiedMergeSnapshotState {
             common: VerifiedSnapshotState {
                 device_state: authority.device_state,
                 active_registrations,
             },
             membership: authority.membership,
-            checkpoints,
+            commit_refs,
         })
     }
 
@@ -130,14 +117,17 @@ impl<'a> MergeHistoryVerifier<'a> {
         if !state.membership.is_owner_now(&author.value().author_pubkey) {
             return Err(StorePullError::SnapshotAuthorNotOwner);
         }
-        let canonical = compose_merge_snapshot_history_summary(
+        let canonical = compose_verified_merge_snapshot_history_summary(
             self.root.reference(),
             &snapshot.meta.coverage,
             &state.membership,
             &state.common.device_state,
             &snapshot.meta.author_registration,
             author.value(),
-            state.checkpoints.clone(),
+            state
+                .commit_refs
+                .iter()
+                .map(|reference| &self.history.commits[reference]),
         )?;
         if snapshot.meta.history_summary != canonical {
             return Err(StorePullError::InvalidState(
@@ -199,10 +189,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 continue;
             };
             let chain = commit
-                .history
-                .summary
-                .acknowledgements
-                .get(&reference.registration.device_id)
+                .history_evidence
+                .acknowledgement
+                .as_ref()
                 .ok_or_else(|| {
                     StorePullError::InvalidState(
                         "verified acknowledgement history lacks its exact chain".to_string(),

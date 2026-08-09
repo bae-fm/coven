@@ -532,7 +532,6 @@ fn deserialized_device_head_rejects_resolution_cleanup_state() {
             store_root_hash: resolution.store_root_hash,
             author_registration: resolution.replacement_acceptance.owner_registration.clone(),
             commit: candidate.clone(),
-            history_summary: store_commit::ObjectHash::digest(&resolution_bytes),
             successor: store_commit::SuccessorLink {
                 activation: store_commit::StreamActivation::grant_authorized(
                     resolution.store_root_hash,

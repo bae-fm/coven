@@ -55,13 +55,15 @@ use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalSto
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use coven_protocol::store_commit::{
-    ActivatedStoreDeviceRegistration, CircleAckRef, CommitFrontier, ObjectHash, StoreAckRef,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceProposalState, StoreDeviceRegistrationRef, StoreHistoryCut,
-    VerifiedStoreBatchCommit, VerifiedStoreDeviceOperations,
+    ActivatedStoreDeviceRegistration, CircleAckRef, ObjectHash, StoreAckRef, StoreBatchCommit,
+    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceProposalState,
+    StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
+    VerifiedStoreDeviceOperations,
 };
 use coven_protocol::synced_schema::SyncedTable;
 use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
+
+pub(crate) use commit_records::derive_materialized_store_device_state_on;
 
 pub struct AppliedMergeMaterialization {
     pub outcome: ApplyOutcome,

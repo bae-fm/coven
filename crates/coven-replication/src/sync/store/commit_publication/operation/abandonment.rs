@@ -1,5 +1,4 @@
 use super::*;
-use crate::sync::store::commit_verification::merge_history::prepare_merge_abandonment_history_summary;
 use crate::sync::store::merge_conflict::MergeCandidateAbandonment;
 use coven_database::{MergeCandidateAbandonmentPreparation, PreparedProtocolObject};
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StoreObjectError};
@@ -18,9 +17,6 @@ impl AuthorizedWriterOperation<'_> {
         let Some(candidate) = database.blocked_merge_candidate(write_id.clone()).await? else {
             return Ok(false);
         };
-        let candidate_summary = database
-            .blocked_merge_history_summary(write_id.clone())
-            .await?;
         let device_id = self.local_device_id().to_string();
         let root = self.store_root().clone();
         let storage = Arc::clone(self.storage);
@@ -85,16 +81,9 @@ impl AuthorizedWriterOperation<'_> {
             )
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let commit_ref = commit.reference().clone();
-        let history_summary = prepare_merge_abandonment_history_summary(
-            &candidate_summary,
-            &candidate.commit,
-            &commit,
-        )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let head = self.writer.sign_device_head(
             root.store_root_hash,
             commit_ref,
-            history_summary.digest(),
             candidate.head.successor.clone(),
         )?;
         let head_context = ProtocolObjectContext::signed_plaintext(
@@ -121,7 +110,7 @@ impl AuthorizedWriterOperation<'_> {
                     value: head,
                     prepared: head_prepared,
                 },
-                history_summary,
+                history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence::none(),
             })
             .await?;
         Ok(true)

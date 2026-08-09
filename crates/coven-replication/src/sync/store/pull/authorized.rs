@@ -712,22 +712,6 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 },
             )
             .await?;
-        let activation_head_ref = super::store_commit::StoreDeviceHeadRef {
-            head_hash: merge_candidate.activation_head.head_hash(),
-            object: merge_candidate.activation_head_object.clone(),
-        };
-        prepared_history
-            .summary
-            .open(
-                commit,
-                commit_ref,
-                &merge_candidate.activation_head,
-                &activation_head_ref,
-                &state_after,
-            )
-            .map_err(|error| {
-                StorePullError::context("open prepared Merge history summary", error)
-            })?;
         self.history.remember_commit(candidate.verified.clone())?;
         let retractions = Box::pin(self.history.verified_terminal_retractions(
             &merge_candidate.activation_head,
@@ -745,7 +729,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             verified_commit: candidate.verified.clone(),
             activation_head: merge_candidate.activation_head.clone(),
             activation_head_object: merge_candidate.activation_head_object.clone(),
-            history_summary: prepared_history.summary,
+            history_evidence: prepared_history.history_evidence,
             membership_objects: membership.as_ref().map(|closure| closure.objects().clone()),
             membership_remote_objects: membership
                 .map(VerifiedMergeMembershipClosure::into_remote_objects)

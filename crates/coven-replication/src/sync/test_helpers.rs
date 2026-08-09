@@ -264,7 +264,6 @@ mod test_device {
             &self,
             store_root_hash: coven_protocol::store_commit::ObjectHash,
             commit: coven_protocol::store_commit::StoreBatchCommitRef,
-            history_summary: coven_protocol::store_commit::ObjectHash,
             successor: coven_protocol::store_commit::SuccessorLink,
         ) -> Result<
             coven_protocol::store_commit::StoreDeviceHead,
@@ -274,7 +273,6 @@ mod test_device {
                 store_root_hash,
                 self.registration.reference().clone(),
                 commit,
-                history_summary,
                 successor,
                 &self.device_signer,
             )
@@ -642,12 +640,11 @@ mod test_device {
         pub async fn sign_device_head_for_test(
             &self,
             commit: coven_protocol::store_commit::StoreBatchCommitRef,
-            history_summary: coven_protocol::store_commit::ObjectHash,
             successor: coven_protocol::store_commit::SuccessorLink,
         ) -> Result<coven_protocol::store_commit::StoreDeviceHead, crate::sync::store::StoreError>
         {
             self.store
-                .sign_device_head_for_test(commit, history_summary, successor)
+                .sign_device_head_for_test(commit, successor)
                 .await
         }
 
@@ -896,10 +893,8 @@ mod test_device {
         pub async fn retained_merge_history_frontier_for_test(
             &self,
             references: Vec<coven_protocol::store_commit::StoreBatchCommitRef>,
-        ) -> Result<
-            Vec<coven_protocol::store_commit::OpenedRetainedMergeHistorySummary>,
-            coven_database::DbError,
-        > {
+        ) -> Result<Vec<coven_database::RetainedMergeHistoryCheckpoint>, coven_database::DbError>
+        {
             self.store
                 .retained_merge_history_frontier_for_test(references)
                 .await
@@ -1481,20 +1476,6 @@ mod test_device {
                 registration,
                 device_signer,
             })
-        }
-
-        pub async fn retained_merge_history_summary_for_test(
-            &self,
-            reference: coven_protocol::store_commit::StoreBatchCommitRef,
-        ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, String>
-        {
-            Ok(self
-                .db
-                .retained_merge_materialization(self.store_root().clone(), reference)
-                .await
-                .map_err(|error| error.to_string())?
-                .history_summary()
-                .clone())
         }
 
         pub async fn publish_changeset_for_test(
@@ -3299,7 +3280,6 @@ impl TestStore {
             self.root.store_root_hash,
             candidate.author_registration.clone(),
             winner_ref,
-            head.history_summary,
             head.successor.clone(),
             &device_signer,
         )
@@ -3458,7 +3438,6 @@ impl TestStore {
             self.root.store_root_hash,
             candidate.commit.value().author_registration.clone(),
             third_ref,
-            candidate.head.history_summary,
             candidate.head.successor.clone(),
             &device_signer,
         )
@@ -4214,27 +4193,6 @@ impl TestStore {
     #[cfg(test)]
     pub fn store_root_hash(&self) -> coven_protocol::store_commit::ObjectHash {
         self.root.store_root_hash
-    }
-
-    #[cfg(test)]
-    pub async fn retained_merge_history_summary(
-        &self,
-        device_id: &coven_protocol::store_commit::StoreDeviceId,
-        reference: coven_protocol::store_commit::StoreBatchCommitRef,
-    ) -> Result<coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary, String> {
-        let device = {
-            let producers = self.producers.lock().await;
-            producers
-                .by_name
-                .values()
-                .chain(producers.unassigned.iter())
-                .find(|producer| producer.device_id == device_id.to_string())
-                .cloned()
-                .ok_or_else(|| format!("test Store has no producer for device {device_id}"))?
-        };
-        device
-            .retained_merge_history_summary_for_test(reference)
-            .await
     }
 
     #[cfg(test)]

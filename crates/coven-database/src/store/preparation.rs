@@ -94,13 +94,9 @@ impl StoreDatabase {
                     "prepared Store head does not activate the exact prepared commit".to_string(),
                 ));
             }
-            if stage.history_summary.digest() != stage.head.value.history_summary
-                || stage.history_summary.causal_cut.get(&commit_ref.coord) != Some(&commit_ref)
-            {
-                return Err(DbError::Message(
-                    "prepared Store history summary differs from its signed head".to_string(),
-                ));
-            }
+            stage.history_evidence
+                .validate_for(&commit_ref, stage.commit.value.value())
+                .map_err(|error| DbError::context("prepared Store history evidence", error))?;
             StoreDeviceHead::parse_at(
                 &stage.head.value.to_bytes(),
                 stage.root.store_root_hash,
@@ -312,7 +308,7 @@ impl StoreDatabase {
                     stage.head.value.to_bytes(),
                     stage.head.prepared,
                 ),
-                history_summary: stage.history_summary,
+                history_evidence: stage.history_evidence,
                 local_cleanup: stage.local_cleanup,
                 completion: stage.completion,
             };
@@ -374,7 +370,7 @@ impl StoreDatabase {
                 let PreparedStoreWriteState::Publication {
                     commit: candidate_commit,
                     head: candidate_head,
-                    history_summary: candidate_history_summary,
+                    history_evidence: candidate_history_evidence,
                     local_cleanup,
                     completion,
                 } = prepared
@@ -428,9 +424,6 @@ impl StoreDatabase {
                 }
                 let authority_ref = stage.commit.value.reference().clone();
                 if stage.head.value.commit != authority_ref
-                    || stage.history_summary.digest() != stage.head.value.history_summary
-                    || stage.history_summary.causal_cut.get(&authority_ref.coord)
-                        != Some(&authority_ref)
                     || stage.head.prepared.reference().slot()
                         != candidate.head_object.slot()
                     || stage.head.value.successor != candidate.head.successor
@@ -441,6 +434,11 @@ impl StoreDatabase {
                             .to_string(),
                     ));
                 }
+                stage.history_evidence
+                    .validate_for(&authority_ref, stage.commit.value.value())
+                    .map_err(|error| {
+                        DbError::context("Merge abandonment history evidence", error)
+                    })?;
                 StoreDeviceHead::parse_at(
                     &stage.head.value.to_bytes(),
                     root.store_root_hash,
@@ -482,7 +480,7 @@ impl StoreDatabase {
                 let replacement = PreparedStoreWriteState::MergeAbandonment {
                     candidate_commit,
                     candidate_head,
-                    candidate_history_summary,
+                    candidate_history_evidence,
                     authority_commit: DurablePreparedProtocolObject::new(
                         stage.commit.value.to_bytes(),
                         stage.commit.prepared,
@@ -491,7 +489,7 @@ impl StoreDatabase {
                         stage.head.value.to_bytes(),
                         stage.head.prepared,
                     ),
-                    authority_history_summary: stage.history_summary,
+                    authority_history_evidence: stage.history_evidence,
                     outcome: MergeAbandonmentOutcome::Prepared,
                     local_cleanup,
                     completion,

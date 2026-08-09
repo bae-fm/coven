@@ -396,7 +396,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         &mut self,
         tips: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<(), StorePullError> {
-        let root = self.root.reference().clone();
         let mut pending = tips.into_iter().collect::<Vec<_>>();
         let mut loaded = BTreeMap::<StoreBatchCommitRef, VerifiedStoreBatchCommit>::new();
         while let Some(reference) = pending.pop() {
@@ -554,29 +553,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                     owner_recovery,
                 )
                 .map_err(StorePullError::Protocol)?;
-            let predecessor_histories = commit_predecessor_references(&commit)
-                .iter()
-                .map(|predecessor| {
-                    self.history
-                        .commits
-                        .get(predecessor)
-                        .map(|verified: &VerifiedMergeHistoryCommit| verified.history.clone())
-                        .ok_or_else(|| {
-                            StorePullError::InvalidState(
-                                "Merge history summary has an unresolved predecessor".to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             let membership_closure = Box::pin(
                 self.commit_verifier
                     .verified_merge_membership_objects(&reference, &commit),
             )
             .await?;
-            let retained_registrations = registrations
-                .iter()
-                .map(|registration| registration.registration().clone())
-                .collect();
             let retained_acknowledgement = match acknowledgement.clone() {
                 Some((acknowledgement_ref, acknowledgement_value)) => Some(
                     self.retain_acknowledgement(
@@ -590,34 +571,17 @@ impl<'a> MergeHistoryVerifier<'a> {
                 ),
                 None => None,
             };
-            let successor = compose_merge_history_successor(
-                &root,
-                &commit,
-                &reference,
-                &membership,
-                &author,
-                state.clone(),
-                predecessor_histories,
-                MergeHistorySuccessorEvidence {
-                    registrations: retained_registrations,
-                    acknowledgement: retained_acknowledgement,
-                    membership_proof: membership_closure.map(|closure| closure.proof),
-                },
-            )?;
+            let history_evidence = store_commit::RetainedMergeCommitEvidence {
+                acknowledgement: retained_acknowledgement.map(Box::new),
+                membership_proof: membership_closure.map(|closure| Box::new(closure.proof)),
+            };
+            history_evidence
+                .validate_for(&reference, &commit)
+                .map_err(StorePullError::Protocol)?;
             let activation_head = self
                 .commit_verifier
                 .load_head(&activation_head_ref, &author, &reference)
                 .await?;
-            let history = successor
-                .summary
-                .open(
-                    &commit,
-                    &reference,
-                    &activation_head.value,
-                    &activation_head_ref,
-                    &state,
-                )
-                .map_err(StorePullError::Protocol)?;
             states.insert(reference.clone(), state.clone());
             self.history.commits.insert(
                 reference,
@@ -632,7 +596,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     membership_control,
                     activation_head: activation_head.value,
                     activation_head_object: activation_head.object,
-                    history,
+                    history_evidence,
                 },
             );
         }

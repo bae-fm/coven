@@ -5368,7 +5368,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, accepted_head_ref) = fixture
+    let (next_slot, _) = fixture
         .owner
         .exact_next_announcement_slot_for_test(
             owner_authority.registration_ref(),
@@ -5377,16 +5377,6 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         )
         .await
         .expect("load exact next announcement slot");
-    let accepted_head_ref = accepted_head_ref.expect("activation has an accepted Store head");
-    let accepted_head = fixture
-        .owner
-        .load_head_for_test(
-            &accepted_head_ref,
-            owner_authority.registration(),
-            &activation,
-        )
-        .await
-        .expect("load accepted Store head");
     let next_sequence = activation
         .coord
         .sequence()
@@ -5407,7 +5397,6 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .sign_device_head_for_test(
             storage.root.store_root_hash,
             next_commit,
-            accepted_head.history_summary,
             coven_protocol::store_commit::SuccessorLink {
                 activation: stream_activation,
                 predecessor: None,

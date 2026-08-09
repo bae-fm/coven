@@ -1,5 +1,126 @@
 use super::*;
 
+pub(crate) fn derive_materialized_store_device_state_on(
+    conn: &rusqlite::Connection,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    commit: &StoreBatchCommit,
+    device_operations: &VerifiedStoreDeviceOperations,
+) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+    let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
+    let recovery_author = commit
+        .device_registrations()
+        .iter()
+        .find_map(|activation| {
+            if activation.registration != commit.author_registration {
+                return None;
+            }
+            let coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                node,
+                ..
+            } = &activation.authority
+            else {
+                return None;
+            };
+            Some((&activation.registration, node))
+        })
+        .map(|(registration_ref, node)| {
+            let registration = load_activated_registration_on(conn, root, registration_ref)?;
+            let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                owner_grant,
+                ..
+            } = registration.origin.clone()
+            else {
+                return Err(DbError::Message(
+                    "recovery activation author has a non-recovery registration origin".to_string(),
+                ));
+            };
+            Ok((
+                registration_ref.clone(),
+                coven_protocol::store_commit::OwnerRecoveryCursor {
+                    owner_grant,
+                    position: coven_protocol::store_commit::OwnerRecoveryPosition::At {
+                        node: node.clone(),
+                    },
+                },
+            ))
+        })
+        .transpose()?;
+    if let Some((registration, recovery)) = &recovery_author {
+        device_state = device_state
+            .activate_registration(registration.clone(), Some(recovery.clone()))
+            .map_err(|error| DbError::Message(error.to_string()))?;
+    }
+    let active_author = device_state
+        .devices
+        .get(&commit.author_registration.device_id)
+        .is_some_and(|record| {
+            record.registration == commit.author_registration
+                && matches!(
+                    record.status,
+                    coven_protocol::store_commit::StoreDeviceStatus::Active
+                )
+        });
+    if !active_author {
+        return Err(DbError::Message(
+            "materialized commit author is not active at its exact predecessor state".into(),
+        ));
+    }
+    device_state = device_operations
+        .apply_to(device_state, &commit.device_state)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    for activation in commit.device_registrations() {
+        if recovery_author
+            .as_ref()
+            .is_some_and(|(registration, _)| registration == &activation.registration)
+        {
+            continue;
+        }
+        device_state = device_state
+            .activate_registration(activation.registration.clone(), None)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+    }
+    let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
+        let coven_protocol::store_commit::StreamActivation::GrantAuthorized {
+            author_registration,
+            grant_id,
+            anchor: anchor @ coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
+            ..
+        } = activation
+        else {
+            return None;
+        };
+        Some((author_registration, grant_id, anchor))
+    });
+    let owner_recovery = owner_recoveries.next();
+    if owner_recoveries.next().is_some() {
+        return Err(DbError::Message(
+            "materialized commit activates more than one Owner recovery stream".to_string(),
+        ));
+    }
+    let owner_recovery = match owner_recovery {
+        Some((registration, grant_id, anchor)) => {
+            let registration = load_activated_registration_on(conn, root, registration)?;
+            Some((
+                grant_id.clone(),
+                coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
+                    root,
+                    &registration.author_pubkey,
+                    grant_id,
+                    anchor,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?,
+            ))
+        }
+        None => None,
+    };
+    if let Some((grant_id, activation)) = owner_recovery {
+        device_state = device_state
+            .activate_owner_recovery(grant_id, activation)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+    }
+    Ok(device_state)
+}
+
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
     pub fn record_store_reclaim_activation(
         &self,
@@ -264,7 +385,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         registrations: &[ActivatedStoreDeviceRegistration],
         activation_head: &StoreDeviceHead,
         activation_head_object: &ExactObjectRef,
-        history_summary: &coven_protocol::store_commit::RetainedVerifiedMergeHistorySummary,
+        history_evidence: &coven_protocol::store_commit::RetainedMergeCommitEvidence,
         packages: &[AudiencePackage],
         package_application: Option<RetainedPackageApplication>,
     ) -> Result<(), DbError> {
@@ -282,7 +403,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             &circle_activations,
             activation_head,
             activation_head_object,
-            history_summary,
+            history_evidence,
             None,
             packages,
             package_application,
@@ -303,27 +424,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             materialization.activation_head_object(),
         )?;
         let root = required_store_root_authority_on(conn)?;
-        let state_after = self.derive_materialized_store_device_state(
+        self.derive_materialized_store_device_state(
             &root,
             materialization.commit(),
             materialization.device_operations(),
         )?;
-        let expected_post_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
-            CommitFrontier(
-                materialization
-                    .history_summary()
-                    .frontier()
-                    .map_err(|error| DbError::Message(error.to_string()))?,
-            ),
-            &state_after,
-        )
-        .map_err(|error| DbError::Message(error.to_string()))?;
-        if materialization.history_summary().post_state != expected_post_state {
-            return Err(DbError::Message(
-                "retained Merge history summary differs from the derived post-commit device state"
-                    .to_string(),
-            ));
-        }
         let (retained_commit_ref, retained) =
             crate::StoreDatabase::retain_merge_materialization_on(
                 self.record_transaction(),
@@ -360,122 +465,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         commit: &StoreBatchCommit,
         device_operations: &VerifiedStoreDeviceOperations,
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-        let conn = self.transaction;
-        let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
-        let recovery_author = commit
-            .device_registrations()
-            .iter()
-            .find_map(|activation| {
-                if activation.registration != commit.author_registration {
-                    return None;
-                }
-                let coven_protocol::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
-                    node,
-                    ..
-                } = &activation.authority
-                else {
-                    return None;
-                };
-                Some((&activation.registration, node))
-            })
-            .map(|(registration_ref, node)| {
-                let registration = load_activated_registration_on(conn, root, registration_ref)?;
-                let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Recovery {
-                    owner_grant,
-                    ..
-                } = registration.origin.clone()
-                else {
-                    return Err(DbError::Message(
-                        "recovery activation author has a non-recovery registration origin"
-                            .to_string(),
-                    ));
-                };
-                Ok((
-                    registration_ref.clone(),
-                    coven_protocol::store_commit::OwnerRecoveryCursor {
-                        owner_grant,
-                        position: coven_protocol::store_commit::OwnerRecoveryPosition::At {
-                            node: node.clone(),
-                        },
-                    },
-                ))
-            })
-            .transpose()?;
-        if let Some((registration, recovery)) = &recovery_author {
-            device_state = device_state
-                .activate_registration(registration.clone(), Some(recovery.clone()))
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        let active_author = device_state
-            .devices
-            .get(&commit.author_registration.device_id)
-            .is_some_and(|record| {
-                record.registration == commit.author_registration
-                    && matches!(
-                        record.status,
-                        coven_protocol::store_commit::StoreDeviceStatus::Active
-                    )
-            });
-        if !active_author {
-            return Err(DbError::Message(
-                "materialized commit author is not active at its exact predecessor state".into(),
-            ));
-        }
-        device_state = device_operations
-            .apply_to(device_state, &commit.device_state)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        for activation in commit.device_registrations() {
-            if recovery_author
-                .as_ref()
-                .is_some_and(|(registration, _)| registration == &activation.registration)
-            {
-                continue;
-            }
-            device_state = device_state
-                .activate_registration(activation.registration.clone(), None)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
-            let coven_protocol::store_commit::StreamActivation::GrantAuthorized {
-                author_registration,
-                grant_id,
-                anchor:
-                    anchor @ coven_protocol::store_commit::GrantStreamAnchor::OwnerRecovery { .. },
-                ..
-            } = activation
-            else {
-                return None;
-            };
-            Some((author_registration, grant_id, anchor))
-        });
-        let owner_recovery = owner_recoveries.next();
-        if owner_recoveries.next().is_some() {
-            return Err(DbError::Message(
-                "materialized commit activates more than one Owner recovery stream".to_string(),
-            ));
-        }
-        let owner_recovery = match owner_recovery {
-            Some((registration, grant_id, anchor)) => {
-                let registration = load_activated_registration_on(conn, root, registration)?;
-                Some((
-                    grant_id.clone(),
-                    coven_protocol::store_commit::OwnerRecoveryActivationId::derive(
-                        root,
-                        &registration.author_pubkey,
-                        grant_id,
-                        anchor,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?,
-                ))
-            }
-            None => None,
-        };
-        if let Some((grant_id, activation)) = owner_recovery {
-            device_state = device_state
-                .activate_owner_recovery(grant_id, activation)
-                .map_err(|error| DbError::Message(error.to_string()))?;
-        }
-        Ok(device_state)
+        derive_materialized_store_device_state_on(self.transaction, root, commit, device_operations)
     }
 
     pub fn record_materialized_commit_with_device_operations(

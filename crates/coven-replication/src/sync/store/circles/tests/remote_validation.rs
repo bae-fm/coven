@@ -155,7 +155,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         author.value(),
     )
     .expect("authenticate re-signed Store commit");
-    let history = store
+    store
         .bind_device(&db, &signer)
         .await
         .expect("bind forged Circle Store")
@@ -168,11 +168,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .expect("prepare matching retained history for the forged Circle commit");
     let original_head = &journal.operation().policy.head;
     let forged_head = device
-        .sign_device_head_for_test(
-            commit_ref.clone(),
-            history.summary.digest(),
-            original_head.successor.clone(),
-        )
+        .sign_device_head_for_test(commit_ref.clone(), original_head.successor.clone())
         .await
         .expect("sign Store head naming the re-signed commit");
     let original_head_object = journal

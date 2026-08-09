@@ -419,7 +419,6 @@ impl PreparedWriteFixture {
             self.root.store_root_hash,
             candidate.author_registration.clone(),
             winner_ref,
-            batch.head.value.history_summary,
             batch.head.value.successor.clone(),
             &signer,
         )
@@ -480,7 +479,6 @@ impl PreparedWriteFixture {
             self.root.store_root_hash,
             batch.head.value.author_registration.clone(),
             batch.head.value.commit.clone(),
-            batch.head.value.history_summary,
             SuccessorLink {
                 activation: batch.head.value.successor.activation,
                 predecessor: batch.head.value.successor.predecessor.clone(),

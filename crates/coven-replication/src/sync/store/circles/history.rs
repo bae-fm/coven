@@ -69,19 +69,6 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
         self.history.load_ref(reference).await
     }
 
-    pub(crate) async fn retained_device_state_for_order(
-        &self,
-        order: &coven_protocol::store_commit::StoreCommitOrder,
-    ) -> Result<
-        (
-            coven_protocol::store_commit::StoreDeviceStateRef,
-            coven_protocol::store_commit::ResolvedStoreDeviceState,
-        ),
-        crate::sync::store::pull::StorePullError,
-    > {
-        retained::retained_device_state_for_order(&self.database, self.history, order).await
-    }
-
     pub(crate) async fn observe_excluded_candidate_head(
         &mut self,
         candidate: &coven_protocol::store_commit::StoreDeviceHead,

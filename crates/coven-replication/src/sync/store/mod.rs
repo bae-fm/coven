@@ -41,8 +41,6 @@ pub use circles::CircleOperationError;
 #[cfg(test)]
 pub(crate) use commit_publication::operation::commit_plan::StoreOperationBatch;
 pub use commit_publication::operation::commit_plan::StoreOperationCommitPlan;
-#[cfg(test)]
-pub(crate) use commit_verification::merge_history::prepare_merge_abandonment_history_summary;
 pub use commit_verification::merge_history::{
     MergeHistorySuccessorEvidence, MergeOutboundAuthorization, PreparedMergeHistorySuccessor,
     VerifiedMergeMembershipPrefix,
