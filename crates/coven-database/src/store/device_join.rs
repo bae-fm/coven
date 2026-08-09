@@ -149,67 +149,167 @@ impl DeviceJoinJournalStore {
         database
             .connection
             .call_database(move |session| {
-                let connection = session.conn;
-                connection
-                    .execute("ATTACH DATABASE ?1 AS pending_join_source", [&pending_path])
-                    .map_err(crate::DbError::from)?;
-                let operation = (|| {
-                    let transaction = connection
-                        .unchecked_transaction()
-                        .map_err(crate::DbError::from)?;
-                    let actual: String = transaction
-                        .query_row(
-                            "SELECT payload FROM pending_join_source.device_join_journals
-                             WHERE attempt_id = ?1 AND role = 'joiner'",
-                            [&pending_attempt],
-                            |row| row.get(0),
-                        )
-                        .map_err(crate::DbError::from)?;
-                    if actual != expected_pending {
-                        return Err(crate::DbError::Message(
-                            "pending join journal changed before activation".to_string(),
-                        ));
-                    }
-                    let installed = transaction
-                        .execute(
-                            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
-                             ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                             WHERE value = excluded.value",
-                            (&store_key, &store_payload),
-                        )
-                        .map_err(crate::DbError::from)?;
-                    if installed != 1 {
-                        return Err(crate::DbError::Message(
-                            "activated join conflicts with the durable Store journal".to_string(),
-                        ));
-                    }
-                    let removed = transaction
-                        .execute(
-                            "DELETE FROM pending_join_source.device_join_journals
-                             WHERE attempt_id = ?1 AND role = 'joiner' AND payload = ?2",
-                            (&pending_attempt, &expected_pending),
-                        )
-                        .map_err(crate::DbError::from)?;
-                    if removed != 1 {
-                        return Err(crate::DbError::Message(
-                            "pending join journal changed during activation".to_string(),
-                        ));
-                    }
-                    transaction.commit().map_err(crate::DbError::from)
-                })();
-                let detached = connection
-                    .execute_batch("DETACH DATABASE pending_join_source")
-                    .map_err(crate::DbError::from);
-                match (operation, detached) {
-                    (Ok(()), Ok(())) => Ok(()),
-                    (Err(operation), Ok(())) => Err(operation),
-                    (Ok(()), Err(detach)) => Err(detach),
-                    (Err(operation), Err(detach)) => Err(crate::DbError::Message(format!(
-                        "{operation}; detaching pending join journal also failed: {detach}"
-                    ))),
-                }
+                session.complete_device_join_from_pending(
+                    &pending_path,
+                    &pending_attempt,
+                    &expected_pending,
+                    &store_key,
+                    &store_payload,
+                )
             })
             .await
+    }
+}
+
+impl crate::DatabaseSession<'_> {
+    fn complete_device_join_from_pending(
+        &mut self,
+        pending_path: &str,
+        pending_attempt: &str,
+        expected_pending: &str,
+        store_key: &str,
+        store_payload: &str,
+    ) -> Result<(), crate::DbError> {
+        self.conn
+            .execute("ATTACH DATABASE ?1 AS pending_join_source", [pending_path])
+            .map_err(crate::DbError::from)?;
+        let operation = (|| {
+            let transaction = self
+                .conn
+                .unchecked_transaction()
+                .map_err(crate::DbError::from)?;
+            let actual: String = transaction
+                .query_row(
+                    "SELECT payload FROM pending_join_source.device_join_journals
+                     WHERE attempt_id = ?1 AND role = 'joiner'",
+                    [pending_attempt],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)?;
+            if actual != expected_pending {
+                return Err(crate::DbError::Message(
+                    "pending join journal changed before activation".to_string(),
+                ));
+            }
+            let installed = transaction
+                .execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                     WHERE value = excluded.value",
+                    (store_key, store_payload),
+                )
+                .map_err(crate::DbError::from)?;
+            if installed != 1 {
+                return Err(crate::DbError::Message(
+                    "activated join conflicts with the durable Store journal".to_string(),
+                ));
+            }
+            let removed = transaction
+                .execute(
+                    "DELETE FROM pending_join_source.device_join_journals
+                     WHERE attempt_id = ?1 AND role = 'joiner' AND payload = ?2",
+                    (pending_attempt, expected_pending),
+                )
+                .map_err(crate::DbError::from)?;
+            if removed != 1 {
+                return Err(crate::DbError::Message(
+                    "pending join journal changed during activation".to_string(),
+                ));
+            }
+            transaction.commit().map_err(crate::DbError::from)
+        })();
+        let detached = self
+            .conn
+            .execute_batch("DETACH DATABASE pending_join_source")
+            .map_err(crate::DbError::from);
+        match (operation, detached) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(operation), Ok(())) => Err(operation),
+            (Ok(()), Err(detach)) => Err(detach),
+            (Err(operation), Err(detach)) => Err(crate::DbError::Message(format!(
+                "{operation}; detaching pending join journal also failed: {detach}"
+            ))),
+        }
+    }
+
+    fn begin_device_join(
+        &mut self,
+        key: &str,
+        value: &str,
+    ) -> Result<DeviceJoinJournalRecord, crate::DbError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (key, value),
+            )
+            .map_err(crate::DbError::from)?;
+        let actual = crate::required_protocol_state_on(self.conn, key)?;
+        serde_json::from_str(&actual).map_err(|error| crate::DbError::Message(error.to_string()))
+    }
+
+    fn advance_device_join(
+        &mut self,
+        key: &str,
+        previous: &str,
+        next: &str,
+    ) -> Result<usize, crate::DbError> {
+        self.conn
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (next, key, previous),
+            )
+            .map_err(crate::DbError::from)
+    }
+
+    fn begin_device_join_replacement_terminal(
+        &mut self,
+        key: &str,
+        value: &str,
+    ) -> Result<String, crate::DbError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (key, value),
+            )
+            .map_err(crate::DbError::from)?;
+        crate::required_protocol_state_on(self.conn, key)
+    }
+
+    fn device_join_records(&mut self) -> Result<Vec<(String, String)>, crate::DbError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT key, value FROM protocol_state
+                 WHERE key GLOB 'device_join/*' ORDER BY key",
+            )
+            .map_err(crate::DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(crate::DbError::from)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn forget_device_join(&mut self, key: &str) -> Result<(), crate::DbError> {
+        self.conn
+            .execute("DELETE FROM protocol_state WHERE key = ?1", [key])
+            .map(|_| ())
+            .map_err(crate::DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn forget_provider_administrator_device_joins(&mut self) -> Result<(), crate::DbError> {
+        self.conn
+            .execute(
+                "DELETE FROM protocol_state
+                 WHERE key GLOB 'device_join/*/provider_administrator'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::DbError::from)
     }
 }
 
@@ -228,18 +328,7 @@ impl StoreDatabase {
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute(
-                        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                        (&key, &value),
-                    )
-                    .map_err(crate::DbError::from)?;
-                let actual = crate::required_protocol_state_on(connection, &key)?;
-                serde_json::from_str(&actual)
-                    .map_err(|error| crate::DbError::Message(error.to_string()))
-            })
+            .call_database(move |session| session.begin_device_join(&key, &value))
             .await
             .map_err(DeviceJoinJournalError::Database)
     }
@@ -272,15 +361,7 @@ impl StoreDatabase {
         let next = serde_json::to_string(&next)?;
         let changed = self
             .connection
-            .call_database(move |session| {
-                let connection = session.conn;
-                connection
-                    .execute(
-                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                        (&next, &key, &previous),
-                    )
-                    .map_err(crate::DbError::from)
-            })
+            .call_database(move |session| session.advance_device_join(&key, &previous, &next))
             .await
             .map_err(DeviceJoinJournalError::Database)?;
         if changed == 1 {
@@ -300,14 +381,7 @@ impl StoreDatabase {
         let durable = self
             .connection
             .call_database(move |session| {
-                let connection = session.conn;
-                connection
-                    .execute(
-                        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                        (&key, &value),
-                    )
-                    .map_err(crate::DbError::from)?;
-                crate::required_protocol_state_on(connection, &key)
+                session.begin_device_join_replacement_terminal(&key, &value)
             })
             .await
             .map_err(DeviceJoinJournalError::Database)?;
@@ -322,22 +396,7 @@ impl StoreDatabase {
     ) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinJournalError> {
         let rows = self
             .connection
-            .call_database(|session| {
-                let connection = session.conn;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT key, value FROM protocol_state
-                         WHERE key GLOB 'device_join/*' ORDER BY key",
-                    )
-                    .map_err(crate::DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(crate::DbError::from)?;
-                rows.collect::<Result<Vec<_>, _>>()
-                    .map_err(crate::DbError::from)
-            })
+            .call_database(|session| session.device_join_records())
             .await
             .map_err(DeviceJoinJournalError::Database)?;
         let mut records = Vec::with_capacity(rows.len());
@@ -381,13 +440,7 @@ impl StoreDatabase {
     ) -> Result<(), DeviceJoinJournalError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute("DELETE FROM protocol_state WHERE key = ?1", [&key])
-                    .map(|_| ())
-                    .map_err(crate::DbError::from)
-            })
+            .call_database(move |session| session.forget_device_join(&key))
             .await
             .map_err(DeviceJoinJournalError::Database)
     }
@@ -397,17 +450,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<(), DeviceJoinJournalError> {
         self.connection
-            .call_store(|session| {
-                let connection = session.records.conn;
-                connection
-                    .execute(
-                        "DELETE FROM protocol_state
-                         WHERE key GLOB 'device_join/*/provider_administrator'",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(crate::DbError::from)
-            })
+            .call_database(|session| session.forget_provider_administrator_device_joins())
             .await
             .map_err(DeviceJoinJournalError::Database)
     }
