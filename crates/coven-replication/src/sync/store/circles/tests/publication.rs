@@ -2874,8 +2874,8 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
 // Runs `flow` on a thread whose stack is capped at 1.5 MiB — below the 2 MiB
 // default thread stack, above the ~1.05 MiB an optimized build of these Circle
 // operations measures at. An unoptimized (`opt-level = 0`) build of the same
-// flow needs ~2 MiB and overflows here; `[profile.test.package.coven]
-// opt-level = 1` in the workspace `Cargo.toml` is what keeps the poll-frame
+// flow needs ~2 MiB and overflows here; `[profile.test] opt-level = 1` in the
+// workspace `Cargo.toml` is what keeps the poll-frame
 // scratch small enough to fit. This guards that profile setting on every
 // platform: drop the optimization (or regrow the operation graph past the cap
 // in optimized frames) and this thread overflows and aborts the test binary, so
