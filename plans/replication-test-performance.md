@@ -197,3 +197,49 @@ dominant named application path is exact announcement-head loading and parsing:
 parsing has 308, with 544 samples in signature verification across the run.
 Trace that call path from current code before deciding which verification can
 be retained and which belongs to each new publication.
+
+## Verifier-owned announcement path
+
+Sample timestamps place announcement traversal in the final sync cycle rather
+than the 100-publication loop. `AuthorizedPull::execute` first calls
+`prepare_retained_history`, which passes every retained commit reference to one
+fresh `MergeHistoryVerifier`. `verify_refs` processes those commits in causal
+order, but `exact_next_announcement_slot` starts at the registration's first
+head slot for every commit. Verifying a stream through sequence 100 therefore
+reads and verifies 5,050 accepted heads. Stream discovery then performs its own
+single linear scan to detect new remote heads; that scan is distinct live
+discovery and must remain.
+
+An accepted head path is meaningful only within the `StoreCommitVerifier` that
+read it from the provider. Retain each verified head, its exact object, and its
+successor slot on that verifier. A request for a later accepted commit extends
+the path from its verified frontier; a request for an earlier coordinate checks
+the cached exact commit. Insert an entry only after both the head and its commit
+have authenticated for the requested registration, so a failed or occupied
+slot never advances the path. This keeps provider acceptance verification while
+making one verifier read each accepted head once.
+
+The regression runs a real pull over retained history and counts provider reads
+of every retained announcement slot. A cycle performs several independent
+whole-stream checks, but each should read all retained slots equally. Requiring
+the maximum and minimum counts to differ by at most one rejects the restart
+pattern without conflating those whole-stream checks.
+
+Before the verifier retains the prefix, the 12 head slots are read in the
+descending pattern 16, 15, 14, through 5; afterward their counts are flat. The
+isolated snapshot cadence test falls from 1.91 seconds to 1.60 seconds, and the
+60 cycle tests fall from 2.52 seconds to 2.11 seconds. A fresh Time Profiler
+sample has 6 inclusive samples in `exact_next_announcement_slot`, down from 273
+in the removed full-path loader. The remaining linear live scan has 27 samples,
+and retained-history preparation has 32.
+
+Tracing the new acceptance cache also exposes a missing invariant in the old
+traversal: a signed head read from announcement position N did not have to name
+commit coordinate N. A two-head regression replaces both authenticated heads
+with a valid chain that names commit 2 twice. The exact-position lookup accepts
+that chain before the check. Require every accepted head's commit stream to be
+the registration's announcement stream and its sequence to equal the position
+being traversed before retaining it. This rejects the malformed chain at its
+first head instead of allowing the cache to give the misplaced commit meaning.
+All 13 retained-history checkpoint tests and the complete all-feature workspace
+test run pass with both checks in place.

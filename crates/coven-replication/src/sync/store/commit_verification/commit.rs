@@ -98,6 +98,8 @@ pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn CloudSyncObjectStorage,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+    accepted_announcements:
+        BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
 
 pub(crate) struct VerifiedMergeMembershipClosure {
@@ -116,10 +118,10 @@ impl VerifiedMergeMembershipClosure {
     }
 }
 
-pub(crate) struct ExactAnnouncementPath {
+struct VerifiedAcceptedStoreAnnouncement {
+    commit: StoreBatchCommitRef,
+    head: StoreDeviceHeadRef,
     next_slot: coven_protocol::objects::ObjectSlot,
-    accepted_head: Option<StoreDeviceHeadRef>,
-    commits: Vec<StoreBatchCommitRef>,
 }
 
 #[derive(Debug)]
@@ -238,6 +240,7 @@ impl<'a> StoreCommitVerifier<'a> {
             storage,
             root,
             commits: BTreeMap::new(),
+            accepted_announcements: BTreeMap::new(),
         }
     }
 }

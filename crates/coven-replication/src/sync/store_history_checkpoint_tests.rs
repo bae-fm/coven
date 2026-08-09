@@ -3,7 +3,9 @@ use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::ObjectHash;
+use coven_storage::CloudSyncObjectStorage;
 
 fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
     coven_database::StoreDatabase::new(db)
@@ -57,6 +59,7 @@ impl<'fixture> HistoryPublisher<'fixture> {
 struct PublishedHistory {
     db: coven_database::Database,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
+    storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     device: crate::sync::test_helpers::TestDevice,
     membership: MembershipChain,
     _temp: tempfile::TempDir,
@@ -80,6 +83,7 @@ impl PublishedHistory {
             .bind_device(&db, &signer)
             .await
             .expect("load Merge Store");
+        let storage = store.storage();
         let membership = device
             .membership_for_test()
             .await
@@ -92,6 +96,7 @@ impl PublishedHistory {
         let fixture = Self {
             db,
             home,
+            storage,
             device,
             membership,
             _temp: temp,
@@ -188,6 +193,85 @@ impl PublishedHistory {
 }
 
 #[tokio::test]
+async fn announcement_position_rejects_a_commit_from_another_coordinate() {
+    let fixture = PublishedHistory::publish(2).await;
+    let retained = fixture.retained_history().await;
+    let first = &retained[0];
+    let second = &retained[1];
+    let registration_ref = second.activation_head().author_registration.clone();
+    let registration = fixture
+        .device
+        .load_registration_for_test(&registration_ref)
+        .await
+        .expect("load announcement author");
+    let context = ProtocolObjectContext::signed_plaintext(
+        fixture.device.store_root().store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
+
+    let first_replacement = fixture
+        .device
+        .sign_device_head_for_test(
+            second.commit_ref().clone(),
+            first.activation_head().successor.clone(),
+        )
+        .await
+        .expect("sign first replacement head");
+    let first_prefix =
+        coven_protocol::store_commit::head_slot_prefix(&registration.device_id.to_string(), 1);
+    let first_prepared = fixture
+        .storage
+        .prepare_protocol_object(
+            &context,
+            first.activation_head_object().slot().clone(),
+            &first_prefix,
+            first_replacement.to_bytes(),
+        )
+        .expect("prepare first replacement head");
+
+    let mut second_successor = second.activation_head().successor.clone();
+    second_successor.predecessor = Some(first_prepared.reference().clone());
+    let second_replacement = fixture
+        .device
+        .sign_device_head_for_test(second.commit_ref().clone(), second_successor)
+        .await
+        .expect("sign second replacement head");
+    let second_prefix =
+        coven_protocol::store_commit::head_slot_prefix(&registration.device_id.to_string(), 2);
+    let second_prepared = fixture
+        .storage
+        .prepare_protocol_object(
+            &context,
+            second.activation_head_object().slot().clone(),
+            &second_prefix,
+            second_replacement.to_bytes(),
+        )
+        .expect("prepare second replacement head");
+    fixture.home.replace_exact_object(
+        first.activation_head_object().slot(),
+        first_prepared.stored_bytes().to_vec(),
+    );
+    fixture.home.replace_exact_object(
+        second.activation_head_object().slot(),
+        second_prepared.stored_bytes().to_vec(),
+    );
+
+    let error = fixture
+        .device
+        .exact_next_announcement_slot_for_test(
+            &registration_ref,
+            &registration,
+            Some(second.commit_ref()),
+        )
+        .await
+        .expect_err("announcement slot one must name commit coordinate one");
+    assert!(
+        error.to_string().contains("coordinate"),
+        "unexpected announcement coordinate error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn retained_materialization_rows_do_not_repeat_predecessor_history() {
     let fixture = PublishedHistory::publish(12).await;
     let first_successor = fixture.retained_input_size(2).await;
@@ -219,6 +303,39 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
          shallow={shallow:?}, deeper={deeper:?}",
         shallow.len(),
         deeper.len(),
+    );
+}
+
+#[tokio::test]
+async fn retained_history_verification_does_not_restart_the_announcement_path() {
+    let fixture = PublishedHistory::publish(12).await;
+    let head_slots = fixture
+        .retained_history()
+        .await
+        .into_iter()
+        .map(|materialization| materialization.activation_head_object().slot().clone())
+        .collect::<Vec<_>>();
+    fixture.home.clear_exact_reads();
+
+    fixture
+        .device
+        .run_cycle(&fixture.store_dir, None)
+        .await
+        .expect("pull retained announcement history");
+
+    let reads = fixture.home.exact_reads();
+    let counts = head_slots
+        .into_iter()
+        .map(|slot| {
+            let count = reads.iter().filter(|read| *read == &slot).count();
+            (slot, count)
+        })
+        .collect::<Vec<_>>();
+    let minimum = counts.iter().map(|(_, count)| *count).min().unwrap_or(0);
+    let maximum = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
+    assert!(
+        maximum.saturating_sub(minimum) <= 1,
+        "retained history verification restarted accepted announcement paths: {counts:?}",
     );
 }
 

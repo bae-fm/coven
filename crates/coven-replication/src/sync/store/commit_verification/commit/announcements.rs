@@ -23,53 +23,16 @@ impl<'a> StoreCommitVerifier<'a> {
                 ));
             }
         }
-        let path = self
-            .load_exact_announcement_path(
-                registration_ref,
-                registration,
-                previous.map(VerifiedStoreBatchCommit::reference),
-            )
-            .await?;
-        for reference in &path.commits {
-            let loaded;
-            let verified =
-                if let Some(previous) = previous.filter(|commit| reference == commit.reference()) {
-                    previous
-                } else {
-                    loaded = self.load_ref(reference).await?;
-                    &loaded
-                };
-            if verified.reference() != reference
-                || verified.author() != registration
-                || verified.value().author_registration != *registration_ref
-            {
-                return Err(StoreError::InvalidOutbound(
-                    "verified Store announcement history belongs to another author".to_string(),
-                ));
-            }
-        }
-        Ok((path.next_slot, path.accepted_head))
-    }
-
-    pub(crate) async fn load_exact_announcement_path(
-        &self,
-        registration_ref: &StoreDeviceRegistrationRef,
-        registration: &StoreDeviceRegistration,
-        previous: Option<&StoreBatchCommitRef>,
-    ) -> Result<ExactAnnouncementPath, StoreError> {
         let DeviceStreamAnchor::StoreAnnouncements { first_slot } = &registration.store_commits
         else {
             return Err(StoreError::InvalidOutbound(
                 "Merge registration has no Store announcement anchor".to_string(),
             ));
         };
-        let Some(target) = previous else {
-            return Ok(ExactAnnouncementPath {
-                next_slot: first_slot.clone(),
-                accepted_head: None,
-                commits: Vec::new(),
-            });
+        let Some(previous) = previous else {
+            return Ok((first_slot.clone(), None));
         };
+        let target = previous.reference();
         let expected_stream = StreamActivation::device_authorized_stream_id(
             self.root.reference().store_root_hash,
             registration_ref,
@@ -80,6 +43,17 @@ impl<'a> StoreCommitVerifier<'a> {
                 "local predecessor belongs to another Store announcement stream".to_string(),
             ));
         }
+        if target.coord.sequence() == 0 {
+            return Err(StoreError::InvalidOutbound(
+                "local predecessor uses Store announcement sequence zero".to_string(),
+            ));
+        }
+        let target_index = usize::try_from(target.coord.sequence() - 1).map_err(|_| {
+            StoreError::InvalidOutbound(
+                "local predecessor announcement sequence exceeds the platform address space"
+                    .to_string(),
+            )
+        })?;
         let activation = registration
             .store_announcement_activation(registration_ref)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
@@ -88,10 +62,44 @@ impl<'a> StoreCommitVerifier<'a> {
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
-        let mut slot = first_slot.clone();
-        let mut predecessor: Option<StoreDeviceHeadRef> = None;
-        let mut commits = Vec::new();
-        for sequence in 1..=target.coord.sequence() {
+        if let Some(accepted) = self
+            .accepted_announcements
+            .get(registration_ref)
+            .and_then(|path| path.get(target_index))
+        {
+            if accepted.commit != *target {
+                return Err(StoreError::MergeAnnouncementOccupied {
+                    expected: Box::new(target.clone()),
+                    actual: Box::new(accepted.commit.clone()),
+                });
+            }
+            return Ok((accepted.next_slot.clone(), Some(accepted.head.clone())));
+        }
+        let (start, mut slot, mut predecessor) = match self
+            .accepted_announcements
+            .get(registration_ref)
+            .and_then(|path| path.last().map(|accepted| (path.len(), accepted)))
+        {
+            Some((length, accepted)) => (
+                u64::try_from(length)
+                    .ok()
+                    .and_then(|sequence| sequence.checked_add(1))
+                    .ok_or_else(|| {
+                        StoreError::InvalidOutbound(
+                            "Store announcement sequence overflow".to_string(),
+                        )
+                    })?,
+                accepted.next_slot.clone(),
+                Some(accepted.head.clone()),
+            ),
+            None => (1, first_slot.clone(), None),
+        };
+        if start > target.coord.sequence() {
+            return Err(StoreError::InvalidOutbound(
+                "verified Store announcement path omits an earlier coordinate".to_string(),
+            ));
+        }
+        for sequence in start..=target.coord.sequence() {
             let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
             let (bytes, object) = self
                 .storage
@@ -130,6 +138,14 @@ impl<'a> StoreCommitVerifier<'a> {
                 }),
             )
             .await?;
+            if head.commit.coord.stream_id != expected_stream
+                || head.commit.coord.sequence() != sequence
+            {
+                return Err(StoreError::InvalidOutbound(format!(
+                    "Store announcement position {sequence} names commit coordinate {:?}",
+                    head.commit.coord
+                )));
+            }
             let is_target = sequence == target.coord.sequence();
             if is_target && head.commit != *target {
                 return Err(StoreError::MergeAnnouncementOccupied {
@@ -137,24 +153,46 @@ impl<'a> StoreCommitVerifier<'a> {
                     actual: Box::new(head.commit.clone()),
                 });
             }
-            commits.push(head.commit.clone());
+            let loaded;
+            let verified = if is_target {
+                previous
+            } else {
+                loaded = self.load_ref(&head.commit).await?;
+                &loaded
+            };
+            if verified.reference() != &head.commit
+                || verified.author() != registration
+                || verified.value().author_registration != *registration_ref
+            {
+                return Err(StoreError::InvalidOutbound(
+                    "verified Store announcement history belongs to another author".to_string(),
+                ));
+            }
             let reference = StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
                 object,
             };
-            if is_target {
-                return Ok(ExactAnnouncementPath {
-                    next_slot: head.successor.next_slot.clone(),
-                    accepted_head: Some(reference),
-                    commits,
-                });
-            }
             slot = head.successor.next_slot.clone();
-            predecessor = Some(reference);
+            predecessor = Some(reference.clone());
+            self.accepted_announcements
+                .entry(registration_ref.clone())
+                .or_default()
+                .push(VerifiedAcceptedStoreAnnouncement {
+                    commit: head.commit.clone(),
+                    head: reference,
+                    next_slot: slot.clone(),
+                });
         }
-        Err(StoreError::InvalidOutbound(
-            "local Store predecessor traversal ended early".to_string(),
-        ))
+        let accepted = self
+            .accepted_announcements
+            .get(registration_ref)
+            .and_then(|path| path.get(target_index))
+            .ok_or_else(|| {
+                StoreError::InvalidOutbound(
+                    "local Store predecessor traversal ended early".to_string(),
+                )
+            })?;
+        Ok((accepted.next_slot.clone(), Some(accepted.head.clone())))
     }
 
     pub(crate) async fn verify_terminal_candidate_head(
