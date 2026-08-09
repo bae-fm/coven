@@ -11,6 +11,71 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, feature = "test-utils"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Clone, Debug)]
+pub(crate) enum FileSync {
+    Enabled,
+    Disabled,
+    #[cfg(any(test, feature = "test-utils"))]
+    ObservedDisabled(std::sync::Arc<AtomicUsize>),
+}
+
+impl FileSync {
+    fn requested(&self) {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Self::ObservedDisabled(requests) = self {
+            requests.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) async fn sync_file(&self, file: &tokio::fs::File) -> std::io::Result<()> {
+        self.requested();
+        match self {
+            Self::Enabled => file.sync_all().await,
+            Self::Disabled => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::ObservedDisabled(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn sync_file_blocking(&self, file: &std::fs::File) -> std::io::Result<()> {
+        self.requested();
+        match self {
+            Self::Enabled => file.sync_all(),
+            Self::Disabled => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::ObservedDisabled(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn sync_parent(&self, path: &Path) -> Result<(), String> {
+        let parent = parent_of(path)?;
+        self.requested();
+        match self {
+            Self::Enabled => flush_directory(parent)
+                .await
+                .map_err(|error| format!("fsync parent directory {}: {error}", parent.display())),
+            Self::Disabled => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::ObservedDisabled(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn sync_parent_blocking(&self, path: &Path) -> Result<(), String> {
+        let parent = parent_of(path)?;
+        self.requested();
+        match self {
+            Self::Enabled => flush_directory_blocking(parent)
+                .map_err(|error| format!("fsync parent directory {}: {error}", parent.display())),
+            Self::Disabled => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::ObservedDisabled(_) => Ok(()),
+        }
+    }
+}
+
 pub(crate) const TEMP_FILE_PREFIX: &str = ".tmp.";
 
 /// A failed atomic write, tagged with whether the write had already committed.
@@ -87,14 +152,23 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
 /// One unpublished file whose destination is chosen after its bytes have been
 /// written. This is the streaming counterpart to [`write_atomic`]: callers can
 /// compute a content address while implementing [`Write`], then commit the
-/// completed file under that address with the same fsync/rename/fsync sequence.
+/// completed file under that address with the owning durability policy's
+/// file-sync, rename, and directory-sync sequence.
 pub struct AtomicFileStage {
     parent: PathBuf,
     temp: tempfile::NamedTempFile,
+    file_sync: FileSync,
 }
 
 impl AtomicFileStage {
     pub fn create_in(parent: &Path) -> Result<Self, std::io::Error> {
+        Self::create_in_with_file_sync(parent, FileSync::Enabled)
+    }
+
+    pub(crate) fn create_in_with_file_sync(
+        parent: &Path,
+        file_sync: FileSync,
+    ) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(parent)?;
         let temp = tempfile::Builder::new()
             .prefix(TEMP_FILE_PREFIX)
@@ -102,6 +176,7 @@ impl AtomicFileStage {
         Ok(Self {
             parent: parent.to_path_buf(),
             temp,
+            file_sync,
         })
     }
 
@@ -116,14 +191,15 @@ impl AtomicFileStage {
                 ),
             )));
         }
-        self.temp
-            .as_file()
-            .sync_all()
+        self.file_sync
+            .sync_file_blocking(self.temp.as_file())
             .map_err(WriteError::BeforeCommit)?;
         self.temp
             .persist(destination)
             .map_err(|error| WriteError::BeforeCommit(error.error))?;
-        flush_directory_blocking(&self.parent).map_err(WriteError::AfterCommit)
+        self.file_sync
+            .sync_parent_blocking(destination)
+            .map_err(|error| WriteError::AfterCommit(std::io::Error::other(error)))
     }
 }
 

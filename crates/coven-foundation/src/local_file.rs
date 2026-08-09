@@ -8,11 +8,11 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 
-use crate::atomic_file::{sync_parent_dir, sync_parent_dir_blocking};
+use crate::atomic_file::FileSync;
 
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
-/// (`.tmp.<uuid>`) before the fsync-then-rename that makes it the committed
-/// destination.
+/// (`.tmp.<uuid>`) before the owning durability policy and rename make it the
+/// committed destination.
 pub const TEMP_BLOB_PREFIX: &str = crate::atomic_file::TEMP_FILE_PREFIX;
 
 /// Whether `path`'s file name marks it as an atomic-write temp sibling.
@@ -68,12 +68,14 @@ struct AtomicTempFile {
 pub struct AtomicStagedFile {
     destination: PathBuf,
     staged: Option<AtomicTempFile>,
+    file_sync: FileSync,
 }
 
 /// A staged file that has been installed at its destination while the caller's
 /// durable transaction is still deciding whether that installation commits.
 pub struct PublishedAtomicFile {
     destination: PathBuf,
+    file_sync: FileSync,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -92,6 +94,13 @@ impl AtomicStagedFile {
     }
 
     pub async fn create(destination: &Path) -> Result<Self, String> {
+        Self::create_with_file_sync(destination, FileSync::Enabled).await
+    }
+
+    pub(crate) async fn create_with_file_sync(
+        destination: &Path,
+        file_sync: FileSync,
+    ) -> Result<Self, String> {
         let parent = destination
             .parent()
             .ok_or_else(|| format!("blob path has no parent dir: {}", destination.display()))?;
@@ -102,6 +111,7 @@ impl AtomicStagedFile {
         Ok(Self {
             destination: destination.to_path_buf(),
             staged: Some(staged),
+            file_sync,
         })
     }
 
@@ -111,6 +121,15 @@ impl AtomicStagedFile {
             .as_ref()
             .expect("atomic stage is unpublished")
             .path
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    /// Create another unpublished stage governed by the same durability policy.
+    pub async fn stage_peer(&self, destination: &Path) -> Result<Self, String> {
+        Self::create_with_file_sync(destination, self.file_sync.clone()).await
     }
 
     pub async fn read_bytes(&self) -> Result<Vec<u8>, String> {
@@ -145,18 +164,18 @@ impl AtomicStagedFile {
         file.write_all(bytes)
             .await
             .map_err(|error| format!("write staged blob {}: {error}", path.display()))?;
-        // Raw fsync: this writes an already-open blob stage that a later rename
-        // publishes, so there is no whole-buffer `write_atomic` to route
-        // through. The stage's own parent-directory flush happens at commit.
-        #[allow(clippy::disallowed_methods)]
-        file.sync_all()
+        // This writes an already-open blob stage that a later rename publishes,
+        // so its owning durability policy handles the completed file here and
+        // the committed parent directory at publication.
+        self.file_sync
+            .sync_file(file)
             .await
             .map_err(|error| format!("fsync staged blob {}: {error}", path.display()))
     }
 
-    /// Fill this unpublished stage from a plaintext stream and fsync the
-    /// completed file. The caller verifies higher-level content facts before
-    /// publishing the stage.
+    /// Fill this unpublished stage from a plaintext stream and apply its file
+    /// durability barrier. The caller verifies higher-level content facts
+    /// before publishing the stage.
     pub async fn write_plaintext<R: PlaintextChunkReader>(
         &mut self,
         source: &mut R,
@@ -188,11 +207,10 @@ impl AtomicStagedFile {
             })?;
             written += chunk.len() as u64;
         }
-        // Raw fsync: the payload arrives as a stream of chunks, so it is never
-        // in one buffer that `write_atomic` could install. The rename that
-        // publishes this stage flushes the parent directory.
-        #[allow(clippy::disallowed_methods)]
-        file.sync_all().await.map_err(|error| {
+        // The payload arrives as a stream of chunks, so its owning durability
+        // policy handles the completed file here and the committed parent
+        // directory at publication.
+        self.file_sync.sync_file(file).await.map_err(|error| {
             StreamWriteError::Local(format!("fsync staged blob {}: {error}", path.display()))
         })?;
         Ok(written)
@@ -237,11 +255,10 @@ impl AtomicStagedFile {
                 })?;
                 written += chunk.len() as u64;
             }
-            // Raw fsync: the bytes come off a caller-supplied byte stream, so
-            // the stage is filled incrementally and cannot go through
-            // `write_atomic`. Publication flushes the parent directory.
-            #[allow(clippy::disallowed_methods)]
-            file.sync_all().await.map_err(|error| {
+            // The stage is filled incrementally, so its owning durability
+            // policy handles the completed file here and the committed parent
+            // directory at publication.
+            self.file_sync.sync_file(file).await.map_err(|error| {
                 AtomicChunkWriteError::Local(format!(
                     "fsync staged blob {}: {error}",
                     path.display()
@@ -284,41 +301,41 @@ impl AtomicStagedFile {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
-        let copy =
-            async {
-                let staged = self.staged.as_mut().expect("atomic stage is unpublished");
-                let mut buffer = vec![0u8; 1 << 20];
-                let mut size = 0_u64;
-                let mut hasher = Sha256::new();
-                loop {
-                    let read = input.read(&mut buffer).await.map_err(|error| {
-                        format!("read pin source {}: {error}", source.display())
-                    })?;
-                    if read == 0 {
-                        break;
-                    }
-                    size = size.checked_add(read as u64).ok_or_else(|| {
-                        format!("copy source size overflow: {}", source.display())
-                    })?;
-                    hasher.update(&buffer[..read]);
-                    staged
-                        .file_mut()
-                        .write_all(&buffer[..read])
-                        .await
-                        .map_err(|error| {
-                            format!("write temp pin {}: {error}", staged.path.display())
-                        })?;
+        let copy = async {
+            let staged = self.staged.as_mut().expect("atomic stage is unpublished");
+            let mut buffer = vec![0u8; 1 << 20];
+            let mut size = 0_u64;
+            let mut hasher = Sha256::new();
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| format!("read pin source {}: {error}", source.display()))?;
+                if read == 0 {
+                    break;
                 }
-                // Raw fsync: this copies a source file through a fixed buffer while
-                // hashing it, so the contents are never held whole for
-                // `write_atomic`. The commit that follows flushes the parent.
-                #[allow(clippy::disallowed_methods)]
-                staged.file_mut().sync_all().await.map_err(|error| {
-                    format!("fsync temp pin {}: {error}", staged.path.display())
-                })?;
-                Ok::<_, String>((size, hasher.finalize().into()))
+                size = size
+                    .checked_add(read as u64)
+                    .ok_or_else(|| format!("copy source size overflow: {}", source.display()))?;
+                hasher.update(&buffer[..read]);
+                staged
+                    .file_mut()
+                    .write_all(&buffer[..read])
+                    .await
+                    .map_err(|error| {
+                        format!("write temp pin {}: {error}", staged.path.display())
+                    })?;
             }
-            .await;
+            // This copies through a fixed buffer while hashing, so the owning
+            // durability policy handles the completed file here and the
+            // committed parent directory at publication.
+            self.file_sync
+                .sync_file(staged.file_mut())
+                .await
+                .map_err(|error| format!("fsync temp pin {}: {error}", staged.path.display()))?;
+            Ok::<_, String>((size, hasher.finalize().into()))
+        }
+        .await;
         match copy {
             Ok((size, hash)) => Ok((self, size, hash)),
             Err(operation) => self.take_stage().fail(operation).await,
@@ -326,9 +343,10 @@ impl AtomicStagedFile {
     }
 
     pub async fn commit(self) -> Result<(), String> {
+        let file_sync = self.file_sync.clone();
         self.commit_with_sync(|path| {
             let path = path.to_path_buf();
-            async move { sync_parent_dir(&path).await }
+            async move { file_sync.sync_parent(&path).await }
         })
         .await
     }
@@ -360,9 +378,12 @@ impl AtomicStagedFile {
                             staged.path.display()
                         )
                     })?;
-                sync_parent_dir(&staged.path).await.map_err(|rollback| {
-                    format!("{operation}; rollback directory sync failed: {rollback}")
-                })?;
+                self.file_sync
+                    .sync_parent(&staged.path)
+                    .await
+                    .map_err(|rollback| {
+                        format!("{operation}; rollback directory sync failed: {rollback}")
+                    })?;
                 return Err(operation);
             }
             Ok(())
@@ -381,9 +402,11 @@ impl AtomicStagedFile {
     /// path. The staged file is a sibling, so the hard link exposes one complete
     /// inode atomically and fails if another file already owns the name.
     pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
+        let file_sync = self.file_sync.clone();
         self.commit_new_with_sync(|path| {
             let path = path.to_path_buf();
-            async move { sync_parent_dir(&path).await }
+            let file_sync = file_sync.clone();
+            async move { file_sync.sync_parent(&path).await }
         })
         .await
     }
@@ -464,9 +487,10 @@ impl AtomicStagedFile {
 
     pub fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, String> {
         let staged = self.take_stage();
-        staged.publish_blocking(&self.destination)?;
+        staged.publish_blocking(&self.destination, &self.file_sync)?;
         Ok(PublishedAtomicFile {
             destination: self.destination.clone(),
+            file_sync: self.file_sync.clone(),
         })
     }
 
@@ -484,7 +508,8 @@ impl AtomicStagedFile {
                     self.destination.display()
                 ),
             })?;
-        sync_parent_dir(&self.destination)
+        self.file_sync
+            .sync_parent(&self.destination)
             .await
             .map_err(|rollback| CommitNewFileError::RollbackFailed {
                 operation: operation.to_string(),
@@ -494,7 +519,7 @@ impl AtomicStagedFile {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), String> {
-        let mut staged = Self::create(destination).await?;
+        let mut staged = Self::create_with_file_sync(destination, FileSync::Disabled).await?;
         staged.write_bytes(bytes).await?;
         staged.commit().await
     }
@@ -528,7 +553,7 @@ impl PublishedAtomicFile {
                 ));
             }
         }
-        sync_parent_dir_blocking(&self.destination)
+        self.file_sync.sync_parent_blocking(&self.destination)
     }
 }
 
@@ -599,10 +624,10 @@ impl AtomicTempFile {
         }
     }
 
-    fn publish_blocking(mut self, destination: &Path) -> Result<(), String> {
+    fn publish_blocking(mut self, destination: &Path, file_sync: &FileSync) -> Result<(), String> {
         self.close();
         let operation = match std::fs::rename(&self.path, destination) {
-            Ok(()) => match sync_parent_dir_blocking(destination) {
+            Ok(()) => match file_sync.sync_parent_blocking(destination) {
                 Ok(()) => {
                     self.armed = false;
                     return Ok(());
@@ -616,7 +641,7 @@ impl AtomicTempFile {
                                 self.path.display()
                             )
                         })
-                        .and_then(|()| sync_parent_dir_blocking(&self.path));
+                        .and_then(|()| file_sync.sync_parent_blocking(&self.path));
                     match rollback {
                         Ok(()) => operation,
                         Err(rollback) => format!("{operation}; {rollback}"),

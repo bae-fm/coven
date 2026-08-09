@@ -1623,13 +1623,19 @@ mod test_device {
                 .allocate_blob_slot(&locator, &authority)
                 .await
                 .expect("allocate exact blob slot");
+            let spool_stage = self
+                .store_dir
+                .dir()
+                .stage_atomic_file(&spool)
+                .await
+                .expect("create exact blob spool stage");
             self.storage
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
                     coven_protocol::objects::BlobSpoolProtection::Opaque(protection),
                     &plaintext,
-                    &spool,
+                    spool_stage,
                 )
                 .await
                 .expect("seal exact blob");
@@ -1683,13 +1689,19 @@ mod test_device {
                 .allocate_blob_slot(&locator, &authority)
                 .await
                 .expect("allocate browsable blob slot");
+            let spool_stage = self
+                .store_dir
+                .dir()
+                .stage_atomic_file(&spool)
+                .await
+                .expect("create browsable blob spool stage");
             self.storage
                 .seal_blob_to_spool(
                     &locator,
                     &authority,
                     coven_protocol::objects::BlobSpoolProtection::Browsable,
                     &plaintext,
-                    &spool,
+                    spool_stage,
                 )
                 .await
                 .expect("stage browsable blob");
@@ -4753,11 +4765,11 @@ where
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
-        spool_file: &std::path::Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, coven_protocol::objects::StorageError>
     {
         self.inner
-            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
+            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool)
             .await
     }
 
@@ -4799,12 +4811,12 @@ where
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
-        dest: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, coven_protocol::objects::StorageError>
     {
         self.interceptor.before_blob_stage().await?;
         self.inner
-            .stage_verified_blob_plaintext(blob, protection, dest)
+            .stage_verified_blob_plaintext(blob, protection, stage)
             .await
     }
 

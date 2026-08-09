@@ -133,7 +133,7 @@ mod tests {
 
     fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
+        let dir = StoreDir::new_ephemeral(tmp.path());
         (tmp, dir)
     }
 
@@ -145,7 +145,7 @@ mod tests {
     fn keyring_preset_unlock_persist_forget_round_trip() {
         crate::keys::test_keyring::install();
         let store_keys = StoreKeys::bind("custody-keyring-roundtrip".to_string());
-        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
+        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new_ephemeral("unused"));
 
         assert!(
             custody.unlock().expect("unlock a fresh store").is_none(),
@@ -181,7 +181,7 @@ mod tests {
             .write_empty_encryption_key_for_test()
             .expect("write empty entry");
 
-        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
+        let custody = KeyCustody::Keyring.resolve(&store_keys, &StoreDir::new_ephemeral("unused"));
         let error = custody.unlock().expect_err("empty entry is corrupt");
         assert!(error.to_string().contains("present but empty"));
     }

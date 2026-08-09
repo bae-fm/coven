@@ -25,7 +25,6 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use coven_foundation::atomic_file::AtomicFileStage;
-use coven_foundation::local_file::AtomicStagedFile;
 use coven_foundation::store_dir::StoreDir;
 use rusqlite::Connection;
 use tracing::debug;
@@ -72,10 +71,12 @@ impl<'store> PayloadSpoolWriter<'store> {
     pub fn create(store_dir: &'store StoreDir) -> Result<Self, PayloadSpoolError> {
         let directory = store_dir.payload_spool_dir();
         let staged =
-            AtomicFileStage::create_in(&directory).map_err(|error| PayloadSpoolError::File {
-                path: directory,
-                error: error.to_string(),
-            })?;
+            store_dir
+                .create_payload_spool_stage()
+                .map_err(|error| PayloadSpoolError::File {
+                    path: directory,
+                    error: error.to_string(),
+                })?;
         Ok(Self {
             store_dir,
             staged,
@@ -129,13 +130,14 @@ impl<'store> PayloadSpool<'store> {
     pub async fn write(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         let hash = ObjectHash::digest(bytes);
         let path = self.store_dir.payload_spool_path(hash);
-        let mut staged =
-            AtomicStagedFile::create(&path)
-                .await
-                .map_err(|error| PayloadSpoolError::File {
-                    path: path.clone(),
-                    error,
-                })?;
+        let mut staged = self
+            .store_dir
+            .stage_atomic_file(&path)
+            .await
+            .map_err(|error| PayloadSpoolError::File {
+                path: path.clone(),
+                error,
+            })?;
         staged
             .write_bytes(bytes)
             .await
@@ -402,7 +404,7 @@ fn delete_payload_blocking(
 ) -> Result<(), PayloadSpoolError> {
     let path = store_dir.payload_spool_path(hash);
     match std::fs::remove_file(&path) {
-        Ok(()) => sync_parent(&path),
+        Ok(()) => sync_parent(store_dir, &path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             debug!(payload = %hash, "payload spool file is already absent");
             Ok(())
@@ -414,13 +416,13 @@ fn delete_payload_blocking(
     }
 }
 
-fn sync_parent(path: &Path) -> Result<(), PayloadSpoolError> {
-    coven_foundation::atomic_file::sync_parent_dir_blocking(path).map_err(|error| {
-        PayloadSpoolError::File {
+fn sync_parent(store_dir: &StoreDir, path: &Path) -> Result<(), PayloadSpoolError> {
+    store_dir
+        .sync_parent_dir_blocking(path)
+        .map_err(|error| PayloadSpoolError::File {
             path: path.to_path_buf(),
             error,
-        }
-    })
+        })
 }
 
 /// Claim `payloads` for `owner_key`, replacing whatever that owner claimed
@@ -624,6 +626,24 @@ mod tests {
         assert!(
             matches!(error, PayloadSpoolError::Missing { hash: missing, .. } if missing == hash),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_test_store_routes_payload_durability_through_its_file_sync() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (store_dir, sync_requests) =
+            StoreDir::new_with_file_sync_observer_for_test(directory.path());
+
+        PayloadSpool::new(&store_dir)
+            .write(b"payload")
+            .await
+            .expect("write payload");
+
+        assert_eq!(
+            sync_requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one file sync and one committed-directory sync"
         );
     }
 

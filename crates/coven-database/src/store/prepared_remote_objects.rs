@@ -18,7 +18,10 @@ struct UploadedBlobSpool {
 }
 
 impl UploadedBlobSpool {
-    async fn retire(&self) -> Result<(), String> {
+    async fn retire(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), String> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -29,7 +32,7 @@ impl UploadedBlobSpool {
                 ))
             }
         }
-        coven_foundation::atomic_file::sync_parent_dir(&self.path).await
+        store_dir.sync_parent_dir(&self.path).await
     }
 }
 
@@ -226,7 +229,10 @@ impl StoreDatabase {
             .await?;
 
         for spool in spools {
-            spool.retire().await.map_err(DbError::Message)?;
+            spool
+                .retire(&self.store_dir)
+                .await
+                .map_err(DbError::Message)?;
             self.clear_uploaded_blob_spool(spool).await?;
         }
         Ok(())

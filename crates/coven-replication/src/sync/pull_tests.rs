@@ -455,6 +455,11 @@ impl PullTestStoreOps for TestStore {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Vec<u8> {
         let temp = tempfile::tempdir().expect("create exact blob read directory");
+        let destination = temp.path().join("plaintext");
+        let stage = coven_foundation::store_dir::StoreDir::new_ephemeral(temp.path())
+            .stage_atomic_file(&destination)
+            .await
+            .expect("create exact blob stage");
         let staged = self
             .storage()
             .stage_verified_blob_plaintext(
@@ -469,7 +474,7 @@ impl PullTestStoreOps for TestStore {
                         coven_protocol::objects::BlobSpoolProtection::Browsable
                     }
                 },
-                &temp.path().join("plaintext"),
+                stage,
             )
             .await
             .expect("read exact blob object");
@@ -2235,7 +2240,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         .expect("copy the locally-authored retained input");
     crate::sync::test_helpers::copy_payload_spool(
         source.store_dir_for_test(),
-        &coven_foundation::store_dir::StoreDir::new(target_dir.path()),
+        &coven_foundation::store_dir::StoreDir::new_ephemeral(target_dir.path()),
     );
     let target = coven_database::Database::open(
         &target_path,

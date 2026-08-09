@@ -96,7 +96,8 @@ struct StagedBlobBatch {
 impl StagedBlob {
     async fn stage<E>(store_dir: &StoreDir, blob: NewBlob) -> Result<Self, HostWriteError<E>> {
         let destination = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let staged = coven_foundation::local_file::AtomicStagedFile::create(&destination)
+        let staged = store_dir
+            .stage_atomic_file(&destination)
             .await
             .map_err(HostWriteError::Blob)?;
         let mut staged_blob = Self {

@@ -90,7 +90,7 @@ mod tests {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
-            StoreDir::new("unused-store-dir"),
+            StoreDir::new_ephemeral("unused-store-dir"),
             "Provider matrix".to_string(),
         );
 

@@ -14,6 +14,7 @@ use super::{remove_snapshot_spool, SnapshotError};
 pub(crate) struct AuthorizedSnapshotPublication<'operation> {
     database: &'operation coven_database::StoreDatabase,
     storage: &'operation dyn CloudSyncObjectStorage,
+    store_dir: &'operation coven_foundation::store_dir::StoreDir,
     _permit: coven_database::SnapshotPublicationPermit,
 }
 
@@ -21,11 +22,13 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
     pub(crate) async fn begin(
         database: &'operation coven_database::StoreDatabase,
         storage: &'operation dyn CloudSyncObjectStorage,
+        store_dir: &'operation coven_foundation::store_dir::StoreDir,
     ) -> Self {
         let permit = database.snapshot_publication_permit().await;
         Self {
             database,
             storage,
+            store_dir,
             _permit: permit,
         }
     }
@@ -143,7 +146,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
             .await
             .map_err(SnapshotError::from)?
         {
-            remove_snapshot_spool(&path, false)
+            remove_snapshot_spool(self.store_dir, &path, false)
                 .await
                 .map_err(SnapshotError::PublicationState)?;
             self.database

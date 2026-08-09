@@ -9,6 +9,18 @@ use coven_protocol::objects::{LocalRotation, RotationPendingState};
 use coven_protocol::store_commit::ObjectHash;
 use std::num::NonZeroU64;
 
+async fn ephemeral_stage(
+    destination: &std::path::Path,
+) -> coven_foundation::local_file::AtomicStagedFile {
+    let parent = destination
+        .parent()
+        .expect("test stage destination has a parent");
+    coven_foundation::store_dir::StoreDir::new_ephemeral(parent)
+        .stage_atomic_file(destination)
+        .await
+        .expect("create ephemeral file stage")
+}
+
 #[test]
 fn encrypted_cloud_object_tag_carries_the_full_key_digest() {
     let encryption = EncryptionService::from_key([0xA5u8; 32]);
@@ -181,7 +193,7 @@ async fn publish_sealed_blob(
             &authority,
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
-            &spool,
+            ephemeral_stage(&spool).await,
         )
         .await
         .expect("seal exact spool");
@@ -329,7 +341,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
             &authority,
             coven_protocol::objects::BlobSpoolProtection::Browsable,
             &source,
-            &spool,
+            ephemeral_stage(&spool).await,
         )
         .await
         .expect("stage the browsable spool");
@@ -357,11 +369,12 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
     ));
     // The whole-blob path still serves it, checked against the row's hash.
     let destination = temp.path().join("materialized");
+    let stage = ephemeral_stage(&destination).await;
     let staged = storage
         .stage_verified_blob_plaintext(
             &blob,
             coven_protocol::objects::BlobSpoolProtection::Browsable,
-            &destination,
+            stage,
         )
         .await
         .expect("materialize the whole browsable blob");
@@ -796,7 +809,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
             &authority,
             coven_protocol::objects::BlobSpoolProtection::Opaque(circle_key.clone()),
             &source,
-            &spool,
+            ephemeral_stage(&spool).await,
         )
         .await
         .expect("seal Circle blob spool");
@@ -864,7 +877,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
                     [10u8; 32]
                 ),),
                 &source,
-                &spool,
+                ephemeral_stage(&spool).await,
             )
             .await,
         Err(StorageError::InvalidContent(_))
@@ -914,7 +927,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
             &authority,
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
-            &spool,
+            ephemeral_stage(&spool).await,
         )
         .await
         .expect("seal exact spool");
@@ -931,11 +944,12 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
         .await
         .expect("create exact blob");
 
+    let stage = ephemeral_stage(&destination).await;
     let staged = storage
         .stage_verified_blob_plaintext(
             &blob,
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
-            &destination,
+            stage,
         )
         .await
         .expect("stage verified plaintext");
@@ -987,7 +1001,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
             &authority,
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
-            &spool,
+            ephemeral_stage(&spool).await,
         )
         .await
         .expect("seal exact spool");
@@ -1005,12 +1019,13 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
         .unwrap();
     home.replace_exact_object(blob.object().slot(), b"corrupt".to_vec());
 
+    let stage = ephemeral_stage(&destination).await;
     assert!(matches!(
         storage
             .stage_verified_blob_plaintext(
                 &blob,
                 coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
-                &destination,
+                stage,
             )
             .await,
         Err(StorageError::InvalidContent(_))

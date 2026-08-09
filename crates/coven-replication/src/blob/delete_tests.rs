@@ -1613,7 +1613,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
     let sources = tempfile::tempdir().expect("upload sources");
     let owners = TestOwnerGraph::new(
         StoreDatabase::new(&db),
-        StoreDir::new(sources.path().join("store")),
+        StoreDir::new_ephemeral(sources.path().join("store")),
     );
     db.enqueue_blob_delete_for_test(&deleted, T0)
         .await
@@ -1651,7 +1651,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
     let sources = tempfile::tempdir().expect("upload sources");
     let owners = TestOwnerGraph::new(
         StoreDatabase::new(&db),
-        StoreDir::new(sources.path().join("store")),
+        StoreDir::new_ephemeral(sources.path().join("store")),
     );
     db.plant_blob_row_for_test("same-id", false, b"replacement")
         .await;
@@ -1689,7 +1689,7 @@ async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
     let sources = tempfile::tempdir().expect("upload sources");
     let owners = TestOwnerGraph::new(
         StoreDatabase::new(&db),
-        StoreDir::new(sources.path().join("store")),
+        StoreDir::new_ephemeral(sources.path().join("store")),
     );
     db.plant_blob_row_for_test("other-id", false, b"other")
         .await;
@@ -1749,7 +1749,7 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
     )
     .await
     .expect("insert journaled Local blob row");
-    let store_dir = StoreDir::new(tmp.path());
+    let store_dir = StoreDir::new_ephemeral(tmp.path());
     let replacement = storage
         .publish_exact_remote_blob_binding(
             &store_dir,
@@ -2012,7 +2012,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     )
     .await
     .expect("insert journaled Local blob row");
-    let store_dir = StoreDir::new(tmp.path());
+    let store_dir = StoreDir::new_ephemeral(tmp.path());
     let replacement = storage
         .publish_exact_remote_blob_binding(
             &store_dir,

@@ -180,7 +180,7 @@ impl ExactPlaintextFile {
             .map_err(|error| format!("create blob parent {}: {error}", parent.display()))
     }
 
-    async fn verify_durable(&self) -> Result<(), String> {
+    async fn verify_installed_size(&self) -> Result<(), String> {
         let length = tokio::fs::metadata(&self.path)
             .await
             .map_err(|error| format!("stat {}: {error}", self.path.display()))?
@@ -192,7 +192,7 @@ impl ExactPlaintextFile {
                 self.expected_size
             ));
         }
-        coven_foundation::atomic_file::sync_parent_dir(&self.path).await
+        Ok(())
     }
 
     async fn remove(&self) -> Result<(), String> {
@@ -592,7 +592,7 @@ impl ConnectedBlobTransitions {
                             detail: detail.to_string(),
                         })?;
                     destination
-                        .verify_durable()
+                        .verify_installed_size()
                         .await
                         .map_err(|detail| MakeLocalError::Write {
                             blob_id: blob.id.clone(),
@@ -653,7 +653,7 @@ impl ConnectedBlobTransitions {
                         reference.plaintext_size(),
                         reference.plaintext_hash(),
                     )
-                    .verify_durable()
+                    .verify_installed_size()
                     .await
                     .map_err(|detail| MakeLocalError::Write {
                         blob_id: blob.id.clone(),

@@ -275,6 +275,7 @@ impl StoreLayout {
     pub fn store_dir(&self, store_id: &str) -> StoreDir {
         StoreDir {
             path: self.stores_root().join(store_id),
+            file_sync: crate::atomic_file::FileSync::Enabled,
         }
     }
 }
@@ -283,14 +284,76 @@ impl StoreLayout {
 ///
 /// Centralizes the on-disk layout so callers use methods instead of
 /// ad-hoc `path.join("images")` etc.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct StoreDir {
     path: PathBuf,
+    file_sync: crate::atomic_file::FileSync,
+}
+
+impl PartialEq for StoreDir {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
 }
 
 impl StoreDir {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            file_sync: crate::atomic_file::FileSync::Enabled,
+        }
+    }
+
+    /// A store directory whose owning database is itself ephemeral. Atomic
+    /// visibility and rollback still run, but persistence barriers do not: no
+    /// file can outlive the durable state that names it.
+    pub fn new_ephemeral(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            file_sync: crate::atomic_file::FileSync::Disabled,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_with_file_sync_observer_for_test(
+        path: impl Into<PathBuf>,
+    ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Self {
+                path: path.into(),
+                file_sync: crate::atomic_file::FileSync::ObservedDisabled(requests.clone()),
+            },
+            requests,
+        )
+    }
+
+    pub async fn stage_atomic_file(
+        &self,
+        destination: &Path,
+    ) -> Result<crate::local_file::AtomicStagedFile, String> {
+        crate::local_file::AtomicStagedFile::create_with_file_sync(
+            destination,
+            self.file_sync.clone(),
+        )
+        .await
+    }
+
+    pub fn create_payload_spool_stage(
+        &self,
+    ) -> Result<crate::atomic_file::AtomicFileStage, std::io::Error> {
+        crate::atomic_file::AtomicFileStage::create_in_with_file_sync(
+            &self.payload_spool_dir(),
+            self.file_sync.clone(),
+        )
+    }
+
+    pub async fn sync_parent_dir(&self, path: &Path) -> Result<(), String> {
+        self.file_sync.sync_parent(path).await
+    }
+
+    pub fn sync_parent_dir_blocking(&self, path: &Path) -> Result<(), String> {
+        self.file_sync.sync_parent_blocking(path)
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -389,7 +452,7 @@ impl StoreDir {
     ) -> Result<(), String> {
         let path = self.outbound_blob_spool_path(locator_hash);
         match tokio::fs::remove_file(&path).await {
-            Ok(()) => crate::atomic_file::sync_parent_dir(&path).await,
+            Ok(()) => self.sync_parent_dir(&path).await,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(format!(
                 "remove exact blob spool {}: {error}",
@@ -455,7 +518,8 @@ impl StoreDir {
         expected_hash: crate::object_hash::ObjectHash,
         source: &Path,
     ) -> Result<(), StoreBlobFileError> {
-        let staged = crate::local_file::AtomicStagedFile::create(&destination)
+        let staged = self
+            .stage_atomic_file(&destination)
             .await
             .map_err(StoreBlobFileError::Io)?;
         let (staged, actual_size, actual_digest) = staged
@@ -843,7 +907,8 @@ impl StoreDir {
         bytes: &[u8],
     ) -> Result<(), LocalBlobStoreError> {
         let destination = self.local_blob_path(namespace, id)?;
-        let mut staged = crate::local_file::AtomicStagedFile::create(&destination)
+        let mut staged = self
+            .stage_atomic_file(&destination)
             .await
             .map_err(LocalBlobStoreError::Io)?;
         staged
@@ -1054,7 +1119,7 @@ impl AsRef<Path> for StoreDir {
 
 impl From<PathBuf> for StoreDir {
     fn from(path: PathBuf) -> Self {
-        Self { path }
+        Self::new(path)
     }
 }
 
@@ -1063,7 +1128,7 @@ impl From<PathBuf> for StoreDir {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     (tmp, dir)
 }
 

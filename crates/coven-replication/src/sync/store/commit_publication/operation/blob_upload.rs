@@ -184,8 +184,13 @@ impl AuthorizedWriterOperation<'_> {
         let spool_path = self
             .store_dir
             .outbound_blob_spool_path(locator.locator_hash());
+        let spool = self
+            .store_dir
+            .stage_atomic_file(&spool_path)
+            .await
+            .map_err(coven_protocol::objects::StorageError::LocalFilesystem)?;
         self.storage
-            .seal_blob_to_spool(locator, authority, protection, source_path, &spool_path)
+            .seal_blob_to_spool(locator, authority, protection, source_path, spool)
             .await?;
         let slot = self.storage.allocate_blob_slot(locator, authority).await?;
         let stored = self

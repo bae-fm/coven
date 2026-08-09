@@ -3456,7 +3456,8 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
             crate::sync::test_helpers::test_cache_locator_hash("new0bbbb"),
         )
         .unwrap();
-    let mut stage = coven_foundation::local_file::AtomicStagedFile::create(&dest)
+    let mut stage = ld
+        .stage_atomic_file(&dest)
         .await
         .expect("create concurrent populate stage");
     stage

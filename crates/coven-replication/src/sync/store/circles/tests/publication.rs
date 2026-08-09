@@ -1097,6 +1097,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("new Circle member resolves the founder blob key from its successor grant");
     let opened_destination = member_temp.path().join("new-member-opened-founder-blob");
+    let stage = coven_foundation::store_dir::StoreDir::new_ephemeral(member_temp.path())
+        .stage_atomic_file(&opened_destination)
+        .await
+        .expect("create opened blob stage");
     let opened = store
         .storage()
         .stage_verified_blob_plaintext(
@@ -1104,7 +1108,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
                 .stored()
                 .expect("published historical blob has an exact stored reference"),
             protection,
-            &opened_destination,
+            stage,
         )
         .await
         .expect("new Circle member opens the exact founder blob");
@@ -1434,7 +1438,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     .expect("copy pre-close Circle database");
     crate::sync::test_helpers::copy_payload_spool(
         db.store_dir_for_test(),
-        &coven_foundation::store_dir::StoreDir::new(candidate_base_temp.path()),
+        &coven_foundation::store_dir::StoreDir::new_ephemeral(candidate_base_temp.path()),
     );
 
     let controls = coven_database::StoreDatabase::new(&db)

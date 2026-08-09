@@ -5,10 +5,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-        destination: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
-            .stage_verified_plaintext(authority, stored, destination)
+            .stage_verified_plaintext(authority, stored, stage)
             .await
     }
 

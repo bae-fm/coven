@@ -99,7 +99,7 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
     let mut config = Config::with_defaults(
         "store-1".to_string(),
         "device-1".to_string(),
-        StoreDir::new("unused-store-dir"),
+        StoreDir::new_ephemeral("unused-store-dir"),
         "CloudKit Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::CloudKit);
@@ -128,7 +128,7 @@ fn local_exact_upload_verification_stays_out_of_restore_wire() {
     let mut config = Config::with_defaults(
         "local-assertion-wire-test".to_string(),
         "device-1".to_string(),
-        StoreDir::new(dir.path()),
+        StoreDir::new_ephemeral(dir.path()),
         "Wire Test".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);

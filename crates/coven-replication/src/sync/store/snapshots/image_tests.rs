@@ -951,7 +951,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .await
         .expect("verify pre-migration scoped snapshot");
     let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-    let store_dir = coven_foundation::store_dir::StoreDir::new(destination.path());
+    let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(destination.path());
     let database = bootstrap
         .install(
             &store_dir,
@@ -1188,7 +1188,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             )
             .await
             .expect("verify bootstrap authority");
-        let store_dir = coven_foundation::store_dir::StoreDir::new(destination.path());
+        let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(destination.path());
         let installed = bootstrap
             .install(
                 &store_dir,
@@ -1603,7 +1603,7 @@ fn blob_graph_install_rejects_a_conflicting_existing_row_binding() {
         remote: replacement_remote,
         spool_path: None,
     };
-    let store_dir = coven_foundation::store_dir::StoreDir::new(dir.path());
+    let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(dir.path());
     let error =
         SnapshotDatabaseImage::replace(store_dir.as_ref().join("snapshot-closure.db"), &image)
             .and_then(|image| image.install_blob_graph(&[prepared]))

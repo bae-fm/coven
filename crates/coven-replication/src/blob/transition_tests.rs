@@ -2356,9 +2356,13 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         }
         .expect("build shared locator");
         let spool = lib.outbound_blob_spool_path(locator.locator_hash());
+        let spool_stage = lib
+            .stage_atomic_file(&spool)
+            .await
+            .expect("create shared-locator spool stage");
         storage
             .storage()
-            .seal_blob_to_spool(&locator, &authority, protection, source_path, &spool)
+            .seal_blob_to_spool(&locator, &authority, protection, source_path, spool_stage)
             .await
             .expect("seal shared-locator blob");
         let slot = storage

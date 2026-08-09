@@ -535,10 +535,10 @@ impl CurrentRemoteBlobSource {
         &self,
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-        destination: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
-            .stage_verified_plaintext(authority, stored, destination)
+            .stage_verified_plaintext(authority, stored, stage)
             .await
     }
 }
@@ -571,10 +571,10 @@ impl<'storage> RemoteBlobSource<'storage> {
         &self,
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-        destination: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
-            .stage_verified_plaintext(authority, stored, destination)
+            .stage_verified_plaintext(authority, stored, stage)
             .await
     }
 
@@ -670,12 +670,12 @@ impl RemoteBlobSourceInner<'_> {
         &self,
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-        destination: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         let protection = self.protection(authority, stored).await?;
         self.storage
             .as_ref()
-            .stage_verified_blob_plaintext(stored, protection, destination)
+            .stage_verified_blob_plaintext(stored, protection, stage)
             .await
             .map_err(BlobCacheError::Storage)
     }
@@ -765,9 +765,13 @@ impl RemoteStoreBlobAccess {
                     stored.locator().locator_hash(),
                 )?;
                 let remote = self.remote.access(reference).await?;
-                let staged = remote
-                    .stage_verified_plaintext(stored, &destination)
-                    .await?;
+                let stage = self
+                    .local
+                    .store_dir
+                    .stage_atomic_file(&destination)
+                    .await
+                    .map_err(BlobCacheError::Io)?;
+                let staged = remote.stage_verified_plaintext(stored, stage).await?;
                 let bytes = staged.read_bytes().await.map_err(BlobCacheError::Io)?;
                 self.remote.validate(reference).await?;
                 self.local
@@ -853,9 +857,15 @@ impl RemoteStoreBlobAccess {
             return Ok(staged);
         }
         let stored = remote_stored_ref(reference)?;
+        let stage = self
+            .local
+            .store_dir
+            .stage_atomic_file(destination)
+            .await
+            .map_err(BlobCacheError::Io)?;
         let staged = self
             .remote
-            .stage_verified_plaintext(reference.authority(), stored, destination)
+            .stage_verified_plaintext(reference.authority(), stored, stage)
             .await?;
         self.remote.validate(reference).await?;
         Ok(staged)
@@ -871,9 +881,13 @@ impl RemoteStoreBlobAccess {
             stored.locator().namespace(),
             stored.locator().locator_hash(),
         )?;
-        let staged = remote
-            .stage_verified_plaintext(stored, &destination)
-            .await?;
+        let stage = self
+            .local
+            .store_dir
+            .stage_atomic_file(&destination)
+            .await
+            .map_err(BlobCacheError::Io)?;
+        let staged = remote.stage_verified_plaintext(stored, stage).await?;
         verify_exact_file(staged.path(), reference).await?;
         let source = open_local_file(staged.path()).await?;
         self.remote.validate(reference).await?;
@@ -995,8 +1009,13 @@ impl StoreBlobCache {
             .store_dir
             .cache_blob_path(locator.namespace(), locator.locator_hash())
             .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+        let stage = self
+            .store_dir
+            .stage_atomic_file(&destination)
+            .await
+            .map_err(BlobDownloadFailureCause::Local)?;
         let staged = remote
-            .stage_verified_plaintext(stored, &destination)
+            .stage_verified_plaintext(stored, stage)
             .await
             .map_err(|error| match error {
                 BlobCacheError::Storage(error) => BlobDownloadFailureCause::Storage(error),
@@ -1050,7 +1069,9 @@ impl StoreBlobCache {
         destination: &std::path::Path,
         reference: &RowBlobRef,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
-        let staged = coven_foundation::local_file::AtomicStagedFile::create(destination)
+        let staged = self
+            .store_dir
+            .stage_atomic_file(destination)
             .await
             .map_err(BlobCacheError::Io)?;
         let (staged, size, digest) = staged.copy_from(source).await.map_err(BlobCacheError::Io)?;
@@ -1084,7 +1105,8 @@ impl StoreBlobCache {
                 )))
             }
         }
-        coven_foundation::atomic_file::sync_parent_dir(source)
+        self.store_dir
+            .sync_parent_dir(source)
             .await
             .map_err(BlobCacheError::Io)
     }
@@ -1137,7 +1159,12 @@ impl StoreBlobCache {
             .ok_or(BlobCacheError::NoCloudHome)?
             .access(reference)
             .await?;
-        let staged = remote.stage_verified_plaintext(stored, &pinned).await?;
+        let stage = self
+            .store_dir
+            .stage_atomic_file(&pinned)
+            .await
+            .map_err(BlobCacheError::Io)?;
+        let staged = remote.stage_verified_plaintext(stored, stage).await?;
         verify_exact_file(staged.path(), reference).await?;
         self.database.validate_row_blob_ref(reference).await?;
         self.publish_materialization(staged, reference).await
@@ -1285,7 +1312,9 @@ impl StoreBlobCache {
         bytes: &[u8],
     ) -> Result<(), BlobCacheError> {
         let destination = self.store_dir.cache_blob_path(namespace, locator_hash)?;
-        let mut staged = coven_foundation::local_file::AtomicStagedFile::create(&destination)
+        let mut staged = self
+            .store_dir
+            .stage_atomic_file(&destination)
             .await
             .map_err(BlobCacheError::Io)?;
         staged

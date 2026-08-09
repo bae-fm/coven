@@ -123,10 +123,10 @@ impl<'a> RemoteBlobAccess<'a> {
     pub(super) async fn stage_verified_plaintext(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-        destination: &std::path::Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.storage
-            .stage_verified_blob_plaintext(stored, self.protection.clone(), destination)
+            .stage_verified_blob_plaintext(stored, self.protection.clone(), stage)
             .await
             .map_err(Into::into)
     }

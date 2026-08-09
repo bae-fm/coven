@@ -1289,7 +1289,7 @@ impl RestoreTarget {
         let temp = tempfile::tempdir().expect("restore destination");
         Self {
             database_path: temp.path().join("store.db"),
-            store_dir: coven_foundation::store_dir::StoreDir::new(temp.path()),
+            store_dir: coven_foundation::store_dir::StoreDir::new_ephemeral(temp.path()),
             _temp: temp,
         }
     }

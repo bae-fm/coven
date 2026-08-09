@@ -111,7 +111,7 @@ fn validate_cloud_path_allows_nesting_but_rejects_escapes() {
 
 #[test]
 fn outbound_blob_spool_is_keyed_by_locator_hash() {
-    let store = StoreDir::new("/stores/example");
+    let store = StoreDir::new_ephemeral("/stores/example");
     let locator_hash = crate::object_hash::ObjectHash::digest(b"locator");
 
     assert_eq!(
@@ -125,7 +125,7 @@ fn outbound_blob_spool_is_keyed_by_locator_hash() {
 
 #[test]
 fn remote_cache_paths_are_keyed_by_locator_hash() {
-    let store = StoreDir::new("/stores/example");
+    let store = StoreDir::new_ephemeral("/stores/example");
     let locator_hash = crate::object_hash::ObjectHash::digest(b"locator");
     let shard = StoreDir::id_shard(&locator_hash.to_string()).expect("hash shard");
 
@@ -150,7 +150,7 @@ fn remote_cache_paths_are_keyed_by_locator_hash() {
 #[test]
 fn orphan_sweep_clears_stale_write_temps_but_keeps_fresh_ones() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let store_dir = StoreDir::new(tmp.path());
+    let store_dir = StoreDir::new_ephemeral(tmp.path());
     let process_start = std::time::SystemTime::now();
     let stale = process_start - Duration::from_secs(3600);
     let fresh = process_start + Duration::from_secs(3600);
@@ -171,7 +171,8 @@ fn orphan_sweep_clears_stale_write_temps_but_keeps_fresh_ones() {
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let staged_temp = |destination: PathBuf| {
         runtime.block_on(async {
-            crate::local_file::AtomicStagedFile::create(&destination)
+            store_dir
+                .stage_atomic_file(&destination)
                 .await
                 .expect("create test staging file")
                 .leave_unpublished_for_test()
@@ -191,7 +192,8 @@ fn orphan_sweep_clears_stale_write_temps_but_keeps_fresh_ones() {
     let fresh_payload_temp = staged_temp(payload_spool.join("fresh-payload"));
     let committed_payload = payload_spool.join("payload0ccc");
     let stale_local_stage = runtime.block_on(async {
-        let mut stage = crate::local_file::AtomicStagedFile::create(&local_namespace.join("blob"))
+        let mut stage = store_dir
+            .stage_atomic_file(&local_namespace.join("blob"))
             .await
             .expect("local staging path");
         stage.write_bytes(b"x").await.expect("write local stage");

@@ -15,6 +15,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         crate::sync::store::snapshots::AuthorizedSnapshotPublication::begin(
             &self.database,
             self.storage.as_ref(),
+            self.store_dir,
         )
         .await
     }
@@ -180,8 +181,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         destination: &std::path::Path,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
+        let stage = self
+            .store_dir
+            .stage_atomic_file(destination)
+            .await
+            .map_err(crate::sync::BlobCacheError::Io)?;
         self.history
-            .stage_verified_blob_plaintext(authority, stored, destination)
+            .stage_verified_blob_plaintext(authority, stored, stage)
             .await
     }
 

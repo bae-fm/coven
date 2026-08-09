@@ -536,7 +536,7 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
         ))
         .await
         .expect("verify pre-exclusion snapshot");
-        let store_dir = StoreDir::new(destination.path());
+        let store_dir = StoreDir::new_ephemeral(destination.path());
         let mut joining_db = bootstrap
             .install(
                 &store_dir,

@@ -57,7 +57,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     keyring_core::set_default_store(Arc::new(PanicOnAnyKeyringOpStore));
 
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let config = Config::with_defaults(
         "open-no-keys-test".to_string(),
         "device".to_string(),
@@ -80,7 +80,7 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     let invalid_config = Config::with_defaults(
         "open-independent-identity-test".to_string(),
         "device".to_string(),
-        StoreDir::new(invalid_tmp.path()),
+        StoreDir::new_ephemeral(invalid_tmp.path()),
         "Test".to_string(),
     );
     let invalid = Coven::builder(invalid_config)

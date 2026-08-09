@@ -42,7 +42,7 @@ impl HostWriteBlobStaging {
         partitions: &[AudiencePartition],
     ) -> Result<StagedAudienceBlobFiles, DbError> {
         self.runtime.block_on(async {
-            let mut files = StagedAudienceBlobFiles::new();
+            let mut files = StagedAudienceBlobFiles::new(self.store_dir.clone());
             let result = self
                 .stage_audience_move_blobs_inner(transaction, facts, moves, partitions, &mut files)
                 .await;
@@ -123,6 +123,13 @@ impl HostWriteBlobStaging {
                     let source_path = self
                         .move_source_plaintext(transaction, fact, &source, &spool_path)
                         .await?;
+                    let spool = self
+                        .store_dir
+                        .stage_atomic_file(&spool_path)
+                        .await
+                        .map_err(|error| {
+                            move_materialization_error(fact, DbError::Message(error))
+                        })?;
                     let spool_write = self
                         .storage
                         .seal_blob_to_spool(
@@ -130,7 +137,7 @@ impl HostWriteBlobStaging {
                             &authority,
                             protection,
                             source_path.path(),
-                            &spool_path,
+                            spool,
                         )
                         .await
                         .map_err(|error| move_materialization_error(fact, error))?;
@@ -266,9 +273,14 @@ impl HostWriteBlobStaging {
         })?;
         let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
         let destination = spool_path.with_extension("move-plaintext");
+        let stage = self
+            .store_dir
+            .stage_atomic_file(&destination)
+            .await
+            .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
         let staged = self
             .storage
-            .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
+            .stage_verified_blob_plaintext(&previous.stored, protection, stage)
             .await
             .map_err(|error| move_materialization_error(fact, error))?;
         Ok(MoveSourcePlaintext::Downloaded(staged))
@@ -337,9 +349,14 @@ impl HostWriteBlobStaging {
             )
         })?;
         let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
+        let stage = self
+            .store_dir
+            .stage_atomic_file(&destination)
+            .await
+            .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
         let staged = self
             .storage
-            .stage_verified_blob_plaintext(&previous.stored, protection, &destination)
+            .stage_verified_blob_plaintext(&previous.stored, protection, stage)
             .await
             .map_err(|error| move_materialization_error(fact, error))?;
         match fact.blob.provenance {
@@ -377,12 +394,14 @@ impl HostWriteBlobStaging {
 }
 
 pub(crate) struct StagedAudienceBlobFiles {
+    store_dir: StoreDir,
     created: Vec<StagedAudienceBlobFile>,
 }
 
 impl StagedAudienceBlobFiles {
-    fn new() -> Self {
+    fn new(store_dir: StoreDir) -> Self {
         Self {
+            store_dir,
             created: Vec::new(),
         }
     }
@@ -391,7 +410,7 @@ impl StagedAudienceBlobFiles {
         let mut failures = Vec::new();
         for file in self.created.into_iter().rev() {
             let path = file.path.clone();
-            if let Err(reason) = file.rollback().await {
+            if let Err(reason) = file.rollback(&self.store_dir).await {
                 failures.push(coven_database::StagedBlobRollbackFailure { path, reason });
             }
         }
@@ -412,7 +431,7 @@ impl StagedAudienceBlobFile {
         Self { path }
     }
 
-    async fn rollback(self) -> Result<(), String> {
+    async fn rollback(self, store_dir: &StoreDir) -> Result<(), String> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -422,7 +441,7 @@ impl StagedAudienceBlobFile {
                 return Err(format!("remove staged audience blob: {error}"));
             }
         }
-        coven_foundation::atomic_file::sync_parent_dir(&self.path).await
+        store_dir.sync_parent_dir(&self.path).await
     }
 }
 

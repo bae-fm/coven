@@ -45,7 +45,7 @@ fn test_key_custody() -> Arc<dyn coven_keys::keys::MasterKeyCustody> {
     coven_keys::custody::KeyCustody::InMemory(coven_keys::encryption::MasterKeyring::generate())
         .resolve(
             &store_keys,
-            &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
+            &coven_foundation::store_dir::StoreDir::new_ephemeral("unused-store-dir"),
         )
 }
 
@@ -59,7 +59,7 @@ fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     )
     .resolve(
         &store_keys,
-        &coven_foundation::store_dir::StoreDir::new("unused-store-dir"),
+        &coven_foundation::store_dir::StoreDir::new_ephemeral("unused-store-dir"),
     )
 }
 
@@ -2050,7 +2050,7 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
                         .write()
                         .expect("test config lock is not poisoned");
                     next_config.store_id = "next-lib".to_string();
-                    next_config.store_dir = StoreDir::new(tmp.path().join("next-store"));
+                    next_config.store_dir = StoreDir::new_ephemeral(tmp.path().join("next-store"));
                     next_config.cloud_home.storage = HomeStorage::Browsable;
                 }
 

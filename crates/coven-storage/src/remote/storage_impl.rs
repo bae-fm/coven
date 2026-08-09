@@ -286,8 +286,9 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &Path,
-        spool_file: &Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, StorageError> {
+        let spool_file = spool.destination().to_path_buf();
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
@@ -303,7 +304,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             )));
         }
 
-        match tokio::fs::metadata(spool_file).await {
+        match tokio::fs::metadata(&spool_file).await {
             Ok(metadata) => {
                 if !metadata.is_file() {
                     return Err(StorageError::LocalFilesystem(format!(
@@ -311,7 +312,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                         spool_file.display()
                     )));
                 }
-                let (stored_size, stored_hash) = crate::local_file::exact_file_facts(spool_file)
+                let (stored_size, stored_hash) = crate::local_file::exact_file_facts(&spool_file)
                     .await
                     .map_err(StorageError::LocalFilesystem)?;
                 let object = ExactObjectRef::new(
@@ -323,7 +324,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                     coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
                         .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader =
-                    ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
+                    ExactBlobPlaintextReader::new(&spool_file, &self.store_id, &blob, protection)
                         .await?;
                 loop {
                     let chunk = coven_foundation::local_file::PlaintextChunkReader::next_chunk(
@@ -398,11 +399,8 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 None => Ok::<_, crate::cloud::CloudHomeError>(None),
             }
         });
-        let staged = coven_foundation::local_file::AtomicStagedFile::create(spool_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
         let (staged, written) =
-            staged
+            spool
                 .write_byte_stream(Box::pin(stream))
                 .await
                 .map_err(|error| match error {
@@ -429,7 +427,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         match staged.commit_new().await {
             Ok(()) => Ok(coven_protocol::objects::BlobSpoolWrite::Created),
             Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(_)) => {
-                let (stored_size, stored_hash) = crate::local_file::exact_file_facts(spool_file)
+                let (stored_size, stored_hash) = crate::local_file::exact_file_facts(&spool_file)
                     .await
                     .map_err(StorageError::LocalFilesystem)?;
                 let object = ExactObjectRef::new(
@@ -441,7 +439,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                     coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
                         .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
                 let mut reader = ExactBlobPlaintextReader::new(
-                    spool_file,
+                    &spool_file,
                     &self.store_id,
                     &blob,
                     retry_protection,
@@ -538,15 +536,16 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
-        dest: &Path,
+        mut plaintext: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
-        let stored_destination = dest.with_extension("coven-stored-download");
-        let stored = self
-            .stage_exact_blob_download(blob, &stored_destination)
-            .await?;
-        let mut plaintext = coven_foundation::local_file::AtomicStagedFile::create(dest)
+        let stored_destination = plaintext
+            .destination()
+            .with_extension("coven-stored-download");
+        let stored_stage = plaintext
+            .stage_peer(&stored_destination)
             .await
             .map_err(StorageError::LocalFilesystem)?;
+        let stored = self.stage_exact_blob_download(blob, stored_stage).await?;
         let mut reader =
             ExactBlobPlaintextReader::new(stored.path(), &self.store_id, blob, protection).await?;
         let written =
@@ -659,7 +658,7 @@ impl CloudSyncConnection {
     async fn stage_exact_blob_download(
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
-        dest: &Path,
+        mut staged: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
         let object = blob.object();
@@ -671,9 +670,6 @@ impl CloudSyncConnection {
                 object.slot().logical_key()
             )));
         }
-        let mut staged = coven_foundation::local_file::AtomicStagedFile::create(dest)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
         self.exact
             .read_at_to_file(object.slot(), staged.path_for_atomic_replacement())
             .await

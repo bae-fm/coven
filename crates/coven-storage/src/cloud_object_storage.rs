@@ -172,14 +172,15 @@ pub trait CloudSyncObjectStorage: Send + Sync {
     ) -> Result<ObjectSlot, StorageError>;
 
     /// Verify one plaintext source against its locator and write the exact stored
-    /// representation to an atomically committed, directory-synced spool file.
+    /// representation through the caller-owned spool stage. The stage's owner
+    /// determines the file and directory durability barriers.
     async fn seal_blob_to_spool(
         &self,
         locator: &coven_protocol::blob::locator::BlobLocator,
         authority: &BlobWriteAuthority<'_>,
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
-        spool_file: &Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<BlobSpoolWrite, StorageError>;
 
     /// Derive an exact reference from an immutable stored blob file.
@@ -206,14 +207,14 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
 
-    /// Download and exact-verify the stored object, open it under the
-    /// audience-owned protection, and return an unpublished plaintext file only
-    /// after its locator size and hash have also been verified.
+    /// Download and exact-verify the stored object into the caller-owned stage,
+    /// open it under the audience-owned protection, and return the unpublished
+    /// plaintext only after its locator size and hash have also been verified.
     async fn stage_verified_blob_plaintext(
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
-        dest: &Path,
+        stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
 
     /// Open a reader that serves plaintext ranges of a stored blob by fetching

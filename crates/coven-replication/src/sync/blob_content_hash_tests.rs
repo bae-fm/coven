@@ -17,6 +17,19 @@ fn protection() -> EncryptionService {
     EncryptionService::from_key(STORE_KEY)
 }
 
+async fn ephemeral_stage(
+    destination: &std::path::Path,
+) -> coven_foundation::local_file::AtomicStagedFile {
+    coven_foundation::store_dir::StoreDir::new_ephemeral(
+        destination
+            .parent()
+            .expect("test stage destination has a parent"),
+    )
+    .stage_atomic_file(destination)
+    .await
+    .expect("create ephemeral plaintext stage")
+}
+
 #[tokio::test]
 async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let database = crate::sync::test_helpers::open_test_db();
@@ -53,13 +66,10 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
 
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("real");
+    let stage = ephemeral_stage(&destination).await;
     let staged = store
         .storage()
-        .stage_verified_blob_plaintext(
-            &real_blob,
-            BlobSpoolProtection::Opaque(protection()),
-            &destination,
-        )
+        .stage_verified_blob_plaintext(&real_blob, BlobSpoolProtection::Opaque(protection()), stage)
         .await
         .expect("stage the referenced exact blob");
     assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), real);
@@ -106,13 +116,14 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
 
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("current");
+    let stage = ephemeral_stage(&destination).await;
     assert!(matches!(
         store
             .storage()
             .stage_verified_blob_plaintext(
                 &current_blob,
                 BlobSpoolProtection::Opaque(protection()),
-                &destination,
+                stage,
             )
             .await,
         Err(StorageError::InvalidContent(_))
@@ -120,12 +131,13 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     assert!(!destination.exists());
 
     home.replace_exact_object(current_blob.object().slot(), current_stored);
+    let stage = ephemeral_stage(&destination).await;
     let staged = store
         .storage()
         .stage_verified_blob_plaintext(
             &current_blob,
             BlobSpoolProtection::Opaque(protection()),
-            &destination,
+            stage,
         )
         .await
         .expect("stage restored exact blob");

@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn round_trips_through_save_and_load() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(dir.path());
+        let store_dir = StoreDir::new_ephemeral(dir.path());
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn round_trips_cloudkit_share_owner_and_zone() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(dir.path());
+        let store_dir = StoreDir::new_ephemeral(dir.path());
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn load_with_absent_optional_fields_uses_defaults() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(dir.path());
+        let store_dir = StoreDir::new_ephemeral(dir.path());
         std::fs::write(
             store_dir.config_path(),
             "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nstorage: opaque\n",
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn load_with_missing_device_id_errors() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(dir.path());
+        let store_dir = StoreDir::new_ephemeral(dir.path());
         std::fs::write(
             store_dir.config_path(),
             "store_id: store-1\nstore_name: My Store\n",
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn load_with_no_file_errors_naming_the_path() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(dir.path());
+        let store_dir = StoreDir::new_ephemeral(dir.path());
 
         let err = Config::load_from_config_yaml(store_dir.clone()).expect_err("no file");
         let message = err.to_string();

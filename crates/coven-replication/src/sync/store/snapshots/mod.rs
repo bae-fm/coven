@@ -572,7 +572,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
     Ok::<(), SnapshotError>(())
     }.await;
         if let Err(error) = preparation {
-            cleanup_snapshot_spools(&prepared)
+            cleanup_snapshot_spools(self.store_dir, &prepared)
                 .await
                 .map_err(|cleanup| {
                     SnapshotError::PublicationState(format!(
@@ -587,7 +587,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let image = match db_image.install_blob_graph(&prepared) {
             Ok(image) => image,
             Err(error) => {
-                cleanup_snapshot_spools(&prepared)
+                cleanup_snapshot_spools(self.store_dir, &prepared)
                     .await
                     .map_err(|cleanup| {
                         SnapshotError::PublicationState(format!(
@@ -613,18 +613,20 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
 }
 
 async fn cleanup_snapshot_spools(
+    store_dir: &StoreDir,
     prepared: &[coven_database::PreparedSnapshotBlob],
 ) -> Result<(), String> {
     let mut paths = std::collections::BTreeSet::new();
     for path in prepared.iter().filter_map(|blob| blob.spool_path.as_ref()) {
         if paths.insert(path.clone()) {
-            remove_snapshot_spool(path, true).await?;
+            remove_snapshot_spool(store_dir, path, true).await?;
         }
     }
     Ok(())
 }
 
 async fn remove_snapshot_spool(
+    store_dir: &StoreDir,
     path: &std::path::Path,
     require_present: bool,
 ) -> Result<(), String> {
@@ -640,7 +642,7 @@ async fn remove_snapshot_spool(
             return Err(format!("remove snapshot spool {}: {error}", path.display()));
         }
     }
-    coven_foundation::atomic_file::sync_parent_dir(path).await
+    store_dir.sync_parent_dir(path).await
 }
 
 pub(crate) fn select_maximal_store_snapshot(

@@ -111,7 +111,7 @@ mod tests {
 
     fn temp_store_dir() -> (tempfile::TempDir, StoreDir) {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
+        let dir = StoreDir::new_ephemeral(tmp.path());
         (tmp, dir)
     }
 
@@ -123,7 +123,8 @@ mod tests {
     fn keyring_preset_unlock_persist_forget_round_trip() {
         test_keyring::install();
         let store_keys = StoreKeys::bind("identity-keyring-roundtrip".to_string());
-        let custody = IdentityCustody::Keyring.resolve(&store_keys, &StoreDir::new("unused"));
+        let custody =
+            IdentityCustody::Keyring.resolve(&store_keys, &StoreDir::new_ephemeral("unused"));
 
         assert!(
             custody.unlock().expect("unlock a fresh store").is_none(),
@@ -153,8 +154,10 @@ mod tests {
         test_keyring::install();
         let store_a_keys = StoreKeys::bind("identity-keyring-scope-a".to_string());
         let store_b_keys = StoreKeys::bind("identity-keyring-scope-b".to_string());
-        let store_a = IdentityCustody::Keyring.resolve(&store_a_keys, &StoreDir::new("unused"));
-        let store_b = IdentityCustody::Keyring.resolve(&store_b_keys, &StoreDir::new("unused"));
+        let store_a =
+            IdentityCustody::Keyring.resolve(&store_a_keys, &StoreDir::new_ephemeral("unused"));
+        let store_b =
+            IdentityCustody::Keyring.resolve(&store_b_keys, &StoreDir::new_ephemeral("unused"));
 
         let keypair_a = UserKeypair::generate();
         store_a.persist(&keypair_a).expect("persist to store a");

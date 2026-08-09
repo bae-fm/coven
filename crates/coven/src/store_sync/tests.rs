@@ -106,7 +106,7 @@ fn established_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     coven_keys::identity_custody::IdentityCustody::InMemory(
         coven_keys::keys::UserKeypair::generate(),
     )
-    .resolve(&store_keys, &StoreDir::new("unused-store-dir"))
+    .resolve(&store_keys, &StoreDir::new_ephemeral("unused-store-dir"))
 }
 
 fn store_security(
@@ -187,7 +187,7 @@ async fn connect_test_home(
 async fn membership_read_surfaces_malformed_cloud_credentials() {
     test_keyring::install();
     let tmp = tempfile::tempdir().expect("temp dir");
-    let store_dir = StoreDir::new(tmp.path());
+    let store_dir = StoreDir::new_ephemeral(tmp.path());
     let store_id = "sync-enabled-malformed-credentials";
     let keys = StoreKeys::bind(store_id.to_string());
     keys.cloud_home_credentials_entry_for_test()
@@ -403,7 +403,7 @@ async fn failed_restart_leaves_no_stale_connection() {
     let config = Arc::new(RwLock::new(initial_config));
     let store_keys = StoreKeys::bind("sync-failed-restart".to_string());
     let custody = coven_keys::custody::KeyCustody::InMemory(MasterKeyring::generate())
-        .resolve(&store_keys, &StoreDir::new("unused-store-dir"));
+        .resolve(&store_keys, &StoreDir::new_ephemeral("unused-store-dir"));
     let sync = store_sync(
         {
             let config = config.clone();

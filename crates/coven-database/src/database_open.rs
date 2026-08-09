@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn database_core_retains_the_injected_store_directory() {
         let temporary = tempfile::tempdir().expect("temporary store directory");
-        let store_dir = StoreDir::new(temporary.path());
+        let store_dir = StoreDir::new_ephemeral(temporary.path());
         let hlc = Arc::new(
             Hlc::try_new(
                 "injected-store-directory".to_string(),

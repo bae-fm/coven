@@ -129,7 +129,7 @@ fn gated_roots_migration() -> Migration {
 
 fn open_gated_roots_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let handle = Coven::builder(config(StoreDir::new(tmp.path())))
+    let handle = Coven::builder(config(StoreDir::new_ephemeral(tmp.path())))
         .synced_tables(vec![gated_roots_table()])
         .migrations(vec![gated_roots_migration()])
         .open()
@@ -155,7 +155,7 @@ fn precreate_database(dir: &StoreDir, sql: &str) {
 #[test]
 fn precreated_empty_sqlite_file_initializes_coven_metadata() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     precreate_database(&dir, "");
 
     open_gated_roots_at(dir).expect("initialize Coven in an empty SQLite database");
@@ -164,7 +164,7 @@ fn precreated_empty_sqlite_file_initializes_coven_metadata() {
 #[test]
 fn existing_host_tables_without_a_coven_marker_initialize_coven_metadata() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     precreate_database(
         &dir,
         "CREATE TABLE roots (
@@ -182,7 +182,7 @@ fn existing_host_tables_without_a_coven_marker_initialize_coven_metadata() {
 #[test]
 fn interrupted_coven_schema_without_a_marker_is_rejected() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     coven_database::DatabaseImageTest::open(&dir.db_path())
         .expect("precreate interrupted Coven database")
         .create_interrupted_coven_schema()
@@ -272,7 +272,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
 
 fn open_files_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = Coven::builder(config(dir))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
@@ -285,7 +285,7 @@ fn open_files_handle() -> (tempfile::TempDir, CovenHandle) {
 async fn configured_clock_is_the_hlc_wall_source() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let clock = chrono::DateTime::from_timestamp_millis(1_234).expect("valid clock instant");
-    let handle = Coven::builder(config(StoreDir::new(tmp.path())))
+    let handle = Coven::builder(config(StoreDir::new_ephemeral(tmp.path())))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .clock(Arc::new(coven_foundation::clock::FixedClock(clock)))
@@ -311,7 +311,7 @@ async fn configured_clock_is_the_hlc_wall_source() {
 #[tokio::test]
 async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let first = Coven::builder(config(dir.clone()))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
@@ -352,7 +352,7 @@ async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
 async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
     for grace in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
+        let dir = StoreDir::new_ephemeral(tmp.path());
         let result = Coven::builder(config(dir))
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
@@ -368,7 +368,7 @@ async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
 #[tokio::test]
 async fn a_positive_blob_tombstone_grace_opens() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     Coven::builder(config(dir))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
@@ -379,7 +379,7 @@ async fn a_positive_blob_tombstone_grace_opens() {
 
 fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = Coven::builder(config(dir))
         .synced_tables(vec![remote_root_files_table()])
         .migrations(vec![files_migration()])
@@ -441,7 +441,7 @@ impl CovenHandleWriteTestOps for CovenHandle {
 #[tokio::test]
 async fn write_survives_reopen_before_sync_cycle() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = open_files_handle_in(dir.clone());
     handle
         .sql(|sql| {
@@ -484,7 +484,7 @@ async fn write_survives_reopen_before_sync_cycle() {
 #[tokio::test]
 async fn separate_host_transactions_publish_as_separate_store_commits_after_restart() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = open_files_handle_in(dir.clone());
     let mut write_ids = Vec::new();
     for id in ["file-pending-a", "file-pending-b"] {
@@ -667,7 +667,7 @@ async fn mixed_transaction_tracks_and_publishes_only_shared_rows() {
 #[tokio::test]
 async fn delete_survives_reopen_before_sync_cycle() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = open_files_handle_in(dir.clone());
     handle
         .sql(|sql| {
@@ -787,7 +787,7 @@ async fn builder_open_runs_coven_and_host_migrations() {
 #[tokio::test]
 async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
 
     // Open with a two-step ladder so the db lands at synced-schema version 2.
     let ahead = Coven::builder(config(dir.clone()))
@@ -906,7 +906,7 @@ async fn open_on_a_fresh_store_serves_sql_read() {
     // host table then succeeds rather than failing on a missing table — proof the
     // read connection opened after, not before, the schema exists.
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = Coven::builder(config(dir))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
@@ -925,11 +925,12 @@ async fn open_on_a_fresh_store_serves_sql_read() {
 #[tokio::test]
 async fn open_removes_orphaned_local_blob_temps() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let final_path = dir
         .local_blob_path("media-files", "tempaaaa")
         .expect("local path");
-    let mut staged = coven_foundation::local_file::AtomicStagedFile::create(&final_path)
+    let mut staged = dir
+        .stage_atomic_file(&final_path)
         .await
         .expect("allocate local blob stage");
     staged
@@ -959,7 +960,7 @@ async fn open_removes_orphaned_local_blob_temps() {
 #[tokio::test]
 async fn write_inserts_row_and_host_provided_blob() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let bytes = b"piece-bytes".to_vec();
     let hash = coven_protocol::blob::content_hash(&bytes);
     handle
@@ -994,7 +995,7 @@ async fn write_inserts_row_and_host_provided_blob() {
 #[tokio::test]
 async fn orphaned_final_blob_is_replaced_by_next_write() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let path = dir
         .local_blob_path("media-files", "orphaaaa")
         .expect("local path");
@@ -1035,7 +1036,7 @@ async fn orphaned_final_blob_is_replaced_by_next_write() {
 #[tokio::test]
 async fn put_blob_rejects_id_already_referenced_by_a_row() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     handle
         .write(
             |w| {
@@ -1217,7 +1218,7 @@ impl RemoteOnlyStoreBlob {
     }
     async fn create() -> Self {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
+        let dir = StoreDir::new_ephemeral(tmp.path());
         let signer = coven_keys::keys::UserKeypair::generate();
         let encryption = crate::EncryptionService::from_key([42; 32]);
         let handle = Coven::builder(config(dir.clone()))
@@ -1627,7 +1628,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
         .run_until(async {
             tokio::task::spawn_local(async {
                 let tmp = tempfile::tempdir().expect("temp dir");
-                let dir = StoreDir::new(tmp.path());
+                let dir = StoreDir::new_ephemeral(tmp.path());
                 let signer = coven_keys::keys::UserKeypair::generate();
                 let keyring =
                     crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
@@ -1741,7 +1742,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
 #[tokio::test]
 async fn sql_failure_removes_staged_blob() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let err = handle
         .write(
             |w| {
@@ -1795,7 +1796,7 @@ async fn blob_stage_failure_does_not_run_sql() {
 #[tokio::test]
 async fn replacement_deletes_old_blob_after_sql_drops_reference() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldaaaa", b"old")
         .await
         .expect("store old");
@@ -1984,7 +1985,7 @@ async fn pending_write_owns_blob_bytes_until_its_publication() {
         .run_until(async {
             tokio::task::spawn_local(async {
                 let (tmp, handle) = open_files_handle();
-                let dir = StoreDir::new(tmp.path());
+                let dir = StoreDir::new_ephemeral(tmp.path());
                 let replacement = PendingReplacement::queue(&handle, &dir).await;
 
                 assert_eq!(
@@ -2034,7 +2035,7 @@ async fn pending_write_blob_ownership_survives_restart() {
         .run_until(async {
             tokio::task::spawn_local(async {
                 let tmp = tempfile::tempdir().expect("temp dir");
-                let dir = StoreDir::new(tmp.path());
+                let dir = StoreDir::new_ephemeral(tmp.path());
                 let handle = open_files_handle_in(dir.clone());
                 let replacement = PendingReplacement::queue(&handle, &dir).await;
                 drop(handle);
@@ -2056,7 +2057,7 @@ async fn pending_write_blob_ownership_survives_restart() {
 #[tokio::test]
 async fn author_delete_drops_all_local_blob_copies() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldcccc", b"old")
         .await
         .expect("store old");
@@ -2139,7 +2140,7 @@ async fn author_delete_drops_all_local_blob_copies() {
 #[tokio::test]
 async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     coven_foundation::store_dir::StoreDir::store_local_blob(
         &dir,
         "media-files",
@@ -2257,7 +2258,7 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
 #[tokio::test]
 async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let blob_id = "shared01";
     handle
         .sql(move |sql| {
@@ -2407,7 +2408,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
 #[tokio::test]
 async fn replacement_is_rejected_while_sql_still_references_old_blob() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     coven_foundation::store_dir::StoreDir::store_local_blob(&dir, "media-files", "oldbbbb", b"old")
         .await
         .expect("store old");
@@ -2468,7 +2469,7 @@ async fn replacement_is_rejected_while_sql_still_references_old_blob() {
 #[tokio::test]
 async fn sql_panic_removes_moved_blob() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let result: CovenResult<WriteReceipt<()>> = handle
         .write(
             |w| {
@@ -2488,7 +2489,7 @@ async fn sql_panic_removes_moved_blob() {
 #[tokio::test]
 async fn write_surfaces_a_failed_installed_blob_rollback() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let final_path = dir
         .local_blob_path("media-files", "rollback-failure")
         .expect("rollback failure path");
@@ -2524,7 +2525,7 @@ async fn write_surfaces_a_failed_installed_blob_rollback() {
 #[tokio::test]
 async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
     let (tmp, handle) = open_files_handle();
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let winner = handle.clone();
     let loser = handle.clone();
 
@@ -2755,7 +2756,7 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
     test_keyring::install();
 
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     // A store id distinct from every other test's — `try_open`/
     // `open_when_lock_released` below reopen the same directory (the
     // lock is path-scoped, not store-id-scoped) but this test's own
@@ -2828,7 +2829,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
     test_keyring::install();
 
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     // A store id distinct from every other test's — see the identical
     // note in `lock_is_held_until_the_sync_loop_exits_its_cycle`.
     let handle = Coven::builder(Config::with_defaults(
@@ -2889,7 +2890,7 @@ async fn read_files_count(handle: &crate::read_handle::CovenReadHandle) -> i64 {
 #[tokio::test]
 async fn read_only_open_succeeds_while_a_full_open_holds_the_store() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let writer = open_files_handle_in(dir.clone());
 
     // A second full open is refused (the invariant the lock protects).
@@ -2909,7 +2910,7 @@ async fn read_only_open_succeeds_while_a_full_open_holds_the_store() {
 #[tokio::test]
 async fn multiple_read_only_opens_coexist_with_a_writer() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let writer = open_files_handle_in(dir.clone());
 
     let reader_a = try_open_read_only(&dir).expect("first read-only open");
@@ -2925,7 +2926,7 @@ async fn multiple_read_only_opens_coexist_with_a_writer() {
 #[tokio::test]
 async fn read_only_open_sees_committed_writer_data() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let writer = open_files_handle_in(dir.clone());
 
     writer
@@ -2973,7 +2974,7 @@ async fn read_only_open_sees_committed_writer_data() {
 #[tokio::test]
 async fn read_only_open_refuses_a_too_new_schema() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
 
     // A newer binary migrates the db to synced-schema version 2.
     let ahead = Coven::builder(config(dir.clone()))
@@ -3008,7 +3009,7 @@ async fn read_only_open_refuses_a_too_new_schema() {
 #[tokio::test]
 async fn read_only_handle_reads_a_host_provided_blob() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let writer = Coven::builder(config(dir.clone()))
         .synced_tables(vec![remote_root_files_table()])
         .migrations(vec![files_migration()])
@@ -3080,7 +3081,7 @@ async fn read_only_handle_reads_a_host_provided_blob() {
 #[tokio::test]
 async fn concurrent_same_blob_cache_writes_never_tear() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let dir = StoreDir::new(tmp.path());
+    let dir = StoreDir::new_ephemeral(tmp.path());
     let dest = dir
         .cache_blob_path(
             "media-files",

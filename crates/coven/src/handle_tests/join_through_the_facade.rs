@@ -41,7 +41,7 @@ impl FacadeFixture {
         let encryption = crate::EncryptionService::from_key([42; 32]);
         let keyring = crate::MasterKeyring::from(encryption.clone());
         let store_tmp = tempfile::tempdir().expect("store directory");
-        let store_dir = crate::StoreDir::new(store_tmp.path());
+        let store_dir = crate::StoreDir::new_ephemeral(store_tmp.path());
         let tables = test_synced_tables();
 
         let handle = crate::Coven::builder(crate::Config::with_defaults(

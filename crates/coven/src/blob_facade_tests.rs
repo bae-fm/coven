@@ -98,7 +98,7 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
 async fn an_external_file_reads_back_through_the_handle() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new(tmp.path()));
+    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");
 
     let bytes = b"the user's own file, never copied".to_vec();
@@ -173,7 +173,7 @@ async fn an_external_file_reads_back_through_the_handle() {
 async fn a_host_provided_table_refuses_an_external_file() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = crate::Coven::builder(config(crate::StoreDir::new(tmp.path())))
+    let handle = crate::Coven::builder(config(crate::StoreDir::new_ephemeral(tmp.path())))
         .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
             "photos",
             crate::Provenance::HostProvided,
@@ -205,7 +205,7 @@ async fn a_host_provided_table_refuses_an_external_file() {
 async fn registering_against_a_table_with_no_blob_is_refused() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new(tmp.path()));
+    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
 
     let refused = handle
         .sql(|sql| {
@@ -256,7 +256,7 @@ async fn the_upload_queue_is_readable_before_any_transfer_and_across_a_restart()
 async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_restart() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let dir = crate::StoreDir::new(tmp.path());
+    let dir = crate::StoreDir::new_ephemeral(tmp.path());
     let owner = coven_keys::keys::UserKeypair::generate();
     let encryption = crate::EncryptionService::from_key([42; 32]);
     let keyring = crate::MasterKeyring::from(encryption.clone());
@@ -417,7 +417,7 @@ async fn deleting_a_published_row_queues_its_cloud_object_for_removal() {
 async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let dir = crate::StoreDir::new(tmp.path());
+    let dir = crate::StoreDir::new_ephemeral(tmp.path());
     let owner = coven_keys::keys::UserKeypair::generate();
     let encryption = crate::EncryptionService::from_key([42; 32]);
     // A blob coven copies and publishes, so the row ends up with a cloud
@@ -542,7 +542,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
 async fn a_local_only_blob_has_no_cloud_object_to_remove() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new(tmp.path()));
+    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");
     let bytes = b"never uploaded".to_vec();
     let path = user_dir.path().join("photo.jpg");
@@ -575,7 +575,7 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
 async fn the_handle_reports_where_a_row_s_user_file_lives() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = open_local(crate::StoreDir::new(tmp.path()));
+    let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
     let user_dir = tempfile::tempdir().expect("user directory");
 
     let bytes = b"the original the host still needs to read".to_vec();

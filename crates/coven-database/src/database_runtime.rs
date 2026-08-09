@@ -6,15 +6,16 @@ use super::*;
 /// have no parent path, so the database opening boundary creates their
 /// process-local directory once and passes that dependency into the core.
 fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
-    match path
+    if path == Path::new(":memory:") {
+        return coven_foundation::store_dir::StoreDir::new_ephemeral(
+            std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
+        );
+    }
+    let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => coven_foundation::store_dir::StoreDir::new(parent),
-        None => coven_foundation::store_dir::StoreDir::new(
-            std::env::temp_dir().join(format!("coven-in-memory-store-{}", uuid::Uuid::new_v4())),
-        ),
-    }
+        .unwrap_or_else(|| Path::new("."));
+    coven_foundation::store_dir::StoreDir::new(parent)
 }
 
 impl Database {
@@ -229,5 +230,18 @@ impl Database {
         R: Send + 'static,
     {
         self.connection.call(f).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_database_uses_the_working_directory_as_its_store_directory() {
+        assert_eq!(
+            store_dir_of(Path::new("store.sqlite")).as_ref(),
+            Path::new(".")
+        );
     }
 }

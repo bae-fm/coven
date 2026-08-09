@@ -40,7 +40,7 @@ fn migrations() -> Vec<Migration> {
 #[test]
 fn builder_rejects_browsable_storage_with_scoped_tables() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let result = Coven::builder(config(store_dir.clone(), HomeStorage::Browsable))
         .synced_tables(tables())
         .migrations(migrations())
@@ -64,7 +64,7 @@ fn builder_rejects_browsable_storage_with_scoped_tables() {
 #[test]
 fn opaque_storage_accepts_scoped_tables() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let handle = Coven::builder(config(store_dir, HomeStorage::Opaque))
         .synced_tables(tables())
         .migrations(migrations())

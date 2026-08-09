@@ -287,7 +287,7 @@ fn scoped_ancestor_rollback_state(
 #[tokio::test]
 async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -436,7 +436,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
 #[tokio::test]
 async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomically() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -662,7 +662,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
 #[tokio::test]
 async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -741,7 +741,7 @@ async fn invalid_circle_audiences_and_authority_roll_back_the_entire_host_write(
 #[tokio::test]
 async fn circle_moves_materialize_destinations_and_delete_removes_current_rows() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -1137,7 +1137,7 @@ async fn circle_moves_materialize_destinations_and_delete_removes_current_rows()
 #[tokio::test]
 async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -1233,7 +1233,7 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
 #[tokio::test]
 async fn validates_every_outgoing_synced_fk_audience() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -1406,7 +1406,7 @@ async fn validates_every_outgoing_synced_fk_audience() {
 #[tokio::test]
 async fn reparenting_an_inherited_row_materializes_its_subtree() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",
@@ -1756,7 +1756,7 @@ async fn reparenting_an_inherited_row_materializes_its_subtree() {
 #[tokio::test]
 async fn scoped_descendant_keeps_store_ancestor() {
     let temp = tempfile::tempdir().expect("store directory");
-    let store_dir = StoreDir::new(temp.path());
+    let store_dir = StoreDir::new_ephemeral(temp.path());
     let (_database, writes) = scoped_store(
         &store_dir,
         "capture-device",

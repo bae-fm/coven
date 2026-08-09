@@ -185,6 +185,10 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let locator = prepare_partition_blob_locator(&fact, audience.clone(), &protection, &authority)
         .expect("prepare exact blob locator");
     let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
+    let spool_stage = store_dir
+        .stage_atomic_file(&spool)
+        .await
+        .expect("create exact spool stage");
     assert_eq!(
         store
             .storage()
@@ -193,7 +197,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
                 &authority,
                 protection.clone(),
                 fact.external_path.as_ref().expect("external source"),
-                &spool,
+                spool_stage,
             )
             .await
             .expect("seed exact spool"),
@@ -222,7 +226,8 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     tokio::fs::remove_file(&spool)
         .await
         .expect("remove shared exact spool");
-    coven_foundation::atomic_file::sync_parent_dir(&spool)
+    store_dir
+        .sync_parent_dir(&spool)
         .await
         .expect("sync removed shared exact spool");
 
