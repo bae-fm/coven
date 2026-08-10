@@ -320,50 +320,6 @@ impl StoreSession<'_> {
         )
     }
 
-    fn run_host_store_write_for_test<R>(
-        &mut self,
-        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-        blob_staging: Option<Box<dyn crate::AudienceBlobMoveStaging>>,
-        write_id: WriteId,
-        operation: impl for<'transaction, 'connection> FnOnce(
-            crate::DatabaseTestTransaction<'transaction, 'connection>,
-        ) -> Result<R, DbError>,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError> {
-        super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-            self.conn,
-            self.store_dir,
-            self.synced_tables,
-            self.gates,
-            self.blob_decls,
-            routing_encryption.as_ref(),
-            blob_staging.as_deref(),
-            self.verified_store_authority,
-            write_id,
-        )?
-        .execute_test(operation)
-    }
-
-    fn run_prepared_blob_transition_write_for_test<R>(
-        &mut self,
-        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-        write_id: WriteId,
-        operation: impl for<'transaction, 'connection> FnOnce(
-            crate::DatabaseTestTransaction<'transaction, 'connection>,
-        ) -> Result<R, DbError>,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError> {
-        super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-            self.conn,
-            self.store_dir,
-            self.synced_tables,
-            self.gates,
-            self.blob_decls,
-            routing_encryption.as_ref(),
-            self.verified_store_authority,
-            write_id,
-        )?
-        .execute_test(operation)
-    }
-
     fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,

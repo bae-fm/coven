@@ -42,7 +42,7 @@ impl Database {
     pub async fn execute_test_host_write(&self, sql: &str) {
         let sql = sql.to_string();
         crate::StoreDatabase::new(self)
-            .run_prepared_blob_transition_write_for_test(None, move |transaction| {
+            .run_host_store_write_for_test(None, None, move |transaction| {
                 transaction.execute_batch(&sql).map_err(DbError::from)
             })
             .await

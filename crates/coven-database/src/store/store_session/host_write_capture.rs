@@ -817,14 +817,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         })
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn execute_test<R>(
-        self,
-        operation: impl FnOnce(crate::DatabaseTestTransaction<'_, '_>) -> Result<R, DbError>,
-    ) -> Result<WriteReceipt<R>, DbError> {
-        self.execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
-    }
-
     fn execute<R, E>(
         self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,

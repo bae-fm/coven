@@ -163,4 +163,25 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
             ExternalBlobRecords::new(self.transaction).clear(&reference)
         })
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn materialized_sequence(&self, stream_id: &str) -> Result<Option<u64>, DbError> {
+        use rusqlite::OptionalExtension;
+
+        crate::with_coven_sql_authority(|| {
+            self.transaction
+                .query_row(
+                    "SELECT seq FROM materialized_commits WHERE device_id = ?1",
+                    [stream_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|sequence| {
+                    u64::try_from(sequence)
+                        .map_err(|error| DbError::context("invalid sequence", error))
+                })
+                .transpose()
+        })
+    }
 }

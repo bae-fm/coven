@@ -82,8 +82,8 @@ impl StoreDatabase {
         &self,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         blob_staging: Option<Box<dyn crate::AudienceBlobMoveStaging>>,
-        operation: impl for<'transaction, 'connection> FnOnce(
-                crate::DatabaseTestTransaction<'transaction, 'connection>,
+        operation: impl for<'context, 'connection> FnOnce(
+                crate::SqlContext<'context, 'connection>,
             ) -> Result<R, DbError>
             + Send
             + 'static,
@@ -91,39 +91,14 @@ impl StoreDatabase {
     where
         R: Send + 'static,
     {
-        let write_id = self.new_store_write_id();
-        self.call_store(move |session| {
-            session.run_host_store_write_for_test(
+        crate::StoreRowWrites::new(self.clone())
+            .execute(
+                crate::HostWriteOperation::new(crate::WriteBatch::new(), operation),
                 routing_encryption,
                 blob_staging,
-                write_id,
-                operation,
             )
-        })
-        .await
-    }
-
-    pub async fn run_prepared_blob_transition_write_for_test<R>(
-        &self,
-        routing_encryption: Option<coven_keys::encryption::EncryptionService>,
-        operation: impl for<'transaction, 'connection> FnOnce(
-                crate::DatabaseTestTransaction<'transaction, 'connection>,
-            ) -> Result<R, DbError>
-            + Send
-            + 'static,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError>
-    where
-        R: Send + 'static,
-    {
-        let write_id = self.new_store_write_id();
-        self.call_store(move |session| {
-            session.run_prepared_blob_transition_write_for_test(
-                routing_encryption,
-                write_id,
-                operation,
-            )
-        })
-        .await
+            .await
+            .map_err(test_host_write_error)
     }
 
     pub async fn cleanup_intent_count_for_test(
@@ -307,5 +282,12 @@ impl StoreDatabase {
             session.tamper_author_exclusion_locator_for_test(exclusion, &candidate, tamper)
         })
         .await
+    }
+}
+
+fn test_host_write_error(error: crate::HostWriteError<DbError>) -> DbError {
+    match error {
+        crate::HostWriteError::Host(error) | crate::HostWriteError::Database(error) => error,
+        error => DbError::Message(format!("test host write failed: {error:?}")),
     }
 }
