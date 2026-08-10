@@ -1,5 +1,6 @@
 use super::*;
 use crate::query_mapped_rows;
+#[cfg(any(test, feature = "test-utils"))]
 use crate::store::store_session::StoreRecords;
 
 impl StoreSession<'_> {

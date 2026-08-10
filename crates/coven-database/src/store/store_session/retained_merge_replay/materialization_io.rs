@@ -34,6 +34,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         StoreDatabase::load_merge_retraction_cleanup_on(self.records, authority, candidate)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn load_retained_merge_materialization_by_ref(
         self,
         root: &coven_protocol::store_commit::StoreRootRef,

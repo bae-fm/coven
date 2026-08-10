@@ -7,9 +7,9 @@ use store_session::test_support;
 use store_session::{
     blob_outbox, blob_transitions, circle_authority, circle_controls, circle_operations,
     host_write_capture, host_write_operation, local_blob_cleanup, materialized_commit_index,
-    merge_materialization_transaction, prepared_remote_objects, pull_replay, replay_projection,
-    retained_merge_replay, retained_replay, snapshot_image, stream_activation_records,
-    verified_store_authority, write_lifecycle,
+    merge_materialization_transaction, pull_replay, replay_projection, retained_merge_replay,
+    retained_replay, snapshot_image, stream_activation_records, verified_store_authority,
+    write_lifecycle,
 };
 pub use store_session::{candidate_records, payload_spool, reclaim};
 mod device_join;
@@ -34,7 +34,7 @@ use activated_registration_records::record_activated_store_device_registrations_
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use materialized_commit_index::materialized_frontier_on;
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) use prepared_remote_objects::persist_prepared_audience_objects_on;
+pub(crate) use store_session::prepared_remote_objects::persist_prepared_audience_objects_on;
 pub mod publication_state;
 use replay_projection::ReplayProjection;
 #[cfg(any(test, feature = "test-utils"))]
