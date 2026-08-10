@@ -247,13 +247,14 @@ impl DatabaseCore {
                         )
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     }
-                    crate::store::StoreRecordTransaction::new(&tx, &store_dir)
-                        .install_verified_snapshot_bootstrap(
-                            install,
-                            schema_version,
-                            resolved.hash(),
-                            &synced_tables,
-                        )?;
+                    crate::store::install_verified_snapshot_bootstrap_on(
+                        &tx,
+                        &store_dir,
+                        install,
+                        schema_version,
+                        resolved.hash(),
+                        &synced_tables,
+                    )?;
                 }
                 Ok((schema_version, resolved, gates, blob_decls))
             })();

@@ -35,7 +35,7 @@ pub(crate) struct StoreRecords<'store> {
 }
 
 impl<'store> StoreRecords<'store> {
-    pub(crate) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
+    pub(super) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
         Self { conn, store_dir }
     }
 
@@ -247,7 +247,7 @@ struct UnpublishedWriteCleanup {
 }
 
 impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
-    pub(crate) fn new(
+    pub(super) fn new(
         transaction: &'store rusqlite::Transaction<'connection>,
         store_dir: &'store StoreDir,
     ) -> Self {

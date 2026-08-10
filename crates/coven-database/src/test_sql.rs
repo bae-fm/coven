@@ -1874,10 +1874,7 @@ impl DatabaseTestSql<'_> {
         let store_dir = self.store_dir.ok_or_else(|| {
             DbError::Message("test Circle bootstrap access requires the Store directory".into())
         })?;
-        crate::StoreDatabase::circle_bootstrap_replay_inputs_on(crate::store::StoreRecords::new(
-            self.connection,
-            store_dir,
-        ))
+        crate::store::circle_bootstrap_replay_inputs_for_test(self.connection, store_dir)
     }
 
     pub fn materialized_frontier(
@@ -1894,12 +1891,7 @@ impl DatabaseTestSql<'_> {
         store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::OwnedVerifiedMergeMaterialization>, DbError> {
-        let mut authority = crate::store::VerifiedStoreAuthority::default();
-        crate::StoreDatabase::load_retained_merge_replay_inputs_on(
-            crate::store::StoreRecords::new(self.connection, store_dir),
-            root,
-            &mut authority,
-        )
+        crate::store::retained_merge_replay_inputs_for_test(self.connection, store_dir, root)
     }
 
     pub fn record_verified_circle_activations(

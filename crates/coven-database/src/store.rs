@@ -147,6 +147,50 @@ use store_device_state::apply_store_device_exclusion_freezes_on;
 pub use test_support::AuthorExclusionLocatorTamper;
 pub use write_lifecycle::BlockedWriteDiscard;
 
+pub(crate) fn install_verified_snapshot_bootstrap_on(
+    transaction: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    install: &crate::VerifiedSnapshotBootstrapInstall,
+    schema_version: u32,
+    routing_hash: coven_protocol::store_commit::ObjectHash,
+    synced_tables: &[coven_protocol::synced_schema::SyncedTable],
+) -> Result<(), DbError> {
+    StoreRecordTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
+        install,
+        schema_version,
+        routing_hash,
+        synced_tables,
+    )
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn circle_bootstrap_replay_inputs_for_test(
+    connection: &rusqlite::Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+) -> Result<
+    Vec<(
+        StoreBatchCommitRef,
+        coven_protocol::circle_activation::VerifiedCircleImage,
+    )>,
+    DbError,
+> {
+    StoreDatabase::circle_bootstrap_replay_inputs_on(StoreRecords::new(connection, store_dir))
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn retained_merge_replay_inputs_for_test(
+    connection: &rusqlite::Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    root: &coven_protocol::store_commit::StoreRootRef,
+) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+    let mut authority = VerifiedStoreAuthority::default();
+    StoreDatabase::load_retained_merge_replay_inputs_on(
+        StoreRecords::new(connection, store_dir),
+        root,
+        &mut authority,
+    )
+}
+
 #[derive(Clone)]
 pub struct StoreDatabaseRuntime {
     /// Serializes complete membership-chain loads that share this database, so a
