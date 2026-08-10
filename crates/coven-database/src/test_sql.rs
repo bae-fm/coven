@@ -20,14 +20,14 @@ pub struct DatabaseTestSql<'connection> {
 }
 
 impl DatabaseTestSql<'_> {
-    pub fn new(connection: &Connection) -> DatabaseTestSql<'_> {
+    pub(crate) fn new(connection: &Connection) -> DatabaseTestSql<'_> {
         DatabaseTestSql {
             connection,
             store_dir: None,
         }
     }
 
-    pub fn for_store<'connection>(
+    pub(crate) fn for_store<'connection>(
         connection: &'connection Connection,
         store_dir: &'connection coven_foundation::store_dir::StoreDir,
     ) -> DatabaseTestSql<'connection> {

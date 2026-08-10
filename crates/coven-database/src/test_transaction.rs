@@ -10,7 +10,7 @@ pub struct DatabaseTestTransaction<'transaction, 'connection> {
 }
 
 impl DatabaseTestTransaction<'_, '_> {
-    pub fn new<'transaction, 'connection>(
+    pub(crate) fn new<'transaction, 'connection>(
         transaction: &'transaction rusqlite::Transaction<'connection>,
     ) -> DatabaseTestTransaction<'transaction, 'connection> {
         DatabaseTestTransaction { transaction }
