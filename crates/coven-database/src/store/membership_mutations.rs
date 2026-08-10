@@ -11,13 +11,6 @@ use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
 impl StoreSession<'_> {
-    fn load_rotation_gate(
-        &mut self,
-    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
-        StoreDatabase::load_rotation_gate_on(self.records.conn)
-            .map(|gate| gate.map(|(_, gate)| gate))
-    }
-
     fn outbound_membership_mutation(
         &mut self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
@@ -100,7 +93,7 @@ impl StoreSession<'_> {
             .map_err(DbError::from)?;
         if let Some((existing_hash, existing_plan)) = existing {
             if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
-                StoreDatabase::stage_pending_rotation_on(
+                super::membership_rotation::stage_pending_rotation_on(
                     &tx,
                     pending_rotation_generation,
                     intent_hash,
@@ -119,7 +112,11 @@ impl StoreSession<'_> {
             rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
         )
         .map_err(DbError::from)?;
-        StoreDatabase::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+        super::membership_rotation::stage_pending_rotation_on(
+            &tx,
+            pending_rotation_generation,
+            intent_hash,
+        )?;
         tx.commit().map_err(DbError::from)?;
         Ok(intent_hash)
     }
@@ -158,7 +155,7 @@ impl StoreSession<'_> {
                     ));
                 }
             }
-            StoreDatabase::stage_pending_rotation_on(
+            super::membership_rotation::stage_pending_rotation_on(
                 &tx,
                 pending_rotation_generation,
                 intent_hash,
@@ -192,21 +189,343 @@ impl StoreSession<'_> {
             rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
         )
         .map_err(DbError::from)?;
-        StoreDatabase::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+        super::membership_rotation::stage_pending_rotation_on(
+            &tx,
+            pending_rotation_generation,
+            intent_hash,
+        )?;
         tx.commit().map_err(DbError::from)?;
         Ok(intent_hash)
+    }
+
+    fn update_membership_mutation_progress(
+        &mut self,
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        let conn = self.records.conn;
+        let updated = conn
+            .execute(
+                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                 WHERE singleton = 1 AND intent_hash = ?2",
+                rusqlite::params![progress_bytes, intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(
+                "membership mutation ownership row is absent or changed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn adopt_merge_membership_candidate_head(
+        &mut self,
+        intent_hash: ObjectHash,
+        plan_bytes: Vec<u8>,
+        previous: RemoteObjectRecord,
+        replacement: coven_protocol::remote_object::ClosedRemoteObject,
+        rotation_generation: Option<u64>,
+        replacement_hash: ObjectHash,
+    ) -> Result<ObjectHash, DbError> {
+        let records = self.records;
+        let conn = records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let previous_id = previous.object_id();
+        let current = load_remote_object_on(&tx, previous_id)?;
+        if current != previous {
+            return Err(DbError::Message(
+                "Merge membership candidate head changed before receipt adoption".to_string(),
+            ));
+        }
+        if !crate::remote_object_records::delete_remote_object_on(&tx, previous_id)? {
+            return Err(DbError::Message(
+                "prepared Merge membership head disappeared during receipt adoption".to_string(),
+            ));
+        }
+        persist_exact_remote_object_on(
+            &tx,
+            records.store_dir,
+            &replacement,
+            "adopted Merge membership candidate head",
+        )?;
+        if tx
+            .execute(
+                "UPDATE outbound_membership_mutation
+                 SET intent_hash = ?1, plan_bytes = ?2
+                 WHERE singleton = 1 AND intent_hash = ?3",
+                rusqlite::params![
+                    replacement_hash.to_string(),
+                    plan_bytes,
+                    intent_hash.to_string()
+                ],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed before Merge head receipt adoption".to_string(),
+            ));
+        }
+        if let Some(generation) = rotation_generation {
+            super::membership_rotation::replace_rotation_candidate_mutation_on(
+                &tx,
+                intent_hash,
+                replacement_hash,
+                generation,
+            )?;
+        }
+        tx.commit().map_err(DbError::from)?;
+        Ok(replacement_hash)
+    }
+
+    fn begin_membership_candidate_nonactivation(
+        &mut self,
+        intent_hash: ObjectHash,
+        candidate: StoreBatchCommitRef,
+        candidate_objects: Vec<ExactObjectRef>,
+        retained_authorities: Vec<ExactObjectRef>,
+        progress_bytes: Vec<u8>,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                 SELECT 1 FROM outbound_membership_mutation
+                 WHERE singleton = 1 AND intent_hash = ?1
+             )",
+                [intent_hash.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !exists {
+            return Err(DbError::Message(
+                "membership candidate mutation changed before nonactivation".to_string(),
+            ));
+        }
+        let owned = candidate_objects
+            .iter()
+            .chain(retained_authorities.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let cleanup =
+            begin_candidate_nonactivation_targets_on(&tx, &candidate, &owned, &nonactivation)?;
+        let updated = tx
+            .execute(
+                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                 WHERE singleton = 1 AND intent_hash = ?2",
+                rusqlite::params![progress_bytes, intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(
+                "membership candidate mutation changed during nonactivation".to_string(),
+            ));
+        }
+        tx.commit().map_err(DbError::from)?;
+        Ok(cleanup)
+    }
+
+    fn complete_nonactivating_membership_candidate_mutation(
+        &mut self,
+        intent_hash: ObjectHash,
+        candidate: StoreBatchCommitRef,
+        candidate_objects: Vec<ExactObjectRef>,
+        retained_authorities: Vec<ExactObjectRef>,
+        rotation_generation: Option<u64>,
+    ) -> Result<(), DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let mut unique = BTreeSet::new();
+        for object in &candidate_objects {
+            let object_id = remote_object_id(object);
+            if !unique.insert(object_id) {
+                return Err(DbError::Message(
+                    "nonactivating membership candidate repeats an exact object".to_string(),
+                ));
+            }
+        }
+        super::candidate_records::require_candidate_cleanup_complete_on(
+            &tx,
+            &candidate,
+            &candidate_objects,
+            "losing membership candidate cleanup is incomplete",
+        )?;
+        for object in &retained_authorities {
+            let object_id = remote_object_id(object);
+            if !unique.insert(object_id) {
+                return Err(DbError::Message(
+                    "nonactivating membership authority repeats an exact object".to_string(),
+                ));
+            }
+            let remote = tx
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|encoded| {
+                    serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
+                        DbError::context(
+                            format!("parse nonactivating membership authority {object_id}"),
+                            error,
+                        )
+                    })
+                })
+                .transpose()?;
+            match remote {
+                Some(remote) => {
+                    if !remote
+                        .candidate_cleanup_complete(&candidate)
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                    {
+                        return Err(DbError::Message(format!(
+                            "membership authority {object_id} still owns its losing candidate"
+                        )));
+                    }
+                }
+                None => {
+                    let inert = load_protocol_inert_object_on(&tx, object_id)?;
+                    if inert.object_id() != object_id {
+                        return Err(DbError::Message(
+                            "protocol-inert membership authority changed exact identity"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        super::candidate_records::delete_remote_objects_on(
+            &tx,
+            candidate_objects.iter().map(remote_object_id),
+            "losing membership",
+        )?;
+        for object in retained_authorities {
+            let object_id = remote_object_id(&object);
+            let removable = tx
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|encoded| {
+                    serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
+                        DbError::context(
+                            format!("parse terminal membership authority {object_id}"),
+                            error,
+                        )
+                    })
+                })
+                .transpose()?
+                .is_some_and(|remote| {
+                    matches!(
+                        remote,
+                        RemoteObjectRecord::RetainedAuthority(
+                            coven_protocol::remote_object::RetainedAuthorityRecord {
+                                state: coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
+                                ..
+                            }
+                        )
+                    )
+                });
+            if removable {
+                crate::remote_object_records::delete_remote_object_on(&tx, object_id)?;
+            }
+        }
+        if tx
+            .execute(
+                "DELETE FROM outbound_membership_mutation \
+                 WHERE singleton = 1 AND intent_hash = ?1",
+                [intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed during nonactivation completion".to_string(),
+            ));
+        }
+        if let Some(generation) = rotation_generation {
+            super::membership_rotation::remove_rotation_candidate_on(&tx, intent_hash, generation)?;
+        }
+        tx.commit().map_err(DbError::from)
+    }
+
+    fn membership_candidate_cleanup_targets(
+        &mut self,
+        intent_hash: ObjectHash,
+        candidate: &StoreBatchCommitRef,
+        objects: &[ExactObjectRef],
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        let conn = self.records.conn;
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                 SELECT 1 FROM outbound_membership_mutation
+                 WHERE singleton = 1 AND intent_hash = ?1
+             )",
+                [intent_hash.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !exists {
+            return Err(DbError::Message(
+                "membership mutation changed before candidate cleanup".to_string(),
+            ));
+        }
+        candidate_cleanup_targets_on(conn, candidate, objects)
+    }
+
+    fn record_direct_revoke_activation(
+        &mut self,
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+        generation: u64,
+    ) -> Result<(), DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        if tx
+            .execute(
+                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                 WHERE singleton = 1 AND intent_hash = ?2",
+                rusqlite::params![progress_bytes, intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "direct revoke mutation changed during activation".to_string(),
+            ));
+        }
+        super::membership_rotation::commit_rotation_candidate_on(&tx, intent_hash, generation)?;
+        tx.commit().map_err(DbError::from)
+    }
+
+    fn complete_membership_mutation(&mut self, intent_hash: ObjectHash) -> Result<(), DbError> {
+        let conn = self.records.conn;
+        let deleted = conn
+            .execute(
+                "DELETE FROM outbound_membership_mutation \
+                 WHERE singleton = 1 AND intent_hash = ?1",
+                [intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        if deleted != 1 {
+            return Err(DbError::Message(
+                "membership mutation ownership row is absent or changed".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
 impl StoreDatabase {
-    pub async fn load_rotation_gate(
-        &self,
-    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
-        self.connection
-            .call_store(|session| session.load_rotation_gate())
-            .await
-    }
-
     pub async fn outbound_membership_mutation(
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
@@ -279,181 +598,6 @@ impl StoreDatabase {
             .await
     }
 
-    fn stage_pending_rotation_on(
-        tx: &rusqlite::Transaction<'_>,
-        generation: Option<u64>,
-        mutation: ObjectHash,
-    ) -> Result<(), DbError> {
-        let Some(generation) = generation else {
-            return Ok(());
-        };
-        let existing = Self::load_rotation_gate_on(tx)?;
-        let gate = coven_protocol::objects::RotationGate::with_candidate(
-            existing.as_ref().map(|(_, gate)| gate.clone()),
-            generation,
-            mutation,
-        )
-        .map_err(DbError::Message)?;
-        Self::replace_rotation_gate_on(tx, existing.as_ref(), Some(gate), "candidate staging")
-    }
-
-    fn load_rotation_gate_on(
-        connection: &rusqlite::Connection,
-    ) -> Result<Option<(String, coven_protocol::objects::RotationGate)>, DbError> {
-        let key = coven_protocol::objects::ROTATION_GATE_STATE_KEY;
-        crate::get_protocol_state_on(connection, key)?
-            .map(|encoded| {
-                let gate = serde_json::from_str::<coven_protocol::objects::RotationGate>(&encoded)
-                    .map_err(|error| DbError::context("parse rotation gate", error))?;
-                Ok((encoded, gate))
-            })
-            .transpose()
-    }
-
-    fn replace_rotation_gate_on(
-        tx: &rusqlite::Transaction<'_>,
-        expected: Option<&(String, coven_protocol::objects::RotationGate)>,
-        next: Option<coven_protocol::objects::RotationGate>,
-        operation: &'static str,
-    ) -> Result<(), DbError> {
-        let key = coven_protocol::objects::ROTATION_GATE_STATE_KEY;
-        let changed = match (expected, next) {
-            (Some((expected, _)), Some(next)) => {
-                let encoded = serde_json::to_string(&next).map_err(|error| {
-                    DbError::context(format!("serialize rotation gate during {operation}"), error)
-                })?;
-                tx.execute(
-                    "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                    (&encoded, key, expected),
-                )
-                .map_err(DbError::from)?
-            }
-            (Some((expected, _)), None) => tx
-                .execute(
-                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
-                    (key, expected),
-                )
-                .map_err(DbError::from)?,
-            (None, Some(next)) => {
-                let encoded = serde_json::to_string(&next).map_err(|error| {
-                    DbError::context(format!("serialize rotation gate during {operation}"), error)
-                })?;
-                tx.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
-                    (key, &encoded),
-                )
-                .map_err(DbError::from)?
-            }
-            (None, None) => return Ok(()),
-        };
-        if changed != 1 {
-            return Err(DbError::Message(format!(
-                "rotation gate changed during {operation}"
-            )));
-        }
-        Ok(())
-    }
-
-    pub async fn record_peer_rotation(
-        &self,
-        generation: u64,
-    ) -> Result<coven_protocol::objects::RotationGate, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let existing = Self::load_rotation_gate_on(&tx)?;
-                let next = coven_protocol::objects::RotationGate::merge_peer_commit(
-                    existing.as_ref().map(|(_, gate)| gate.clone()),
-                    generation,
-                )
-                .map_err(DbError::Message)?;
-                Self::replace_rotation_gate_on(
-                    &tx,
-                    existing.as_ref(),
-                    Some(next.clone()),
-                    "peer rotation recording",
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
-            })
-            .await
-    }
-
-    pub async fn complete_peer_rotation_adoption(
-        &self,
-        adopted_generation: u64,
-    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
-                    DbError::Message(
-                        "rotation gate is absent during peer rotation adoption".to_string(),
-                    )
-                })?;
-                let next = existing
-                    .1
-                    .clone()
-                    .complete_peer_adoption(adopted_generation)
-                    .map_err(DbError::Message)?;
-                Self::replace_rotation_gate_on(
-                    &tx,
-                    Some(&existing),
-                    next.clone(),
-                    "peer rotation adoption",
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
-            })
-            .await
-    }
-
-    pub async fn complete_local_rotation_adoption(
-        &self,
-        intent_hash: ObjectHash,
-        generation: u64,
-    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let existing = Self::load_rotation_gate_on(&tx)?.ok_or_else(|| {
-                    DbError::Message(
-                        "rotation gate is absent during local rotation adoption".to_string(),
-                    )
-                })?;
-                let next = existing
-                    .1
-                    .clone()
-                    .complete_local_adoption(generation, intent_hash)
-                    .map_err(DbError::Message)?;
-                if tx
-                    .execute(
-                        "DELETE FROM outbound_membership_mutation \
-                     WHERE singleton = 1 AND intent_hash = ?1",
-                        [intent_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(
-                        "membership mutation changed during local rotation adoption".to_string(),
-                    ));
-                }
-                Self::replace_rotation_gate_on(
-                    &tx,
-                    Some(&existing),
-                    next.clone(),
-                    "local rotation adoption",
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
-            })
-            .await
-    }
-
     pub async fn update_membership_mutation_progress(
         &self,
         intent_hash: ObjectHash,
@@ -461,20 +605,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let updated = conn
-                    .execute(
-                        "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                     WHERE singleton = 1 AND intent_hash = ?2",
-                        rusqlite::params![progress_bytes, intent_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "membership mutation ownership row is absent or changed".to_string(),
-                    ));
-                }
-                Ok(())
+                session.update_membership_mutation_progress(intent_hash, progress_bytes)
             })
             .await
     }
@@ -532,79 +663,18 @@ impl StoreDatabase {
                 DbError::context("mark adopted Merge membership head uploaded", error)
             })?;
         let replacement_hash = ObjectHash::digest(&plan_bytes);
-        let store_dir = self.store_dir.clone();
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let previous_id = previous.object_id();
-                let current = load_remote_object_on(&tx, previous_id)?;
-                if current != previous {
-                    return Err(DbError::Message(
-                        "Merge membership candidate head changed before receipt adoption"
-                            .to_string(),
-                    ));
-                }
-                if !crate::remote_object_records::delete_remote_object_on(&tx, previous_id)? {
-                    return Err(DbError::Message(
-                        "prepared Merge membership head disappeared during receipt adoption"
-                            .to_string(),
-                    ));
-                }
-                persist_exact_remote_object_on(
-                    &tx,
-                    &store_dir,
-                    &replacement,
-                    "adopted Merge membership candidate head",
-                )?;
-                if tx
-                    .execute(
-                        "UPDATE outbound_membership_mutation
-                     SET intent_hash = ?1, plan_bytes = ?2
-                     WHERE singleton = 1 AND intent_hash = ?3",
-                        rusqlite::params![
-                            replacement_hash.to_string(),
-                            plan_bytes,
-                            intent_hash.to_string()
-                        ],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(
-                        "membership mutation changed before Merge head receipt adoption"
-                            .to_string(),
-                    ));
-                }
-                if let Some(generation) = rotation_generation {
-                    Self::replace_rotation_candidate_mutation_on(
-                        &tx,
-                        intent_hash,
-                        replacement_hash,
-                        generation,
-                    )?;
-                }
-                tx.commit().map_err(DbError::from)?;
-                Ok(replacement_hash)
+                session.adopt_merge_membership_candidate_head(
+                    intent_hash,
+                    plan_bytes,
+                    previous,
+                    replacement,
+                    rotation_generation,
+                    replacement_hash,
+                )
             })
             .await
-    }
-
-    fn replace_rotation_candidate_mutation_on(
-        tx: &rusqlite::Transaction<'_>,
-        previous: ObjectHash,
-        replacement: ObjectHash,
-        generation: u64,
-    ) -> Result<(), DbError> {
-        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
-            DbError::Message("rotation gate is absent during candidate replacement".to_string())
-        })?;
-        let next = existing
-            .1
-            .clone()
-            .replace_candidate_mutation(generation, previous, replacement)
-            .map_err(DbError::Message)?;
-        Self::replace_rotation_gate_on(tx, Some(&existing), Some(next), "candidate replacement")
     }
 
     pub async fn begin_membership_candidate_nonactivation(
@@ -628,48 +698,14 @@ impl StoreDatabase {
         let nonactivation = nonactivation.into_durable();
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let exists: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(
-                         SELECT 1 FROM outbound_membership_mutation
-                         WHERE singleton = 1 AND intent_hash = ?1
-                     )",
-                        [intent_hash.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Err(DbError::Message(
-                        "membership candidate mutation changed before nonactivation".to_string(),
-                    ));
-                }
-                let owned = candidate_objects
-                    .iter()
-                    .chain(retained_authorities.iter())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let cleanup = begin_candidate_nonactivation_targets_on(
-                    &tx,
-                    &candidate,
-                    &owned,
-                    &nonactivation,
-                )?;
-                let updated = tx
-                    .execute(
-                        "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                     WHERE singleton = 1 AND intent_hash = ?2",
-                        rusqlite::params![progress_bytes, intent_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "membership candidate mutation changed during nonactivation".to_string(),
-                    ));
-                }
-                tx.commit().map_err(DbError::from)?;
-                Ok(cleanup)
+                session.begin_membership_candidate_nonactivation(
+                    intent_hash,
+                    candidate,
+                    candidate_objects,
+                    retained_authorities,
+                    progress_bytes,
+                    nonactivation,
+                )
             })
             .await
     }
@@ -682,138 +718,17 @@ impl StoreDatabase {
         retained_authorities: Vec<ExactObjectRef>,
         rotation_generation: Option<u64>,
     ) -> Result<(), DbError> {
-        self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let mut unique = BTreeSet::new();
-            for object in &candidate_objects {
-                let object_id = remote_object_id(object);
-                if !unique.insert(object_id) {
-                    return Err(DbError::Message(
-                        "nonactivating membership candidate repeats an exact object".to_string(),
-                    ));
-                }
-            }
-            super::candidate_records::require_candidate_cleanup_complete_on(
-                &tx,
-                &candidate,
-                &candidate_objects,
-                "losing membership candidate cleanup is incomplete",
-            )?;
-            for object in &retained_authorities {
-                let object_id = remote_object_id(object);
-                if !unique.insert(object_id) {
-                    return Err(DbError::Message(
-                        "nonactivating membership authority repeats an exact object".to_string(),
-                    ));
-                }
-                let remote = tx
-                    .query_row(
-                        "SELECT state FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?
-                    .map(|encoded| {
-                        serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                            DbError::context(format!("parse nonactivating membership authority {object_id}"), error)
-                        })
-                    })
-                    .transpose()?;
-                match remote {
-                    Some(remote) => {
-                        if !remote
-                            .candidate_cleanup_complete(&candidate)
-                            .map_err(|error| DbError::Message(error.to_string()))?
-                        {
-                            return Err(DbError::Message(format!(
-                                "membership authority {object_id} still owns its losing candidate"
-                            )));
-                        }
-                    }
-                    None => {
-                        let inert = load_protocol_inert_object_on(&tx, object_id)?;
-                        if inert.object_id() != object_id {
-                            return Err(DbError::Message(
-                                "protocol-inert membership authority changed exact identity"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
-            super::candidate_records::delete_remote_objects_on(
-                &tx,
-                candidate_objects.iter().map(remote_object_id),
-                "losing membership",
-            )?;
-            for object in retained_authorities {
-                let object_id = remote_object_id(&object);
-                let removable = tx
-                    .query_row(
-                        "SELECT state FROM remote_objects WHERE object_id = ?1",
-                        [object_id.to_string()],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?
-                    .map(|encoded| {
-                        serde_json::from_str::<RemoteObjectRecord>(&encoded).map_err(|error| {
-                            DbError::context(format!("parse terminal membership authority {object_id}"), error)
-                        })
-                    })
-                    .transpose()?
-                    .is_some_and(|remote| {
-                        matches!(
-                            remote,
-                            RemoteObjectRecord::RetainedAuthority(
-                                coven_protocol::remote_object::RetainedAuthorityRecord {
-                                    state: coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
-                                    ..
-                                }
-                            )
-                        )
-                    });
-                if removable {
-                    crate::remote_object_records::delete_remote_object_on(&tx, object_id)?;
-                }
-            }
-            if tx
-                .execute(
-                    "DELETE FROM outbound_membership_mutation \
-                     WHERE singleton = 1 AND intent_hash = ?1",
-                    [intent_hash.to_string()],
+        self.connection
+            .call_store(move |session| {
+                session.complete_nonactivating_membership_candidate_mutation(
+                    intent_hash,
+                    candidate,
+                    candidate_objects,
+                    retained_authorities,
+                    rotation_generation,
                 )
-                .map_err(DbError::from)?
-                != 1
-            {
-                return Err(DbError::Message(
-                    "membership mutation changed during nonactivation completion".to_string(),
-                ));
-            }
-            if let Some(generation) = rotation_generation {
-                Self::remove_rotation_candidate_on(&tx, intent_hash, generation)?;
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    fn remove_rotation_candidate_on(
-        tx: &rusqlite::Transaction<'_>,
-        intent_hash: ObjectHash,
-        generation: u64,
-    ) -> Result<(), DbError> {
-        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
-            DbError::Message("rotation gate is absent during candidate loss".to_string())
-        })?;
-        let next = existing
-            .1
-            .clone()
-            .remove_candidate(generation, intent_hash)
-            .map_err(DbError::Message)?;
-        Self::replace_rotation_gate_on(tx, Some(&existing), next, "candidate loss")
+            })
+            .await
     }
 
     pub async fn membership_candidate_cleanup_targets(
@@ -824,70 +739,9 @@ impl StoreDatabase {
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(
-                         SELECT 1 FROM outbound_membership_mutation
-                         WHERE singleton = 1 AND intent_hash = ?1
-                     )",
-                        [intent_hash.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Err(DbError::Message(
-                        "membership mutation changed before candidate cleanup".to_string(),
-                    ));
-                }
-                candidate_cleanup_targets_on(conn, &candidate, &objects)
+                session.membership_candidate_cleanup_targets(intent_hash, &candidate, &objects)
             })
             .await
-    }
-
-    pub fn record_activated_membership_candidate_mutation_on(
-        tx: &rusqlite::Transaction<'_>,
-        intent_hash: ObjectHash,
-        candidate: &StoreBatchCommitRef,
-        objects: &[ExactObjectRef],
-        progress_bytes: Vec<u8>,
-        activation: MembershipMutationActivation,
-    ) -> Result<(), DbError> {
-        Self::activate_membership_candidate_graph_on(tx, candidate, objects)?;
-        if tx
-            .execute(
-                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                 WHERE singleton = 1 AND intent_hash = ?2",
-                rusqlite::params![progress_bytes, intent_hash.to_string()],
-            )
-            .map_err(DbError::from)?
-            != 1
-        {
-            return Err(DbError::Message(
-                "membership mutation changed during activated recording".to_string(),
-            ));
-        }
-        if let MembershipMutationActivation::Rotation { generation } = activation {
-            Self::commit_rotation_candidate_on(tx, intent_hash, generation)?;
-        }
-        Ok(())
-    }
-
-    fn commit_rotation_candidate_on(
-        tx: &rusqlite::Transaction<'_>,
-        intent_hash: ObjectHash,
-        generation: u64,
-    ) -> Result<(), DbError> {
-        let existing = Self::load_rotation_gate_on(tx)?.ok_or_else(|| {
-            DbError::Message("rotation gate is absent during candidate activation".to_string())
-        })?;
-        let gate = coven_protocol::objects::RotationGate::commit_candidate(
-            Some(existing.1.clone()),
-            generation,
-            intent_hash,
-        )
-        .map_err(DbError::Message)?;
-        Self::replace_rotation_gate_on(tx, Some(&existing), Some(gate), "membership activation")
     }
 
     pub async fn record_direct_revoke_activation(
@@ -898,75 +752,9 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                if tx
-                    .execute(
-                        "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
-                     WHERE singleton = 1 AND intent_hash = ?2",
-                        rusqlite::params![progress_bytes, intent_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(
-                        "direct revoke mutation changed during activation".to_string(),
-                    ));
-                }
-                Self::commit_rotation_candidate_on(&tx, intent_hash, generation)?;
-                tx.commit().map_err(DbError::from)
+                session.record_direct_revoke_activation(intent_hash, progress_bytes, generation)
             })
             .await
-    }
-
-    fn activate_membership_candidate_graph_on(
-        tx: &rusqlite::Transaction<'_>,
-        candidate: &StoreBatchCommitRef,
-        objects: &[ExactObjectRef],
-    ) -> Result<(), DbError> {
-        let mut unique = BTreeSet::new();
-        for object in objects {
-            let object_id = remote_object_id(object);
-            if !unique.insert(object_id) {
-                return Err(DbError::Message(
-                    "activated membership graph repeats an exact object".to_string(),
-                ));
-            }
-            let remote = load_remote_object_on(tx, object_id)?;
-            let activated = remote.clone().into_activated(candidate).map_err(|error| {
-                DbError::context(
-                    format!("validate activated membership object {object_id}"),
-                    error,
-                )
-            })?;
-            if activated != remote {
-                let expected = serde_json::to_string(&remote).map_err(|error| {
-                    DbError::context(
-                        format!("serialize pending membership object {object_id}"),
-                        error,
-                    )
-                })?;
-                let replacement = serde_json::to_string(&activated).map_err(|error| {
-                    DbError::context(
-                        format!("serialize activated membership object {object_id}"),
-                        error,
-                    )
-                })?;
-                if tx
-                    .execute(
-                        "UPDATE remote_objects SET state = ?1 WHERE object_id = ?2 AND state = ?3",
-                        rusqlite::params![replacement, object_id.to_string(), expected],
-                    )
-                    .map_err(DbError::from)?
-                    != 1
-                {
-                    return Err(DbError::Message(format!(
-                        "membership object {object_id} changed during activation"
-                    )));
-                }
-            }
-        }
-        Ok(())
     }
 
     pub async fn complete_membership_mutation(
@@ -974,22 +762,7 @@ impl StoreDatabase {
         intent_hash: ObjectHash,
     ) -> Result<(), DbError> {
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let deleted = conn
-                    .execute(
-                        "DELETE FROM outbound_membership_mutation \
-                     WHERE singleton = 1 AND intent_hash = ?1",
-                        [intent_hash.to_string()],
-                    )
-                    .map_err(DbError::from)?;
-                if deleted != 1 {
-                    return Err(DbError::Message(
-                        "membership mutation ownership row is absent or changed".to_string(),
-                    ));
-                }
-                Ok(())
-            })
+            .call_store(move |session| session.complete_membership_mutation(intent_hash))
             .await
     }
 }

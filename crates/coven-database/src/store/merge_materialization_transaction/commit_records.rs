@@ -310,14 +310,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 intent_hash,
                 progress_bytes,
                 remote_objects,
-            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
-                self.transaction,
+            } => self.record_activated_membership_candidate_mutation(
                 intent_hash,
                 candidate,
-                &remote_objects
-                    .iter()
-                    .map(|remote| remote.object().clone())
-                    .collect::<Vec<_>>(),
+                &remote_objects,
                 progress_bytes,
                 crate::MembershipMutationActivation::WithoutRotation,
             ),
@@ -326,14 +322,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 progress_bytes,
                 generation,
                 remote_objects,
-            } => StoreDatabase::record_activated_membership_candidate_mutation_on(
-                self.transaction,
+            } => self.record_activated_membership_candidate_mutation(
                 intent_hash,
                 candidate,
-                &remote_objects
-                    .iter()
-                    .map(|remote| remote.object().clone())
-                    .collect::<Vec<_>>(),
+                &remote_objects,
                 progress_bytes,
                 crate::MembershipMutationActivation::Rotation { generation },
             ),
@@ -377,6 +369,49 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 )
             }
         }
+    }
+
+    fn record_activated_membership_candidate_mutation(
+        &self,
+        intent_hash: ObjectHash,
+        candidate: &StoreBatchCommitRef,
+        remote_objects: &[coven_protocol::remote_object::RemoteObjectRecord],
+        progress_bytes: Vec<u8>,
+        activation: crate::MembershipMutationActivation,
+    ) -> Result<(), DbError> {
+        let mut unique = std::collections::BTreeSet::new();
+        let object_ids = remote_objects
+            .iter()
+            .map(|remote| remote.object_id())
+            .map(|object_id| {
+                if unique.insert(object_id) {
+                    Ok(object_id)
+                } else {
+                    Err(DbError::Message(
+                        "activated membership graph repeats an exact object".to_string(),
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.activate_store_operation_remote_objects(candidate, &object_ids)?;
+        if self
+            .transaction
+            .execute(
+                "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                 WHERE singleton = 1 AND intent_hash = ?2",
+                rusqlite::params![progress_bytes, intent_hash.to_string()],
+            )
+            .map_err(DbError::from)?
+            != 1
+        {
+            return Err(DbError::Message(
+                "membership mutation changed during activated recording".to_string(),
+            ));
+        }
+        if let crate::MembershipMutationActivation::Rotation { generation } = activation {
+            super::commit_rotation_candidate_on(self.transaction, intent_hash, generation)?;
+        }
+        Ok(())
     }
 
     pub fn record_obsolete_blob_cleanup_intent(

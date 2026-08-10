@@ -28,6 +28,7 @@ pub mod materialization_models;
 mod materialized_commit_index;
 use activated_registration_records::record_activated_store_device_registrations_on;
 mod membership_mutations;
+mod membership_rotation;
 mod merge_materialization_transaction;
 mod owner_promotion;
 pub mod payload_spool;
