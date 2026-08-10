@@ -3,6 +3,7 @@ use super::{Connection, DbError};
 
 mod circle_fixture;
 mod database;
+mod database_capabilities;
 mod image;
 pub mod synthetic_store;
 

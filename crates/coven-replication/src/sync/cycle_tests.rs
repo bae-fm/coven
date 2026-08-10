@@ -211,7 +211,7 @@ async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
         .create_exact_opaque_blob("photos", "maintenance", b"maintenance")
         .await;
     db.database
-        .test_sql(move |database| database.enqueue_blob_delete(&stored, T0))
+        .enqueue_blob_delete_for_test(&stored, T0)
         .await
         .expect("queue exact maintenance tombstone");
     storage.arm_provider_write_failures();
@@ -287,9 +287,8 @@ impl CycleTestDatabaseOps for SyntheticStoreFixture {
     }
 
     async fn make_remote_intent_present(&self, root_table: &str, root_id: &str) -> bool {
-        let (root_table, root_id) = (root_table.to_string(), root_id.to_string());
         self.database
-            .test_sql(move |database| database.make_remote_intent_exists(&root_table, &root_id))
+            .make_remote_intent_exists_for_test(root_table, root_id)
             .await
             .expect("make_remote intent lookup")
     }
@@ -1450,11 +1449,9 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     );
     let installed_bindings = db
         .database
-        .test_sql(|database| {
-            database.table_row_count(coven_database::DatabaseTestTable::named(
-                "row_blob_locators",
-            ))
-        })
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+            "row_blob_locators",
+        ))
         .await
         .expect("count activated snapshot blob bindings");
     assert_eq!(installed_bindings, 0);
@@ -1819,19 +1816,18 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         .await
         .expect("publish coalesced shared snapshot blob");
     assert_eq!(interceptor.rejected_blobs().len(), 1);
-    let (bindings, objects) = db
+    let bindings = db
         .database
-        .test_sql(|database| {
-            Ok((
-                database.table_row_count(coven_database::DatabaseTestTable::named(
-                    "row_blob_locators",
-                ))?,
-                database
-                    .table_row_count(coven_database::DatabaseTestTable::named("blob_locators"))?,
-            ))
-        })
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+            "row_blob_locators",
+        ))
         .await
-        .expect("count coalesced snapshot graph");
+        .expect("count coalesced snapshot bindings");
+    let objects = db
+        .database
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named("blob_locators"))
+        .await
+        .expect("count coalesced snapshot objects");
     assert_eq!(bindings, 2);
     assert_eq!(objects, 1);
 }
@@ -1937,18 +1933,16 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
     let audience = serde_json::to_string(&coven_protocol::audience_package::PackageAudience::Store)
         .expect("serialize Store audience");
     db.database
-        .test_sql(move |database| {
-            database.install_blob_binding(
-                &object_id,
-                &state,
-                &locator_hash,
-                "note_photos",
-                "audio1",
-                "id",
-                "0000000001000-0000-M",
-                &audience,
-            )
-        })
+        .install_blob_binding_for_test(
+            object_id,
+            state,
+            locator_hash,
+            "note_photos",
+            "audio1",
+            "id",
+            "0000000001000-0000-M",
+            audience,
+        )
         .await
         .expect("install exact activated user blob binding");
     tokio::fs::remove_file(&external_path)
@@ -2225,7 +2219,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
     );
     let cursor_count = db
         .database
-        .test_sql(|database| database.protocol_state_prefix_count("membership_head_cursor/"))
+        .protocol_state_prefix_count_for_test("membership_head_cursor/")
         .await
         .unwrap();
     assert_eq!(cursor_count, 1);
@@ -2445,7 +2439,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
     );
     let cursor_count = db
         .database
-        .test_sql(|database| database.protocol_state_prefix_count("membership_head_cursor/"))
+        .protocol_state_prefix_count_for_test("membership_head_cursor/")
         .await
         .unwrap();
     assert_eq!(cursor_count, 1);
@@ -2526,7 +2520,7 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     );
     let watermark_count = db
         .database
-        .test_sql(|database| database.protocol_state_prefix_count("membership_head_seq/"))
+        .protocol_state_prefix_count_for_test("membership_head_seq/")
         .await
         .unwrap();
     assert_eq!(watermark_count, 0);
@@ -3406,14 +3400,12 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     );
     let activated_bindings = db
         .database
-        .test_sql(|database| {
-            database.exact_row_blob_locator_count(
-                "note_photos",
-                "hponly",
-                "id",
-                "0000000001000-0000-M",
-            )
-        })
+        .exact_row_blob_locator_count_for_test(
+            "note_photos",
+            "hponly",
+            "id",
+            "0000000001000-0000-M",
+        )
         .await
         .expect("count exact host-blob bindings");
     assert_eq!(
@@ -3422,14 +3414,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     );
     let exact_outbox_rows = db
         .database
-        .test_sql(|database| {
-            database.exact_upload_outbox_count(
-                "note_photos",
-                "hponly",
-                "id",
-                "0000000001000-0000-M",
-            )
-        })
+        .exact_upload_outbox_count_for_test("note_photos", "hponly", "id", "0000000001000-0000-M")
         .await
         .expect("count exact host-blob upload handoffs");
     assert_eq!(
@@ -4476,7 +4461,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         .write_id;
 
     db.database
-        .test_sql(|database| database.install_outbound_preparation_failure_trigger())
+        .install_outbound_preparation_failure_for_test()
         .await
         .expect("install Store preparation fault");
     let device = storage.open_into(&db).await.expect("open exact test Store");
@@ -4505,10 +4490,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     );
 
     db.database
-        .test_sql(|conn| {
-            conn.execute_batch("DROP TRIGGER fail_outbound_preparation")
-                .map_err(coven_database::DbError::from)
-        })
+        .remove_outbound_preparation_failure_for_test()
         .await
         .expect("remove Store preparation fault");
     run_cycle_in_task(

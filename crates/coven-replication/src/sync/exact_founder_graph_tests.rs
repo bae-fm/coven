@@ -1,18 +1,6 @@
 use crate::sync::test_helpers::{open_test_db, temp_store_dir, test_cloud_home, TestStore};
 use coven_keys::keys::UserKeypair;
 
-trait ExactFounderGraphDatabaseOps {
-    async fn table_count(&self, table: coven_database::DatabaseTestTable) -> i64;
-}
-
-impl ExactFounderGraphDatabaseOps for coven_database::Database {
-    async fn table_count(&self, table: coven_database::DatabaseTestTable) -> i64 {
-        self.test_sql(move |database| database.table_row_count(table))
-            .await
-            .expect("count lifecycle rows")
-    }
-}
-
 #[tokio::test]
 async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let db = open_test_db();
@@ -74,16 +62,18 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(home.exact_create_count(), creates_before);
     let local_registrations = opened_db
         .database
-        .table_count(coven_database::DatabaseTestTable::named(
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "local_store_device_registration",
         ))
-        .await;
+        .await
+        .expect("count local Store device registrations");
     let activations = opened_db
         .database
-        .table_count(coven_database::DatabaseTestTable::named(
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "store_device_registration_activations",
         ))
-        .await;
+        .await
+        .expect("count Store device registration activations");
     assert_eq!(local_registrations, 1);
     assert_eq!(activations, 1);
 
@@ -96,19 +86,21 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     assert_eq!(
         opened_db
             .database
-            .table_count(coven_database::DatabaseTestTable::named(
+            .table_row_count_for_test(coven_database::DatabaseTestTable::named(
                 "local_store_device_registration",
             ))
-            .await,
+            .await
+            .expect("recount local Store device registrations"),
         local_registrations,
     );
     assert_eq!(
         opened_db
             .database
-            .table_count(coven_database::DatabaseTestTable::named(
+            .table_row_count_for_test(coven_database::DatabaseTestTable::named(
                 "store_device_registration_activations",
             ))
-            .await,
+            .await
+            .expect("recount Store device registration activations"),
         activations,
     );
 }
