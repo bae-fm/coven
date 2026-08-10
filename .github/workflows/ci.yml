@@ -13,6 +13,19 @@ jobs:
       # The pinned toolchain and components come from rust-toolchain.toml on the
       # first cargo invocation.
       - uses: Swatinem/rust-cache@v2
+      # rust-cache preserves dependency artifacts but deliberately exports
+      # CARGO_INCREMENTAL=0 and removes incremental state. Coven's test build is
+      # dominated by recompiling the workspace crate, so restore the profile's
+      # setting and retain that crate's compiler state separately.
+      - name: Enable incremental compilation
+        run: echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
+      - name: Restore coven incremental compiler state
+        uses: actions/cache@v5
+        with:
+          path: target/debug/incremental/coven-*
+          key: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-
       - name: Format
         run: cargo fmt --all --check
       - name: Restricted-path Rust visibility
@@ -37,7 +50,15 @@ jobs:
       - name: Lib-only check (production feature sets, no test cfg)
         run: scripts/check-lib-only.sh
       - name: Compile unit and integration tests
-        run: cargo test --all-features --no-run
+        run: cargo test --all-features --no-run --timings
+      - name: Upload test compilation timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-test-timings-linux
+          path: target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 14
       - name: Run tests and doctests
         run: cargo test --all-features
 

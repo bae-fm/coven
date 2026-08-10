@@ -99,6 +99,7 @@ incremental = true
 [profile.test]
 incremental = true
 opt-level = 1
+debug = "line-tables-only"
 
 # Tests drive complete flows through every workspace crate and their signing,
 # hashing, encryption, and SQLite dependencies. Optimize workspace code at level
