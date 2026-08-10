@@ -24,7 +24,10 @@ pub struct ScopedRoutingStateForTest {
     pub mirror: Option<(Option<String>, String)>,
 }
 
-pub fn table_row_count(connection: &Connection, table: DatabaseTestTable) -> Result<i64, DbError> {
+pub(crate) fn table_row_count(
+    connection: &Connection,
+    table: DatabaseTestTable,
+) -> Result<i64, DbError> {
     connection
         .query_row(&format!("SELECT COUNT(*) FROM {}", table.0), [], |row| {
             row.get(0)
@@ -32,14 +35,17 @@ pub fn table_row_count(connection: &Connection, table: DatabaseTestTable) -> Res
         .map_err(DbError::from)
 }
 
-pub fn clear_table(connection: &Connection, table: DatabaseTestTable) -> Result<(), DbError> {
+pub(crate) fn clear_table(
+    connection: &Connection,
+    table: DatabaseTestTable,
+) -> Result<(), DbError> {
     connection
         .execute(&format!("DELETE FROM {}", table.0), [])
         .map(|_| ())
         .map_err(DbError::from)
 }
 
-pub fn author_exclusion_activation_evidence(
+pub(crate) fn author_exclusion_activation_evidence(
     connection: &Connection,
 ) -> Result<(String, String, String, String), DbError> {
     connection
