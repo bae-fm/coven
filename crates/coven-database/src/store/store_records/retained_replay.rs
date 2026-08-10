@@ -487,10 +487,7 @@ impl StoreRecordTransaction<'_, '_> {
         self,
         connection: rusqlite::Connection,
     ) -> crate::store::ReplayProjection {
-        crate::store::ReplayProjection {
-            connection,
-            store_dir: self.store_dir.clone(),
-        }
+        crate::store::ReplayProjection::new(connection, self.store_dir.clone())
     }
 
     #[allow(clippy::too_many_arguments)]

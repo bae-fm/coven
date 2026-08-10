@@ -9,7 +9,6 @@ use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalSto
 use coven_protocol::store_commit::{CommitFrontier, StoreRootRef};
 use coven_protocol::synced_schema::SyncedTable;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 #[derive(Clone, Default)]
 pub(super) struct RetainedReplayCache {
@@ -466,44 +465,16 @@ impl RetainedReplayCache {
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
         let replay = transaction_records.finish_replay_projection(replay_connection);
-        let schema = Arc::new(TableSchema::for_apply(
-            &replay.connection,
-            synced_tables,
-            gates,
-        )?);
+        let schema = replay.table_schema(synced_tables, gates)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
         let mut circle_bootstrap_cuts = BTreeMap::new();
         for coverage in &circle_bootstraps {
-            let source = crate::open_database_image(
+            replay.install_circle_bootstrap(
                 &transaction_records.verified_payload(coverage.bootstrap.image.image_hash)?,
-            )
-            .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
-            crate::store::verify_circle_bootstrap_connection(
-                &source,
-                &coverage.bootstrap,
-                coverage.circle_id,
+                coverage,
                 synced_tables,
                 routing_key,
-            )
-            .map_err(|error| {
-                DbError::context(
-                    format!("verify retained Circle {} bootstrap", coverage.circle_id),
-                    error,
-                )
-            })?;
-            let tx = replay
-                .connection
-                .unchecked_transaction()
-                .map_err(DbError::from)?;
-            crate::store::install_circle_bootstrap_connection_on(
-                &tx,
-                &source,
-                synced_tables,
-                &coverage.activation_commit,
-                coverage.circle_id,
-                &coverage.bootstrap,
             )?;
-            tx.commit().map_err(DbError::from)?;
             if circle_bootstrap_cuts
                 .insert(coverage.circle_id, coverage.bootstrap.coverage.clone())
                 .is_some()
@@ -714,28 +685,23 @@ impl RetainedReplayCache {
                     circle_activations: materialization.circle_activations().clone(),
                     package_application,
                 };
-                let tx = replay
-                    .connection
-                    .unchecked_transaction()
-                    .map_err(DbError::from)?;
                 let outcome = {
                     let mut authority = ReplayVerifiedStoreLookup {
                         cache: self,
                         registrations,
                         root,
                     };
-                    MergeMaterializationTransaction::new(&tx, &replay.store_dir)
-                        .apply_prepared_merge_materialization(
-                            &mut authority,
-                            blob_decls,
-                            gates,
-                            synced_tables,
-                            routing_key,
-                            local_store_membership,
-                            timestamp_policy,
-                            Some(&circle_bootstrap_cuts),
-                            replay_materialization,
-                        )
+                    replay.apply_materialization(
+                        &mut authority,
+                        blob_decls,
+                        gates,
+                        synced_tables,
+                        routing_key,
+                        local_store_membership,
+                        timestamp_policy,
+                        &circle_bootstrap_cuts,
+                        replay_materialization,
+                    )
                 }
                 .map_err(|error| {
                     DbError::context(
@@ -745,18 +711,14 @@ impl RetainedReplayCache {
                         error,
                     )
                 })?;
-                match outcome.outcome {
+                match outcome {
                     ApplyOutcome::Applied(_) => {
-                        tx.commit().map_err(DbError::from)?;
                         pending.remove(&reference);
                         applied.insert(reference);
                         made_progress = true;
                     }
-                    ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency) => {
-                        tx.rollback().map_err(DbError::from)?;
-                    }
+                    ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency) => {}
                     ApplyOutcome::Held(reason) => {
-                        tx.rollback().map_err(DbError::from)?;
                         return Err(DbError::Message(format!(
                             "retained Merge replay held accepted commit {reference:?}: {reason:?}"
                         )));
@@ -770,49 +732,7 @@ impl RetainedReplayCache {
             }
         }
         for overlay in write_overlays {
-            let tx = replay
-                .connection
-                .unchecked_transaction()
-                .map_err(DbError::from)?;
-            tx.pragma_update(None, "defer_foreign_keys", "ON")
-                .map_err(DbError::from)?;
-            let partitions = overlay
-                .partitions
-                .store
-                .into_iter()
-                .chain(overlay.partitions.circles)
-                .chain(overlay.partitions.local);
-            for partition in partitions {
-                let changeset = ValidatedChangeset::new(partition.changeset, schema.clone())
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("local replay write {} changeset", overlay.write_id),
-                            error,
-                        )
-                    })?;
-                let applied = MergeMaterializationTransaction::new(&tx, &replay.store_dir)
-                    .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
-                if applied.had_fk_violations || !applied.constraint_conflict_tables.is_empty() {
-                    return Err(DbError::Message(format!(
-                        "local replay write {} conflicts with accepted history",
-                        overlay.write_id
-                    )));
-                }
-            }
-            let violations: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if violations {
-                return Err(DbError::Message(format!(
-                    "local replay write {} violates foreign keys",
-                    overlay.write_id
-                )));
-            }
-            tx.commit().map_err(DbError::from)?;
+            replay.apply_write_overlay(overlay, schema.clone())?;
         }
         Ok(replay)
     }
