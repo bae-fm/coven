@@ -61,6 +61,10 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     (
+        "local_owner_recovery_publication",
+        ReplayTableDisposition::Preserve,
+    ),
+    (
         "local_store_founder_graph",
         ReplayTableDisposition::Preserve,
     ),

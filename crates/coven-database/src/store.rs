@@ -49,6 +49,7 @@ mod membership_mutations;
 mod membership_rotation;
 mod merge_materialization_transaction;
 mod owner_promotion;
+mod owner_recovery_publication;
 pub mod payload_spool;
 mod pending_publication;
 mod preparation;

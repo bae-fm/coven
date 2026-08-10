@@ -375,6 +375,69 @@ impl StoreSession<'_> {
                 ));
             }
         };
+        let existing: Option<LocalDeviceRegistrationJournalRow> = tx
+            .query_row(
+                "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                        initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+                 FROM local_store_device_registration WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if !activated {
+            if let Some(existing) = existing.as_ref() {
+                let same_objects = existing.0 == objects.0
+                    && existing.1 == objects.1
+                    && existing.2 == objects.2
+                    && existing.3 == objects.3
+                    && existing.4 == objects.4
+                    && existing.5 == objects.5
+                    && existing.6 == objects.6;
+                if same_objects {
+                    let state: LocalDeviceRegistrationState = serde_json::from_str(&existing.7)
+                        .map_err(|error| {
+                            DbError::context("parse Owner recovery journal state", error)
+                        })?;
+                    if !matches!(
+                        state,
+                        LocalDeviceRegistrationState::Prepared
+                            | LocalDeviceRegistrationState::Created
+                    ) {
+                        return Err(DbError::Message(
+                            "Owner recovery journal claims activation absent from Store authority"
+                                .into(),
+                        ));
+                    }
+                    let published_ack_count: i64 = tx
+                        .query_row("SELECT COUNT(*) FROM published_store_acks", [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(DbError::from)?;
+                    if published_ack_count != 0
+                        || crate::get_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?.is_some()
+                    {
+                        return Err(DbError::Message(
+                            "unactivated Owner recovery journal has published local authority"
+                                .into(),
+                        ));
+                    }
+                    tx.commit().map_err(DbError::from)?;
+                    return Ok(false);
+                }
+            }
+        }
         tx.execute("DELETE FROM local_store_device_registration", [])
             .map_err(DbError::from)?;
         tx.execute("DELETE FROM published_store_acks", [])
@@ -497,6 +560,16 @@ impl StoreSession<'_> {
                 },
             )
             .transpose()
+    }
+
+    pub(super) fn local_store_device_registration(
+        &mut self,
+    ) -> Result<Option<DurableDeviceRegistration>, DbError> {
+        self.read_local_store_device_registration(
+            "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                    initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+             FROM local_store_device_registration WHERE singleton = 1",
+        )
     }
 
     fn mark_local_store_device_registration_created(

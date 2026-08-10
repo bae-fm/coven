@@ -28,7 +28,7 @@ use super::store_device_state::{
 use super::{
     apply_store_device_exclusion_freezes_on,
     verified_store_authority::{
-        RetainedReplayTransaction, VerifiedRegistrationLookup, VerifiedStoreLookup,
+        VerifiedRegistrationLookup, VerifiedStoreAuthorityTransaction, VerifiedStoreLookup,
     },
     StoreDatabase,
 };
@@ -81,7 +81,7 @@ pub(crate) struct AppliedMergeMaterialization {
 pub(super) fn retract_verified_merge_materializations(
     transaction: &MergeMaterializationTransaction<'_, '_>,
     root: &coven_protocol::store_commit::StoreRootRef,
-    retained_replay: &mut RetainedReplayTransaction,
+    retained_replay: &mut VerifiedStoreAuthorityTransaction,
     retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
 ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
     transaction.retract_verified_merge_materializations(root, retained_replay, retractions)

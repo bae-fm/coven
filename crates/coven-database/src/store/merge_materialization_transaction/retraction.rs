@@ -113,7 +113,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     pub(super) fn retract_verified_merge_materializations(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
-        retained_replay: &mut RetainedReplayTransaction,
+        retained_replay: &mut VerifiedStoreAuthorityTransaction,
         retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
         let conn = self.transaction;

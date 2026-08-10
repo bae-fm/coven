@@ -168,6 +168,10 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
             "local_store_device_registration",
             "initial_ack_prepared".to_string(),
         ),
+        (
+            "local_owner_recovery_publication",
+            "publication".to_string(),
+        ),
         ("local_store_founder_graph", "membership_graph".to_string()),
     ]);
     let byte_free = std::collections::BTreeSet::from([

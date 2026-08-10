@@ -36,7 +36,6 @@ impl StoreSession<'_> {
     {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure;
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let blob_decls = self.blob_decls;
         let gates = self.gates;
@@ -64,6 +63,8 @@ impl StoreSession<'_> {
             .local_exclusions()
             .to_vec();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let transaction_records = crate::store::StoreRecords::new(&tx, self.store_dir);
+        let mut transaction_authority = authority.begin_transaction_on(transaction_records)?;
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?,
         )
@@ -78,7 +79,7 @@ impl StoreSession<'_> {
         let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
         let merge_transaction = MergeMaterializationTransaction::new(&tx, self.store_dir);
         let mut applied = merge_transaction.apply_prepared_merge_materialization(
-            authority,
+            &mut transaction_authority,
             blob_decls,
             gates,
             synced_tables,
@@ -92,13 +93,12 @@ impl StoreSession<'_> {
             applied.outcome,
             coven_protocol::membership::ApplyOutcome::Applied(_)
         ) {
-            let mut transaction_cache = authority.begin_retained_replay_transaction_on(records)?;
             let retained = applied.retained.take().ok_or_else(|| {
                 DbError::Message(
                     "applied Merge materialization omitted its verified retained input".to_string(),
                 )
             })?;
-            transaction_cache.insert_verified(retained)?;
+            transaction_authority.insert_verified(retained)?;
             #[cfg(any(test, feature = "test-utils"))]
             if reach_materialization_failure(
                 materialization_failure,
@@ -124,7 +124,7 @@ impl StoreSession<'_> {
                     super::merge_materialization_transaction::retract_verified_merge_materializations(
                         &merge_transaction,
                         &root,
-                        &mut transaction_cache,
+                        &mut transaction_authority,
                         retractions,
                     )?;
                 #[cfg(any(test, feature = "test-utils"))]
@@ -142,7 +142,7 @@ impl StoreSession<'_> {
                 || installs_circle_bootstrap
                 || !retracted.is_empty()
             {
-                let replay = transaction_cache.replay_projection_on(
+                let replay = transaction_authority.replay_projection_on(
                     crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
                     blob_decls,
                     gates,
@@ -227,7 +227,7 @@ impl StoreSession<'_> {
                 }
             }
             tx.commit().map_err(DbError::from)?;
-            authority.commit_retained_replay_transaction(transaction_cache);
+            authority.commit_transaction(transaction_authority);
         }
         if let Some(max_applied) = applied.max_updated_at.as_ref() {
             self.hlc.advance_past(max_applied);
@@ -254,6 +254,9 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let mut transaction_authority = self
+            .verified_store_authority
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
         let store_transaction = MergeMaterializationTransaction::new(&tx, self.store_dir);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(&reference, &object_ids)?;
@@ -284,14 +287,12 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("complete exact membership journal", error))?;
         }
         let retained = store_transaction
-            .record_verified_merge_materialization(self.verified_store_authority, materialization)
+            .record_verified_merge_materialization(&mut transaction_authority, materialization)
             .map_err(|error| DbError::context("record exact Merge materialization", error))?;
-        self.verified_store_authority
-            .validate_retained_materialization_insert(&retained)?;
+        transaction_authority.insert_verified(retained)?;
         tx.commit().map_err(DbError::from)?;
         self.verified_store_authority
-            .insert_retained_materialization(retained)
-            .expect("committed retained Merge materialization passed cache validation");
+            .commit_transaction(transaction_authority);
         Ok(())
     }
 
@@ -322,6 +323,9 @@ impl StoreSession<'_> {
             tx.commit().map_err(DbError::from)?;
             return Ok(());
         }
+        let mut transaction_authority = self
+            .verified_store_authority
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
         super::record_activated_store_device_registrations_on(
             &tx,
             verified_commit.value(),
@@ -344,16 +348,11 @@ impl StoreSession<'_> {
             None,
         )?;
         let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
-            .record_verified_merge_materialization(
-                self.verified_store_authority,
-                materialization,
-            )?;
-        self.verified_store_authority
-            .validate_retained_materialization_insert(&retained)?;
+            .record_verified_merge_materialization(&mut transaction_authority, materialization)?;
+        transaction_authority.insert_verified(retained)?;
         tx.commit().map_err(DbError::from)?;
         self.verified_store_authority
-            .insert_retained_materialization(retained)
-            .expect("committed device-join materialization passed cache validation");
+            .commit_transaction(transaction_authority);
         Ok(())
     }
 
@@ -363,10 +362,10 @@ impl StoreSession<'_> {
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let mut newly_retained = Vec::new();
-        let installed_root = self
+        let mut transaction_authority = self
             .verified_store_authority
-            .required_root_authority_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+        let installed_root = transaction_authority.root().clone();
         if installed_root != root || plan.founder.store_root != root {
             return Err(DbError::Message(
                 "device join bootstrap root differs from the installed exact root".to_string(),
@@ -482,19 +481,14 @@ impl StoreSession<'_> {
             )?;
             let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
                 .record_verified_merge_materialization(
-                    self.verified_store_authority,
+                    &mut transaction_authority,
                     materialization,
                 )?;
-            self.verified_store_authority
-                .validate_retained_materialization_insert(&retained)?;
-            newly_retained.push(retained);
+            transaction_authority.insert_verified(retained)?;
         }
         tx.commit().map_err(DbError::from)?;
-        for retained in newly_retained {
-            self.verified_store_authority
-                .insert_retained_materialization(retained)
-                .expect("committed device-join bootstrap materialization passed cache validation");
-        }
+        self.verified_store_authority
+            .commit_transaction(transaction_authority);
         Ok(())
     }
 
@@ -507,15 +501,16 @@ impl StoreSession<'_> {
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let root = self
+        let mut transaction_authority = self
             .verified_store_authority
-            .required_root_authority_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+        let root = transaction_authority.root().clone();
         let registrations = vec![registration];
         let commit = verified_commit.value();
         super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
         let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
             .record_materialized_merge_commit(
-                self.verified_store_authority,
+                &mut transaction_authority,
                 &root,
                 &verified_commit,
                 &registrations,
@@ -525,12 +520,25 @@ impl StoreSession<'_> {
                 &[],
                 None,
             )?;
-        self.verified_store_authority
-            .validate_retained_materialization_insert(&retained)?;
+        transaction_authority.insert_verified(retained)?;
+        super::owner_recovery_publication::complete_owner_recovery_publication_on(
+            &tx,
+            &verified_commit,
+            &activation_head,
+            &activation_head_object,
+        )?;
+        #[cfg(any(test, feature = "test-utils"))]
+        if reach_materialization_failure(
+            self.merge_materialization_failure,
+            crate::MergeMaterializationFailurePoint::SummaryMaterialization,
+        )? {
+            return Err(DbError::Message(
+                "injected failure after Merge summary materialization".to_string(),
+            ));
+        }
         tx.commit().map_err(DbError::from)?;
         self.verified_store_authority
-            .insert_retained_materialization(retained)
-            .expect("committed Owner-recovery materialization passed cache validation");
+            .commit_transaction(transaction_authority);
         Ok(())
     }
 }

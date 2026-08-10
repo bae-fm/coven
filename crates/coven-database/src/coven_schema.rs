@@ -508,6 +508,16 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            local_owner_recovery_publication,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    registration_hash TEXT NOT NULL UNIQUE CHECK (length(registration_hash) = 64),
+    publication TEXT NOT NULL CHECK (json_valid(publication)),
+    FOREIGN KEY (registration_hash)
+        REFERENCES local_store_device_registration(registration_hash) ON DELETE CASCADE
+"
+        );
+        $visit!(
             local_store_founder_graph,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

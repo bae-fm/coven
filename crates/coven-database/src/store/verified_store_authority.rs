@@ -25,12 +25,13 @@ pub(crate) struct VerifiedStoreAuthority {
     retained_replay: RetainedReplayCache,
 }
 
-/// Retained replay state staged beside one SQL transaction.
+/// Verified authority staged beside one SQL transaction.
 ///
-/// The transaction starts from the connection's verified cache. Publishing it
-/// back to the authority is infallible and happens only after the SQL commit;
-/// dropping it leaves the connection cache unchanged.
-pub(super) struct RetainedReplayTransaction {
+/// Root, registration, and retained replay reads start from the connection's
+/// verified cache. Publishing every newly verified value back is infallible and
+/// happens only after the SQL commit; dropping this value leaves the connection
+/// cache unchanged.
+pub(super) struct VerifiedStoreAuthorityTransaction {
     root: StoreRootRef,
     registrations: BTreeMap<StoreDeviceRegistrationRef, StoreDeviceRegistration>,
     cache: RetainedReplayCache,
@@ -81,7 +82,11 @@ impl VerifiedRegistrationLookup for CachedVerifiedRegistrations<'_> {
     }
 }
 
-impl RetainedReplayTransaction {
+impl VerifiedStoreAuthorityTransaction {
+    pub(super) fn root(&self) -> &StoreRootRef {
+        &self.root
+    }
+
     pub(super) fn insert_verified(
         &mut self,
         materialization: OwnedVerifiedMergeMaterialization,
@@ -220,26 +225,23 @@ impl VerifiedStoreAuthority {
         )
     }
 
-    pub(super) fn begin_retained_replay_transaction_on(
+    pub(super) fn begin_transaction_on(
         &mut self,
         records: crate::store::StoreRecords<'_>,
-    ) -> Result<RetainedReplayTransaction, DbError> {
+    ) -> Result<VerifiedStoreAuthorityTransaction, DbError> {
         let root = self.required_root_authority_on(records)?;
-        Ok(RetainedReplayTransaction {
+        Ok(VerifiedStoreAuthorityTransaction {
             root,
             registrations: self.registrations.clone(),
             cache: self.retained_replay.clone(),
         })
     }
 
-    pub(super) fn commit_retained_replay_transaction(
-        &mut self,
-        transaction: RetainedReplayTransaction,
-    ) {
+    pub(super) fn commit_transaction(&mut self, transaction: VerifiedStoreAuthorityTransaction) {
         assert_eq!(
             self.root_authority.as_ref().map(|(reference, _)| reference),
             Some(&transaction.root),
-            "retained replay transaction belongs to another Store root"
+            "verified authority transaction belongs to another Store root"
         );
         for (reference, registration) in transaction.registrations {
             match self.registrations.entry(reference) {
@@ -249,7 +251,7 @@ impl VerifiedStoreAuthority {
                 std::collections::btree_map::Entry::Occupied(entry) => assert_eq!(
                     entry.get(),
                     &registration,
-                    "retained replay transaction verified conflicting registration bytes"
+                    "verified authority transaction found conflicting registration bytes"
                 ),
             }
         }
@@ -523,7 +525,7 @@ impl VerifiedStoreLookup for VerifiedStoreAuthority {
     }
 }
 
-impl VerifiedRegistrationLookup for RetainedReplayTransaction {
+impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
     fn activated_registration_on(
         &mut self,
         records: crate::store::StoreRecords<'_>,
@@ -544,12 +546,14 @@ impl VerifiedRegistrationLookup for RetainedReplayTransaction {
     }
 }
 
-impl VerifiedStoreLookup for RetainedReplayTransaction {
+impl VerifiedStoreLookup for VerifiedStoreAuthorityTransaction {
     fn retained_materialization_by_ref_on(
         &mut self,
         records: crate::store::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        RetainedReplayTransaction::retained_materialization_by_ref_on(self, records, reference)
+        VerifiedStoreAuthorityTransaction::retained_materialization_by_ref_on(
+            self, records, reference,
+        )
     }
 }

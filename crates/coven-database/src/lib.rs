@@ -195,8 +195,8 @@ pub use migration::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use operation_models::{
     DurableCircleSnapshotPublication, DurableDeviceRegistration, DurableMembershipMutation,
     DurableSnapshotPublication, LocalDeviceRegistrationJournalRow, LocalDeviceRegistrationState,
-    MembershipMutationActivation, PreparedLocalDeviceRegistrationRow, PreparedSnapshotBlob,
-    PublishedCircleSnapshot, PublishedStoreSnapshot,
+    MembershipMutationActivation, OwnerRecoveryPublication, PreparedLocalDeviceRegistrationRow,
+    PreparedSnapshotBlob, PublishedCircleSnapshot, PublishedStoreSnapshot,
 };
 pub use prepared_audience_objects::{
     validate_prepared_audience_blob_graph, BlobActivation, MakeRemoteIntentState,

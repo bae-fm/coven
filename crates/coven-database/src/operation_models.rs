@@ -11,6 +11,15 @@ pub struct DurableDeviceRegistration {
     pub state: LocalDeviceRegistrationState,
 }
 
+/// The exact Owner-recovery commit and announcement staged before either is
+/// published. A retry reopens these same stored bytes instead of resealing the
+/// semantic objects into different exact identities.
+pub struct OwnerRecoveryPublication {
+    pub commit: ExactProtocolObject<coven_protocol::store_commit::VerifiedStoreBatchCommit>,
+    pub head: ExactProtocolObject<coven_protocol::store_commit::StoreDeviceHead>,
+    pub history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalDeviceRegistrationState {
