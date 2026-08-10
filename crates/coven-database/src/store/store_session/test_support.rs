@@ -25,6 +25,56 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreSession<'_> {
+    fn seed_prepared_audience_write_for_test(
+        &self,
+        write_id: &WriteId,
+        changeset_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        let base = serde_json::to_string(&crate::StoreWriteBase {
+            dependencies: std::collections::BTreeMap::new(),
+        })
+        .map_err(|error| DbError::context("serialize test Store write base", error))?;
+        crate::DatabaseTestSql::for_store(self.conn, self.store_dir).transaction(|transaction| {
+            transaction
+                .execute(
+                    "INSERT INTO store_writes
+                     (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+                     VALUES (?1, '\"pending\"', '[]', ?2, ?3, '{\"blobs\":[]}')",
+                    rusqlite::params![write_id.as_str(), changeset_hash.to_string(), base],
+                )
+                .map_err(DbError::from)?;
+            transaction.set_payload_owner_claims(
+                &crate::payload_store::store_write_owner_key(write_id),
+                &BTreeSet::from([changeset_hash]),
+            )
+        })
+    }
+
+    fn persist_prepared_audience_objects_for_test(
+        &self,
+        write_id: &WriteId,
+        remotes: &[coven_protocol::remote_object::RemoteObjectRecord],
+        packages: &[crate::PreparedAudiencePackage],
+        blobs: &[crate::PreparedAudienceBlob],
+    ) -> Result<(), DbError> {
+        crate::DatabaseTestSql::for_store(self.conn, self.store_dir).transaction(|transaction| {
+            for remote in remotes {
+                transaction
+                    .execute(
+                        "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                        rusqlite::params![
+                            remote.object_id().to_string(),
+                            serde_json::to_string(remote).map_err(|error| {
+                                DbError::context("serialize prepared remote object", error)
+                            })?,
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+            }
+            transaction.persist_prepared_audience_objects(self.store_dir, write_id, packages, blobs)
+        })
+    }
+
     pub(crate) fn capture_test_changeset(&self, statements: &[String]) -> Result<Vec<u8>, DbError> {
         let tables = self
             .synced_tables

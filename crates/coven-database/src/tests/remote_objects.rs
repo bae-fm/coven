@@ -32,33 +32,10 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         .await
         .expect("install empty captured changeset");
     let write_id = WriteId::from_generated("write-1".to_string());
-    let stored_write_id = write_id.clone();
-    db.test_sql(move |conn| {
-        let base = serde_json::to_string(&StoreWriteBase {
-            dependencies: BTreeMap::new(),
-        })
-        .expect("serialize base");
-        conn.transaction(|transaction| {
-            transaction
-                .execute(
-                    "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
-             VALUES (?1, '\"pending\"', '[]', ?2, ?3, '{\"blobs\":[]}')",
-                    rusqlite::params![
-                        stored_write_id.as_str(),
-                        empty_changeset_hash.to_string(),
-                        base
-                    ],
-                )
-                .map_err(DbError::from)?;
-            transaction.set_payload_owner_claims(
-                &crate::payload_store::store_write_owner_key(&stored_write_id),
-                &std::collections::BTreeSet::from([empty_changeset_hash]),
-            )
-        })
-    })
-    .await
-    .expect("seed write");
+    StoreDatabase::new(&db)
+        .seed_prepared_audience_write_for_test(write_id.clone(), empty_changeset_hash)
+        .await
+        .expect("seed write");
 
     let binding = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes");
     let second_object = ExactObjectRef::new(
@@ -284,38 +261,15 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
             .await
             .expect("install package payload");
     }
-    let persisted_write_id = write_id.clone();
-    let package_state = serde_json::to_string(&package_remote).expect("package remote state");
-    let blob_state = serde_json::to_string(&blob_remote).expect("blob remote state");
-    let second_blob_state =
-        serde_json::to_string(&second_blob_remote).expect("second blob remote state");
-    db.test_sql(move |conn| {
-        conn.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                rusqlite::params![package_remote_id.to_string(), package_state],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                rusqlite::params![blob_remote_id.to_string(), blob_state],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                rusqlite::params![second_blob_remote_id.to_string(), second_blob_state],
-            )
-            .map_err(DbError::from)?;
-            tx.persist_prepared_audience_objects(
-                &store_dir,
-                &persisted_write_id,
-                &[prepared_package],
-                &[prepared_blob, second_prepared_blob],
-            )
-        })
-    })
-    .await
-    .expect("persist prepared objects");
+    StoreDatabase::new(&db)
+        .persist_prepared_audience_objects_for_test(
+            write_id.clone(),
+            vec![package_remote, blob_remote, second_blob_remote],
+            vec![prepared_package],
+            vec![prepared_blob, second_prepared_blob],
+        )
+        .await
+        .expect("persist prepared objects");
 
     let reloaded = crate::StoreDatabase::new(&db)
         .prepared_audience_objects(&write_id)

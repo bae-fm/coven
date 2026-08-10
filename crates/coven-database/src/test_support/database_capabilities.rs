@@ -642,6 +642,53 @@ impl Database {
         .await
     }
 
+    pub async fn persist_exact_remote_object_for_test(
+        &self,
+        remote: coven_protocol::remote_object::ClosedRemoteObject,
+        context: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.persist_exact_remote_object(&remote, &context))
+            .await
+    }
+
+    pub async fn remote_object_by_id_for_test(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        self.test_sql(move |database| database.load_remote_object(object_id))
+            .await
+    }
+
+    pub async fn install_reclaimed_store_package_for_test(
+        &self,
+        operation: crate::DurableStoreReclaimOperation,
+        package: crate::ReclaimedStorePackage,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.transaction(|transaction| {
+                transaction.insert_store_reclaim_operation(&operation)?;
+                transaction.record_reclaimed_store_package(&package)
+            })
+        })
+        .await
+    }
+
+    pub async fn reclaimed_store_package_for_test(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<Option<crate::ReclaimedStorePackage>, DbError> {
+        self.test_sql(move |database| database.load_reclaimed_store_package(object_id))
+            .await
+    }
+
+    pub async fn record_reclaimed_store_package_for_test(
+        &self,
+        package: crate::ReclaimedStorePackage,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.record_reclaimed_store_package(&package))
+            .await
+    }
+
     pub async fn scoped_routing_counts_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,

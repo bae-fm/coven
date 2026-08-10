@@ -1,6 +1,31 @@
 use super::*;
 
 impl StoreDatabase {
+    pub async fn seed_prepared_audience_write_for_test(
+        &self,
+        write_id: WriteId,
+        changeset_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.seed_prepared_audience_write_for_test(&write_id, changeset_hash)
+        })
+        .await
+    }
+
+    pub async fn persist_prepared_audience_objects_for_test(
+        &self,
+        write_id: WriteId,
+        remotes: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
+        packages: Vec<crate::PreparedAudiencePackage>,
+        blobs: Vec<crate::PreparedAudienceBlob>,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session
+                .persist_prepared_audience_objects_for_test(&write_id, &remotes, &packages, &blobs)
+        })
+        .await
+    }
+
     pub async fn seed_local_release_rows_for_test(
         &self,
         note_id: &str,

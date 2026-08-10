@@ -144,40 +144,40 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let saved_remote_for_insert = package_remote.clone();
     closure_db
         .database
-        .test_sql(move |conn| {
-            conn.persist_exact_remote_object(
-                &saved_remote_for_insert,
-                "reclaim closure fixture package",
-            )
-        })
+        .persist_exact_remote_object_for_test(
+            saved_remote_for_insert,
+            "reclaim closure fixture package".to_string(),
+        )
         .await
         .expect("install solely-owned reclaim closure fixture");
-    let operation_for_insert = operation.clone();
-    let absence_for_insert = absence.clone();
     closure_db
         .database
-        .test_sql(move |conn| {
-            conn.transaction(|tx| {
-                tx.insert_store_reclaim_operation(&operation_for_insert)?;
-                tx.record_reclaimed_store_package(&absence_for_insert)
-            })
-        })
+        .install_reclaimed_store_package_for_test(operation, absence.clone())
         .await
         .expect("close reclaimed package");
 
     let saved_remote_for_revival = package_remote.clone();
-    closure_db
+    assert!(closure_db
         .database
-        .test_sql(move |conn| {
-            assert!(conn.load_remote_object(object_id).is_err());
-            assert_eq!(conn.load_reclaimed_store_package(object_id)?, Some(absence));
-            assert!(conn
-                .persist_exact_remote_object(&saved_remote_for_revival, "revived Store package",)
-                .is_err());
-            Ok(())
-        })
+        .remote_object_by_id_for_test(object_id)
         .await
-        .expect("verify irreversible absence closure");
+        .is_err());
+    assert_eq!(
+        closure_db
+            .database
+            .reclaimed_store_package_for_test(object_id)
+            .await
+            .expect("load reclaimed Store package"),
+        Some(absence)
+    );
+    assert!(closure_db
+        .database
+        .persist_exact_remote_object_for_test(
+            saved_remote_for_revival,
+            "revived Store package".to_string(),
+        )
+        .await
+        .is_err());
 
     let receipt = coven_protocol::reclaim::ReclaimReceiptRef {
         receipt_hash: ObjectHash::digest(b"closed reclaim receipt"),
@@ -191,16 +191,15 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         receipt_activation,
     )
     .expect("valid receipt closure");
-    let receipted_for_insert = receipted.clone();
     closure_db
         .database
-        .test_sql(move |conn| conn.record_reclaimed_store_package(&receipted_for_insert))
+        .record_reclaimed_store_package_for_test(receipted.clone())
         .await
         .expect("attach receipt to reclaimed package");
     assert_eq!(
         closure_db
             .database
-            .test_sql(move |conn| conn.load_reclaimed_store_package(object_id))
+            .reclaimed_store_package_for_test(object_id)
             .await
             .expect("load receipted closure"),
         Some(receipted)
@@ -264,17 +263,14 @@ fn snapshot_blob_owner_rejects_other_activation_and_later_generation() {
 async fn upload_retry_preserves_prepared_object_handoff() {
     let db = open_outbox_database("prepared-upload-retry");
     let row = local_row_blob("photo", "0000000001000-0000-a", b"photo bytes");
-    let initial_row = row.clone();
-    db.test_sql(move |conn| {
-        conn.enqueue_blob_upload(
-            "photos",
-            "photo",
-            &initial_row,
-            Path::new("/source/first"),
-            false,
-            "2026-07-16T10:00:00Z",
-        )
-    })
+    db.enqueue_blob_upload_with_retention_for_test(
+        "photos",
+        "photo",
+        row.clone(),
+        PathBuf::from("/source/first"),
+        false,
+        "2026-07-16T10:00:00Z",
+    )
     .await
     .expect("enqueue upload");
 
@@ -298,16 +294,14 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .await
         .expect("record prepared object");
 
-    db.test_sql(move |conn| {
-        conn.enqueue_blob_upload(
-            "photos",
-            "photo",
-            &row,
-            Path::new("/source/retried"),
-            true,
-            "2026-07-16T10:01:00Z",
-        )
-    })
+    db.enqueue_blob_upload_with_retention_for_test(
+        "photos",
+        "photo",
+        row,
+        PathBuf::from("/source/retried"),
+        true,
+        "2026-07-16T10:01:00Z",
+    )
     .await
     .expect("retry upload command");
 
@@ -357,8 +351,7 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
     let stored = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes")
         .blob()
         .clone();
-    let delete_stored = stored.clone();
-    db.test_sql(move |conn| conn.enqueue_blob_delete(&delete_stored, "2026-07-16T10:00:00Z"))
+    db.enqueue_blob_delete_for_test(&stored, "2026-07-16T10:00:00Z")
         .await
         .expect("enqueue delete");
     let failed = crate::StoreDatabase::new(&db)
@@ -371,8 +364,7 @@ async fn repeated_exact_delete_resets_retry_state_without_duplication() {
         .record_outbox_failure(&failed, "provider unavailable", "2026-07-16T10:00:30Z")
         .await
         .expect("record delete failure");
-    let retry_stored = stored.clone();
-    db.test_sql(move |conn| conn.enqueue_blob_delete(&retry_stored, "2026-07-16T10:01:00Z"))
+    db.enqueue_blob_delete_for_test(&stored, "2026-07-16T10:01:00Z")
         .await
         .expect("repeat exact delete");
 
@@ -395,10 +387,10 @@ async fn exact_deletes_for_distinct_objects_remain_distinct() {
     let second = exact_blob_binding("photo-b", "0000000001000-0000-a", b"photo b")
         .blob()
         .clone();
-    db.test_sql(move |conn| conn.enqueue_blob_delete(&first, "2026-07-16T10:00:00Z"))
+    db.enqueue_blob_delete_for_test(&first, "2026-07-16T10:00:00Z")
         .await
         .expect("enqueue first delete");
-    db.test_sql(move |conn| conn.enqueue_blob_delete(&second, "2026-07-16T10:01:00Z"))
+    db.enqueue_blob_delete_for_test(&second, "2026-07-16T10:01:00Z")
         .await
         .expect("enqueue second delete");
 
