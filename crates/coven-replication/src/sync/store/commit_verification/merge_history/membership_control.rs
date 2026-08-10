@@ -78,6 +78,10 @@ pub(crate) enum VerifiedMergePrefixHeadStatus {
 }
 
 impl VerifiedMergeMembershipPrefix {
+    pub(super) fn extends(&self, verified: &Self) -> bool {
+        verified.commits.is_subset(&self.commits)
+    }
+
     pub(crate) fn from_retained(
         checkpoints: &[coven_database::RetainedMergeHistoryCheckpoint],
     ) -> Result<Self, StorePullError> {

@@ -411,6 +411,15 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         self.history.verified_pull_candidate(reference)
     }
 
+    pub(crate) fn verified_predecessor_membership(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<MembershipChain> {
+        self.history
+            .verified_predecessor_membership(reference)
+            .cloned()
+    }
+
     pub(crate) fn verified_membership_prefix(
         &self,
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
@@ -423,13 +432,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         reference: &StoreBatchCommitRef,
     ) -> Result<Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>, StoreObjectError> {
         self.history.load_store_package(reference).await
-    }
-
-    pub(crate) async fn load_predecessor_membership(
-        &mut self,
-        state: &coven_protocol::circle_control::StoreMembershipStateRef,
-    ) -> Result<MembershipChain, RegistrationLoadError> {
-        self.history.load_predecessor_membership(state).await
     }
 
     pub(crate) async fn materialized_reference_status(

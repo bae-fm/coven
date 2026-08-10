@@ -98,6 +98,40 @@ pub(crate) struct VerifiedMergeHistoryAuthority {
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
+    fn cached_verified_membership(
+        &self,
+        state: &StoreMembershipStateRef,
+        authority: &VerifiedMergeMembershipPrefix,
+    ) -> Option<MembershipChain> {
+        self.verified_memberships
+            .iter()
+            .rev()
+            .find(|verified| {
+                verified.membership.head_refs() == state.heads
+                    && verified.membership.resolution_refs() == state.resolutions
+                    && authority.extends(&verified.authority)
+            })
+            .map(|verified| verified.membership.clone())
+    }
+
+    fn remember_verified_membership(
+        &mut self,
+        authority: VerifiedMergeMembershipPrefix,
+        membership: MembershipChain,
+    ) {
+        if self.verified_memberships.iter().any(|verified| {
+            verified.membership.head_refs() == membership.head_refs()
+                && verified.membership.resolution_refs() == membership.resolution_refs()
+                && authority.extends(&verified.authority)
+        }) {
+            return;
+        }
+        self.verified_memberships.push(VerifiedMembershipChain {
+            authority,
+            membership,
+        });
+    }
+
     pub(crate) fn verified_root(&self) -> &crate::sync::store::protocol_root::VerifiedStoreRoot {
         &self.root
     }
@@ -254,6 +288,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 genesis,
                 commits: BTreeMap::new(),
             },
+            verified_memberships: Vec::new(),
         })
     }
 
@@ -407,6 +442,16 @@ impl<'a> MergeHistoryVerifier<'a> {
             })
     }
 
+    pub(crate) fn verified_predecessor_membership(
+        &self,
+        reference: &StoreBatchCommitRef,
+    ) -> Option<&MembershipChain> {
+        self.history
+            .commits
+            .get(reference)
+            .map(|commit| &commit.predecessor_membership)
+    }
+
     pub(super) fn verifies_membership_head_activation(
         &self,
         reference: &protocol_membership::MembershipHeadRef,
@@ -537,19 +582,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         };
         let verified_membership_activations =
             verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
-        let membership = self
-            .load_membership_at_verified_prefix(
-                &membership_state.heads,
-                &membership_state.resolutions,
-                &verified_membership_activations,
-                None,
-            )
-            .await
-            .map_err(StorePullError::MembershipChain)?;
+        let membership = match self
+            .cached_verified_membership(membership_state, &verified_membership_activations)
+        {
+            Some(membership) => membership,
+            None => self
+                .load_membership_at_verified_prefix(
+                    &membership_state.heads,
+                    &membership_state.resolutions,
+                    &verified_membership_activations,
+                    None,
+                )
+                .await
+                .map_err(StorePullError::MembershipChain)?,
+        };
         verified_membership_activations
             .validate_complete_membership(&membership)
             .map_err(StorePullError::InvalidState)?;
         verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
+        self.remember_verified_membership(verified_membership_activations, membership.clone());
         Ok(VerifiedMergeHistoryAuthority {
             device_state,
             membership,
@@ -631,10 +682,16 @@ pub(crate) struct VerifiedMergeHistory {
     pub(crate) commits: BTreeMap<StoreBatchCommitRef, VerifiedMergeHistoryCommit>,
 }
 
+struct VerifiedMembershipChain {
+    authority: VerifiedMergeMembershipPrefix,
+    membership: MembershipChain,
+}
+
 pub struct MergeHistoryVerifier<'a> {
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
+    verified_memberships: Vec<VerifiedMembershipChain>,
 }
 
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;

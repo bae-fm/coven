@@ -250,11 +250,12 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             }
             let membership = self
                 .history
-                .load_predecessor_membership(&materialization.commit().membership_state)
-                .await
-                .map_err(|error| match error {
-                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
+                .verified_predecessor_membership(materialization.commit_ref())
+                .ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "retained Merge commit has no operation-verified predecessor membership"
+                            .to_string(),
+                    )
                 })?;
             loaded_predecessor_memberships.insert(materialization.commit_ref().clone(), membership);
         }

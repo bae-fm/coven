@@ -341,6 +341,41 @@ async fn retained_history_verification_does_not_restart_the_announcement_path() 
     );
 }
 
+async fn membership_head_reads_for_retained_history(history_length: u64) -> usize {
+    let fixture = PublishedHistory::publish(history_length).await;
+    let head_slots = fixture
+        .membership
+        .head_refs()
+        .iter()
+        .map(|reference| reference.object.slot().clone())
+        .collect::<Vec<_>>();
+    fixture.home.clear_exact_reads();
+
+    fixture
+        .device
+        .run_cycle(&fixture.store_dir, None)
+        .await
+        .expect("pull retained membership history");
+
+    fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| head_slots.contains(slot))
+        .count()
+}
+
+#[tokio::test]
+async fn retained_history_depth_does_not_repeat_exact_membership_head_reads() {
+    let shallow = membership_head_reads_for_retained_history(1).await;
+    let deep = membership_head_reads_for_retained_history(12).await;
+
+    assert!(
+        deep <= shallow,
+        "one retained commit read exact membership heads {shallow} times; twelve read them {deep} times",
+    );
+}
+
 #[tokio::test]
 async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
     let fixture = PublishedHistory::publish(3).await;

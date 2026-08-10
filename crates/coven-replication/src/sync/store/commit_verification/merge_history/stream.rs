@@ -450,15 +450,26 @@ impl<'a> MergeHistoryVerifier<'a> {
             )?;
             let pending_resolution =
                 Box::pin(self.verify_resolution_activation_acceptance(&commit)).await?;
-            let membership = self
-                .load_membership_at_verified_prefix(
-                    &commit.membership_state.heads,
-                    &commit.membership_state.resolutions,
+            let cached_membership = if pending_resolution.is_none() {
+                self.cached_verified_membership(
+                    &commit.membership_state,
                     &verified_membership_prefix,
-                    pending_resolution.as_ref(),
                 )
-                .await
-                .map_err(StorePullError::MembershipChain)?;
+            } else {
+                None
+            };
+            let membership = match cached_membership {
+                Some(membership) => membership,
+                None => self
+                    .load_membership_at_verified_prefix(
+                        &commit.membership_state.heads,
+                        &commit.membership_state.resolutions,
+                        &verified_membership_prefix,
+                        pending_resolution.as_ref(),
+                    )
+                    .await
+                    .map_err(StorePullError::MembershipChain)?,
+            };
             verified_membership_prefix
                 .validate_complete_membership(&membership)
                 .map_err(StorePullError::InvalidState)?;
@@ -582,6 +593,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .commit_verifier
                 .load_head(&activation_head_ref, &author, &reference)
                 .await?;
+            let membership_to_remember = pending_resolution.is_none().then(|| membership.clone());
             states.insert(reference.clone(), state.clone());
             self.history.commits.insert(
                 reference,
@@ -599,6 +611,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                     history_evidence,
                 },
             );
+            if let Some(membership) = membership_to_remember {
+                self.remember_verified_membership(verified_membership_prefix, membership);
+            }
         }
         Ok(())
     }
