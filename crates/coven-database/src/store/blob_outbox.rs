@@ -129,7 +129,7 @@ impl StoreSession<'_> {
             ),
             None => (format!("{COLUMNS} ORDER BY id"), Vec::new()),
         };
-        let mut statement = self.conn.prepare(&sql).map_err(DbError::from)?;
+        let mut statement = self.records.conn.prepare(&sql).map_err(DbError::from)?;
         let uploads = statement
             .query_map(rusqlite::params_from_iter(parameters), row_to_queued_upload)
             .map_err(DbError::from)?
@@ -140,6 +140,7 @@ impl StoreSession<'_> {
 
     fn queued_deletes(&mut self) -> Result<Vec<QueuedDelete>, DbError> {
         let mut statement = self
+            .records
             .conn
             .prepare(
                 "SELECT stored_ref, attempt_count, last_error, created_at, last_attempt_at
@@ -156,6 +157,7 @@ impl StoreSession<'_> {
 
     fn pending_outbox(&mut self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         let mut statement = self
+            .records
             .conn
             .prepare(
                 "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
@@ -173,6 +175,7 @@ impl StoreSession<'_> {
 
     fn remove_blob_delete(&mut self, id: i64, stored: String) -> Result<(), DbError> {
         let removed = self
+            .records
             .conn
             .execute(
                 "DELETE FROM cloud_outbox
@@ -193,6 +196,7 @@ impl StoreSession<'_> {
         max_seq: u64,
     ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
         let mut statement = self
+            .records
             .conn
             .prepare(
                 "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
@@ -287,7 +291,8 @@ impl StoreSession<'_> {
         id: String,
         locator_hash: String,
     ) -> Result<(), DbError> {
-        self.conn
+        self.records
+            .conn
             .execute(
                 "DELETE FROM published_blob_drop_intents
                  WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND locator_hash = ?4",
@@ -310,7 +315,7 @@ impl StoreSession<'_> {
                 row_id,
                 column,
                 row_stamp,
-            } => self.conn.execute(
+            } => self.records.conn.execute(
                 "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
                  last_error = ?1, last_attempt_at = ?2
                  WHERE id = ?3 AND operation = 'upload' AND table_name = ?4
@@ -325,7 +330,7 @@ impl StoreSession<'_> {
                     row_stamp
                 ],
             ),
-            OutboxIdentity::Stored { operation, stored } => self.conn.execute(
+            OutboxIdentity::Stored { operation, stored } => self.records.conn.execute(
                 "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
                      last_error = ?1, last_attempt_at = ?2
                      WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
@@ -354,6 +359,7 @@ impl StoreSession<'_> {
         context: &'static str,
     ) -> Result<(), DbError> {
         let updated = self
+            .records
             .conn
             .execute(
                 "UPDATE cloud_outbox SET upload_state = ?1
@@ -373,7 +379,8 @@ impl StoreSession<'_> {
 
     #[cfg(any(test, feature = "test-utils"))]
     fn reset_outbox_backoff(&mut self) -> Result<(), DbError> {
-        self.conn
+        self.records
+            .conn
             .execute(
                 "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
                 [],
@@ -387,11 +394,15 @@ impl StoreSession<'_> {
         root_table: String,
         root_id: String,
     ) -> Result<Option<MakeRemoteIntentState>, DbError> {
-        Database::make_remote_intent_state(self.conn, &root_table, &root_id)
+        Database::make_remote_intent_state(self.records.conn, &root_table, &root_id)
     }
 
     fn finish_cancelled_blob_upload(&mut self, entry: OutboxEntry) -> Result<bool, DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let finished =
             crate::CloudOutboxRecords::new(&transaction).finish_cancelled_upload(&entry)?;
         transaction.commit().map_err(DbError::from)?;

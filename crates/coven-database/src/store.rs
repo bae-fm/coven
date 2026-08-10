@@ -77,7 +77,7 @@ mod store_database;
 mod store_device_state;
 mod store_records;
 pub use store_database::StoreDatabase;
-use store_records::{StoreRecordTransaction, StoreRecords};
+use store_records::StoreTransaction;
 mod store_session;
 mod stream_activation_records;
 mod verified_store_authority;
@@ -85,6 +85,17 @@ pub(crate) use verified_store_authority::VerifiedStoreAuthority;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_support;
 mod write_lifecycle;
+
+/// One Store's row connection and matching payload directory.
+///
+/// A record whose bytes live in the spool is half a row and half a file, so
+/// record operations carry both halves as one scoped value. Operations that
+/// touch rows alone continue to take the connection in their private SQL leaf.
+#[derive(Clone, Copy)]
+pub(crate) struct StoreRecords<'store> {
+    conn: &'store rusqlite::Connection,
+    store_dir: &'store coven_foundation::store_dir::StoreDir,
+}
 
 use crate::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
@@ -170,7 +181,7 @@ pub(crate) fn install_verified_snapshot_bootstrap_on(
     routing_hash: coven_protocol::store_commit::ObjectHash,
     synced_tables: &[coven_protocol::synced_schema::SyncedTable],
 ) -> Result<(), DbError> {
-    StoreRecordTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
+    StoreTransaction::new(transaction, store_dir).install_verified_snapshot_bootstrap(
         install,
         schema_version,
         routing_hash,
@@ -327,8 +338,7 @@ pub struct LocalBlobCleanupPermit {
 /// authority verified by the same connection. Code outside this module cannot
 /// obtain either retained dependency.
 pub(crate) struct StoreSession<'session> {
-    conn: &'session rusqlite::Connection,
-    store_dir: &'session coven_foundation::store_dir::StoreDir,
+    records: StoreRecords<'session>,
     verified_store_authority: &'session mut VerifiedStoreAuthority,
     gates: &'session crate::Gates,
     synced_tables: &'session [coven_protocol::synced_schema::SyncedTable],
@@ -346,16 +356,16 @@ impl StoreSession<'_> {
     where
         F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E>,
     {
-        let authorization = host_sql_transaction::HostSqlAuthorization::begin(self.conn)?;
-        Ok(authorization.run(|| read(SqlReadContext::new(self.conn))))
+        let authorization = host_sql_transaction::HostSqlAuthorization::begin(self.records.conn)?;
+        Ok(authorization.run(|| read(SqlReadContext::new(self.records.conn))))
     }
 
     fn protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
-        crate::get_protocol_state_on(self.conn, key)
+        crate::get_protocol_state_on(self.records.conn, key)
     }
 
     fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
-        crate::set_protocol_state_on(self.conn, key, value)
+        crate::set_protocol_state_on(self.records.conn, key, value)
     }
 
     fn write_status(
@@ -363,6 +373,7 @@ impl StoreSession<'_> {
         write_id: &coven_protocol::write::WriteId,
     ) -> Result<coven_protocol::write::WriteStatus, DbError> {
         let raw: String = self
+            .records
             .conn
             .query_row(
                 "SELECT status FROM store_writes WHERE write_id = ?1",
@@ -378,7 +389,11 @@ impl StoreSession<'_> {
         &self,
         value: &str,
     ) -> Result<coven_protocol::store_creation::StoreCreationAttempt, DbError> {
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         tx.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO NOTHING",
@@ -410,6 +425,7 @@ impl StoreSession<'_> {
 
     fn advance_store_creation_attempt(&self, previous: &str, next: &str) -> Result<(), DbError> {
         let changed = self
+            .records
             .conn
             .execute(
                 "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
@@ -430,7 +446,8 @@ impl StoreSession<'_> {
 
     #[cfg(any(test, feature = "test-utils"))]
     fn scoped_snapshot_counts(&self) -> Result<(i64, i64, i64), DbError> {
-        self.conn
+        self.records
+            .conn
             .query_row(
                 "SELECT
                      (SELECT COUNT(*) FROM documents),
@@ -444,7 +461,8 @@ impl StoreSession<'_> {
 
     #[cfg(any(test, feature = "test-utils"))]
     fn migrated_scoped_snapshot_facts(&self) -> Result<(i64, i64, String), DbError> {
-        self.conn
+        self.records
+            .conn
             .query_row(
                 "SELECT
                      (SELECT COUNT(*) FROM documents),
@@ -461,7 +479,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        retained_merge_replay::circle_bootstrap_coverage_ref_on(self.conn, circle_id)
+        retained_merge_replay::circle_bootstrap_coverage_ref_on(self.records.conn, circle_id)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -469,7 +487,8 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
-        self.conn
+        self.records
+            .conn
             .query_row(
                 "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
                 [circle_id.to_string()],
@@ -481,8 +500,8 @@ impl StoreSession<'_> {
     #[cfg(any(test, feature = "test-utils"))]
     fn generation_zero_replay_baseline(&self) -> Result<crate::RetainedReplayBaseline, DbError> {
         StoreDatabase::generation_zero_replay_baseline_on(crate::store::StoreRecords::new(
-            self.conn,
-            self.store_dir,
+            self.records.conn,
+            self.records.store_dir,
         ))
     }
 
@@ -491,11 +510,16 @@ impl StoreSession<'_> {
         &self,
         authority_bytes: &[u8],
     ) -> Result<(), DbError> {
-        let authority_hash = payload_spool::write_payload_blocking(self.store_dir, authority_bytes)
-            .map_err(|error| {
-                DbError::Message(format!("install retained replay authority: {error}"))
-            })?;
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let authority_hash =
+            payload_spool::write_payload_blocking(self.records.store_dir, authority_bytes)
+                .map_err(|error| {
+                    DbError::Message(format!("install retained replay authority: {error}"))
+                })?;
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         transaction
             .execute(
                 "UPDATE retained_replay_baselines SET authority_hash = ?1
@@ -529,8 +553,8 @@ impl StoreSession<'_> {
         DbError,
     > {
         StoreDatabase::circle_bootstrap_replay_inputs_on(crate::store::StoreRecords::new(
-            self.conn,
-            self.store_dir,
+            self.records.conn,
+            self.records.store_dir,
         ))
     }
 }

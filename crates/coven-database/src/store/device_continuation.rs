@@ -199,7 +199,7 @@ impl StoreSession<'_> {
                 "continued registration differs from activated Store state".into(),
             ));
         }
-        let conn = self.conn;
+        let conn = self.records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let stored_authority: String = tx
             .query_row(

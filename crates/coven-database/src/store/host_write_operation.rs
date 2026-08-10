@@ -340,8 +340,8 @@ impl StoreSession<'_> {
         let mut staged = staged;
         let stamper = coven_protocol::hlc::UpdatedAtStamper::new(self.hlc.clone());
         let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-            self.conn,
-            self.store_dir,
+            self.records.conn,
+            self.records.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,
@@ -419,7 +419,10 @@ impl StoreSession<'_> {
                 })) {
                     Ok(Ok(value)) => {
                         for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
-                            let _ = self.store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+                            let _ = self
+                                .records
+                                .store_dir
+                                .local_blob_path(&blob.namespace, &blob.id)?;
                             if self
                                 .blob_decls
                                 .blob_id_is_referenced(transaction, &blob.namespace, &blob.id)

@@ -21,8 +21,7 @@ impl<'session> StoreSession<'session> {
         >,
     ) -> Self {
         Self {
-            conn,
-            store_dir,
+            records: crate::store::StoreRecords::new(conn, store_dir),
             verified_store_authority,
             gates,
             synced_tables,
@@ -37,7 +36,7 @@ impl<'session> StoreSession<'session> {
 
     pub(super) fn required_root_authority(&mut self) -> Result<StoreRootRef, DbError> {
         self.verified_store_authority
-            .required_root_authority_on(crate::store::StoreRecords::new(self.conn, self.store_dir))
+            .required_root_authority_on(self.records)
     }
 
     pub(super) fn root_authority(
@@ -50,7 +49,7 @@ impl<'session> StoreSession<'session> {
         DbError,
     > {
         self.verified_store_authority
-            .root_authority_on(crate::store::StoreRecords::new(self.conn, self.store_dir))
+            .root_authority_on(self.records)
     }
 
     pub(super) fn activated_registration(
@@ -59,7 +58,7 @@ impl<'session> StoreSession<'session> {
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         let root = self.required_root_authority()?;
         let registration = self.verified_store_authority.activated_registration_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             &root,
             reference,
         )?;
@@ -71,6 +70,6 @@ impl<'session> StoreSession<'session> {
         &mut self,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         self.verified_store_authority
-            .local_store_authority_on(crate::store::StoreRecords::new(self.conn, self.store_dir))
+            .local_store_authority_on(self.records)
     }
 }

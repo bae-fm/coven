@@ -62,8 +62,12 @@ impl StoreSession<'_> {
             .circle_activations
             .local_exclusions()
             .to_vec();
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.store_dir);
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
         let mut transaction_authority = authority.begin_transaction_on(transaction_records)?;
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?,
@@ -77,7 +81,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?
             .frontier();
         let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
-        let merge_transaction = MergeMaterializationTransaction::new(&tx, self.store_dir);
+        let merge_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
         let mut applied = merge_transaction.apply_prepared_merge_materialization(
             &mut transaction_authority,
             blob_decls,
@@ -143,7 +147,7 @@ impl StoreSession<'_> {
                 || !retracted.is_empty()
             {
                 let replay = transaction_authority.replay_projection_on(
-                    crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
+                    crate::store::StoreTransaction::new(&tx, self.records.store_dir),
                     blob_decls,
                     gates,
                     synced_tables,
@@ -170,7 +174,7 @@ impl StoreSession<'_> {
                     tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                         .map_err(DbError::from)?;
                 }
-                crate::store::StoreRecordTransaction::new(&tx, self.store_dir)
+                crate::store::StoreTransaction::new(&tx, self.records.store_dir)
                     .replace_tables_from_projection(&replay, &tables)?;
                 let violations: bool = tx
                     .query_row(
@@ -253,11 +257,15 @@ impl StoreSession<'_> {
         >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let mut transaction_authority = self
             .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
-        let store_transaction = MergeMaterializationTransaction::new(&tx, self.store_dir);
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
+        let store_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(&reference, &object_ids)?;
         }
@@ -309,7 +317,11 @@ impl StoreSession<'_> {
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         if let Some(materialized) =
             crate::store::materialized_commit_index::materialized_commit_ref_on(
                 &tx, &stream_id, sequence,
@@ -325,7 +337,7 @@ impl StoreSession<'_> {
         }
         let mut transaction_authority = self
             .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
         super::record_activated_store_device_registrations_on(
             &tx,
             verified_commit.value(),
@@ -347,7 +359,7 @@ impl StoreSession<'_> {
             &[],
             None,
         )?;
-        let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
+        let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
             .record_verified_merge_materialization(&mut transaction_authority, materialization)?;
         transaction_authority.insert_verified(retained)?;
         tx.commit().map_err(DbError::from)?;
@@ -361,10 +373,14 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let mut transaction_authority = self
             .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
         let installed_root = transaction_authority.root().clone();
         if installed_root != root || plan.founder.store_root != root {
             return Err(DbError::Message(
@@ -479,7 +495,7 @@ impl StoreSession<'_> {
                 &[],
                 None,
             )?;
-            let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
+            let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
                 .record_verified_merge_materialization(
                     &mut transaction_authority,
                     materialization,
@@ -500,15 +516,19 @@ impl StoreSession<'_> {
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let mut transaction_authority = self
             .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
+            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
         let root = transaction_authority.root().clone();
         let registrations = vec![registration];
         let commit = verified_commit.value();
         super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
-        let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
+        let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
             .record_materialized_merge_commit(
                 &mut transaction_authority,
                 &root,

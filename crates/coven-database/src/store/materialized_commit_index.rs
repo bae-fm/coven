@@ -18,21 +18,20 @@ use super::*;
 
 impl StoreSession<'_> {
     fn materialized_frontier(&mut self) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        materialized_frontier_on(self.conn, None)
+        materialized_frontier_on(self.records.conn, None)
     }
 
     fn retained_merge_replay_inputs(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.verified_store_authority.retained_replay_inputs_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
-            &root,
-        )
+        self.verified_store_authority
+            .retained_replay_inputs_on(self.records, &root)
     }
 
     fn retained_merge_materialization_refs(&mut self) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         let mut statement = self
+            .records
             .conn
             .prepare(
                 "SELECT device_id, seq, commit_ref
@@ -63,11 +62,7 @@ impl StoreSession<'_> {
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.verified_store_authority
-            .retained_replay_inputs_with_verified_commits_on(
-                crate::store::StoreRecords::new(self.conn, self.store_dir),
-                &root,
-                &verified,
-            )
+            .retained_replay_inputs_with_verified_commits_on(self.records, &root, &verified)
     }
 
     fn retained_merge_materialization(
@@ -76,10 +71,7 @@ impl StoreSession<'_> {
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.verified_store_authority
-            .retained_replay_inputs_on(
-                crate::store::StoreRecords::new(self.conn, self.store_dir),
-                &root,
-            )?
+            .retained_replay_inputs_on(self.records, &root)?
             .into_iter()
             .find(|materialization| materialization.commit_ref() == &reference)
             .ok_or_else(|| {
@@ -94,7 +86,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
+        let records = self.records;
         let authority = &mut *self.verified_store_authority;
         let retained = authority.retained_replay_inputs_on(records, &root)?;
         let by_reference = retained
@@ -135,11 +127,12 @@ impl StoreSession<'_> {
         stream_id: String,
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        materialized_commit_ref_on(self.conn, &stream_id, sequence)
+        materialized_commit_ref_on(self.records.conn, &stream_id, sequence)
     }
 
     fn snapshot_coverage_frontier(&mut self) -> Result<CommitFrontier, DbError> {
         let mut stmt = self
+            .records
             .conn
             .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
             .map_err(DbError::from)?;
@@ -167,14 +160,14 @@ impl StoreSession<'_> {
         &mut self,
         cut: StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        store_device_state_for_history_cut_on(self.conn, &cut)
+        store_device_state_for_history_cut_on(self.records.conn, &cut)
     }
 
     fn resolved_store_device_state(
         &mut self,
         reference: StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, DbError> {
-        load_declared_store_device_state_on(self.conn, &reference)
+        load_declared_store_device_state_on(self.records.conn, &reference)
     }
 
     fn store_device_exclusion_freezes(&mut self) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
@@ -184,15 +177,17 @@ impl StoreSession<'_> {
             .ok_or_else(|| {
                 DbError::Message("Store root is absent while loading exclusion freezes".to_string())
             })?;
-        Ok(load_store_device_exclusion_freezes_on(self.conn, &root)?
-            .into_values()
-            .collect())
+        Ok(
+            load_store_device_exclusion_freezes_on(self.records.conn, &root)?
+                .into_values()
+                .collect(),
+        )
     }
 
     fn activated_store_device_registration_records(
         &mut self,
     ) -> Result<Vec<ReferencedStoreDeviceRegistration>, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
+        let records = self.records;
         let root = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -201,6 +196,7 @@ impl StoreSession<'_> {
                 DbError::Message("Store root is absent while loading activated devices".to_string())
             })?;
         let mut statement = self
+            .records
             .conn
             .prepare(
                 "SELECT device_id, registration_hash, registration_object
@@ -261,7 +257,7 @@ impl StoreSession<'_> {
                 )
             })?;
         let registration = self.verified_store_authority.activated_registration_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             &root,
             &reference,
         )?;
@@ -272,7 +268,7 @@ impl StoreSession<'_> {
     fn local_activated_registration_ref(
         &mut self,
     ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
-        local_activated_registration_ref_on(self.conn)
+        local_activated_registration_ref_on(self.records.conn)
     }
 
     fn activated_store_device_registration_with_authority(
@@ -280,11 +276,12 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
+        let records = self.records;
         let registration = self
             .verified_store_authority
             .activated_registration_on(records, &root, &reference)?;
         let authority: String = self
+            .records
             .conn
             .query_row(
                 "SELECT activation_authority FROM store_device_registration_activations \
@@ -308,7 +305,7 @@ impl StoreSession<'_> {
         &mut self,
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
+        let records = self.records;
         let root = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -319,6 +316,7 @@ impl StoreSession<'_> {
                 )
             })?;
         let stored: Option<(String, String)> = self
+            .records
             .conn
             .query_row(
                 "SELECT registration_object, activation_authority \

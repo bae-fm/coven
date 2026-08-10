@@ -311,7 +311,7 @@ impl SnapshotDatabaseImage {
                     })?;
             }
             if matches!(audience, coven_protocol::circle::Audience::Store) {
-                let records = crate::store::StoreRecordTransaction::new(&transaction, store_dir);
+                let records = crate::store::StoreTransaction::new(&transaction, store_dir);
                 let mut authority = super::VerifiedStoreAuthority::default();
                 records
                     .retain_snapshot_replay_inputs(&mut authority, root)
@@ -625,15 +625,18 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        require_no_unpublished_store_writes(self.conn)?;
+        let records = self.records;
+        require_no_unpublished_store_writes(self.records.conn)?;
         let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
                 records.capture_snapshot(image, root, tables, routing_encryption, &audience)
             })
             .map_err(snapshot_image_db_error)?;
         let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
+            crate::store::materialized_commit_index::materialized_frontier_on(
+                self.records.conn,
+                None,
+            )?,
         )
         .map_err(|error| DbError::context("snapshot coverage", error))?;
         Ok((snapshot, coverage))
@@ -650,8 +653,12 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let replay = crate::store::StoreRecordTransaction::new(&transaction, self.store_dir)
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let replay = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
             .replay_projection_with_authority(
                 self.verified_store_authority,
                 root,
@@ -694,7 +701,7 @@ impl StoreSession<'_> {
     ) -> Result<Vec<u8>, DbError> {
         SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
-                crate::store::StoreRecords::new(self.conn, self.store_dir).capture_snapshot(
+                self.records.capture_snapshot(
                     image,
                     root,
                     self.synced_tables,

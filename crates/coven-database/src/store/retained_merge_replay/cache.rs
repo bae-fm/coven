@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::retained_merge_replay::CircleReplayEpochIndex;
-use crate::store::{StoreRecordTransaction, StoreRecords};
+use crate::store::{StoreRecords, StoreTransaction};
 use crate::{
     activated_merge_membership_remote_objects, ObjectHash, PreparedMergeMaterialization,
     PreparedMergeMaterializationPackage,
@@ -298,7 +298,7 @@ impl RetainedReplayCache {
 
     fn replay_inputs_in_transaction(
         &mut self,
-        records: StoreRecordTransaction<'_, '_>,
+        records: StoreTransaction<'_, '_>,
         root: &StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
@@ -420,7 +420,7 @@ impl RetainedReplayCache {
 
     fn circle_replay_epoch_index_in_transaction(
         &self,
-        records: StoreRecordTransaction<'_, '_>,
+        records: StoreTransaction<'_, '_>,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         let rows = records.circle_replay_controls()?;
         Self::circle_replay_epoch_index_from_rows(rows, |circle_id, control| {
@@ -474,7 +474,7 @@ impl RetainedReplayCache {
 
     pub(super) fn replay_projection_on(
         &mut self,
-        transaction_records: StoreRecordTransaction<'_, '_>,
+        transaction_records: StoreTransaction<'_, '_>,
         root: &StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
         blob_decls: &BlobDecls,

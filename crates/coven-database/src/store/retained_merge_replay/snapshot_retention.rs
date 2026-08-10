@@ -6,7 +6,7 @@ impl StoreDatabase {
     /// keeps: author-exclusion activation commits (device-exclusion recovery),
     /// Circle bootstrap-coverage activation commits, and every retained
     /// materialization that still carries a Circle package no bootstrap cut
-    /// covers. `StoreRecordTransaction::retain_snapshot_replay_inputs` keeps exactly this set, and
+    /// covers. `StoreTransaction::retain_snapshot_replay_inputs` keeps exactly this set, and
     /// `validate_snapshot_retained_inputs_on` expects exactly it, so the two
     /// share this one derivation.
     pub(crate) fn snapshot_required_retained_refs(

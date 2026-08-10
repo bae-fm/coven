@@ -104,7 +104,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let circle_id = encoded_circle_id
                 .parse()
                 .map_err(|error| DbError::context("parse retracted Circle bootstrap id", error))?;
-            crate::store::StoreRecordTransaction::new(self.transaction, self.store_dir)
+            crate::store::StoreTransaction::new(self.transaction, self.store_dir)
                 .clear_circle_bootstrap_coverage(circle_id)?;
         }
         Ok(circle_ids.len())

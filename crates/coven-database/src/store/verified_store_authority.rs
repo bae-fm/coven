@@ -126,7 +126,7 @@ impl VerifiedStoreAuthorityTransaction {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replay_projection_on(
         &mut self,
-        records: crate::store::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreTransaction<'_, '_>,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -569,7 +569,7 @@ impl VerifiedStoreAuthority {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replay_projection_for_root_on(
         &mut self,
-        records: crate::store::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreTransaction<'_, '_>,
         root: &StoreRootRef,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,

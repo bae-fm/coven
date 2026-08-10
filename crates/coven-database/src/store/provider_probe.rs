@@ -10,7 +10,7 @@ impl StoreSession<'_> {
         &self,
         key: &str,
     ) -> Result<Option<ProviderProbeJournalRecord>, DbError> {
-        crate::get_protocol_state_on(self.conn, key)?
+        crate::get_protocol_state_on(self.records.conn, key)?
             .map(|value| {
                 serde_json::from_str(&value)
                     .map_err(|error| DbError::context("parse provider probe journal", error))
@@ -23,7 +23,11 @@ impl StoreSession<'_> {
         key: &str,
         value: &str,
     ) -> Result<ProviderProbeJournalRecord, DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         transaction
             .execute(
                 "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
@@ -43,6 +47,7 @@ impl StoreSession<'_> {
         next: &str,
     ) -> Result<(), DbError> {
         let changed = self
+            .records
             .conn
             .execute(
                 "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",

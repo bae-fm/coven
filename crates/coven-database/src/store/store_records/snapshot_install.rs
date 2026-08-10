@@ -1,4 +1,4 @@
-use super::{StoreRecordTransaction, StoreRecords};
+use super::{StoreRecords, StoreTransaction};
 use crate::store::retained_replay::install_snapshot_replay_baseline_on;
 use crate::{
     install_store_founder_state_on, install_store_root_authority_on,
@@ -27,7 +27,7 @@ impl StoreRecords<'_> {
     }
 }
 
-impl StoreRecordTransaction<'_, '_> {
+impl StoreTransaction<'_, '_> {
     pub(crate) fn install_verified_snapshot_bootstrap(
         self,
         install: &VerifiedSnapshotBootstrapInstall,
@@ -35,7 +35,7 @@ impl StoreRecordTransaction<'_, '_> {
         routing_hash: crate::ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.records.conn;
         let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: install.store_root.value.descriptor.store_root_id(),
             store_root_hash: install.store_root.semantic_hash,
@@ -87,7 +87,7 @@ impl StoreRecordTransaction<'_, '_> {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            StoreRecords::new(self.transaction, self.store_dir),
+            self.records,
             schema_version,
             routing_hash,
             install.stability.clone(),
@@ -114,7 +114,7 @@ impl StoreRecordTransaction<'_, '_> {
         let mut verified_authority = crate::store::VerifiedStoreAuthority::default();
         for selected in circle_installs {
             let activation = StoreDatabase::verified_circle_activation_on(
-                StoreRecords::new(self.transaction, self.store_dir),
+                self.records,
                 &mut verified_authority,
                 root,
                 selected.image.circle_id(),
@@ -127,7 +127,7 @@ impl StoreRecordTransaction<'_, '_> {
                 ))
             })?;
             crate::install_circle_bootstrap_image_on(
-                self.transaction,
+                self.records.conn,
                 synced_tables,
                 &selected.activation_commit,
                 &selected.image,

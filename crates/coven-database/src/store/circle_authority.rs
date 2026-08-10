@@ -115,7 +115,7 @@ impl StoreSession<'_> {
         covered: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         let Some(covering_reference) = StoreDatabase::verified_circle_activation_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -125,7 +125,7 @@ impl StoreSession<'_> {
             return Ok(false);
         };
         StoreDatabase::verified_circle_control_covers_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -140,17 +140,11 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, DbError> {
-        self.verified_store_authority.retained_replay_inputs_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
-            root,
-        )?;
+        self.verified_store_authority
+            .retained_replay_inputs_on(self.records, root)?;
         let Some(activation) = self
             .verified_store_authority
-            .verified_circle_activation_on(
-                crate::store::StoreRecords::new(self.conn, self.store_dir),
-                circle_id,
-                expected_control,
-            )?
+            .verified_circle_activation_on(self.records, circle_id, expected_control)?
         else {
             return Ok(None);
         };
@@ -166,7 +160,8 @@ impl StoreSession<'_> {
         expected_control: &coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<Option<String>, DbError> {
-        let Some(state) = super::circle_operations::circle_current_state_on(self.conn, circle_id)?
+        let Some(state) =
+            super::circle_operations::circle_current_state_on(self.records.conn, circle_id)?
         else {
             return Ok(None);
         };
@@ -177,7 +172,7 @@ impl StoreSession<'_> {
             return Ok(None);
         };
         let Some(historical) = StoreDatabase::verified_circle_activation_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -187,7 +182,7 @@ impl StoreSession<'_> {
             return Ok(None);
         };
         if !StoreDatabase::verified_circle_control_covers_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -233,11 +228,12 @@ impl StoreSession<'_> {
         )>,
         DbError,
     > {
-        let Some(commit) = circle_activation_commit_ref_on(self.conn, circle_id, control)? else {
+        let Some(commit) = circle_activation_commit_ref_on(self.records.conn, circle_id, control)?
+        else {
             return Ok(None);
         };
         let activation = StoreDatabase::verified_circle_activation_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -259,7 +255,7 @@ impl StoreSession<'_> {
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         circle_blob_opening_protection_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -275,7 +271,7 @@ impl StoreSession<'_> {
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
         StoreDatabase::verified_circle_activation_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -296,7 +292,7 @@ impl StoreSession<'_> {
         DbError,
     > {
         let Some(head) = StoreDatabase::head_circle_control_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -305,8 +301,8 @@ impl StoreSession<'_> {
         else {
             return Ok(None);
         };
-        let commit =
-            circle_activation_commit_ref_on(self.conn, circle_id, &head)?.ok_or_else(|| {
+        let commit = circle_activation_commit_ref_on(self.records.conn, circle_id, &head)?
+            .ok_or_else(|| {
                 DbError::Message(format!(
                     "Circle {circle_id} head control has no activating commit"
                 ))
@@ -319,7 +315,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        retained_circle_activation_commit_ref_on(self.conn, circle_id, control)
+        retained_circle_activation_commit_ref_on(self.records.conn, circle_id, control)
     }
 
     fn verified_circle_control_coord_covers(
@@ -330,7 +326,7 @@ impl StoreSession<'_> {
         covered: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         let Some(reference) = StoreDatabase::verified_circle_activation_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -340,7 +336,7 @@ impl StoreSession<'_> {
             return Ok(false);
         };
         StoreDatabase::verified_circle_control_covers_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,
@@ -357,7 +353,7 @@ impl StoreSession<'_> {
         prior: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
         StoreDatabase::verified_circle_control_covers_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
+            self.records,
             self.verified_store_authority,
             root,
             circle_id,

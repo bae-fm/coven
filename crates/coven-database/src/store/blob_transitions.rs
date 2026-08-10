@@ -24,7 +24,7 @@ impl StoreSession<'_> {
         gate_column: &str,
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
-        crate::query_truth(self.conn, root_table, gate_column, root_id)
+        crate::query_truth(self.records.conn, root_table, gate_column, root_id)
             .map_err(|error| DbError::Message(error.to_string()))
     }
 
@@ -38,7 +38,7 @@ impl StoreSession<'_> {
         created_at: &str,
         uploads: &[(RowBlobRef, std::path::PathBuf)],
     ) -> Result<Option<bool>, DbError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = self.records.conn.unchecked_transaction()?;
         let locality = crate::query_truth(&transaction, root_table, gate_column, root_id)
             .map_err(|error| DbError::Message(error.to_string()))?;
         if locality == Some(false) {
@@ -86,7 +86,7 @@ impl StoreSession<'_> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<PostUpload, DbError> {
-        let connection = self.conn;
+        let connection = self.records.conn;
         let resolved_root = self
             .gates
             .resolve_root_of(connection, row.table(), row.row_id())
@@ -170,7 +170,7 @@ impl StoreSession<'_> {
         let publication_write_id = write_id.clone();
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             connection,
-            self.store_dir,
+            self.records.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,
@@ -212,8 +212,8 @@ impl StoreSession<'_> {
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), DbError> {
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-            self.conn,
-            self.store_dir,
+            self.records.conn,
+            self.records.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,
@@ -316,7 +316,7 @@ impl StoreSession<'_> {
     }
 
     fn cancel_make_remote(&self, root_table: &str, root_id: &str) -> Result<(), DbError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = self.records.conn.unchecked_transaction()?;
         match Database::make_remote_intent_state(&transaction, root_table, root_id)? {
             Some(MakeRemoteIntentState::Uploading) => {
                 let updated = transaction

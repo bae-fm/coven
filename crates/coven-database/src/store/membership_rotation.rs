@@ -5,11 +5,11 @@ use coven_protocol::store_commit::ObjectHash;
 
 impl StoreSession<'_> {
     fn load_rotation_gate(&mut self) -> Result<Option<RotationGate>, DbError> {
-        load_rotation_gate_on(self.conn).map(|gate| gate.map(|(_, gate)| gate))
+        load_rotation_gate_on(self.records.conn).map(|gate| gate.map(|(_, gate)| gate))
     }
 
     fn record_peer_rotation(&mut self, generation: u64) -> Result<RotationGate, DbError> {
-        let conn = self.conn;
+        let conn = self.records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let existing = load_rotation_gate_on(&tx)?;
         let next = RotationGate::merge_peer_commit(
@@ -31,7 +31,7 @@ impl StoreSession<'_> {
         &mut self,
         adopted_generation: u64,
     ) -> Result<Option<RotationGate>, DbError> {
-        let conn = self.conn;
+        let conn = self.records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let existing = load_rotation_gate_on(&tx)?.ok_or_else(|| {
             DbError::Message("rotation gate is absent during peer rotation adoption".to_string())
@@ -51,7 +51,7 @@ impl StoreSession<'_> {
         intent_hash: ObjectHash,
         generation: u64,
     ) -> Result<Option<RotationGate>, DbError> {
-        let conn = self.conn;
+        let conn = self.records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let existing = load_rotation_gate_on(&tx)?.ok_or_else(|| {
             DbError::Message("rotation gate is absent during local rotation adoption".to_string())

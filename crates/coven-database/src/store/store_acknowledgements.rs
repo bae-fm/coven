@@ -7,14 +7,15 @@ use crate::store_ack_records::{load_expected_outbound_store_ack_on, load_outboun
 
 impl StoreSession<'_> {
     fn latest_local_store_ack(&self) -> Result<Option<PublishedStoreAck>, DbError> {
-        load_published_store_ack_on(self.conn)
+        load_published_store_ack_on(self.records.conn)
     }
 
     fn activated_store_ack(
         &self,
         registration: &StoreDeviceRegistrationRef,
     ) -> Result<Option<StoreAckRef>, DbError> {
-        self.conn
+        self.records
+            .conn
             .query_row(
                 "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
                 [registration.device_id.to_string()],
@@ -43,7 +44,11 @@ impl StoreSession<'_> {
     ) -> Result<StoreAckRef, DbError> {
         let authority = self.local_store_authority()?;
         let bytes = ack.to_bytes();
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let (reference, verified) =
             verify_next_local_store_ack_on(&tx, &authority, &bytes, &prepared)?;
         if verified != ack {
@@ -78,7 +83,11 @@ impl StoreSession<'_> {
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
             &authority,
@@ -163,12 +172,16 @@ impl StoreSession<'_> {
 
     fn oldest_outbound_store_ack(&mut self) -> Result<Option<OutboundStoreAck>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_store_ack_on(self.conn, &authority)
+        load_outbound_store_ack_on(self.records.conn, &authority)
     }
 
     fn complete_outbound_store_ack(&mut self, accepted: &StoreAckRef) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
             &authority,

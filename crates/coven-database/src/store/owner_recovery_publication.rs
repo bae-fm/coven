@@ -91,7 +91,7 @@ impl StoreSession<'_> {
                 "Owner recovery publication requires created registration objects".into(),
             ));
         }
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
+        let records = self.records;
         let root = self
             .verified_store_authority
             .required_root_authority_on(records)?;
@@ -238,7 +238,11 @@ impl StoreSession<'_> {
         let registration_hash = registration_hash.to_string();
         let encoded = serde_json::to_string(&durable)
             .map_err(|error| DbError::context("serialize Owner recovery publication", error))?;
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         tx.execute(
             "INSERT INTO local_owner_recovery_publication
                  (singleton, registration_hash, publication)
@@ -266,6 +270,7 @@ impl StoreSession<'_> {
 
     fn owner_recovery_publication(&mut self) -> Result<Option<OwnerRecoveryPublication>, DbError> {
         let stored: Option<(String, String)> = self
+            .records
             .conn
             .query_row(
                 "SELECT registration_hash, publication

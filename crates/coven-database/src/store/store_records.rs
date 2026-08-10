@@ -14,6 +14,7 @@ use super::payload_spool::{
     PayloadSpoolError,
 };
 use super::publication_state::PreparedStoreWriteState;
+use super::StoreRecords;
 use crate::{
     candidate_graph_exact_objects, is_routing_table, load_remote_object_on, AudiencePartition,
     CirclePartitionControl, Database, DbError, StoreWriteBase, StoreWriteBlobFacts,
@@ -22,17 +23,6 @@ use crate::{
 mod circle_bootstrap;
 mod retained_replay;
 mod snapshot_install;
-
-/// One Store's row connection and matching payload directory.
-///
-/// A record whose bytes live in the spool is half a row and half a file, so
-/// record operations carry both halves as one scoped value. Operations that
-/// touch rows alone continue to take the connection in their private SQL leaf.
-#[derive(Clone, Copy)]
-pub(crate) struct StoreRecords<'store> {
-    conn: &'store Connection,
-    store_dir: &'store StoreDir,
-}
 
 impl<'store> StoreRecords<'store> {
     pub(super) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
@@ -236,9 +226,9 @@ impl<'store> StoreRecords<'store> {
 /// land in this transaction. Keeping both borrows together prevents a record
 /// mutation from using another Store's payload directory.
 #[derive(Clone, Copy)]
-pub(crate) struct StoreRecordTransaction<'store, 'connection> {
+pub(crate) struct StoreTransaction<'store, 'connection> {
     transaction: &'store rusqlite::Transaction<'connection>,
-    store_dir: &'store StoreDir,
+    records: StoreRecords<'store>,
 }
 
 struct UnpublishedWriteCleanup {
@@ -246,19 +236,19 @@ struct UnpublishedWriteCleanup {
     candidate: Option<coven_protocol::store_commit::StoreBatchCommitRef>,
 }
 
-impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
+impl<'store, 'connection> StoreTransaction<'store, 'connection> {
     pub(super) fn new(
         transaction: &'store rusqlite::Transaction<'connection>,
         store_dir: &'store StoreDir,
     ) -> Self {
         Self {
             transaction,
-            store_dir,
+            records: StoreRecords::new(transaction, store_dir),
         }
     }
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
-        write_payload_blocking(self.store_dir, bytes)
+        self.records.install_payload(bytes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -278,7 +268,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         } = nonactivation
         {
             super::candidate_records::validate_terminal_candidate_authority_on(
-                StoreRecords::new(self.transaction, self.store_dir),
+                self.records,
                 retained,
                 root,
                 candidate,
@@ -324,7 +314,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
     ) -> Result<(), DbError> {
         super::owner_promotion::advance_owner_promotion_journal_on(
             self.transaction,
-            self.store_dir,
+            self.records.store_dir,
             journal_key,
             target_key,
             previous_value,
@@ -354,7 +344,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
-        let tx = self.transaction;
+        let tx = self.records.conn;
         let remote_partitions = partitions
             .iter()
             .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
@@ -477,7 +467,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         authority: &mut super::VerifiedStoreAuthority,
         write_id: &WriteId,
     ) -> Result<UnpublishedWriteCleanup, DbError> {
-        let tx = self.transaction;
+        let tx = self.records.conn;
         let raw_prepared: Option<String> = tx
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -490,11 +480,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         if let Some(raw_prepared) = raw_prepared.as_deref() {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
-            let merge = parse_prepared_merge_candidate_on(
-                StoreRecords::new(tx, self.store_dir),
-                authority,
-                &prepared,
-            )?;
+            let merge = parse_prepared_merge_candidate_on(self.records, authority, &prepared)?;
             removable.push(remote_object_id(&merge.reference.object));
             match load_merge_candidate_head_cleanup_on(tx, &merge.head_object, &merge.reference)? {
                 MergeCandidateHeadCleanup::Remote { .. } => {
@@ -539,7 +525,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
             return Ok(true);
         };
         for object_id in &cleanup.removable {
-            let remote = load_remote_object_on(self.transaction, *object_id)?;
+            let remote = load_remote_object_on(self.records.conn, *object_id)?;
             if !remote
                 .candidate_cleanup_complete(candidate)
                 .map_err(|error| {
@@ -567,7 +553,7 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
         write_ids: &[WriteId],
         resolution: &WriteResolution,
     ) -> Result<(), DbError> {
-        let tx = self.transaction;
+        let tx = self.records.conn;
         let status = WriteStatus::Resolved(resolution.clone());
         for write_id in write_ids {
             let cleanup = self.unpublished_write_cleanup(authority, write_id)?;
