@@ -22,7 +22,6 @@ use std::collections::BTreeSet;
 pub(super) struct CircleCandidatePublisher<'operation, 'storage> {
     database: StoreDatabase,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     membership: coven_protocol::membership::MembershipChain,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -32,7 +31,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
     pub(super) fn new(
         database: StoreDatabase,
         storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         membership: coven_protocol::membership::MembershipChain,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
@@ -40,7 +38,6 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         Self {
             database,
             storage,
-            store_dir,
             membership,
             local_writer,
             history,
@@ -701,25 +698,17 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         context: &ProtocolObjectContext,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, CircleOperationError> {
-        let object = journal
-            .operation()
-            .prepared_objects
-            .get(step)
-            .cloned()
-            .ok_or_else(|| {
-                CircleOperationError::Journal(format!(
-                    "Circle upload step {step:?} lacks its prepared exact object"
-                ))
+        // The database retains the exact reference and its bytes through
+        // operation completion. Opening them locally validates the journal's
+        // semantic value without a cloud body GET; the provider adapter proves
+        // the stored representation.
+        let prepared = self
+            .database
+            .circle_operation_step(&journal.operation_id, step)
+            .await
+            .map_err(|error| {
+                CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
             })?;
-        // The bytes remain in the spool through operation completion. Opening
-        // them locally validates the journal's semantic value without a cloud
-        // body GET; the provider adapter proves the stored representation.
-        let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
-        let stored_bytes = spool.read(object.stored_hash()).await.map_err(|error| {
-            CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
-        })?;
-        let prepared = coven_protocol::objects::PreparedExactObject::new(object, stored_bytes)
-            .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let opened = self
             .storage
             .open_prepared_protocol_object(context, &prepared, semantic_prefix)

@@ -1,6 +1,50 @@
 use super::*;
 
 #[tokio::test]
+async fn circle_preparation_leaves_payload_installation_to_the_database() {
+    let db = open_test_db();
+    let signer = UserKeypair::generate();
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let fixture =
+        create_test_store_fixture_in_its_own_task(&db, "circle-payload-owner", &signer, home).await;
+    let prepared = fixture
+        .store
+        .bind_device(&db, &signer)
+        .await
+        .expect("bind Circle preparation Store")
+        .prepare_circle_operation("0000000001000-0000-creator", "Household")
+        .await
+        .expect("prepare Circle operation");
+    let hashes = prepared
+        .prepared_objects
+        .values()
+        .map(|object| object.reference().stored_hash())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for hash in &hashes {
+        assert!(
+            !db.store_dir.payload_spool_path(*hash).exists(),
+            "preparation installed payload {hash} without a durable owner"
+        );
+    }
+
+    let operation_id = prepared.journal.operation_id.clone();
+    StoreDatabase::new(&db.database)
+        .insert_circle_operation(prepared.journal, prepared.prepared_objects)
+        .await
+        .expect("persist Circle operation");
+    let claims = StoreDatabase::new(&db.database)
+        .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
+            operation_id.as_str(),
+        ))
+        .await
+        .expect("read Circle operation payload claims")
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(claims, hashes);
+}
+
+#[tokio::test]
 async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     let db = open_test_db();
     let (_store, _home, _signer, journal) =

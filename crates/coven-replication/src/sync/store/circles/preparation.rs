@@ -43,7 +43,6 @@ pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     membership: coven_protocol::membership::MembershipChain,
     root: coven_protocol::store_commit::StoreRootRef,
     storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-    store_dir: &'storage coven_foundation::store_dir::StoreDir,
     local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
     history: super::VerifiedCircleHistory<'operation, 'storage>,
 }
@@ -1085,7 +1084,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         membership: coven_protocol::membership::MembershipChain,
         root: coven_protocol::store_commit::StoreRootRef,
         storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
-        store_dir: &'storage coven_foundation::store_dir::StoreDir,
         local_writer: std::sync::Arc<crate::sync::store::commit_publication::LocalStoreWriter>,
         history: super::VerifiedCircleHistory<'operation, 'storage>,
     ) -> Self {
@@ -1095,7 +1093,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             membership,
             root,
             storage,
-            store_dir,
             local_writer,
             history,
         }
@@ -1898,21 +1895,6 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             )
         };
         let circle_id = creation.circle_id;
-        // The bytes reach the spool before the journal that names them, so a
-        // row referencing an object always finds it there — and a preparation
-        // that fails after this leaves content-named files no row points at.
-        let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
-        for (step, object) in &prepared_objects {
-            let stored = spool
-                .write(object.stored_bytes())
-                .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            if stored != object.reference().stored_hash() {
-                return Err(CircleOperationError::InvalidState(format!(
-                    "Circle upload step {step:?} spooled under a different hash than its reference"
-                )));
-            }
-        }
         Ok(PreparedCircleJournal {
             journal: CircleOperationJournal::ready(
                 operation_id,
@@ -1938,9 +1920,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
 /// A freshly prepared Circle operation: the journal that names its objects, and
 /// those objects' bytes.
 ///
-/// The bytes travel beside the journal rather than inside it because
-/// `remote_objects` still stores them inline; the durable copy is already in
-/// the payload spool by the time this value exists.
+/// The bytes travel beside the journal rather than inside it. The database
+/// installs them when it commits the operation that owns them.
 #[derive(Debug)]
 pub(crate) struct PreparedCircleJournal {
     pub(crate) journal: CircleOperationJournal,

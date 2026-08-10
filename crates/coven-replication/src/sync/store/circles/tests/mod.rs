@@ -95,7 +95,7 @@ async fn persist_merge_operation_fixture(
     (fixture, home, signer, prepared.journal)
 }
 
-/// The bytes an operation's object was spooled under when it was prepared.
+/// The bytes an operation's object was stored under when its row was inserted.
 ///
 /// The operation names its objects; the spool beside the device's database is
 /// where their bytes are, so a test that wants the bytes reads them the same
@@ -110,8 +110,7 @@ async fn spooled_bytes(
         .expect("read a prepared Circle object from the payload spool")
 }
 
-/// Publish every object an operation names, from the bytes preparation spooled
-/// for it — what a completed publication would have left in storage.
+/// Publish every object an operation names from the bytes its durable row owns.
 async fn publish_prepared_objects(
     store: &TestStore,
     store_dir: &coven_foundation::store_dir::StoreDir,

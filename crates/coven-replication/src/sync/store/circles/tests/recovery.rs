@@ -781,7 +781,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
     assert_eq!(
         spooled_objects(&db.store_dir, &activating).await,
         prepared_steps,
-        "preparation spools every object the operation names"
+        "operation insertion stores every object the operation names"
     );
 
     device

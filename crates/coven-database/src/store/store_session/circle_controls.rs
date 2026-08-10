@@ -20,12 +20,38 @@ use coven_protocol::store_commit::{
 };
 
 /// The stored bytes of one operation's objects, supplied alongside the
-/// operation that names them.
-///
-/// The operation holds references; `remote_objects` still stores the bytes
-/// those references name inline, so the flows that write those rows are handed
-/// the bytes by whoever prepared or read them.
+/// operation that names them so the database can install the bytes and their
+/// owner claims at the same durable boundary.
 pub type PreparedCircleObjects = std::collections::BTreeMap<String, PreparedExactObject>;
+
+fn persist_circle_operation_objects_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
+    prepared_objects: &PreparedCircleObjects,
+    owner: &coven_protocol::store_commit::StoreBatchCommitRef,
+    domain: &str,
+) -> Result<(), DbError> {
+    let mut installed = std::collections::BTreeSet::new();
+    for remote in remotes {
+        persist_prepared_remote_object_on(conn, store_dir, remote, owner, domain)?;
+        installed.extend(remote.payload_bytes().keys().copied());
+    }
+    for object in prepared_objects.values() {
+        let expected = object.reference().stored_hash();
+        if !installed.insert(expected) {
+            continue;
+        }
+        let actual = crate::payload_spool::write_payload_blocking(store_dir, object.stored_bytes())
+            .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
+        if actual != expected {
+            return Err(DbError::Message(format!(
+                "{domain} payload installed as {actual}, referenced as {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 impl StoreSession<'_> {
     fn insert_circle_operation(
@@ -43,15 +69,14 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        for remote in &remotes {
-            persist_prepared_remote_object_on(
-                &tx,
-                self.records.store_dir,
-                remote,
-                &owner,
-                "Circle candidate graph",
-            )?;
-        }
+        persist_circle_operation_objects_on(
+            &tx,
+            self.records.store_dir,
+            &remotes,
+            &prepared_objects,
+            &owner,
+            "Circle candidate graph",
+        )?;
         claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
         insert_circle_operation_row_on(&tx, &row)?;
         tx.commit().map_err(DbError::from)
@@ -95,15 +120,14 @@ impl StoreSession<'_> {
                 "superseded Circle operation is absent from its slot".to_string(),
             ));
         }
-        for remote in &remotes {
-            persist_prepared_remote_object_on(
-                &tx,
-                self.records.store_dir,
-                remote,
-                &owner,
-                "Circle candidate graph",
-            )?;
-        }
+        persist_circle_operation_objects_on(
+            &tx,
+            self.records.store_dir,
+            &remotes,
+            &prepared_objects,
+            &owner,
+            "Circle candidate graph",
+        )?;
         claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
         insert_circle_operation_row_on(&tx, &row)?;
         tx.commit().map_err(DbError::from)
@@ -114,6 +138,34 @@ impl StoreSession<'_> {
         operation_id: String,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         load_circle_operation_on(self.records.conn, &operation_id)
+    }
+
+    fn circle_operation_step(
+        &mut self,
+        operation_id: String,
+        step: String,
+    ) -> Result<PreparedExactObject, DbError> {
+        let journal =
+            load_circle_operation_on(self.records.conn, &operation_id)?.ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle operation {operation_id} disappeared before opening step {step:?}"
+                ))
+            })?;
+        let object = journal
+            .operation()
+            .prepared_objects
+            .get(&step)
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle operation {operation_id} has no payload for step {step:?}"
+                ))
+            })?;
+        let stored_bytes = self
+            .records
+            .payload(object.stored_hash())
+            .map_err(DbError::from)?;
+        PreparedExactObject::new(object.clone(), stored_bytes)
+            .map_err(|error| DbError::context(format!("Circle operation step {step:?}"), error))
     }
 
     fn oldest_pending_circle_operation(
@@ -232,15 +284,14 @@ impl StoreSession<'_> {
                 journal.operation_id
             )));
         }
-        for remote in &remotes {
-            persist_prepared_remote_object_on(
-                &tx,
-                self.records.store_dir,
-                remote,
-                &owner,
-                "Circle close-finalization candidate graph",
-            )?;
-        }
+        persist_circle_operation_objects_on(
+            &tx,
+            self.records.store_dir,
+            &remotes,
+            &prepared_objects,
+            &owner,
+            "Circle close-finalization candidate graph",
+        )?;
         claim_operation_payloads_on(&tx, &journal.operation_id, journal.operation())?;
         tx.execute(
             "DELETE FROM circle_operation_uploads WHERE operation_id = ?1",
@@ -596,6 +647,17 @@ impl StoreDatabase {
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         let operation_id = operation_id.as_str().to_string();
         self.call_store(move |session| session.circle_operation(operation_id))
+            .await
+    }
+
+    pub async fn circle_operation_step(
+        &self,
+        operation_id: &CircleOperationId,
+        step: &str,
+    ) -> Result<PreparedExactObject, DbError> {
+        let operation_id = operation_id.as_str().to_string();
+        let step = step.to_string();
+        self.call_store(move |session| session.circle_operation_step(operation_id, step))
             .await
     }
 
