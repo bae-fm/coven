@@ -36,6 +36,9 @@ impl MembershipChain {
         if entries.is_empty() {
             return Err(MembershipError::EmptyChain);
         }
+        for (index, (_, entry)) in entries.iter().enumerate() {
+            Self::validate_entry_authenticity(index, entry)?;
+        }
         let (coords, entries): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
         let mut chain = Self {
             entries,
@@ -247,6 +250,7 @@ impl MembershipChain {
         coord: MembershipCoord,
         entry: MembershipEntry,
     ) -> Result<(), MembershipError> {
+        Self::validate_entry_authenticity(self.entries.len(), &entry)?;
         self.entries.push(entry);
         self.coords.push(coord);
         if let Err(error) = self.rebuild() {
@@ -396,6 +400,17 @@ impl MembershipChain {
         })
     }
 
+    fn validate_entry_authenticity(
+        index: usize,
+        entry: &MembershipEntry,
+    ) -> Result<(), MembershipError> {
+        if verify_membership_entry(entry) {
+            Ok(())
+        } else {
+            Err(MembershipError::InvalidSignature(index))
+        }
+    }
+
     fn rebuild(&mut self) -> Result<(), MembershipError> {
         let expected_store = self
             .entries
@@ -417,9 +432,6 @@ impl MembershipChain {
                     expected: expected_store.clone(),
                     actual: entry.store_id.clone(),
                 });
-            }
-            if !verify_membership_entry(entry) {
-                return Err(MembershipError::InvalidSignature(index));
             }
             let actual = entry.coord();
             if *coord != actual {
