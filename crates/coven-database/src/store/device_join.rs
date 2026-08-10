@@ -206,6 +206,7 @@ fn pending_join_connection_poisoned() -> crate::DbError {
 
 pub(crate) fn complete_device_join_from_pending_on(
     conn: &rusqlite::Connection,
+    durability: crate::connection_io::ConnectionDurability,
     pending_path: &str,
     pending_attempt: &str,
     expected_pending: &str,
@@ -215,6 +216,11 @@ pub(crate) fn complete_device_join_from_pending_on(
     conn.execute("ATTACH DATABASE ?1 AS pending_join_source", [pending_path])
         .map_err(crate::DbError::from)?;
     let operation = (|| {
+        crate::connection_io::configure_connection_schema_durability(
+            conn,
+            Some("pending_join_source"),
+            durability,
+        )?;
         let transaction = conn.unchecked_transaction().map_err(crate::DbError::from)?;
         let actual: String = transaction
             .query_row(

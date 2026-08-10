@@ -109,13 +109,24 @@ pub(crate) fn configure_connection_durability(
     connection: &Connection,
     durability: ConnectionDurability,
 ) -> Result<(), DbError> {
-    let synchronous = match durability {
-        ConnectionDurability::Full => "FULL",
+    configure_connection_schema_durability(connection, None, durability)
+}
+
+pub(crate) fn configure_connection_schema_durability(
+    connection: &Connection,
+    schema: Option<&str>,
+    durability: ConnectionDurability,
+) -> Result<(), DbError> {
+    let (journal_mode, synchronous) = match durability {
+        ConnectionDurability::Full => ("DELETE", "FULL"),
         #[cfg(any(test, feature = "test-utils"))]
-        ConnectionDurability::Disabled => "OFF",
+        ConnectionDurability::Disabled => ("MEMORY", "OFF"),
     };
     connection
-        .pragma_update(None, "synchronous", synchronous)
+        .pragma_update_and_check(schema, "journal_mode", journal_mode, |_| Ok(()))
+        .map_err(DbError::from)?;
+    connection
+        .pragma_update(schema, "synchronous", synchronous)
         .map_err(DbError::from)
 }
 
@@ -124,24 +135,19 @@ pub(crate) fn open_connection(
     durability: ConnectionDurability,
 ) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
-    // WAL so a read-only connection in another process can read committed rows while
-    // this writer commits. The mode is stored in the db header and persists, so a
-    // later read-only open finds the db already in WAL.
-    conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
-        .map_err(DbError::from)?;
-    // The operation journal is the durable side of the local-intent →
-    // idempotent-remote-step bridge. Production construction selects FULL so a
-    // successful journal commit reaches the OS before an external step begins;
-    // test construction can suppress physical durability with its file-sync
-    // dependency.
+    // Rollback journaling lets one SQLite transaction commit the Store and an
+    // attached operation journal through a super-journal. Production selects
+    // DELETE + FULL so that cross-file commit is crash-atomic before an external
+    // step begins. Tests select MEMORY + OFF: transaction rollback remains real,
+    // while crash durability and its filesystem work are deliberately absent.
     configure_connection_durability(&conn, durability)?;
     Ok(conn)
 }
 
 /// Open a `SQLITE_OPEN_READONLY` connection for [`Database::open_read_only`].
 /// `NO_MUTEX` because coven serializes every access
-/// on its one connection thread; the connection sets no journal mode (a read-only
-/// connection cannot, and the writer already put the db in WAL).
+/// on its one connection thread; the connection sets no journal mode because a
+/// read-only connection cannot change the writer-owned database setting.
 pub(crate) fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
     use rusqlite::OpenFlags;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -155,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writable_connection_pins_wal_commit_durability() {
+    fn writable_connection_uses_crash_atomic_rollback_journaling() {
         let directory = tempfile::tempdir().expect("create database directory");
         let connection = open_connection(
             &directory.path().join("store.db"),
@@ -171,11 +177,11 @@ mod tests {
             .expect("read journal mode");
 
         assert_eq!(synchronous, 2);
-        assert_eq!(journal_mode, "wal");
+        assert_eq!(journal_mode, "delete");
     }
 
     #[test]
-    fn writable_connection_can_disable_commit_durability() {
+    fn writable_connection_can_keep_test_transactions_out_of_durable_files() {
         let directory = tempfile::tempdir().expect("create database directory");
         let connection = open_connection(
             &directory.path().join("store.db"),
@@ -186,8 +192,64 @@ mod tests {
         let synchronous: i64 = connection
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .expect("read synchronous setting");
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode");
 
         assert_eq!(synchronous, 0);
+        assert_eq!(journal_mode, "memory");
+    }
+
+    #[test]
+    fn attached_test_journal_uses_the_store_connections_durability() {
+        let directory = tempfile::tempdir().expect("create database directory");
+        let connection = open_connection(
+            &directory.path().join("store.db"),
+            ConnectionDurability::Disabled,
+        )
+        .expect("open Store database");
+        let pending_path = directory.path().join("pending.db");
+        Connection::open(&pending_path).expect("create pending database");
+        let pending_path = pending_path.to_string_lossy().into_owned();
+        connection
+            .execute("ATTACH DATABASE ?1 AS pending", [&pending_path])
+            .expect("attach pending database");
+
+        configure_connection_schema_durability(
+            &connection,
+            Some("pending"),
+            ConnectionDurability::Disabled,
+        )
+        .expect("configure attached database");
+
+        let synchronous: i64 = connection
+            .query_row("PRAGMA pending.synchronous", [], |row| row.get(0))
+            .expect("read attached synchronous setting");
+        let journal_mode: String = connection
+            .query_row("PRAGMA pending.journal_mode", [], |row| row.get(0))
+            .expect("read attached journal mode");
+        assert_eq!(synchronous, 0);
+        assert_eq!(journal_mode, "memory");
+    }
+
+    #[test]
+    fn rollback_writer_and_secondary_reader_observe_commits() {
+        let directory = tempfile::tempdir().expect("create database directory");
+        let path = directory.path().join("store.db");
+        let writer = open_connection(&path, ConnectionDurability::Full).expect("open writer");
+        writer
+            .execute_batch("CREATE TABLE values_seen (value INTEGER NOT NULL);")
+            .expect("create table");
+        let reader = open_connection_read_only(&path).expect("open secondary reader");
+
+        writer
+            .execute("INSERT INTO values_seen VALUES (1)", [])
+            .expect("commit writer row");
+        let value: i64 = reader
+            .query_row("SELECT value FROM values_seen", [], |row| row.get(0))
+            .expect("secondary reader observes committed row");
+
+        assert_eq!(value, 1);
     }
 
     #[test]

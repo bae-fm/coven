@@ -340,12 +340,12 @@ impl Database {
     /// opens against the schema the writer left, and refuses one newer than this
     /// binary knows — the writer's `SchemaTooNew` policy); and it returns no
     /// stamper, because a reader mints no `_updated_at`. Reads are safe across
-    /// processes because the writer opens the db in WAL mode, so a reader observes
-    /// committed rows while the writer commits more.
+    /// processes because a read-only connection can coexist with the writer and
+    /// observes commits after each read transaction ends.
     ///
     /// The caller takes no store open-lock for a read-only open: the exclusive
     /// advisory lock guards against a second *writer*, and a read-only connection
-    /// cannot write, so multiple readers and one writer coexist under WAL.
+    /// cannot write, so multiple readers can coexist with one writer.
     pub fn open_read_only(
         path: &Path,
         synced_tables: Vec<SyncedTable>,

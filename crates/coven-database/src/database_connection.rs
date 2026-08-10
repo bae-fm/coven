@@ -29,6 +29,7 @@ struct DatabaseContext {
 /// Caller-task services live in the one shared context created beside it.
 pub(crate) struct DatabaseCore {
     conn: Connection,
+    connection_durability: crate::connection_io::ConnectionDurability,
     verified_store_authority: crate::store::VerifiedStoreAuthority,
     context: Arc<DatabaseContext>,
 }
@@ -37,6 +38,7 @@ impl DatabaseCore {
     pub(crate) fn new(
         store_dir: coven_foundation::store_dir::StoreDir,
         conn: Connection,
+        connection_durability: crate::connection_io::ConnectionDurability,
         hlc: Arc<Hlc>,
         synced_tables: Arc<Vec<SyncedTable>>,
         schema_version: u32,
@@ -48,6 +50,7 @@ impl DatabaseCore {
     ) -> Self {
         Self {
             conn,
+            connection_durability,
             verified_store_authority: Default::default(),
             context: Arc::new(DatabaseContext {
                 store_dir,
@@ -110,6 +113,7 @@ impl DatabaseConnection {
         self.on_connection_thread(move |core| {
             let mut session = DatabaseSession::new(
                 &core.conn,
+                core.connection_durability,
                 #[cfg(any(test, feature = "test-utils"))]
                 &core.context.store_dir,
             );
