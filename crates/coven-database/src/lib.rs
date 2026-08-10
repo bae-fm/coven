@@ -804,6 +804,8 @@ pub(crate) struct DatabaseSession<'session> {
     conn: &'session Connection,
     gates: &'session Gates,
     synced_tables: &'session [SyncedTable],
+    #[cfg(any(test, feature = "test-utils"))]
+    store_dir: &'session coven_foundation::store_dir::StoreDir,
 }
 
 /// One Circle image selected against the restoring identity's re-resolved

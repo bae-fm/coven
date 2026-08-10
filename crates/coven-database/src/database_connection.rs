@@ -39,6 +39,8 @@ impl DatabaseConnection {
                 conn: &core.conn,
                 gates: &core.gates,
                 synced_tables: &core.synced_tables,
+                #[cfg(any(test, feature = "test-utils"))]
+                store_dir: &core.store_dir,
             };
             operation(&mut session)
         })
