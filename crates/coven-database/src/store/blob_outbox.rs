@@ -114,6 +114,302 @@ pub struct PublishedBlobDropIntent {
     pub drop: coven_protocol::blob::DeferredLocalBlobDrop,
 }
 
+impl StoreSession<'_> {
+    fn queued_upload_rows(
+        &mut self,
+        root: Option<(String, String)>,
+    ) -> Result<Vec<QueuedUpload>, DbError> {
+        const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
+                    attempt_count, last_error, created_at, last_attempt_at
+             FROM cloud_outbox WHERE operation = 'upload'";
+        let (sql, parameters): (String, Vec<String>) = match root {
+            Some((root_table, root_id)) => (
+                format!("{COLUMNS} AND root_table = ?1 AND root_id = ?2 ORDER BY id"),
+                vec![root_table, root_id],
+            ),
+            None => (format!("{COLUMNS} ORDER BY id"), Vec::new()),
+        };
+        let mut statement = self.records.conn.prepare(&sql).map_err(DbError::from)?;
+        let uploads = statement
+            .query_map(rusqlite::params_from_iter(parameters), row_to_queued_upload)
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(uploads)
+    }
+
+    fn queued_deletes(&mut self) -> Result<Vec<QueuedDelete>, DbError> {
+        let mut statement = self
+            .records
+            .conn
+            .prepare(
+                "SELECT stored_ref, attempt_count, last_error, created_at, last_attempt_at
+                 FROM cloud_outbox WHERE operation = 'delete' ORDER BY id",
+            )
+            .map_err(DbError::from)?;
+        let deletes = statement
+            .query_map([], row_to_queued_delete)
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(deletes)
+    }
+
+    fn pending_outbox(&mut self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
+        let mut statement = self
+            .records
+            .conn
+            .prepare(
+                "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
+                        upload_state, attempt_count, last_attempt_at, root_table, root_id
+                 FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
+            )
+            .map_err(DbError::from)?;
+        let entries = statement
+            .query_map([operation], crate::row_to_outbox_entry)
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(entries)
+    }
+
+    fn remove_blob_delete(&mut self, id: i64, stored: String) -> Result<(), DbError> {
+        let removed = self
+            .records
+            .conn
+            .execute(
+                "DELETE FROM cloud_outbox
+                 WHERE id = ?1 AND operation = 'delete' AND stored_ref = ?2",
+                rusqlite::params![id, stored],
+            )
+            .map_err(DbError::from)?;
+        if removed != 1 {
+            return Err(DbError::Message(
+                "blob delete outbox entry changed before exact dequeue".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn published_blob_drop_intents(
+        &mut self,
+        max_seq: u64,
+    ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
+        let mut statement = self
+            .records
+            .conn
+            .prepare(
+                "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
+                 FROM published_blob_drop_intents
+                 WHERE seq <= ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM store_write_blob_leases lease
+                       WHERE lease.namespace = published_blob_drop_intents.namespace
+                         AND lease.blob_id = published_blob_drop_intents.blob_id
+                   )
+                 ORDER BY seq, namespace, blob_id, locator_hash",
+            )
+            .map_err(DbError::from)?;
+        let intents = statement
+            .query_map([max_seq as i64], |row| {
+                let size: Option<i64> = row.get(3)?;
+                let size = size.ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "published blob drop intent is missing size",
+                        )),
+                    )
+                })?;
+                if size < 0 {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Integer,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("published blob drop intent has negative size {size}"),
+                        )),
+                    ));
+                }
+                let plaintext_hash = row.get::<_, String>(4)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid published blob plaintext hash: {error}"),
+                        )),
+                    )
+                })?;
+                let locator_hash = row.get::<_, String>(5)?.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid published blob locator hash: {error}"),
+                        )),
+                    )
+                })?;
+                let disposition_raw: String = row.get(6)?;
+                let disposition =
+                    coven_protocol::blob::DeferredLocalBlobDisposition::from_db(&disposition_raw)
+                        .map_err(|message| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                message,
+                            )),
+                        )
+                    })?;
+                Ok(PublishedBlobDropIntent {
+                    seq: row.get::<_, i64>(0)? as u64,
+                    drop: coven_protocol::blob::DeferredLocalBlobDrop {
+                        namespace: row.get(1)?,
+                        id: row.get(2)?,
+                        size: size as u64,
+                        plaintext_hash,
+                        locator_hash,
+                        disposition,
+                    },
+                })
+            })
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(intents)
+    }
+
+    fn clear_published_blob_drop_intent(
+        &mut self,
+        seq: u64,
+        namespace: String,
+        id: String,
+        locator_hash: String,
+    ) -> Result<(), DbError> {
+        self.records
+            .conn
+            .execute(
+                "DELETE FROM published_blob_drop_intents
+                 WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND locator_hash = ?4",
+                rusqlite::params![seq as i64, namespace, id, locator_hash],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    fn record_outbox_failure(
+        &mut self,
+        entry: OutboxEntry,
+        error: String,
+        attempted_at: String,
+    ) -> Result<(), DbError> {
+        let identity = crate::outbox_identity(&entry.operation)?;
+        let updated = match identity {
+            OutboxIdentity::Upload {
+                table,
+                row_id,
+                column,
+                row_stamp,
+            } => self.records.conn.execute(
+                "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
+                 last_error = ?1, last_attempt_at = ?2
+                 WHERE id = ?3 AND operation = 'upload' AND table_name = ?4
+                   AND row_id = ?5 AND column_name = ?6 AND row_stamp = ?7",
+                rusqlite::params![
+                    error,
+                    attempted_at,
+                    entry.id,
+                    table,
+                    row_id,
+                    column,
+                    row_stamp
+                ],
+            ),
+            OutboxIdentity::Stored { operation, stored } => self.records.conn.execute(
+                "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
+                     last_error = ?1, last_attempt_at = ?2
+                     WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
+                rusqlite::params![error, attempted_at, entry.id, operation, stored],
+            ),
+        }
+        .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(
+                "cloud outbox entry changed before failure recording".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn swap_blob_upload_state(
+        &mut self,
+        id: i64,
+        table: String,
+        row_id: String,
+        column: String,
+        row_stamp: String,
+        from: String,
+        to: String,
+        context: &'static str,
+    ) -> Result<(), DbError> {
+        let updated = self
+            .records
+            .conn
+            .execute(
+                "UPDATE cloud_outbox SET upload_state = ?1
+                 WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
+                   AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
+                   AND upload_state = ?7",
+                rusqlite::params![to, id, table, row_id, column, row_stamp, from],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "upload outbox entry changed before {context}"
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn reset_outbox_backoff(&mut self) -> Result<(), DbError> {
+        self.records
+            .conn
+            .execute(
+                "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
+                [],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    fn make_remote_intent_state(
+        &mut self,
+        root_table: String,
+        root_id: String,
+    ) -> Result<Option<MakeRemoteIntentState>, DbError> {
+        Database::make_remote_intent_state(self.records.conn, &root_table, &root_id)
+    }
+
+    fn finish_cancelled_blob_upload(&mut self, entry: OutboxEntry) -> Result<bool, DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let finished =
+            crate::CloudOutboxRecords::new(&transaction).finish_cancelled_upload(&entry)?;
+        transaction.commit().map_err(DbError::from)?;
+        Ok(finished)
+    }
+}
+
 impl StoreDatabase {
     #[doc(hidden)]
     pub async fn queued_uploads(&self) -> Result<Vec<QueuedUpload>, DbError> {
@@ -135,47 +431,14 @@ impl StoreDatabase {
         root: Option<(String, String)>,
     ) -> Result<Vec<QueuedUpload>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
-                            attempt_count, last_error, created_at, last_attempt_at
-                     FROM cloud_outbox WHERE operation = 'upload'";
-                let (sql, parameters): (String, Vec<String>) = match root {
-                    Some((root_table, root_id)) => (
-                        format!("{COLUMNS} AND root_table = ?1 AND root_id = ?2 ORDER BY id"),
-                        vec![root_table, root_id],
-                    ),
-                    None => (format!("{COLUMNS} ORDER BY id"), Vec::new()),
-                };
-                let mut statement = connection.prepare(&sql).map_err(DbError::from)?;
-                let uploads = statement
-                    .query_map(rusqlite::params_from_iter(parameters), row_to_queued_upload)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                Ok(uploads)
-            })
+            .call_store(move |session| session.queued_upload_rows(root))
             .await
     }
 
     #[doc(hidden)]
     pub async fn queued_deletes(&self) -> Result<Vec<QueuedDelete>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT stored_ref, attempt_count, last_error, created_at, last_attempt_at
-                         FROM cloud_outbox WHERE operation = 'delete' ORDER BY id",
-                    )
-                    .map_err(DbError::from)?;
-                let deletes = statement
-                    .query_map([], row_to_queued_delete)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                Ok(deletes)
-            })
+            .call_store(|session| session.queued_deletes())
             .await
     }
 
@@ -185,22 +448,7 @@ impl StoreDatabase {
 
     async fn pending_outbox(&self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
-                                upload_state, attempt_count, last_attempt_at, root_table, root_id
-                         FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
-                    )
-                    .map_err(DbError::from)?;
-                let entries = statement
-                    .query_map([operation], crate::row_to_outbox_entry)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                Ok(entries)
-            })
+            .call_store(move |session| session.pending_outbox(operation))
             .await
     }
 
@@ -214,22 +462,7 @@ impl StoreDatabase {
         let stored = serde_json::to_string(stored)
             .map_err(|error| DbError::context("serialize stored blob ref", error))?;
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let removed = connection
-                    .execute(
-                        "DELETE FROM cloud_outbox
-                         WHERE id = ?1 AND operation = 'delete' AND stored_ref = ?2",
-                        rusqlite::params![id, stored],
-                    )
-                    .map_err(DbError::from)?;
-                if removed != 1 {
-                    return Err(DbError::Message(
-                        "blob delete outbox entry changed before exact dequeue".to_string(),
-                    ));
-                }
-                Ok(())
-            })
+            .call_store(move |session| session.remove_blob_delete(id, stored))
             .await
     }
 
@@ -237,104 +470,8 @@ impl StoreDatabase {
         &self,
         max_seq: u64,
     ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
-        self.connection.call_store(move |session| {
-                let connection = session.records.conn;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT seq, namespace, blob_id, size, plaintext_hash, locator_hash, disposition
-                         FROM published_blob_drop_intents
-                         WHERE seq <= ?1
-                           AND NOT EXISTS (
-                               SELECT 1 FROM store_write_blob_leases lease
-                               WHERE lease.namespace = published_blob_drop_intents.namespace
-                                 AND lease.blob_id = published_blob_drop_intents.blob_id
-                           )
-                         ORDER BY seq, namespace, blob_id, locator_hash",
-                    )
-                    .map_err(DbError::from)?;
-                let intents = statement
-                    .query_map([max_seq as i64], |row| {
-                        let size: Option<i64> = row.get(3)?;
-                        let size = size.ok_or_else(|| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Integer,
-                                Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "published blob drop intent is missing size",
-                                )),
-                            )
-                        })?;
-                        if size < 0 {
-                            return Err(rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Integer,
-                                Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!(
-                                        "published blob drop intent has negative size {size}"
-                                    ),
-                                )),
-                            ));
-                        }
-                        let plaintext_hash =
-                            row.get::<_, String>(4)?.parse().map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    4,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        format!(
-                                            "invalid published blob plaintext hash: {error}"
-                                        ),
-                                    )),
-                                )
-                            })?;
-                        let locator_hash =
-                            row.get::<_, String>(5)?.parse().map_err(|error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    5,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        format!(
-                                            "invalid published blob locator hash: {error}"
-                                        ),
-                                    )),
-                                )
-                            })?;
-                        let disposition_raw: String = row.get(6)?;
-                        let disposition =
-                            coven_protocol::blob::DeferredLocalBlobDisposition::from_db(
-                                &disposition_raw,
-                            )
-                            .map_err(|message| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    6,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        message,
-                                    )),
-                                )
-                            })?;
-                        Ok(PublishedBlobDropIntent {
-                            seq: row.get::<_, i64>(0)? as u64,
-                            drop: coven_protocol::blob::DeferredLocalBlobDrop {
-                                namespace: row.get(1)?,
-                                id: row.get(2)?,
-                                size: size as u64,
-                                plaintext_hash,
-                                locator_hash,
-                                disposition,
-                            },
-                        })
-                    })
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                Ok(intents)
-            })
+        self.connection
+            .call_store(move |session| session.published_blob_drop_intents(max_seq))
             .await
     }
 
@@ -348,15 +485,7 @@ impl StoreDatabase {
         let locator_hash = intent.drop.locator_hash.to_string();
         self.connection
             .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute(
-                        "DELETE FROM published_blob_drop_intents
-                         WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND locator_hash = ?4",
-                        rusqlite::params![seq as i64, namespace, id, locator_hash],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
+                session.clear_published_blob_drop_intent(seq, namespace, id, locator_hash)
             })
             .await
     }
@@ -457,49 +586,11 @@ impl StoreDatabase {
         error: &str,
         attempted_at: &str,
     ) -> Result<(), DbError> {
-        let id = entry.id;
-        let identity = crate::outbox_identity(&entry.operation)?;
+        let entry = entry.clone();
         let error = error.to_string();
         let attempted_at = attempted_at.to_string();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let updated = match identity {
-                    OutboxIdentity::Upload {
-                        table,
-                        row_id,
-                        column,
-                        row_stamp,
-                    } => connection.execute(
-                        "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
-                         last_error = ?1, last_attempt_at = ?2
-                         WHERE id = ?3 AND operation = 'upload' AND table_name = ?4
-                           AND row_id = ?5 AND column_name = ?6 AND row_stamp = ?7",
-                        rusqlite::params![
-                            error,
-                            attempted_at,
-                            id,
-                            table,
-                            row_id,
-                            column,
-                            row_stamp
-                        ],
-                    ),
-                    OutboxIdentity::Stored { operation, stored } => connection.execute(
-                        "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
-                             last_error = ?1, last_attempt_at = ?2
-                             WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
-                        rusqlite::params![error, attempted_at, id, operation, stored],
-                    ),
-                }
-                .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(
-                        "cloud outbox entry changed before failure recording".to_string(),
-                    ));
-                }
-                Ok(())
-            })
+            .call_store(move |session| session.record_outbox_failure(entry, error, attempted_at))
             .await
     }
 
@@ -517,22 +608,8 @@ impl StoreDatabase {
         let row_stamp = row.row_stamp().to_string();
         self.connection
             .call_store(move |session| {
-                let connection = session.records.conn;
-                let updated = connection
-                    .execute(
-                        "UPDATE cloud_outbox SET upload_state = ?1
-                         WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
-                           AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
-                           AND upload_state = ?7",
-                        rusqlite::params![to, id, table, row_id, column, row_stamp, from],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(format!(
-                        "upload outbox entry changed before {context}"
-                    )));
-                }
-                Ok(())
+                session
+                    .swap_blob_upload_state(id, table, row_id, column, row_stamp, from, to, context)
             })
             .await
     }
@@ -540,16 +617,7 @@ impl StoreDatabase {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_outbox_backoff(&self) -> Result<(), DbError> {
         self.connection
-            .call_store(|session| {
-                let connection = session.records.conn;
-                connection
-                    .execute(
-                        "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            })
+            .call_store(|session| session.reset_outbox_backoff())
             .await
     }
 
@@ -561,10 +629,7 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                Database::make_remote_intent_state(connection, &root_table, &root_id)
-            })
+            .call_store(move |session| session.make_remote_intent_state(root_table, root_id))
             .await
     }
 
@@ -586,14 +651,7 @@ impl StoreDatabase {
     pub async fn finish_cancelled_blob_upload(&self, entry: &OutboxEntry) -> Result<bool, DbError> {
         let entry = entry.clone();
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                let finished =
-                    crate::CloudOutboxRecords::new(&transaction).finish_cancelled_upload(&entry)?;
-                transaction.commit().map_err(DbError::from)?;
-                Ok(finished)
-            })
+            .call_store(move |session| session.finish_cancelled_blob_upload(entry))
             .await
     }
 }
