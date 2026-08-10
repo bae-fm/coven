@@ -1,6 +1,6 @@
 //! Circle metadata, access records, controls, and creation objects.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 

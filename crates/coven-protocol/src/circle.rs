@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 
