@@ -129,7 +129,9 @@ impl StoreRecords<'_> {
         input: &RetainedMergeMaterializationInput,
         owner: &RetainedReplayOwner,
     ) -> Result<(), DbError> {
-        StoreDatabase::validate_retained_merge_pin_closure_on(self.conn, input, owner)
+        crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
+            self.conn, input, owner,
+        )
     }
 
     pub(crate) fn snapshot_coverage_reference(
@@ -205,7 +207,9 @@ impl StoreRecords<'_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        StoreDatabase::circle_activation_commit_ref_on(self.conn, circle_id, control)
+        crate::store::circle_authority::circle_activation_commit_ref_on(
+            self.conn, circle_id, control,
+        )
     }
 
     pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
@@ -537,7 +541,7 @@ impl StoreRecordTransaction<'_, '_> {
         ),
         DbError,
     > {
-        let packages = StoreDatabase::canonical_retained_merge_packages(
+        let packages = crate::store::retained_merge_replay::canonical_retained_merge_packages(
             materialization.commit(),
             materialization.commit_ref(),
             materialization.packages(),
@@ -633,8 +637,12 @@ impl StoreRecordTransaction<'_, '_> {
             commit: materialization.commit_ref().clone(),
             input_hash,
         };
-        StoreDatabase::pin_retained_merge_objects_on(self.transaction, &input, &replay_owner)?;
-        StoreDatabase::validate_retained_merge_pin_closure_on(
+        crate::store::retained_merge_replay::pin_retained_merge_objects_on(
+            self.transaction,
+            &input,
+            &replay_owner,
+        )?;
+        crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
             self.transaction,
             &input,
             &replay_owner,
@@ -694,7 +702,9 @@ impl StoreRecordTransaction<'_, '_> {
                 .map_err(|error| DbError::context("snapshot retained replay input", error))?;
             retained.push((reference, input_hash, canonical_input, input));
         }
-        StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(conn)?;
+        crate::store::retained_merge_replay::remove_retained_replay_ownership_from_snapshot_on(
+            conn,
+        )?;
         conn.execute("DELETE FROM retained_merge_materializations", [])
             .map_err(DbError::from)?;
         for (reference, input_hash, canonical_input, input) in retained {
@@ -726,8 +736,12 @@ impl StoreRecordTransaction<'_, '_> {
                 commit: reference,
                 input_hash,
             };
-            StoreDatabase::pin_retained_merge_objects_on(conn, &input, &owner)?;
-            StoreDatabase::validate_retained_merge_pin_closure_on(conn, &input, &owner)?;
+            crate::store::retained_merge_replay::pin_retained_merge_objects_on(
+                conn, &input, &owner,
+            )?;
+            crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
+                conn, &input, &owner,
+            )?;
         }
         Ok(())
     }

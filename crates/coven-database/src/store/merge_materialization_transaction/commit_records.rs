@@ -663,7 +663,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .to_string(),
             ));
         }
-        StoreDatabase::record_verified_stream_activations_on(
+        crate::store::stream_activation_records::record_verified_stream_activations_on(
             conn,
             stream_activations,
             &commit_ref_json,

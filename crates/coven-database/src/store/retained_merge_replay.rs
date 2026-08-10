@@ -1,8 +1,15 @@
 use crate::*;
 
 mod circle_coverage;
+pub(crate) use circle_coverage::{
+    circle_bootstrap_coverage_ref_on, circle_bootstrap_coverage_refs_on,
+};
 mod materialization_io;
 mod retained_objects;
+pub(crate) use retained_objects::{
+    canonical_retained_merge_packages, pin_retained_merge_objects_on,
+    remove_retained_replay_ownership_from_snapshot_on, validate_retained_merge_pin_closure_on,
+};
 mod snapshot_retention;
 
 use crate::{RetainedReplayAuthority, RetainedReplayBaseline};

@@ -50,6 +50,10 @@ pub mod reclaim;
 mod replay_projection;
 use replay_projection::ReplayProjection;
 mod retained_merge_replay;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use retained_merge_replay::circle_bootstrap_coverage_ref_on;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use retained_merge_replay::remove_retained_replay_ownership_from_snapshot_on;
 mod retained_replay;
 mod snapshot_image;
 mod snapshot_publication;
@@ -375,7 +379,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        StoreDatabase::circle_bootstrap_coverage_ref_on(self.conn, circle_id)
+        retained_merge_replay::circle_bootstrap_coverage_ref_on(self.conn, circle_id)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

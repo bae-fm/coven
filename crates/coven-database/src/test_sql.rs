@@ -1859,7 +1859,7 @@ impl DatabaseTestSql<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        crate::StoreDatabase::circle_bootstrap_coverage_ref_on(self.connection, circle_id)
+        crate::store::circle_bootstrap_coverage_ref_on(self.connection, circle_id)
     }
 
     pub fn circle_bootstrap_replay_inputs(

@@ -117,7 +117,7 @@ impl DatabaseTestTransaction<'_, '_> {
     }
 
     pub fn remove_retained_replay_ownership_from_snapshot(&self) -> Result<(), DbError> {
-        crate::StoreDatabase::remove_retained_replay_ownership_from_snapshot_on(self.transaction)
+        crate::store::remove_retained_replay_ownership_from_snapshot_on(self.transaction)
     }
 
     pub fn delete_materialized_commit(

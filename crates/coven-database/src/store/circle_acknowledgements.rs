@@ -52,7 +52,8 @@ impl StoreSession<'_> {
             let control = authoring.control.coord.clone();
             let epoch_id = authoring.control.value.epoch_id();
             let access = super::circle_publication_context_on(conn, circle_id, &control)?;
-            let seeded_from = StoreDatabase::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
+            let seeded_from =
+                super::retained_merge_replay::circle_bootstrap_coverage_ref_on(conn, circle_id)?;
             inputs.push(CircleAckPublicationInput {
                 circle_id,
                 control,

@@ -430,35 +430,6 @@ impl StoreDatabase {
         Ok(advanced)
     }
 
-    pub fn capture_partition_blob_facts_on(
-        tx: &rusqlite::Transaction<'_>,
-        partitions: &[AudiencePartition],
-        blob_decls: &BlobDecls,
-    ) -> Result<StoreWriteBlobFacts, DbError> {
-        let mut facts = BTreeMap::new();
-        for partition in partitions {
-            if partition.audience == coven_protocol::circle::Audience::Local {
-                continue;
-            }
-            for fact in
-                Self::capture_store_write_blob_facts_on(tx, &partition.changeset, blob_decls)?.blobs
-            {
-                let key = fact.identity_key();
-                if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
-                    if prior != fact {
-                        return Err(DbError::Message(format!(
-                            "audience partitions give row {}/{}/{} at {} conflicting blob facts",
-                            key.0, key.1, key.2, key.3
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(StoreWriteBlobFacts {
-            blobs: facts.into_values().collect(),
-        })
-    }
-
     fn store_write_routing<'a>(
         gates: &Gates,
         routing_encryption: Option<&'a EncryptionService>,
@@ -487,6 +458,36 @@ impl StoreDatabase {
             .call_store(|session| session.prepare_store_write())
             .await
     }
+}
+
+pub(crate) fn capture_partition_blob_facts_on(
+    tx: &rusqlite::Transaction<'_>,
+    partitions: &[AudiencePartition],
+    blob_decls: &BlobDecls,
+) -> Result<StoreWriteBlobFacts, DbError> {
+    let mut facts = BTreeMap::new();
+    for partition in partitions {
+        if partition.audience == coven_protocol::circle::Audience::Local {
+            continue;
+        }
+        for fact in
+            StoreDatabase::capture_store_write_blob_facts_on(tx, &partition.changeset, blob_decls)?
+                .blobs
+        {
+            let key = fact.identity_key();
+            if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
+                if prior != fact {
+                    return Err(DbError::Message(format!(
+                        "audience partitions give row {}/{}/{} at {} conflicting blob facts",
+                        key.0, key.1, key.2, key.3
+                    )));
+                }
+            }
+        }
+    }
+    Ok(StoreWriteBlobFacts {
+        blobs: facts.into_values().collect(),
+    })
 }
 
 impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operation> {
@@ -655,12 +656,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )?
                 }
             };
-            let mut blob_facts = StoreDatabase::capture_partition_blob_facts_on(
-                &tx,
-                &partitioned.partitions,
-                blob_decls,
-            )
-            .map_err(E::from)?;
+            let mut blob_facts =
+                capture_partition_blob_facts_on(&tx, &partitioned.partitions, blob_decls)
+                    .map_err(E::from)?;
             blob_facts = StoreDatabase::capture_audience_move_blob_facts_on(
                 &tx,
                 &partitioned.moves,

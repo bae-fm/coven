@@ -15,6 +15,97 @@ enum CircleActivationCommitLookup {
     Retained(StoreBatchCommitRef),
 }
 
+/// Resolve a Circle control's activating commit reference from retained
+/// authority. A known activation whose materialization was reclaimed is an
+/// error because strict callers require the current control to stay retained.
+pub(crate) fn circle_activation_commit_ref_on(
+    conn: &Connection,
+    circle_id: coven_protocol::circle::CircleId,
+    control: &coven_protocol::circle::CircleControlCoord,
+) -> Result<Option<StoreBatchCommitRef>, DbError> {
+    match circle_activation_commit_lookup_on(conn, circle_id, control)? {
+        CircleActivationCommitLookup::Absent => Ok(None),
+        CircleActivationCommitLookup::Reclaimed {
+            stream_id,
+            sequence,
+        } => Err(DbError::Message(format!(
+            "Circle {circle_id} activation commit {stream_id}/{sequence} is not retained"
+        ))),
+        CircleActivationCommitLookup::Retained(reference) => Ok(Some(reference)),
+    }
+}
+
+/// Resolve a Circle control's activating commit, reading a reclaimed
+/// materialization as absence because its standalone snapshot is superseded.
+pub(crate) fn retained_circle_activation_commit_ref_on(
+    conn: &Connection,
+    circle_id: coven_protocol::circle::CircleId,
+    control: &coven_protocol::circle::CircleControlCoord,
+) -> Result<Option<StoreBatchCommitRef>, DbError> {
+    Ok(
+        match circle_activation_commit_lookup_on(conn, circle_id, control)? {
+            CircleActivationCommitLookup::Retained(reference) => Some(reference),
+            CircleActivationCommitLookup::Absent
+            | CircleActivationCommitLookup::Reclaimed { .. } => None,
+        },
+    )
+}
+
+fn circle_activation_commit_lookup_on(
+    conn: &Connection,
+    circle_id: coven_protocol::circle::CircleId,
+    control: &coven_protocol::circle::CircleControlCoord,
+) -> Result<CircleActivationCommitLookup, DbError> {
+    let control_coord = serde_json::to_string(control)
+        .map_err(|error| DbError::context("serialize Circle control coordinate", error))?;
+    let stored = conn
+        .query_row(
+            "SELECT stream_id, seq, commit_hash
+             FROM circle_control_activations
+             WHERE circle_id = ?1 AND control_coord = ?2",
+            rusqlite::params![circle_id.to_string(), control_coord],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some((stream_id, sequence_sql, commit_hash)) = stored else {
+        return Ok(CircleActivationCommitLookup::Absent);
+    };
+    let sequence = Database::sequence_from_sqlite(&stream_id, sequence_sql)?;
+    let stored_ref: Option<String> = conn
+        .query_row(
+            "SELECT commit_ref FROM retained_merge_materializations
+             WHERE device_id = ?1 AND seq = ?2",
+            rusqlite::params![&stream_id, sequence_sql],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some(stored_ref) = stored_ref else {
+        return Ok(CircleActivationCommitLookup::Reclaimed {
+            stream_id,
+            sequence,
+        });
+    };
+    let reference = crate::store::materialized_commit_index::parse_stored_commit_ref(
+        &stream_id,
+        sequence,
+        &stored_ref,
+    )?;
+    if reference.commit_hash.to_string() != commit_hash {
+        return Err(DbError::Message(format!(
+            "Circle {circle_id} activation index differs from its retained commit"
+        )));
+    }
+    Ok(CircleActivationCommitLookup::Retained(reference))
+}
+
 impl StoreSession<'_> {
     fn circle_control_covers_strictly(
         &mut self,
@@ -142,9 +233,7 @@ impl StoreSession<'_> {
         )>,
         DbError,
     > {
-        let Some(commit) =
-            StoreDatabase::circle_activation_commit_ref_on(self.conn, circle_id, control)?
-        else {
+        let Some(commit) = circle_activation_commit_ref_on(self.conn, circle_id, control)? else {
             return Ok(None);
         };
         let activation = StoreDatabase::verified_circle_activation_on(
@@ -216,12 +305,12 @@ impl StoreSession<'_> {
         else {
             return Ok(None);
         };
-        let commit = StoreDatabase::circle_activation_commit_ref_on(self.conn, circle_id, &head)?
-            .ok_or_else(|| {
-            DbError::Message(format!(
-                "Circle {circle_id} head control has no activating commit"
-            ))
-        })?;
+        let commit =
+            circle_activation_commit_ref_on(self.conn, circle_id, &head)?.ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle {circle_id} head control has no activating commit"
+                ))
+            })?;
         Ok(Some((head, commit)))
     }
 
@@ -230,7 +319,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        StoreDatabase::retained_circle_activation_commit_ref_on(self.conn, circle_id, control)
+        retained_circle_activation_commit_ref_on(self.conn, circle_id, control)
     }
 
     fn verified_circle_control_coord_covers(
@@ -492,110 +581,6 @@ impl StoreDatabase {
             }
         }
         Ok(head)
-    }
-
-    /// Resolve a Circle control's activating commit reference from the retained
-    /// authority, not the materialized ledger. The activating commit is always a
-    /// retained input (every consumer that reads it goes on to open its retained
-    /// materialization), and the materialized ledger is empty on a device restored
-    /// from a snapshot until the pull replays it — so a restore resolves the same
-    /// reference here that a live device would.
-    ///
-    /// Errors when the control is a known activation whose materialization has been
-    /// reclaimed: every strict caller resolves a current/authoring/closing control
-    /// that must stay retained. A caller resolving a possibly-superseded control (a
-    /// restore weighing an old standalone snapshot) uses
-    /// [`Self::retained_circle_activation_commit_ref_on`] instead, which reads the
-    /// reclaimed state as absence.
-    pub fn circle_activation_commit_ref_on(
-        conn: &Connection,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        match Self::circle_activation_commit_lookup_on(conn, circle_id, control)? {
-            CircleActivationCommitLookup::Absent => Ok(None),
-            CircleActivationCommitLookup::Reclaimed {
-                stream_id,
-                sequence,
-            } => Err(DbError::Message(format!(
-                "Circle {circle_id} activation commit {stream_id}/{sequence} is not retained"
-            ))),
-            CircleActivationCommitLookup::Retained(reference) => Ok(Some(reference)),
-        }
-    }
-
-    /// Resolve a Circle control's activating commit, reading a reclaimed
-    /// materialization as absence rather than an error. A control reclaimed after an
-    /// epoch close leaves its standalone snapshot superseded by the successor
-    /// bootstrap, so restore selection treats it as one fewer installable candidate
-    /// rather than a hard failure.
-    pub fn retained_circle_activation_commit_ref_on(
-        conn: &Connection,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        Ok(
-            match Self::circle_activation_commit_lookup_on(conn, circle_id, control)? {
-                CircleActivationCommitLookup::Retained(reference) => Some(reference),
-                CircleActivationCommitLookup::Absent
-                | CircleActivationCommitLookup::Reclaimed { .. } => None,
-            },
-        )
-    }
-
-    fn circle_activation_commit_lookup_on(
-        conn: &Connection,
-        circle_id: coven_protocol::circle::CircleId,
-        control: &coven_protocol::circle::CircleControlCoord,
-    ) -> Result<CircleActivationCommitLookup, DbError> {
-        let control_coord = serde_json::to_string(control)
-            .map_err(|error| DbError::context("serialize Circle control coordinate", error))?;
-        let stored = conn
-            .query_row(
-                "SELECT stream_id, seq, commit_hash
-                 FROM circle_control_activations
-                 WHERE circle_id = ?1 AND control_coord = ?2",
-                rusqlite::params![circle_id.to_string(), control_coord],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let Some((stream_id, sequence_sql, commit_hash)) = stored else {
-            return Ok(CircleActivationCommitLookup::Absent);
-        };
-        let sequence = Database::sequence_from_sqlite(&stream_id, sequence_sql)?;
-        let stored_ref: Option<String> = conn
-            .query_row(
-                "SELECT commit_ref FROM retained_merge_materializations
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![&stream_id, sequence_sql],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let Some(stored_ref) = stored_ref else {
-            return Ok(CircleActivationCommitLookup::Reclaimed {
-                stream_id,
-                sequence,
-            });
-        };
-        let reference = crate::store::materialized_commit_index::parse_stored_commit_ref(
-            &stream_id,
-            sequence,
-            &stored_ref,
-        )?;
-        if reference.commit_hash.to_string() != commit_hash {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} activation index differs from its retained commit"
-            )));
-        }
-        Ok(CircleActivationCommitLookup::Retained(reference))
     }
 
     pub(crate) fn verified_circle_activation_on(

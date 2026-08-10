@@ -168,7 +168,7 @@ impl StoreDatabase {
             .cloned()
             .collect::<Vec<_>>();
         let packages =
-            Self::canonical_retained_merge_packages(&commit, commit_ref, &package_values)?;
+            super::canonical_retained_merge_packages(&commit, commit_ref, &package_values)?;
         if packages != input.packages {
             return Err(DbError::Message(
                 "retained Merge packages are not in commit order".to_string(),

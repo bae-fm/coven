@@ -503,8 +503,11 @@ impl StoreSession<'_> {
             control: None,
             changeset: changeset.clone(),
         }];
-        let blob_facts =
-            StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, self.blob_decls)?;
+        let blob_facts = super::host_write_capture::capture_partition_blob_facts_on(
+            &tx,
+            &partitions,
+            self.blob_decls,
+        )?;
         let changeset_hash =
             crate::payload_spool::write_payload_blocking(self.store_dir, &changeset)?;
         crate::store::StoreRecordTransaction::new(&tx, self.store_dir).insert_store_write(

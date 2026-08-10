@@ -16,7 +16,9 @@ impl StoreRecords<'_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        StoreDatabase::retained_circle_activation_commit_ref_on(self.conn, circle_id, control)
+        crate::store::circle_authority::retained_circle_activation_commit_ref_on(
+            self.conn, circle_id, control,
+        )
     }
 
     pub(crate) fn circle_controls(
@@ -72,7 +74,7 @@ impl StoreRecords<'_> {
                 registrations,
                 &reference,
             )?;
-            StoreDatabase::record_verified_stream_activations_on(
+            crate::store::stream_activation_records::record_verified_stream_activations_on(
                 self.conn,
                 owned.circle_activations().stream_activations(),
                 &encoded,
@@ -84,7 +86,8 @@ impl StoreRecords<'_> {
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        let coverage = StoreDatabase::circle_bootstrap_coverage_refs_on(self.conn)?;
+        let coverage =
+            crate::store::retained_merge_replay::circle_bootstrap_coverage_refs_on(self.conn)?;
         for retained in &coverage {
             let owner_key = circle_bootstrap_coverage_owner_key(retained.circle_id);
             let expected = BTreeSet::from([retained.bootstrap.image.image_hash]);

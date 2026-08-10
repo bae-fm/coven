@@ -118,7 +118,7 @@ impl StoreSession<'_> {
         if authoring.access.recipient_pubkey != identity_pubkey {
             return Err(DbError::Message(foreign_identity(circle_id)));
         }
-        let activated_commit = StoreDatabase::circle_activation_commit_ref_on(
+        let activated_commit = super::circle_authority::circle_activation_commit_ref_on(
             self.conn,
             circle_id,
             &authoring.control.coord,
