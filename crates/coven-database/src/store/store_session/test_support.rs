@@ -656,6 +656,111 @@ impl StoreSession<'_> {
             .install_indexed_shared_blobs(write_id, records)
     }
 
+    fn replace_blob_row_stamp_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+        stamp: &str,
+    ) -> Result<(), DbError> {
+        self.conn
+            .execute(
+                &format!(
+                    "UPDATE {} SET _updated_at = ?2 WHERE id = ?1",
+                    crate::quote_ident(table)
+                ),
+                (row_id, stamp),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    fn replace_blob_row_facts_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+        size: i64,
+        hash: &str,
+        stamp: &str,
+    ) -> Result<(), DbError> {
+        self.conn
+            .execute(
+                &format!(
+                    "UPDATE {} SET size = ?2, hash = ?3, _updated_at = ?4 WHERE id = ?1",
+                    crate::quote_ident(table)
+                ),
+                rusqlite::params![row_id, size, hash, stamp],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
+    fn complete_note_blob_transition_to_remote_for_test(
+        &self,
+        reference: &coven_protocol::blob::RowBlobRef,
+        note_id: &str,
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        crate::ExternalBlobRecords::new(&transaction).clear(reference)?;
+        transaction
+            .execute("UPDATE notes SET shared = 1 WHERE id = ?1", [note_id])
+            .map_err(DbError::from)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    fn plant_blob_namespace_collision_for_test(
+        &self,
+        id: &str,
+        local_hash: &str,
+        remote_hash: &str,
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                 VALUES ('note-local', 'x', 0, '0000000001000-0000-dev1', '2026-01-01'),
+                        ('note-remote', 'x', 1, '0000000001000-0000-dev1', '2026-01-01')",
+                [],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO note_photos
+                 (id, note_id, kind, size, hash, _updated_at, created_at)
+                 VALUES (?1, 'note-local', 'attach', 17, ?2,
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                rusqlite::params![id, local_hash],
+            )
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO note_covers
+                 (id, note_id, size, hash, _updated_at, created_at)
+                 VALUES (?1, 'note-remote', 18, ?2,
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                rusqlite::params![id, remote_hash],
+            )
+            .map_err(DbError::from)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    fn plant_note_cover_blob_row_for_test(
+        &self,
+        id: &str,
+        note_id: &str,
+        size: i64,
+        hash: &str,
+    ) -> Result<(), DbError> {
+        self.conn
+            .execute(
+                "INSERT INTO note_covers
+                 (id, note_id, size, hash, _updated_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, '0000000001000-0000-dev1', '2026-01-01')",
+                rusqlite::params![id, note_id, size, hash],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+    }
+
     fn tamper_author_exclusion_locator_for_test(
         &self,
         exclusion: StoreDeviceExclusionRef,
@@ -756,5 +861,6 @@ impl StoreSession<'_> {
     }
 }
 
+mod blob;
 mod database;
 mod device_exclusion;

@@ -356,16 +356,14 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
                 .locator_hash(),
         )
         .expect("exact cache path");
-    db.database.test_sql(|conn| {
-        conn.execute(
-            "UPDATE note_photos SET _updated_at = '0000000002000-0000-dev1' WHERE id = 'stale-materialized-row'",
-            [],
+    StoreDatabase::new(&db.database)
+        .replace_blob_row_stamp_for_test(
+            "note_photos",
+            "stale-materialized-row",
+            "0000000002000-0000-dev1",
         )
-        .map_err(coven_database::DbError::from)?;
-        Ok(())
-    })
-    .await
-    .expect("replace row stamp");
+        .await
+        .expect("replace row stamp");
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
         StoreDatabase::new(&db.database),
@@ -475,17 +473,14 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let second_hash = coven_protocol::blob::content_hash(second_bytes);
     let second_size = second_bytes.len() as i64;
     let id_for_update = id.to_string();
-    db.database
-        .test_sql(move |conn| {
-            conn.execute(
-                "UPDATE note_photos
-             SET size = ?1, hash = ?2, _updated_at = '0000000002000-0000-dev1'
-             WHERE id = ?3",
-                rusqlite::params![second_size, second_hash, id_for_update],
-            )
-            .map(|_| ())
-            .map_err(coven_database::DbError::from)
-        })
+    StoreDatabase::new(&db.database)
+        .replace_blob_row_facts_for_test(
+            "note_photos",
+            &id_for_update,
+            second_size,
+            &second_hash,
+            "0000000002000-0000-dev1",
+        )
         .await
         .expect("replace logical row with a second exact version");
     let second = ExactRemoteBlobFixture::new(&db, &storage)
@@ -2354,16 +2349,9 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     // Install the exact destination before the host write, then atomically clear
     // the Local source and flip the gate. No observer can see a Remote row without
     // its exact locator.
-    let local_reference_for_transition = local_reference.clone();
     let note_id = format!("note-{}", blob.id);
-    db.database
-        .test_sql(move |database| {
-            database.clear_external_blob(&local_reference_for_transition)?;
-            database
-                .execute("UPDATE notes SET shared = 1 WHERE id = ?1", [note_id])
-                .map_err(coven_database::DbError::from)?;
-            Ok(())
-        })
+    StoreDatabase::new(&db.database)
+        .complete_note_blob_transition_to_remote_for_test(local_reference.clone(), note_id)
         .await
         .expect("commit exact Local-to-Remote transition");
     let remote_reference = db
@@ -3002,29 +2990,8 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     let id = "dup0aaaa";
     let local_hash = coven_protocol::blob::content_hash(b"LOCAL-STORE-BYTES");
     let remote_hash = coven_protocol::blob::content_hash(b"REMOTE-CLOUD-BYTES");
-    db.database
-        .test_sql(move |conn| {
-            conn.execute(
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
-             VALUES ('note-local', 'x', 0, '0000000001000-0000-dev1', '2026-01-01'), \
-                    ('note-remote', 'x', 1, '0000000001000-0000-dev1', '2026-01-01')",
-                [],
-            )
-            .map_err(coven_database::DbError::from)?;
-            conn.execute(
-                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
-             VALUES (?1, 'note-local', 'attach', 17, ?2, '0000000001000-0000-dev1', '2026-01-01')",
-                rusqlite::params![id, local_hash],
-            )
-            .map_err(coven_database::DbError::from)?;
-            conn.execute(
-                "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
-             VALUES (?1, 'note-remote', 18, ?2, '0000000001000-0000-dev1', '2026-01-01')",
-                rusqlite::params![id, remote_hash],
-            )
-            .map_err(coven_database::DbError::from)?;
-            Ok(())
-        })
+    StoreDatabase::new(&db.database)
+        .plant_blob_namespace_collision_for_test(id, &local_hash, &remote_hash)
         .await
         .expect("plant the colliding-id rows");
 
@@ -3418,17 +3385,8 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     let lazy_bytes = [7u8; 500];
     let lazy_hash = coven_protocol::blob::content_hash(&lazy_bytes);
-    db2.database
-        .test_sql(move |conn| {
-            conn.execute(
-                "INSERT INTO note_covers \
-             (id, note_id, size, hash, _updated_at, created_at) \
-             VALUES ('usr0bbbb', 'n1', 500, ?1, '0000000001000-0000-dev1', '2026-01-01')",
-                [lazy_hash],
-            )
-            .map_err(coven_database::DbError::from)?;
-            Ok(())
-        })
+    StoreDatabase::new(&db2.database)
+        .plant_note_cover_blob_row_for_test("usr0bbbb", "n1", 500, &lazy_hash)
         .await
         .expect("plant lazy blob row");
     ExactRemoteBlobFixture::new(&db2, &storage)
