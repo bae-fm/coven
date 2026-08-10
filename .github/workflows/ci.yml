@@ -13,6 +13,9 @@ jobs:
       # The pinned toolchain and components come from rust-toolchain.toml on the
       # first cargo invocation.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: profile-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          cache-workspace-crates: true
       # rust-cache preserves dependency artifacts but deliberately exports
       # CARGO_INCREMENTAL=0 and removes incremental state. Coven's test build is
       # dominated by recompiling the workspace crate, so restore the profile's
@@ -67,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: profile-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          cache-workspace-crates: true
       - name: Clippy
         run: cargo clippy -p coven --all-targets --all-features -- -D warnings
       # dead_code coverage is per-platform now that the durable-write helpers
@@ -97,6 +103,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: profile-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          cache-workspace-crates: true
       - name: Clippy
         run: cargo clippy -p coven --all-targets --all-features -- -D warnings
       - name: Apple protected-store entry construction
