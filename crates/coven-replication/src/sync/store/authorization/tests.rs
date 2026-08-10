@@ -82,4 +82,12 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         .open_into(&target)
         .await
         .expect("retry Store loading after rollback");
+    assert_eq!(
+        coven_database::StoreDatabase::new(&target)
+            .local_store_root_ref()
+            .await
+            .expect("read Store root after committed retry"),
+        Some(fixture.root.clone()),
+        "the connection must replace its earlier absent read with the committed authority",
+    );
 }
