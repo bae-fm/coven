@@ -67,8 +67,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let mut transaction_authority = authority.begin_transaction_on(transaction_records)?;
+        let mut transaction_authority =
+            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .begin_verified_authority_transaction(authority)?;
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?,
         )
@@ -262,9 +263,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let mut transaction_authority = self
-            .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
+        let mut transaction_authority =
+            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .begin_verified_authority_transaction(self.verified_store_authority)?;
         let store_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(&reference, &object_ids)?;
@@ -335,9 +336,9 @@ impl StoreSession<'_> {
             tx.commit().map_err(DbError::from)?;
             return Ok(());
         }
-        let mut transaction_authority = self
-            .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
+        let mut transaction_authority =
+            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .begin_verified_authority_transaction(self.verified_store_authority)?;
         super::record_activated_store_device_registrations_on(
             &tx,
             verified_commit.value(),
@@ -378,9 +379,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let mut transaction_authority = self
-            .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
+        let mut transaction_authority =
+            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .begin_verified_authority_transaction(self.verified_store_authority)?;
         let installed_root = transaction_authority.root().clone();
         if installed_root != root || plan.founder.store_root != root {
             return Err(DbError::Message(
@@ -521,9 +522,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let mut transaction_authority = self
-            .verified_store_authority
-            .begin_transaction_on(crate::store::StoreRecords::new(&tx, self.records.store_dir))?;
+        let mut transaction_authority =
+            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .begin_verified_authority_transaction(self.verified_store_authority)?;
         let root = transaction_authority.root().clone();
         let registrations = vec![registration];
         let commit = verified_commit.value();

@@ -16,10 +16,6 @@ pub use changeset_application::{resolve_and_apply_changeset, ApplyResult};
 pub use changeset_application::{ValidatedChangeset, WinningRow};
 pub use conflict::{IncomingTimestampPolicy, TableSchema};
 
-use super::candidate_records::{
-    author_exclusion_activation_for_candidate_on, load_author_exclusion_activation_locator_on,
-    validate_terminal_nonactivation_authority_on,
-};
 use super::membership_rotation::commit_rotation_candidate_on;
 use super::store_device_state::{
     load_store_device_exclusion_freezes_on, replace_store_device_exclusion_freezes_on,
@@ -172,11 +168,7 @@ fn advance_max_updated_at(
 }
 
 pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
-    transaction: &'transaction rusqlite::Transaction<'connection>,
-    /// Where this store's payload files go. Materializing a pulled commit
-    /// writes remote object rows, and a row that names a payload installs it in
-    /// the same transaction.
-    store_dir: &'transaction StoreDir,
+    store: crate::store::StoreTransaction<'transaction, 'connection>,
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
@@ -185,8 +177,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         store_dir: &'transaction StoreDir,
     ) -> Self {
         Self {
-            transaction,
-            store_dir,
+            store: crate::store::StoreTransaction::new(transaction, store_dir),
         }
     }
 
@@ -195,7 +186,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
         Ok(
-            super::circle_operations::circle_current_state_on(self.transaction, circle_id)?
+            super::circle_operations::circle_current_state_on(self.store.transaction, circle_id)?
                 .is_some_and(|state| state.is_deleted()),
         )
     }
@@ -211,7 +202,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         activation: &BlobActivation,
         winning_rows: &[WinningRow],
     ) -> Result<usize, DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         if package.commit_coord() != &activation.coord {
             return Err(DbError::Message(format!(
                 "blob activation {:?} does not match audience package {:?}",

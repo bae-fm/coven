@@ -124,6 +124,24 @@ pub(crate) fn derive_materialized_store_device_state_on(
     Ok(device_state)
 }
 
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(super) fn derive_materialized_store_device_state(
+        self,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        commit: &StoreBatchCommit,
+        device_operations: &VerifiedStoreDeviceOperations,
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+        derive_materialized_store_device_state_on(
+            self.records,
+            registrations,
+            root,
+            commit,
+            device_operations,
+        )
+    }
+}
+
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
     pub(crate) fn record_store_reclaim_activation(
         &self,
@@ -145,7 +163,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 activation: activation.clone(),
             };
             next.validate().map_err(store_reclaim_journal_error)?;
-            match load_store_reclaim_operation_on(self.transaction, operation_id)? {
+            match load_store_reclaim_operation_on(self.store.transaction, operation_id)? {
                 Some(expected)
                     if matches!(
                         &expected,
@@ -154,7 +172,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                             if object.authorization_ref() == authorization
                     ) =>
                 {
-                    update_store_reclaim_operation_on(self.transaction, &expected, &next)?;
+                    update_store_reclaim_operation_on(self.store.transaction, &expected, &next)?;
                 }
                 Some(existing) if existing == next => {}
                 Some(_) => {
@@ -162,15 +180,15 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         "reclaim authorization conflicts with its durable operation".to_string(),
                     ));
                 }
-                None => insert_store_reclaim_operation_on(self.transaction, &next)?,
+                None => insert_store_reclaim_operation_on(self.store.transaction, &next)?,
             }
         }
         if let Some(receipt) = commit.reclaim_receipt() {
             let operation_id = receipt.authorization.authorization_hash;
-            let expected = load_store_reclaim_operation_on(self.transaction, operation_id)?
+            let expected = load_store_reclaim_operation_on(self.store.transaction, operation_id)?
                 .ok_or_else(|| {
-                    DbError::Message("reclaim receipt has no durable authorization".to_string())
-                })?;
+                DbError::Message("reclaim receipt has no durable authorization".to_string())
+            })?;
             let (authorization, authorization_activation) = match &expected {
                 DurableStoreReclaimOperation::AuthorizationCandidate { .. } => {
                     return Err(DbError::Message(
@@ -251,11 +269,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )
             .map_err(store_reclaim_journal_error)?;
             record_reclaimed_store_package_on(
-                self.transaction,
+                self.store.transaction,
                 Some(root.store_root_hash),
                 &reclaimed,
             )?;
-            update_store_reclaim_operation_on(self.transaction, &expected, &next)?;
+            update_store_reclaim_operation_on(self.store.transaction, &expected, &next)?;
         }
         Ok(())
     }
@@ -264,16 +282,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let existing = load_store_device_exclusion_freezes_on(self.transaction, root)?;
+        let existing = load_store_device_exclusion_freezes_on(self.store.transaction, root)?;
         let frontier = crate::store::materialized_commit_index::materialized_frontier_on(
-            self.transaction,
+            self.store.transaction,
             None,
         )?
         .into_values()
         .map(|reference| (reference.coord.stream_id, reference))
         .collect::<BTreeMap<_, _>>();
-        let (_, state) =
-            store_device_state_for_history_cut_on(self.transaction, &StoreHistoryCut(frontier))?;
+        let (_, state) = store_device_state_for_history_cut_on(
+            self.store.transaction,
+            &StoreHistoryCut(frontier),
+        )?;
         let mut retained = Vec::new();
         for freeze in existing.into_values() {
             let proposal_state = state
@@ -300,7 +320,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             }
         }
         retained.sort_by_key(|freeze| freeze.proposal.proposal_id);
-        replace_store_device_exclusion_freezes_on(self.transaction, &retained)
+        replace_store_device_exclusion_freezes_on(self.store.transaction, &retained)
     }
 
     pub(crate) fn complete_membership_journal(
@@ -359,7 +379,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 self.activate_store_operation_remote_objects(candidate, &object_ids)?;
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
-                crate::store::StoreTransaction::new(self.transaction, self.store_dir)
+                self.store
                     .advance_owner_promotion_journal(
                         journal_key,
                         target_key,
@@ -395,6 +415,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .collect::<Result<Vec<_>, _>>()?;
         self.activate_store_operation_remote_objects(candidate, &object_ids)?;
         if self
+            .store
             .transaction
             .execute(
                 "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
@@ -409,7 +430,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             ));
         }
         if let crate::MembershipMutationActivation::Rotation { generation } = activation {
-            super::commit_rotation_candidate_on(self.transaction, intent_hash, generation)?;
+            super::commit_rotation_candidate_on(self.store.transaction, intent_hash, generation)?;
         }
         Ok(())
     }
@@ -420,7 +441,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,
     ) -> Result<(), DbError> {
         crate::store::local_blob_cleanup::record_obsolete_copy_intents_on(
-            self.transaction,
+            self.store.transaction,
             declarations,
             intent,
         )
@@ -467,22 +488,23 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.record_author_exclusion_activations(&materialization)?;
         let root = materialization.root();
-        self.derive_materialized_store_device_state(
+        self.store.derive_materialized_store_device_state(
             registrations_lookup,
             root,
             materialization.commit(),
             materialization.device_operations(),
         )?;
-        let (retained_commit_ref, retained) =
-            crate::store::StoreTransaction::new(self.transaction, self.store_dir)
-                .retain_merge_materialization(registrations_lookup, root, &materialization)?;
-        crate::store::StoreTransaction::new(self.transaction, self.store_dir)
-            .record_circle_bootstrap_coverage(
-                registrations_lookup,
-                root,
-                materialization.commit_ref(),
-                materialization.circle_activations(),
-            )?;
+        let (retained_commit_ref, retained) = self.store.retain_merge_materialization(
+            registrations_lookup,
+            root,
+            &materialization,
+        )?;
+        self.store.record_circle_bootstrap_coverage(
+            registrations_lookup,
+            root,
+            materialization.commit_ref(),
+            materialization.circle_activations(),
+        )?;
         let activation = ReclaimCommitActivation::new(
             materialization.commit_ref().clone(),
             coven_protocol::store_commit::StoreDeviceHeadRef {
@@ -503,22 +525,6 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(retained)
     }
 
-    pub(crate) fn derive_materialized_store_device_state(
-        &self,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        commit: &StoreBatchCommit,
-        device_operations: &VerifiedStoreDeviceOperations,
-    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-        derive_materialized_store_device_state_on(
-            crate::store::StoreRecords::new(self.transaction, self.store_dir),
-            registrations,
-            root,
-            commit,
-            device_operations,
-        )
-    }
-
     pub(crate) fn record_materialized_commit_with_device_operations(
         &self,
         registrations: &mut dyn VerifiedRegistrationLookup,
@@ -529,7 +535,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         retention: &RetainedMergeMaterializationKey,
         activation: &ReclaimCommitActivation,
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
         let stored_registration: String = conn
@@ -611,7 +617,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 predecessor
             )));
         }
-        let device_state = self.derive_materialized_store_device_state(
+        let device_state = self.store.derive_materialized_store_device_state(
             registrations,
             root,
             commit,

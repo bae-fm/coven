@@ -25,6 +25,30 @@ fn spooled_semantic_payload(
         .map_err(|error| DbError::Message(error.to_string()))
 }
 
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(crate) fn load_merge_retraction_cleanup(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        StoreDatabase::load_merge_retraction_cleanup_on(self.records, authority, candidate)
+    }
+
+    pub(crate) fn load_retained_merge_materialization_by_ref(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        registrations: &mut dyn VerifiedRegistrationLookup,
+        reference: &StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            self.records,
+            root,
+            registrations,
+            reference,
+        )
+    }
+}
+
 impl StoreDatabase {
     pub(crate) fn open_retained_merge_materialization_input_with_verified_commit_on(
         records: StoreRecords<'_>,

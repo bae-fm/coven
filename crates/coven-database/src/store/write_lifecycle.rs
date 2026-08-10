@@ -2,7 +2,6 @@ use crate::*;
 use coven_protocol::write::{PendingWrite, WriteId, WriteResolution, WriteStatus};
 use std::sync::Arc;
 
-use super::candidate_records::parse_prepared_merge_candidate_on;
 use super::publication_state::PreparedStoreWriteState;
 use super::*;
 
@@ -106,12 +105,9 @@ impl StoreSession<'_> {
                 serde_json::from_str(raw_prepared).map_err(|error| {
                     DbError::context(format!("blocked write {write_id} preparation"), error)
                 })?;
-            let candidate = parse_prepared_merge_candidate_on(
-                crate::store::StoreRecords::new(&tx, self.records.store_dir),
-                self.verified_store_authority,
-                &prepared,
-            )?
-            .reference;
+            let candidate = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                .prepared_merge_candidate(self.verified_store_authority, &prepared)?
+                .reference;
             let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
             if matches!(
                 remote,
@@ -231,9 +227,9 @@ impl StoreSession<'_> {
             self.synced_tables,
             self.gates,
         )?);
-        let records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
         for (_, changeset_hash) in discarded.iter().rev() {
-            let changeset = records.payload(*changeset_hash)?;
+            let changeset = store_transaction.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
             let inverse = crate::ValidatedChangeset::new(inverse, schema.clone())
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;

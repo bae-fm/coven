@@ -173,7 +173,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         changeset: ValidatedChangeset<B>,
         timestamp_policy: IncomingTimestampPolicy,
     ) -> Result<ApplyResult, DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let ValidatedChangeset { bytes, schema } = changeset;
         let bytes = bytes.as_ref();
         #[cfg(any(test, feature = "test-utils"))]
@@ -272,7 +272,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         changeset: B,
     ) -> Result<Vec<WinningRow>, DbError> {
         resolve_winning_rows(
-            self.transaction,
+            self.store.transaction,
             schema,
             incoming_rows(changeset.as_ref(), schema)?,
         )
@@ -283,7 +283,8 @@ impl MergeMaterializationTransaction<'_, '_> {
         changeset: ValidatedChangeset<B>,
     ) -> Result<(), DbError> {
         let bytes = changeset.bytes();
-        self.transaction
+        self.store
+            .transaction
             .apply_strm(
                 &mut &bytes[..],
                 None::<fn(&str) -> bool>,

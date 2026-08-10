@@ -5,9 +5,6 @@ use coven_protocol::store_commit::{
 };
 use rusqlite::OptionalExtension;
 
-use super::retained_replay::{
-    ensure_founder_replay_baseline_on, install_generation_zero_replay_baseline_on,
-};
 use super::*;
 
 impl StoreSession<'_> {
@@ -124,12 +121,12 @@ impl StoreSession<'_> {
             anchor.owner(),
         )?;
         membership.install_on(&tx)?;
-        let baseline = ensure_founder_replay_baseline_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            self.schema_version,
-            self.sync_routing_hash,
-            authority.clone(),
-        )?;
+        let baseline = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .ensure_founder_replay_baseline(
+                self.schema_version,
+                self.sync_routing_hash,
+                authority.clone(),
+            )?;
         tx.commit().map_err(DbError::from)?;
         self.verified_store_authority.commit_installed_owner_anchor(
             authority,
@@ -402,10 +399,10 @@ impl StoreSession<'_> {
                             .to_string(),
                     ));
                 }
-                let installed = verified_authority
-                    .root_authority_on(crate::store::StoreRecords::new(&tx, store_dir))?;
-                let installed_registration = verified_authority.activated_registration_on(
-                    crate::store::StoreRecords::new(&tx, store_dir),
+                let store_transaction = crate::store::StoreTransaction::new(&tx, store_dir);
+                let installed = store_transaction.root_authority(verified_authority)?;
+                let installed_registration = store_transaction.activated_registration(
+                    verified_authority,
                     &root,
                     &registration,
                 )?;
@@ -461,9 +458,8 @@ impl StoreSession<'_> {
                     founder_registration: registration.clone(),
                 };
                 let baseline_matches = {
-                    let baseline = verified_authority.retained_replay_baseline_on(
-                        crate::store::StoreRecords::new(&tx, store_dir),
-                    )?;
+                    let baseline = crate::store::StoreTransaction::new(&tx, store_dir)
+                        .retained_replay_baseline(verified_authority)?;
                     baseline.generation == GENERATION_ZERO
                         && baseline.schema_version == schema_version
                         && baseline.routing_hash == routing_hash
@@ -559,15 +555,15 @@ impl StoreSession<'_> {
             head_refs: vec![graph.membership.head_ref.clone()],
         }
         .install_on(&tx)?;
-        let baseline = install_generation_zero_replay_baseline_on(
-            crate::store::StoreRecords::new(&tx, store_dir),
-            schema_version,
-            routing_hash,
-            RetainedReplayGenesisAuthority {
-                store_root: root.clone(),
-                founder_registration: registration.clone(),
-            },
-        )?;
+        let baseline = crate::store::StoreTransaction::new(&tx, store_dir)
+            .install_generation_zero_replay_baseline(
+                schema_version,
+                routing_hash,
+                RetainedReplayGenesisAuthority {
+                    store_root: root.clone(),
+                    founder_registration: registration.clone(),
+                },
+            )?;
         tx.commit().map_err(DbError::from)?;
         verified_authority.commit_installed_owner_anchor(
             RetainedReplayGenesisAuthority {

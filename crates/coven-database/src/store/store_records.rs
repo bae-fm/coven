@@ -14,7 +14,7 @@ use super::payload_spool::{
     PayloadSpoolError,
 };
 use super::publication_state::PreparedStoreWriteState;
-use super::StoreRecords;
+use super::{StoreRecords, StoreTransaction};
 use crate::{
     candidate_graph_exact_objects, is_routing_table, load_remote_object_on, AudiencePartition,
     CirclePartitionControl, Database, DbError, StoreWriteBase, StoreWriteBlobFacts,
@@ -220,17 +220,6 @@ impl<'store> StoreRecords<'store> {
     }
 }
 
-/// One Store transaction and its matching payload directory.
-///
-/// Payloads land before the row naming them commits, while ownership claims
-/// land in this transaction. Keeping both borrows together prevents a record
-/// mutation from using another Store's payload directory.
-#[derive(Clone, Copy)]
-pub(crate) struct StoreTransaction<'store, 'connection> {
-    transaction: &'store rusqlite::Transaction<'connection>,
-    records: StoreRecords<'store>,
-}
-
 struct UnpublishedWriteCleanup {
     removable: Vec<ObjectHash>,
     candidate: Option<coven_protocol::store_commit::StoreBatchCommitRef>,
@@ -249,6 +238,17 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         self.records.install_payload(bytes)
+    }
+
+    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
+        self.records.payload(hash)
+    }
+
+    pub(crate) fn store_write_partitions(
+        self,
+        write_id: &str,
+    ) -> Result<crate::PreparedStoreWritePartitions, DbError> {
+        self.records.store_write_partitions(write_id)
     }
 
     #[allow(clippy::too_many_arguments)]

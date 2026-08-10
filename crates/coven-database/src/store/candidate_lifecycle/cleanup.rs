@@ -238,11 +238,8 @@ impl StoreSession<'_> {
         };
         witness.validate().map_err(DbError::Message)?;
         let candidate_ref = witness.original_position().commit().clone();
-        let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            verified_authority,
-            &candidate_ref,
-        )?;
+        let candidate = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .load_merge_retraction_cleanup(verified_authority, &candidate_ref)?;
         if candidate.commit.write_id != *write_id {
             return Err(DbError::Message(
                 "Merge retraction cleanup names another write".to_string(),
@@ -450,11 +447,8 @@ impl StoreSession<'_> {
         let verified_authority = &mut *self.verified_store_authority;
         let conn = self.records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            verified_authority,
-            candidate,
-        )?;
+        let prepared = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .load_merge_retraction_cleanup(verified_authority, candidate)?;
         finish_merge_retraction_cleanup_on(&tx, &prepared)?;
         tx.commit().map_err(DbError::from)
     }

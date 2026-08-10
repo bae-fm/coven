@@ -158,6 +158,31 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     install_generation_zero_replay_baseline_on(records, schema_version, routing_hash, authority)
 }
 
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(super) fn ensure_founder_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: RetainedReplayGenesisAuthority,
+    ) -> Result<RetainedReplayBaseline, DbError> {
+        ensure_founder_replay_baseline_on(self.records, schema_version, routing_hash, authority)
+    }
+
+    pub(super) fn install_generation_zero_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: RetainedReplayGenesisAuthority,
+    ) -> Result<RetainedReplayBaseline, DbError> {
+        install_generation_zero_replay_baseline_on(
+            self.records,
+            schema_version,
+            routing_hash,
+            authority,
+        )
+    }
+}
+
 const GENESIS_PRESERVED_TABLES: &[&str] = &[
     "protocol_state",
     "store_protocol_root_authority",

@@ -65,7 +65,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let encoded_ref = serde_json::to_string(&retained.commit_ref())
             .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
-        self.transaction
+        self.store
+            .transaction
             .execute(
                 "INSERT INTO merge_retraction_cleanups
                  (device_id, seq, commit_ref, cleanup_hash, canonical_cleanup)
@@ -80,7 +81,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             )
             .map_err(DbError::from)?;
         StoreDatabase::load_merge_retraction_cleanup_for_verified_materialization_on(
-            self.transaction,
+            self.store.transaction,
             retained,
         )?;
         Ok(())
@@ -94,7 +95,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             DbError::context("serialize retracted Circle bootstrap activation", error)
         })?;
         let circle_ids = crate::query_mapped_rows(
-            self.transaction,
+            self.store.transaction,
             "SELECT circle_id FROM circle_bootstrap_coverage
              WHERE activation_commit = ?1 ORDER BY circle_id",
             [encoded],
@@ -104,8 +105,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let circle_id = encoded_circle_id
                 .parse()
                 .map_err(|error| DbError::context("parse retracted Circle bootstrap id", error))?;
-            crate::store::StoreTransaction::new(self.transaction, self.store_dir)
-                .clear_circle_bootstrap_coverage(circle_id)?;
+            self.store.clear_circle_bootstrap_coverage(circle_id)?;
         }
         Ok(circle_ids.len())
     }
@@ -116,7 +116,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         retained_replay: &mut VerifiedStoreAuthorityTransaction,
         retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let provided = retractions
             .iter()
             .map(|retraction| {
@@ -125,20 +125,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = retained_replay.replay_inputs_on(crate::store::StoreRecords::new(
-            self.transaction,
-            self.store_dir,
-        ))?;
+        let retained = self.store.retained_replay_inputs(retained_replay)?;
         let mut required = BTreeSet::new();
         for retained in &retained {
-            if author_exclusion_activation_for_candidate_on(
-                crate::store::StoreRecords::new(self.transaction, self.store_dir),
-                retained_replay,
-                root,
-                retained.commit_ref(),
-                &retained.commit().author_registration,
-            )?
-            .is_some()
+            if self
+                .store
+                .author_exclusion_activation_for_candidate(
+                    retained_replay,
+                    root,
+                    retained.commit_ref(),
+                    &retained.commit().author_registration,
+                )?
+                .is_some()
             {
                 required.insert(retained.commit_ref().clone());
             }
@@ -181,8 +179,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             let candidate = nonactivation
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            validate_terminal_nonactivation_authority_on(
-                crate::store::StoreRecords::new(self.transaction, self.store_dir),
+            self.store.validate_terminal_nonactivation_authority(
                 retained_replay,
                 root,
                 &nonactivation,
@@ -193,16 +190,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     accepted_cut,
                     activation_head,
                 } => {
-                    let locator =
-                        load_author_exclusion_activation_locator_on(
-                            crate::store::StoreRecords::new(
-                                self.transaction,
-                                self.store_dir,
-                            ),
-                            retained_replay,
-                            root,
-                            exclusion,
-                        )?;
+                    let locator = self.store.load_author_exclusion_activation_locator(
+                        retained_replay,
+                        root,
+                        exclusion,
+                    )?;
                     if locator.accepted_cut() != accepted_cut
                         || locator.activation_head() != activation_head
                     {
@@ -236,10 +228,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let retained = retained_replay.retained_materialization_by_ref_on(
-                crate::store::StoreRecords::new(self.transaction, self.store_dir),
-                &candidate,
-            )?;
+            let retained = self
+                .store
+                .retained_materialization_by_ref(retained_replay, &candidate)?;
             if retained.root() != root || retained.input_hash().to_string() != input_hash {
                 return Err(DbError::Message(
                     "terminal retraction retained input differs from its materialization"

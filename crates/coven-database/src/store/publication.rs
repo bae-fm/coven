@@ -1,9 +1,5 @@
 use super::{
-    candidate_records::{
-        author_exclusion_activation_for_candidate_on, begin_merge_candidate_nonactivation_on,
-        parse_prepared_merge_candidate_on, parse_prepared_merge_candidate_parts_on,
-        parse_prepared_merge_publication_on,
-    },
+    candidate_records::begin_merge_candidate_nonactivation_on,
     publication_state::{MergeAbandonmentOutcome, PreparedStoreWriteState},
     MergeMaterializationTransaction, StoreDatabase, StoreSession,
 };
@@ -62,17 +58,16 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::context("prepared Store write status", error))?;
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Store write", error))?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let exclusion_candidate =
-            state.prepared_merge_candidate_on(transaction_records, &prepared)?;
-        if author_exclusion_activation_for_candidate_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            state,
-            &root,
-            &exclusion_candidate.reference,
-            &exclusion_candidate.commit.author_registration,
-        )?
-        .is_some()
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let exclusion_candidate = store_transaction.prepared_merge_candidate(state, &prepared)?;
+        if store_transaction
+            .author_exclusion_activation_for_candidate(
+                state,
+                &root,
+                &exclusion_candidate.reference,
+                &exclusion_candidate.commit.author_registration,
+            )?
+            .is_some()
         {
             let device_id = exclusion_candidate.commit.author_registration.device_id;
             let write_id = WriteId::from_generated(stored_write_id.clone());
@@ -138,17 +133,15 @@ impl StoreSession<'_> {
             ..
         } = &prepared
         {
-            let root = state.required_root_authority_on(transaction_records)?;
-            let candidate = parse_prepared_merge_candidate_parts_on(
-                transaction_records,
+            let root = store_transaction.required_root_authority(state)?;
+            let candidate = store_transaction.prepared_merge_candidate_parts(
                 state,
                 candidate_commit.semantic_bytes(),
                 candidate_commit.prepared().reference(),
                 candidate_head.semantic_bytes(),
                 candidate_head.prepared().reference(),
             )?;
-            let authority = parse_prepared_merge_candidate_parts_on(
-                transaction_records,
+            let authority = store_transaction.prepared_merge_candidate_parts(
                 state,
                 authority_commit.semantic_bytes(),
                 authority_commit.prepared().reference(),
@@ -166,8 +159,8 @@ impl StoreSession<'_> {
                     "accepted Merge abandonment differs from its durable authority".to_string(),
                 ));
             }
-            let registration = state.activated_registration_on(
-                transaction_records,
+            let registration = store_transaction.activated_registration(
+                state,
                 &root,
                 &authority.commit.author_registration,
             )?;
@@ -277,12 +270,12 @@ impl StoreSession<'_> {
                 "Merge abandonment reached ordinary publication completion".to_string(),
             ));
         };
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let root = state.required_root_authority_on(transaction_records)?;
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let root = store_transaction.required_root_authority(state)?;
         let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
             .map_err(|error| DbError::context("prepared Store commit", error))?;
-        let registration = state.activated_registration_on(
-            transaction_records,
+        let registration = store_transaction.activated_registration(
+            state,
             &root,
             &unverified.author_registration,
         )?;
@@ -538,11 +531,11 @@ impl StoreSession<'_> {
         }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let tx_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
         let prepared_candidate =
-            parse_prepared_merge_candidate_on(tx_records, verified_authority, &prepared)?;
+            store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
         let publication =
-            parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
+            store_transaction.prepared_merge_publication(verified_authority, &prepared)?;
         if winner_head.object.slot() != publication.head_object.slot()
             || winner_head.object == publication.head_object
         {

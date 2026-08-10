@@ -163,21 +163,18 @@ impl StoreSession<'_> {
                 "author exclusion reached a non-candidate Merge preparation".to_string(),
             ));
         };
-        let candidate = parse_prepared_merge_candidate_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate =
+            store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
+        store_transaction.begin_blocked_merge_candidate_nonactivation(
             verified_authority,
-            &prepared,
+            &root,
+            &write_id,
+            &candidate,
+            &nonactivation,
+            true,
+            &[],
         )?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .begin_blocked_merge_candidate_nonactivation(
-                verified_authority,
-                &root,
-                &write_id,
-                &candidate,
-                &nonactivation,
-                true,
-                &[],
-            )?;
         tx.commit().map_err(DbError::from)
     }
 
@@ -225,42 +222,39 @@ impl StoreSession<'_> {
                 "Merge abandonment already has a publication outcome".to_string(),
             ));
         }
-        let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
             candidate_head.semantic_bytes(),
             candidate_head.prepared().reference(),
         )?;
-        let authority = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let authority = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             authority_commit.semantic_bytes(),
             authority_commit.prepared().reference(),
             authority_head.semantic_bytes(),
             authority_head.prepared().reference(),
         )?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .begin_blocked_merge_candidate_nonactivation(
-                verified_authority,
-                &root,
-                &write_id,
-                &candidate,
-                &candidate_nonactivation,
-                true,
-                &[],
-            )?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .begin_blocked_merge_candidate_nonactivation(
-                verified_authority,
-                &root,
-                &write_id,
-                &authority,
-                &authority_nonactivation,
-                false,
-                &[],
-            )?;
+        store_transaction.begin_blocked_merge_candidate_nonactivation(
+            verified_authority,
+            &root,
+            &write_id,
+            &candidate,
+            &candidate_nonactivation,
+            true,
+            &[],
+        )?;
+        store_transaction.begin_blocked_merge_candidate_nonactivation(
+            verified_authority,
+            &root,
+            &write_id,
+            &authority,
+            &authority_nonactivation,
+            false,
+            &[],
+        )?;
         *outcome = MergeAbandonmentOutcome::AuthorExcluded;
         let replacement = serde_json::to_string(&prepared).map_err(|error| {
             DbError::context("serialize excluded Merge abandonment preparation", error)
@@ -374,8 +368,8 @@ impl StoreSession<'_> {
                 "Merge abandonment did not lose to its prepared candidate".to_string(),
             ));
         };
-        let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
@@ -387,8 +381,7 @@ impl StoreSession<'_> {
                 "Merge abandonment winner is another candidate".to_string(),
             ));
         }
-        let authority = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let authority = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             authority_commit.semantic_bytes(),
             authority_commit.prepared().reference(),
@@ -459,8 +452,8 @@ impl StoreSession<'_> {
                 "Merge abandonment has no third-candidate winner".to_string(),
             ));
         };
-        let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
@@ -472,8 +465,7 @@ impl StoreSession<'_> {
                 "original candidate won the Merge abandonment race".to_string(),
             ));
         }
-        let authority = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let authority = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             authority_commit.semantic_bytes(),
             authority_commit.prepared().reference(),
@@ -544,16 +536,15 @@ impl StoreSession<'_> {
                 "Merge abandonment has no author-exclusion outcome".to_string(),
             ));
         };
-        let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
             candidate_head.semantic_bytes(),
             candidate_head.prepared().reference(),
         )?;
-        let authority = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let authority = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             authority_commit.semantic_bytes(),
             authority_commit.prepared().reference(),

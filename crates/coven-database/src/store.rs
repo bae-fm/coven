@@ -10,7 +10,6 @@ mod circle_authority;
 mod circle_controls;
 mod circle_operation_discard;
 mod circle_operations;
-use circle_authority::circle_blob_opening_protection_on;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use circle_operations::circle_current_state_on;
 use circle_operations::circle_publication_context_on;
@@ -77,7 +76,6 @@ mod store_database;
 mod store_device_state;
 mod store_records;
 pub use store_database::StoreDatabase;
-use store_records::StoreTransaction;
 mod store_session;
 mod stream_activation_records;
 mod verified_store_authority;
@@ -95,6 +93,17 @@ mod write_lifecycle;
 pub(crate) struct StoreRecords<'store> {
     conn: &'store rusqlite::Connection,
     store_dir: &'store coven_foundation::store_dir::StoreDir,
+}
+
+/// One Store transaction and its matching row-and-payload capability.
+///
+/// Payloads land before the row naming them commits, while ownership claims
+/// land in this transaction. Keeping both borrows together prevents a record
+/// mutation from using another Store's payload directory.
+#[derive(Clone, Copy)]
+pub(crate) struct StoreTransaction<'store, 'connection> {
+    transaction: &'store rusqlite::Transaction<'connection>,
+    records: StoreRecords<'store>,
 }
 
 use crate::{

@@ -103,6 +103,15 @@ impl StoreRecords<'_> {
 }
 
 impl StoreTransaction<'_, '_> {
+    pub(crate) fn seed_stream_activation_index_from_retained(
+        self,
+        registrations: &mut dyn crate::store::verified_store_authority::VerifiedRegistrationLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<(), DbError> {
+        self.records
+            .seed_stream_activation_index_from_retained(registrations, root)
+    }
+
     pub(crate) fn record_circle_bootstrap_coverage(
         self,
         authority: &mut dyn VerifiedStoreLookup,

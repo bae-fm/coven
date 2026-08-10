@@ -69,8 +69,7 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
 }
 
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
-    transaction: &'transaction rusqlite::Transaction<'connection>,
-    store_dir: &'transaction coven_foundation::store_dir::StoreDir,
+    store: crate::store::StoreTransaction<'transaction, 'connection>,
     verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
 }
 
@@ -125,8 +124,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
     ) -> Self {
         Self {
-            transaction,
-            store_dir,
+            store: crate::store::StoreTransaction::new(transaction, store_dir),
             verified_authority,
         }
     }
@@ -136,16 +134,14 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<coven_protocol::store_commit::ReferencedStoreDeviceRegistration, DbError> {
         let reference =
-            local_activated_registration_ref_on(self.transaction)?.ok_or_else(|| {
+            local_activated_registration_ref_on(self.store.transaction)?.ok_or_else(|| {
                 DbError::Message(
                     "audience blob move has no activated local Store registration".to_string(),
                 )
             })?;
-        let registration = self.verified_authority.activated_registration_on(
-            crate::store::StoreRecords::new(self.transaction, self.store_dir),
-            root,
-            &reference,
-        )?;
+        let registration =
+            self.store
+                .activated_registration(self.verified_authority, root, &reference)?;
         coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
             reference,
             registration,
@@ -158,7 +154,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         circle_id: coven_protocol::circle::CircleId,
         expected_control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
-        super::circle_publication_context_on(self.transaction, circle_id, expected_control)
+        super::circle_publication_context_on(self.store.transaction, circle_id, expected_control)
     }
 
     pub fn circle_blob_opening_protection(
@@ -168,8 +164,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         expected_control: &coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
-        super::circle_blob_opening_protection_on(
-            crate::store::StoreRecords::new(self.transaction, self.store_dir),
+        self.store.circle_blob_opening_protection(
             self.verified_authority,
             root,
             circle_id,
@@ -183,6 +178,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         fact: &StoreWriteBlobFact,
     ) -> Result<Option<PathBuf>, DbError> {
         let stored = self
+            .store
             .transaction
             .query_row(
                 "SELECT path, plaintext_size, plaintext_hash
@@ -629,8 +625,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             }
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
-                    let store_root_hash = verified_authority
-                        .required_root_authority_on(crate::store::StoreRecords::new(&tx, store_dir))
+                    let store_root_hash = crate::store::StoreTransaction::new(&tx, store_dir)
+                        .required_root_authority(verified_authority)
                         .map_err(E::from)?
                         .store_root_hash;
                     let key =
@@ -718,8 +714,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             drop(journal);
             let committed = (|| {
                 let rows_changed = tx.total_changes().saturating_sub(changes_before);
-                let local_stream_id = verified_authority
-                    .local_merge_stream_id_on(crate::store::StoreRecords::new(&tx, store_dir))?;
+                let local_stream_id = crate::store::StoreTransaction::new(&tx, store_dir)
+                    .local_merge_stream_id(verified_authority)?;
                 let base = StoreWriteBase {
                     dependencies:
                         crate::store::materialized_commit_index::materialized_frontier_on(

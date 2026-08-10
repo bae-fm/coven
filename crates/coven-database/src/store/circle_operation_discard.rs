@@ -10,8 +10,7 @@
 use super::candidate_records::{
     blocked_merge_candidate_from_prepared, blocked_merge_candidate_nonactivation,
     merge_candidate_cleanup_targets_on, parse_prepared_merge_candidate_parts_on,
-    terminal_candidate_verification_on, validate_terminal_candidate_authority_on,
-    CandidateCleanupObject, PreparedMergeCandidate,
+    terminal_candidate_verification_on, CandidateCleanupObject, PreparedMergeCandidate,
 };
 use super::{StoreDatabase, StoreSession};
 use crate::{
@@ -32,6 +31,16 @@ use rusqlite::Connection;
 struct CircleOperationCandidate {
     candidate: PreparedMergeCandidate,
     bootstrap_blobs: Vec<ExactObjectRef>,
+}
+
+impl crate::store::StoreTransaction<'_, '_> {
+    fn circle_operation_candidate(
+        self,
+        authority: &mut super::VerifiedStoreAuthority,
+        operation: &PreparedCircleOperation,
+    ) -> Result<CircleOperationCandidate, crate::DbError> {
+        circle_operation_candidate_on(self.records, authority, operation)
+    }
 }
 
 pub struct CircleOperationDiscardCandidate {
@@ -138,11 +147,8 @@ impl StoreSession<'_> {
         let CircleOperationCandidate {
             candidate,
             bootstrap_blobs,
-        } = circle_operation_candidate_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            self.verified_store_authority,
-            journal.operation(),
-        )?;
+        } = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .circle_operation_candidate(self.verified_store_authority, journal.operation())?;
         crate::store::StoreTransaction::new(&tx, self.records.store_dir)
             .begin_blocked_merge_candidate_nonactivation(
                 self.verified_store_authority,
@@ -195,12 +201,10 @@ impl StoreSession<'_> {
             .unchecked_transaction()
             .map_err(crate::DbError::from)?;
         let journal = load_discarding_operation_on(&tx, &operation_id)?;
-        let candidate = circle_operation_candidate_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            self.verified_store_authority,
-            journal.operation(),
-        )?
-        .candidate;
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction
+            .circle_operation_candidate(self.verified_store_authority, journal.operation())?
+            .candidate;
         let reference = durable
             .reference()
             .map_err(|error| crate::DbError::Message(error.to_string()))?;
@@ -209,8 +213,7 @@ impl StoreSession<'_> {
                 "fresh excluded-author head evidence names another candidate".to_string(),
             ));
         }
-        validate_terminal_candidate_authority_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        store_transaction.validate_terminal_candidate_authority(
             self.verified_store_authority,
             &root,
             &candidate,
@@ -302,11 +305,8 @@ impl StoreSession<'_> {
         let CircleOperationCandidate {
             candidate,
             bootstrap_blobs,
-        } = circle_operation_candidate_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-            self.verified_store_authority,
-            journal.operation(),
-        )?;
+        } = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .circle_operation_candidate(self.verified_store_authority, journal.operation())?;
         if !merge_candidate_cleanup_targets_on(
             &tx,
             &candidate.commit.write_id,

@@ -107,6 +107,7 @@ impl StoreSession<'_> {
         let mut candidates = Vec::new();
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
             witness.validate().map_err(DbError::Message)?;
             if witness.original_position().commit() != &reference {
@@ -115,11 +116,9 @@ impl StoreSession<'_> {
                         .to_string(),
                 ));
             }
-            candidates.push(crate::StoreDatabase::load_merge_retraction_cleanup_on(
-                crate::store::StoreRecords::new(&tx, self.records.store_dir),
-                verified_authority,
-                &reference,
-            )?);
+            candidates.push(
+                store_transaction.load_merge_retraction_cleanup(verified_authority, &reference)?,
+            );
         } else {
             let raw_prepared = raw_prepared.ok_or_else(|| {
                 DbError::Message("Merge cleanup has no prepared candidate".to_string())
@@ -128,8 +127,7 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("prepared Merge cleanup", error))?;
             match &prepared {
                 PreparedStoreWriteState::Publication { commit, head, .. } => {
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::store::StoreRecords::new(&tx, self.records.store_dir),
+                    candidates.push(store_transaction.prepared_merge_candidate_parts(
                         verified_authority,
                         commit.semantic_bytes(),
                         commit.prepared().reference(),
@@ -144,16 +142,14 @@ impl StoreSession<'_> {
                     authority_head,
                     ..
                 } => {
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::store::StoreRecords::new(&tx, self.records.store_dir),
+                    candidates.push(store_transaction.prepared_merge_candidate_parts(
                         verified_authority,
                         candidate_commit.semantic_bytes(),
                         candidate_commit.prepared().reference(),
                         candidate_head.semantic_bytes(),
                         candidate_head.prepared().reference(),
                     )?);
-                    candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::store::StoreRecords::new(&tx, self.records.store_dir),
+                    candidates.push(store_transaction.prepared_merge_candidate_parts(
                         verified_authority,
                         authority_commit.semantic_bytes(),
                         authority_commit.prepared().reference(),
@@ -171,8 +167,7 @@ impl StoreSession<'_> {
                     "fresh excluded-author head evidence names another write".to_string(),
                 )
             })?;
-        validate_terminal_candidate_authority_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        store_transaction.validate_terminal_candidate_authority(
             verified_authority,
             root,
             &candidate,
@@ -237,12 +232,12 @@ impl StoreSession<'_> {
         }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let tx_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
         let publication =
-            parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
-        let root = verified_authority.required_root_authority_on(tx_records)?;
-        let registration = verified_authority.activated_registration_on(
-            tx_records,
+            store_transaction.prepared_merge_publication(verified_authority, &prepared)?;
+        let root = store_transaction.required_root_authority(verified_authority)?;
+        let registration = store_transaction.activated_registration(
+            verified_authority,
             &root,
             &publication.commit.author_registration,
         )?;

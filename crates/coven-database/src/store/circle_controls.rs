@@ -359,10 +359,10 @@ impl StoreSession<'_> {
         let unverified_commit: StoreBatchCommit =
             serde_json::from_slice(&operation.commit_bytes)
                 .map_err(|error| DbError::context("parse circle Store commit", error))?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let root = authority.required_root_authority_on(transaction_records)?;
-        let author = authority.activated_registration_on(
-            transaction_records,
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let root = store_transaction.required_root_authority(authority)?;
+        let author = store_transaction.activated_registration(
+            authority,
             &root,
             &unverified_commit.author_registration,
         )?;

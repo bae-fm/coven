@@ -742,3 +742,23 @@ pub(crate) fn circle_blob_opening_protection_on(
             ))
         })
 }
+
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(super) fn circle_blob_opening_protection(
+        self,
+        verified_store: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        circle_id: coven_protocol::circle::CircleId,
+        expected_control: &coven_protocol::circle::CircleControlCoord,
+        expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
+        circle_blob_opening_protection_on(
+            self.records,
+            verified_store,
+            root,
+            circle_id,
+            expected_control,
+            expected_key_fingerprint,
+        )
+    }
+}

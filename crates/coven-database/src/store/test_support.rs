@@ -595,10 +595,9 @@ impl StoreSession<'_> {
                 )],
             )
             .map_err(DbError::from)?;
-        let error = StoreDatabase::circle_bootstrap_replay_inputs_on(
-            crate::store::StoreRecords::new(&transaction, self.records.store_dir),
-        )
-        .expect_err("Circle bootstrap replay must require its payload claim");
+        let error = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
+            .circle_bootstrap_replay_inputs()
+            .expect_err("Circle bootstrap replay must require its payload claim");
         transaction.rollback().map_err(DbError::from)?;
         Ok(error.to_string())
     }
@@ -625,12 +624,12 @@ impl StoreSession<'_> {
                 ],
             )
             .map_err(DbError::from)?;
-        let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            crate::store::StoreRecords::new(&transaction, self.records.store_dir),
-            root,
-            self.verified_store_authority,
-            activation_commit,
-        )?;
+        let retained = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
+            .load_retained_merge_materialization_by_ref(
+                root,
+                self.verified_store_authority,
+                activation_commit,
+            )?;
         let error = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
             .record_circle_bootstrap_coverage(
                 self.verified_store_authority,

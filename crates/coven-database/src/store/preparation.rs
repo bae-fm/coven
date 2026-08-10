@@ -1,5 +1,4 @@
 use super::{
-    candidate_records::parse_prepared_merge_candidate_parts_on,
     publication_state::{
         MergeAbandonmentOutcome, MergeCandidateAbandonmentPreparation, PreparedStoreWriteState,
         StoreWritePreparation,
@@ -115,7 +114,7 @@ impl StoreSession<'_> {
                 stage.write_id
             )));
         }
-        let partitions = crate::store::StoreRecords::new(&tx, self.records.store_dir)
+        let partitions = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
             .store_write_partitions(stage.write_id.as_str())?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
             .map_err(|error| DbError::context(format!("write {} base", stage.write_id), error))?;
@@ -358,8 +357,8 @@ impl StoreSession<'_> {
                 "Merge abandonment requires one prepared candidate".to_string(),
             ));
         };
-        let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
@@ -371,10 +370,9 @@ impl StoreSession<'_> {
                 "prepared Merge candidate differs from its write identity".to_string(),
             ));
         }
-        let tx_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let root = verified_authority.required_root_authority_on(tx_records)?;
-        let registration = verified_authority.activated_registration_on(
-            tx_records,
+        let root = store_transaction.required_root_authority(verified_authority)?;
+        let registration = store_transaction.activated_registration(
+            verified_authority,
             &root,
             &candidate.commit.author_registration,
         )?;
@@ -506,9 +504,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let local_stream_id = self.verified_store_authority.local_merge_stream_id_on(
-            crate::store::StoreRecords::new(&tx, self.records.store_dir),
-        )?;
+        let local_stream_id = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            .local_merge_stream_id(self.verified_store_authority)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
                 &tx,

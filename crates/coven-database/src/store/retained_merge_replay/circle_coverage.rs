@@ -12,7 +12,7 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        StoreRecords::new(&tx, self.records.store_dir)
+        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
             .seed_stream_activation_index_from_retained(self.verified_store_authority, root)?;
         let rows = query_mapped_rows(
             &tx,
@@ -237,5 +237,20 @@ impl StoreDatabase {
                 Ok((coverage.activation_commit, image))
             })
             .collect()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(crate) fn circle_bootstrap_replay_inputs(
+        self,
+    ) -> Result<
+        Vec<(
+            StoreBatchCommitRef,
+            coven_protocol::circle_activation::VerifiedCircleImage,
+        )>,
+        DbError,
+    > {
+        StoreDatabase::circle_bootstrap_replay_inputs_on(self.records)
     }
 }

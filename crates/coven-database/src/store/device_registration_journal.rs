@@ -212,10 +212,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let root = self
-            .verified_store_authority
-            .required_root_authority_on(transaction_records)?;
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
             &record.registration().origin
@@ -224,8 +222,8 @@ impl StoreSession<'_> {
                 "existing local founder device has a non-founder origin".to_string(),
             ));
         };
-        let activated = self.verified_store_authority.activated_registration_on(
-            transaction_records,
+        let activated = store_transaction.activated_registration(
+            self.verified_store_authority,
             &root,
             record.reference(),
         )?;
@@ -341,10 +339,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, self.records.store_dir);
-        let root = self
-            .verified_store_authority
-            .required_root_authority_on(transaction_records)?;
+        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let objects = record.columns(subject)?;
         let exact_registration_ref = encode(record.reference(), subject, "registration ref")?;

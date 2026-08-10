@@ -14,7 +14,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 "activated Store acknowledgement names another registration".to_string(),
             ));
         }
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let device_id = reference.registration.device_id.to_string();
         let current = conn
             .query_row(
@@ -63,7 +63,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         for reference in commit.circle_acknowledgements() {
             if reference.registration != commit.author_registration {
                 return Err(DbError::Message(
@@ -125,7 +125,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         &self,
         materialization: &VerifiedMergeMaterialization<'_>,
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let commit_ref = materialization.commit_ref();
         let activation_head = materialization.activation_head();
         let activation_head = coven_protocol::store_commit::StoreDeviceHeadRef {
@@ -191,7 +191,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         verified_commit: &VerifiedStoreBatchCommit,
         activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
         if activations.len() != commit.circle_controls().len() {

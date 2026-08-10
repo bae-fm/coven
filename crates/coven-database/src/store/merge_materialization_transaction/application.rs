@@ -7,7 +7,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         commit_ref: &StoreBatchCommitRef,
         object_ids: &[ObjectHash],
     ) -> Result<(), DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let mut unique = std::collections::BTreeSet::new();
         for object_id in object_ids {
             if !unique.insert(*object_id) {
@@ -79,7 +79,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         *package_reported_fk_violation |= apply.had_fk_violations;
         if let Some(package_audience) = package_audience {
             crate::align_inbound_scoped_root_audiences(
-                self.transaction,
+                self.store.transaction,
                 &bytes,
                 package_audience,
                 gates,
@@ -115,7 +115,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         returned_changes: &mut Vec<RowChange>,
         package_reported_fk_violation: &mut bool,
     ) -> Result<MergeSubsetOutcome, DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let mut winning_rows = Vec::new();
         match package.audience() {
             PackageAudience::Store if gates.has_scoped_graph() => {
@@ -232,7 +232,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         >,
         materialization: PreparedMergeMaterialization,
     ) -> Result<AppliedMergeMaterialization, DbError> {
-        let conn = self.transaction;
+        let conn = self.store.transaction;
         let PreparedMergeMaterialization {
             root,
             verified_commit,
@@ -323,7 +323,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 crate::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
             crate::install_pulled_package_activation_on(
                 conn,
-                self.store_dir,
+                self.store.records.store_dir,
                 commit_ref,
                 retained.domain(),
                 retained.object(),
@@ -416,7 +416,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )?;
         crate::install_pulled_merge_membership_activations_on(
             conn,
-            self.store_dir,
+            self.store.records.store_dir,
             commit_ref,
             &membership_remote_objects,
         )?;

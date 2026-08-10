@@ -618,6 +618,67 @@ impl VerifiedStoreLookup for VerifiedStoreAuthority {
     }
 }
 
+impl crate::store::StoreTransaction<'_, '_> {
+    pub(super) fn begin_verified_authority_transaction(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+    ) -> Result<VerifiedStoreAuthorityTransaction, DbError> {
+        authority.begin_transaction_on(self.records)
+    }
+
+    pub(super) fn required_root_authority(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+    ) -> Result<StoreRootRef, DbError> {
+        authority.required_root_authority_on(self.records)
+    }
+
+    pub(super) fn root_authority(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+    ) -> Result<Option<(StoreRootRef, StoreProtocolRoot)>, DbError> {
+        authority.root_authority_on(self.records)
+    }
+
+    pub(super) fn activated_registration(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+        root: &StoreRootRef,
+        reference: &StoreDeviceRegistrationRef,
+    ) -> Result<StoreDeviceRegistration, DbError> {
+        authority.activated_registration_on(self.records, root, reference)
+    }
+
+    pub(super) fn local_merge_stream_id(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+    ) -> Result<Option<String>, DbError> {
+        authority.local_merge_stream_id_on(self.records)
+    }
+
+    pub(super) fn retained_replay_baseline(
+        self,
+        authority: &mut VerifiedStoreAuthority,
+    ) -> Result<&RetainedReplayBaseline, DbError> {
+        authority.retained_replay_baseline_on(self.records)
+    }
+
+    pub(super) fn retained_replay_inputs(
+        self,
+        authority: &mut VerifiedStoreAuthorityTransaction,
+    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
+        authority.replay_inputs_on(self.records)
+    }
+
+    pub(super) fn retained_materialization_by_ref(
+        self,
+        authority: &mut VerifiedStoreAuthorityTransaction,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        authority.retained_materialization_by_ref_on(self.records, reference)
+    }
+}
+
 impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
     fn activated_registration_on(
         &mut self,
