@@ -275,54 +275,15 @@ mod tests {
         let live_object = ObjectHash::digest(b"live object");
         let database = StoreDatabase::new(&db.database);
 
-        db.database.test_sql(move |conn| {
-            conn.execute_batch(&format!(
-                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
-                 VALUES ('parent', 'parent', 1, '0000000001000-0000-test', '2026-01-01');
-                 INSERT INTO note_photos
-                    (id, note_id, kind, size, hash, blob_id, _updated_at, created_at)
-                 VALUES
-                    ('removed-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
-                     '0000000001000-0000-test', '2026-01-01'),
-                    ('live-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
-                     '0000000001001-0000-test', '2026-01-01');",
-                hash = coven_protocol::blob::content_hash(b"bytes"),
-            ))
-            .map_err(DbError::from)?;
-            for (object, locator) in [
-                (removed_object, removed_locator),
-                (live_object, live_locator),
-            ] {
-                conn.execute(
-                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
-                    [object.to_string()],
-                )
-                .map_err(DbError::from)?;
-                conn.execute(
-                    "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)",
-                    (object.to_string(), locator.to_string()),
-                )
-                .map_err(DbError::from)?;
-            }
-            for (row_id, row_stamp, object) in [
-                ("removed-row", "0000000001000-0000-test", removed_object),
-                ("live-row", "0000000001001-0000-test", live_object),
-            ] {
-                conn.execute(
-                    "INSERT INTO row_blob_locators
-                     (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
-                     VALUES ('note_photos', ?1, 'blob_id', ?2, '\"store\"', ?3)",
-                    (row_id, row_stamp, object.to_string()),
-                )
-                .map_err(DbError::from)?;
-            }
-            conn.execute("DELETE FROM note_photos WHERE id = 'removed-row'", [])
-                .map_err(DbError::from)?;
-
-            Ok(())
-        })
-        .await
-        .expect("seed removed and live blob bindings");
+        db.database
+            .seed_distinct_cleanup_bindings_for_test(
+                removed_locator,
+                live_locator,
+                removed_object,
+                live_object,
+            )
+            .await
+            .expect("seed removed and live blob bindings");
 
         database
             .record_obsolete_copy_intent_for_test(LocalBlobCleanupIntent::for_row(
@@ -335,14 +296,7 @@ mod tests {
             .expect("record obsolete row copies");
 
         db.database
-            .test_sql(|conn| {
-                conn.query(
-                    "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)
-            })
+            .cleanup_intent_copy_identities_for_test()
             .await
             .map(|identities| {
                 assert_eq!(

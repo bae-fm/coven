@@ -39,18 +39,9 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         .expect_err("missing Store root must fail");
     assert!(matches!(missing, DbError::StoreRootHashMissing));
 
-    db.test_sql(|conn| {
-        conn.execute(
-            "INSERT INTO store_protocol_root_authority
-             (singleton, store_root_hash, store_protocol_root_bytes, store_root_object)
-             VALUES (1, ?1, X'00', '{}')",
-            ["00".repeat(32)],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("write malformed exact Store root authority");
+    db.install_malformed_store_root_authority_for_test()
+        .await
+        .expect("write malformed exact Store root authority");
     let malformed = crate::StoreDatabase::new(&db)
         .required_store_root_hash()
         .await
@@ -60,13 +51,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         "unexpected malformed Store root error: {malformed:?}"
     );
 
-    db.test_sql(|conn| {
-        conn.execute("DELETE FROM store_protocol_root_authority", [])
-            .map(|_| ())
-            .map_err(DbError::from)
-    })
-    .await
-    .expect("remove malformed authority");
+    db.remove_store_protocol_root_for_test().await;
     let signer = coven_keys::keys::UserKeypair::generate();
     let founder_provider_admin =
         coven_protocol::provider::FounderProviderAdminGrant::from_test_label("required-store-root");
@@ -126,7 +111,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
             ObjectHash::digest(&bytes),
         ),
     };
-    db.test_sql(move |database| database.install_exact_store_root_authority(&reference, &bytes))
+    db.install_exact_store_root_authority_for_test(reference, bytes)
         .await
         .expect("install exact Store root authority");
     assert_eq!(
@@ -667,23 +652,9 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     .expect("open");
     let existing_changeset = vec![0x45, 0x58, 0x41, 0x43, 0x54];
     let existing_hash = ObjectHash::digest(&existing_changeset).to_string();
-    let existing_for_insert = existing_hash.clone();
-    db.test_sql(move |conn| {
-        conn.execute(
-            "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
-             VALUES (
-                'existing-write', '\"pending\"', '[]', ?1,
-                '{\"dependencies\":{}}',
-                '{\"blobs\":[]}'
-             )",
-            [existing_for_insert],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("seed existing write records");
+    db.seed_existing_store_write_for_test(existing_hash.clone())
+        .await
+        .expect("seed existing write records");
 
     let result = crate::StoreDatabase::new(&db)
         .run_host_store_write_for_test(None, None, move |tx| {
@@ -701,23 +672,12 @@ async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
     let error = result.expect_err("invalid UUID must reject the host transaction");
     assert!(error.to_string().contains("things") && error.to_string().contains("2"));
 
-    db.test_sql(move |conn| {
-        let row_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM things", [], |row| row.get(0))
-            .map_err(DbError::from)?;
-        let pending = conn
-            .query(
-                "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(DbError::from)?;
-        assert_eq!(row_count, 0);
-        assert_eq!(pending, vec![existing_hash]);
-        Ok(())
-    })
-    .await
-    .expect("inspect rollback");
+    let (row_count, pending) = db
+        .host_identity_rollback_state_for_test()
+        .await
+        .expect("inspect rollback");
+    assert_eq!(row_count, 0);
+    assert_eq!(pending, vec![existing_hash]);
 }
 
 #[tokio::test]
@@ -736,16 +696,9 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     )
     .expect("open");
     let original = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-    db.test_sql(move |conn| {
-        conn.execute(
-            "INSERT INTO things VALUES (?1, 'base', '0000000001000-0000-writer')",
-            [original],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("seed row");
+    db.seed_thing_for_test(original.to_string())
+        .await
+        .expect("seed row");
 
     let renamed = "01890a5d-ac96-774b-bcce-b302099c3f74";
     crate::StoreDatabase::new(&db)
@@ -789,14 +742,7 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
         .expect("ordinary update and same-id upsert succeed");
 
     let pending_before = db
-        .test_sql(|conn| {
-            conn.query(
-                "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(DbError::from)
-        })
+        .store_write_hashes_for_test()
         .await
         .expect("read existing write records");
     assert_eq!(pending_before.len(), 3);
@@ -813,25 +759,12 @@ async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid
     let error = invalid.expect_err("invalid new UUID rejects the primary-key change");
     assert!(error.to_string().contains("not-a-uuid"));
 
-    db.test_sql(move |conn| {
-        let row = conn
-            .query_row("SELECT id, body FROM things", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(DbError::from)?;
-        let pending_after = conn
-            .query(
-                "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(DbError::from)?;
-        assert_eq!(row, (replaced.to_string(), "upserted".to_string()));
-        assert_eq!(pending_after, pending_before);
-        Ok(())
-    })
-    .await
-    .expect("invalid identity change rolls back row and write records");
+    let (row, pending_after) = db
+        .thing_and_store_write_state_for_test()
+        .await
+        .expect("invalid identity change rolls back row and write records");
+    assert_eq!(row, (replaced.to_string(), "upserted".to_string()));
+    assert_eq!(pending_after, pending_before);
 }
 
 #[tokio::test]

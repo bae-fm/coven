@@ -148,21 +148,17 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     let store_database = crate::StoreDatabase::new(&db.database);
     let first_commit = verified_commit.clone();
     db.database
-        .test_sql(move |database| {
-            database.record_verified_circle_activations(&first_commit, &[verified])
-        })
+        .record_verified_circle_activations_for_test(first_commit, vec![verified])
         .await
         .expect("record multi-Owner control");
     let cached_owner = db
         .database
-        .test_sql(move |database| database.circle_access_owner(creation.circle_id))
+        .circle_access_owner_for_test(creation.circle_id)
         .await
         .expect("read cached access owner");
     assert_eq!(cached_owner, author_pubkey);
     db.database
-        .test_sql(|database| {
-            database.clear_table(crate::DatabaseTestTable::named("circle_access_cache"))
-        })
+        .clear_circle_access_cache_for_test()
         .await
         .expect("remove historical Circle projections");
     let circles = store_database
@@ -262,17 +258,15 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     .expect("authenticate second Store commit");
     let error = db
         .database
-        .test_sql(move |database| {
-            database.record_verified_circle_activations(
-                &second_commit,
-                &[coven_protocol::circle_activation::VerifiedCircleReference {
-                    reference: second_reference,
-                    circle_id: creation.circle_id,
-                    control: second_control,
-                    local_access: None,
-                }],
-            )
-        })
+        .record_verified_circle_activations_for_test(
+            second_commit,
+            vec![coven_protocol::circle_activation::VerifiedCircleReference {
+                reference: second_reference,
+                circle_id: creation.circle_id,
+                control: second_control,
+                local_access: None,
+            }],
+        )
         .await
         .expect_err("a Circle cannot accept a second founder control");
     assert!(

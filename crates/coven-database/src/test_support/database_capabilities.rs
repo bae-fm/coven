@@ -1,6 +1,142 @@
 use crate::{Database, DatabaseTestTable, DbError};
 
 impl Database {
+    pub async fn install_malformed_store_root_authority_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database
+                .execute(
+                    "INSERT INTO store_protocol_root_authority
+                     (singleton, store_root_hash, store_protocol_root_bytes, store_root_object)
+                     VALUES (1, ?1, X'00', '{}')",
+                    ["00".repeat(32)],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn install_exact_store_root_authority_for_test(
+        &self,
+        reference: coven_protocol::store_commit::StoreRootRef,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.install_exact_store_root_authority(&reference, &bytes)
+        })
+        .await
+    }
+
+    pub async fn seed_existing_store_write_for_test(
+        &self,
+        changeset_hash: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO store_writes
+                     (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+                     VALUES (
+                        'existing-write', '\"pending\"', '[]', ?1,
+                        '{\"dependencies\":{}}',
+                        '{\"blobs\":[]}'
+                     )",
+                    [changeset_hash],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn host_identity_rollback_state_for_test(
+        &self,
+    ) -> Result<(i64, Vec<String>), DbError> {
+        self.test_sql(|database| {
+            let row_count = database
+                .query_row("SELECT COUNT(*) FROM things", [], |row| row.get(0))
+                .map_err(DbError::from)?;
+            let write_hashes = database
+                .query(
+                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?;
+            Ok((row_count, write_hashes))
+        })
+        .await
+    }
+
+    pub async fn seed_thing_for_test(&self, row_id: String) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database
+                .execute(
+                    "INSERT INTO things VALUES (?1, 'base', '0000000001000-0000-writer')",
+                    [row_id],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn store_write_hashes_for_test(&self) -> Result<Vec<String>, DbError> {
+        self.test_sql(|database| {
+            database
+                .query(
+                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn thing_and_store_write_state_for_test(
+        &self,
+    ) -> Result<((String, String), Vec<String>), DbError> {
+        self.test_sql(|database| {
+            let row = database
+                .query_row("SELECT id, body FROM things", [], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let write_hashes = database
+                .query(
+                    "SELECT changeset_hash FROM store_writes ORDER BY ordinal",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?;
+            Ok((row, write_hashes))
+        })
+        .await
+    }
+
+    pub async fn make_remote_retain_pinned_column_for_test(
+        &self,
+    ) -> Result<Option<(i64, Option<String>)>, DbError> {
+        self.test_sql(|database| {
+            let rows = database
+                .query("PRAGMA table_info(blob_make_remote_intents)", [], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            Ok(rows
+                .into_iter()
+                .find_map(|(name, not_null, default_value)| {
+                    (name == "retain_pinned").then_some((not_null, default_value))
+                }))
+        })
+        .await
+    }
+
     pub async fn vacuum_into_for_test(&self, destination: String) -> Result<(), DbError> {
         self.test_sql(move |database| {
             database
@@ -434,6 +570,32 @@ impl Database {
             .await
     }
 
+    pub async fn record_verified_circle_activations_for_test(
+        &self,
+        commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
+        activations: Vec<coven_protocol::circle_activation::VerifiedCircleReference>,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.record_verified_circle_activations(&commit, &activations)
+        })
+        .await
+    }
+
+    pub async fn circle_access_owner_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<String, DbError> {
+        self.test_sql(move |database| database.circle_access_owner(circle_id))
+            .await
+    }
+
+    pub async fn clear_circle_access_cache_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database.clear_table(DatabaseTestTable::named("circle_access_cache"))
+        })
+        .await
+    }
+
     pub async fn replace_circle_operation_prepared_for_test(
         &self,
         operation_id: coven_protocol::circle::CircleOperationId,
@@ -501,6 +663,68 @@ impl Database {
     ) -> Result<(), DbError> {
         self.test_sql(move |database| {
             database.insert_cleanup_intent(&namespace, &blob_id, &copy_identity)
+        })
+        .await
+    }
+
+    pub async fn seed_distinct_cleanup_bindings_for_test(
+        &self,
+        removed_locator: coven_protocol::store_commit::ObjectHash,
+        live_locator: coven_protocol::store_commit::ObjectHash,
+        removed_object: coven_protocol::store_commit::ObjectHash,
+        live_object: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database
+                .execute_batch(&format!(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                     VALUES ('parent', 'parent', 1, '0000000001000-0000-test', '2026-01-01');
+                     INSERT INTO note_photos
+                        (id, note_id, kind, size, hash, blob_id, _updated_at, created_at)
+                     VALUES
+                        ('removed-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
+                         '0000000001000-0000-test', '2026-01-01'),
+                        ('live-row', 'parent', 'cover', 5, '{hash}', 'shared-id',
+                         '0000000001001-0000-test', '2026-01-01');",
+                    hash = coven_protocol::blob::content_hash(b"bytes"),
+                ))
+                .map_err(DbError::from)?;
+            for (object, locator) in [
+                (removed_object, removed_locator),
+                (live_object, live_locator),
+            ] {
+                database
+                    .execute(
+                        "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+                        [object.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                database
+                    .execute(
+                        "INSERT INTO blob_locators (remote_object_id, locator_hash)
+                         VALUES (?1, ?2)",
+                        (object.to_string(), locator.to_string()),
+                    )
+                    .map_err(DbError::from)?;
+            }
+            for (row_id, row_stamp, object) in [
+                ("removed-row", "0000000001000-0000-test", removed_object),
+                ("live-row", "0000000001001-0000-test", live_object),
+            ] {
+                database
+                    .execute(
+                        "INSERT INTO row_blob_locators
+                         (table_name, row_id, column_name, row_stamp,
+                          audience_authority, remote_object_id)
+                         VALUES ('note_photos', ?1, 'blob_id', ?2, '\"store\"', ?3)",
+                        (row_id, row_stamp, object.to_string()),
+                    )
+                    .map_err(DbError::from)?;
+            }
+            database
+                .execute("DELETE FROM note_photos WHERE id = 'removed-row'", [])
+                .map(|_| ())
+                .map_err(DbError::from)
         })
         .await
     }
