@@ -656,8 +656,8 @@ mod tests {
 
     #[tokio::test]
     async fn abandoning_one_write_keeps_identical_content_available_to_another_writer() {
-        let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let bytes = payload(7, 128);
 
@@ -727,9 +727,8 @@ mod tests {
         .expect("record payload claims");
     }
 
-    async fn pay_owed_deletions(db: &crate::Database, store_dir: &StoreDir) -> Result<(), DbError> {
-        let store_dir = store_dir.clone();
-        db.test_sql(move |database| database.pay_owed_payload_deletions(&store_dir))
+    async fn pay_owed_deletions(db: &crate::Database) -> Result<(), DbError> {
+        db.test_sql(|database| database.pay_owed_payload_deletions())
             .await
     }
 
@@ -741,8 +740,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_last_claim_to_go_owes_its_payload_a_deletion_and_the_drain_pays_it() {
-        let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let kept = spool.write(&payload(1, 64)).await.expect("write kept");
         let dropped = spool.write(&payload(2, 64)).await.expect("write dropped");
@@ -750,7 +749,7 @@ mod tests {
         commit_claims(&db.database, "owner-a", &[kept, dropped]).await;
         commit_claims(&db.database, "owner-a", &[kept]).await;
 
-        pay_owed_deletions(&db.database, &store_dir)
+        pay_owed_deletions(&db.database)
             .await
             .expect("drain obligations");
 
@@ -763,8 +762,8 @@ mod tests {
     /// still needs its bytes must not take the file with it.
     #[tokio::test]
     async fn a_payload_a_second_owner_still_claims_is_not_owed_a_deletion() {
-        let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let shared = spool.write(&payload(3, 64)).await.expect("write shared");
 
@@ -774,7 +773,7 @@ mod tests {
 
         assert_eq!(owed_deletions(&db.database).await, Vec::new());
 
-        pay_owed_deletions(&db.database, &store_dir)
+        pay_owed_deletions(&db.database)
             .await
             .expect("drain obligations");
         assert_eq!(spool_entries(&store_dir), vec![shared.to_string()]);
@@ -788,8 +787,8 @@ mod tests {
     /// record was deleted lands exactly here.
     #[tokio::test]
     async fn claiming_a_payload_that_is_owed_a_deletion_discharges_the_obligation() {
-        let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let bytes = payload(4, 64);
         let hash = spool.write(&bytes).await.expect("write payload");
@@ -799,7 +798,7 @@ mod tests {
         commit_claims(&db.database, "owner-b", &[hash]).await;
 
         assert_eq!(owed_deletions(&db.database).await, Vec::new());
-        pay_owed_deletions(&db.database, &store_dir)
+        pay_owed_deletions(&db.database)
             .await
             .expect("drain obligations");
         assert_eq!(spool.read(hash).await.expect("read payload"), bytes);
@@ -809,8 +808,8 @@ mod tests {
     /// — must not put a payload it keeps through a moment of being unowned.
     #[tokio::test]
     async fn replacing_a_claim_set_keeps_the_payloads_that_stay_in_it() {
-        let (_directory, store_dir) = temp_store_dir();
         let db = crate::synthetic_store::open_test_db();
+        let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let carried = spool.write(&payload(5, 64)).await.expect("write carried");
         let superseded = spool.write(&payload(6, 64)).await.expect("write old");
@@ -820,7 +819,7 @@ mod tests {
         commit_claims(&db.database, "owner-a", &[carried, fresh]).await;
 
         assert_eq!(owed_deletions(&db.database).await, vec![superseded]);
-        pay_owed_deletions(&db.database, &store_dir)
+        pay_owed_deletions(&db.database)
             .await
             .expect("drain obligations");
 
@@ -842,7 +841,7 @@ mod tests {
 
         commit_claims(&db.database, "owner-a", &[hash]).await;
         commit_claims(&db.database, "owner-a", &[]).await;
-        pay_owed_deletions(&db.database, &store_dir)
+        pay_owed_deletions(&db.database)
             .await
             .expect("drain obligations");
 

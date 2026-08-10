@@ -38,13 +38,17 @@ impl DatabaseTestSql<'_> {
     }
 
     fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
-        let store_dir = self.store_dir.ok_or_else(|| {
-            DbError::Message("test payload access requires the Store directory".to_string())
-        })?;
+        let store_dir = self.required_store_dir()?;
         let hash = encoded_hash
             .parse()
             .map_err(|error| DbError::context("parse test payload hash", error))?;
         crate::payload_spool::read_payload_blocking(store_dir, hash).map_err(DbError::from)
+    }
+
+    fn required_store_dir(&self) -> Result<&coven_foundation::store_dir::StoreDir, DbError> {
+        self.store_dir.ok_or_else(|| {
+            DbError::Message("test Store operation requires the Store directory".to_string())
+        })
     }
 
     pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
@@ -76,11 +80,11 @@ impl DatabaseTestSql<'_> {
         values
     }
 
-    pub fn pay_owed_payload_deletions(
-        &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<(), DbError> {
-        crate::payload_spool::pay_owed_payload_deletions_on(self.connection, store_dir)
+    pub fn pay_owed_payload_deletions(&self) -> Result<(), DbError> {
+        crate::payload_spool::pay_owed_payload_deletions_on(
+            self.connection,
+            self.required_store_dir()?,
+        )
     }
 
     pub fn payload_spool_cleanup_hashes(
@@ -107,11 +111,15 @@ impl DatabaseTestSql<'_> {
 
     pub fn persist_exact_remote_object(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
         remote: &coven_protocol::remote_object::ClosedRemoteObject,
         subject: &str,
     ) -> Result<(), DbError> {
-        crate::persist_exact_remote_object_on(self.connection, store_dir, remote, subject)
+        crate::persist_exact_remote_object_on(
+            self.connection,
+            self.required_store_dir()?,
+            remote,
+            subject,
+        )
     }
 
     pub fn load_remote_object(
@@ -1888,15 +1896,17 @@ impl DatabaseTestSql<'_> {
 
     pub fn load_retained_merge_replay_inputs(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::OwnedVerifiedMergeMaterialization>, DbError> {
-        crate::store::retained_merge_replay_inputs_for_test(self.connection, store_dir, root)
+        crate::store::retained_merge_replay_inputs_for_test(
+            self.connection,
+            self.required_store_dir()?,
+            root,
+        )
     }
 
     pub fn record_verified_circle_activations(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
     ) -> Result<(), DbError> {
@@ -1904,21 +1914,20 @@ impl DatabaseTestSql<'_> {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::MergeMaterializationTransaction::new(&transaction, store_dir)
+        crate::MergeMaterializationTransaction::new(&transaction, self.required_store_dir()?)
             .record_verified_circle_activations(commit, activations)?;
         transaction.commit().map_err(DbError::from)
     }
 
     pub fn apply_changeset(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
         bytes: &[u8],
         tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
     ) -> Result<crate::ApplyResult, DbError> {
         crate::resolve_and_apply_changeset(
             self.connection,
-            store_dir,
+            self.required_store_dir()?,
             bytes,
             tables,
             receiver_wall_ms,
@@ -1927,7 +1936,6 @@ impl DatabaseTestSql<'_> {
 
     pub fn apply_changesets_atomically(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
         changesets: Vec<Vec<u8>>,
         tables: &[coven_protocol::synced_schema::SyncedTable],
         receiver_wall_ms: u64,
@@ -1942,11 +1950,14 @@ impl DatabaseTestSql<'_> {
             let changeset = crate::ValidatedChangeset::new(changeset, schema.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?;
             results.push(
-                crate::MergeMaterializationTransaction::new(&transaction, store_dir)
-                    .apply_changeset(
-                        changeset,
-                        crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
-                    )?,
+                crate::MergeMaterializationTransaction::new(
+                    &transaction,
+                    self.required_store_dir()?,
+                )
+                .apply_changeset(
+                    changeset,
+                    crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
+                )?,
             );
         }
         let foreign_key_violations = transaction

@@ -272,12 +272,11 @@ async fn lww_earlier_update_loses() {
     let bytes = cs.clone();
     let tables = test_synced_tables();
     let receiver_wall_ms = target.database.receive_wall_ms();
-    let store_dir = target.store_dir.clone();
     let winners = target
         .database
         .test_sql(move |database| {
             database
-                .apply_changeset(&store_dir, &bytes, &tables, receiver_wall_ms)
+                .apply_changeset(&bytes, &tables, receiver_wall_ms)
                 .map(|result| result.winning_rows)
         })
         .await
@@ -556,12 +555,10 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
     let target = open_test_db();
     let tables = test_synced_tables();
     let receiver_wall_ms = target.database.receive_wall_ms();
-    let store_dir = target.store_dir.clone();
     target
         .database
         .test_sql(move |database| {
             let (results, violations) = database.apply_changesets_atomically(
-                &store_dir,
                 vec![child, parent],
                 &tables,
                 receiver_wall_ms,

@@ -145,17 +145,11 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         }),
     };
     let db = crate::synthetic_store::open_test_db();
-    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
-    let activation_store_dir = store_dir.clone();
     let store_database = crate::StoreDatabase::new(&db.database);
     let first_commit = verified_commit.clone();
     db.database
         .test_sql(move |database| {
-            database.record_verified_circle_activations(
-                &activation_store_dir,
-                &first_commit,
-                &[verified],
-            )
+            database.record_verified_circle_activations(&first_commit, &[verified])
         })
         .await
         .expect("record multi-Owner control");
@@ -270,7 +264,6 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         .database
         .test_sql(move |database| {
             database.record_verified_circle_activations(
-                &store_dir,
                 &second_commit,
                 &[coven_protocol::circle_activation::VerifiedCircleReference {
                     reference: second_reference,

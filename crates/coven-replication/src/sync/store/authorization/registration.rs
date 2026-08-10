@@ -209,10 +209,9 @@ mod tests {
             .await;
 
         let root = store.root.clone();
-        let store_dir = db.store_dir.clone();
         db.database.test_sql(move |database| {
             database
-                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .load_retained_merge_replay_inputs(&root)
                 .map(drop)
         })
         .await
@@ -232,10 +231,9 @@ mod tests {
             .await;
 
         let root = store.root.clone();
-        let store_dir = db.store_dir.clone();
         db.database.test_sql(move |database| {
             database
-                .load_retained_merge_replay_inputs(&store_dir, &root)
+                .load_retained_merge_replay_inputs(&root)
                 .map(drop)
         })
             .await

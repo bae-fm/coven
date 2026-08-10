@@ -141,14 +141,11 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     .expect("valid absence closure");
     let object_id = absence.object_id();
     let closure_db = crate::synthetic_store::open_test_db();
-    let (_closure_spool, closure_store_dir) = coven_foundation::store_dir::temp_store_dir();
-    let store_dir_for_insert = closure_store_dir.clone();
     let saved_remote_for_insert = package_remote.clone();
     closure_db
         .database
         .test_sql(move |conn| {
             conn.persist_exact_remote_object(
-                &store_dir_for_insert,
                 &saved_remote_for_insert,
                 "reclaim closure fixture package",
             )
@@ -168,7 +165,6 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("close reclaimed package");
 
-    let store_dir_for_revival = closure_store_dir.clone();
     let saved_remote_for_revival = package_remote.clone();
     closure_db
         .database
@@ -176,11 +172,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
             assert!(conn.load_remote_object(object_id).is_err());
             assert_eq!(conn.load_reclaimed_store_package(object_id)?, Some(absence));
             assert!(conn
-                .persist_exact_remote_object(
-                    &store_dir_for_revival,
-                    &saved_remote_for_revival,
-                    "revived Store package",
-                )
+                .persist_exact_remote_object(&saved_remote_for_revival, "revived Store package",)
                 .is_err());
             Ok(())
         })

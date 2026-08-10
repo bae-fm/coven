@@ -2119,14 +2119,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &missing)
         .await;
     let root = storage.root.clone();
-    let store_dir = target.store_dir.clone();
     assert!(target
         .database
-        .test_sql(move |database| {
-            database
-                .load_retained_merge_replay_inputs(&store_dir, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
@@ -2158,14 +2153,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .replace_stored_remote_object(&second_package.object, &tampered)
         .await;
     let root = storage.root.clone();
-    let store_dir = target.store_dir.clone();
     assert!(target
         .database
-        .test_sql(move |database| {
-            database
-                .load_retained_merge_replay_inputs(&store_dir, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
@@ -2207,14 +2197,9 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .to_string()
         .contains("ownership differs from its exact object closure"));
     let root = storage.root.clone();
-    let store_dir = target.store_dir.clone();
     assert!(target
         .database
-        .test_sql(move |database| {
-            database
-                .load_retained_merge_replay_inputs(&store_dir, &root)
-                .map(drop)
-        })
+        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()
