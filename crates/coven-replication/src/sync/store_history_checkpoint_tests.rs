@@ -129,7 +129,7 @@ impl PublishedHistory {
             .to_string();
         self.db
             .database
-            .test_sql(move |database| database.retained_canonical_input(&stream_id, sequence))
+            .retained_canonical_input_for_test(stream_id, sequence)
             .await
             .expect("load retained materialization input")
             .len()
@@ -423,7 +423,7 @@ async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
     fixture
         .db
         .database
-        .test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
+        .delete_device_state_snapshot_for_test(encoded)
         .await
         .expect("remove state after its checkpoint was verified");
 
@@ -448,7 +448,7 @@ async fn publish_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySa
             fixture
                 .db
                 .database
-                .test_sql(|conn| conn.replace_store_root_hash(None))
+                .replace_store_root_hash_for_test(None)
                 .await
                 .expect("delete verified Store root authority");
         }
@@ -456,7 +456,7 @@ async fn publish_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySa
             fixture
                 .db
                 .database
-                .test_sql(move |conn| conn.corrupt_store_device_registration_bytes(&registration))
+                .corrupt_store_device_registration_bytes_for_test(registration)
                 .await
                 .expect("corrupt verified Store registration authority");
         }
@@ -524,12 +524,12 @@ async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySab
     match sabotage {
         VerifiedAuthoritySabotage::StoreRoot => database
             .database
-            .test_sql(|sql| sql.replace_store_root_hash(None))
+            .replace_store_root_hash_for_test(None)
             .await
             .expect("remove verified Store root"),
         VerifiedAuthoritySabotage::Registration => database
             .database
-            .test_sql(move |sql| sql.corrupt_store_device_registration_bytes(&registration))
+            .corrupt_store_device_registration_bytes_for_test(registration)
             .await
             .expect("corrupt verified Store registration"),
     }
@@ -578,9 +578,7 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     fixture
         .db
         .database
-        .test_sql(move |database| {
-            database.delete_retained_materialization_without_foreign_keys(&reference)
-        })
+        .delete_retained_materialization_without_foreign_keys_for_test(reference)
         .await
         .expect("remove retained frontier row");
 
@@ -602,7 +600,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             fixture
                 .db
                 .database
-                .test_sql(move |conn| conn.delete_device_state_snapshot(&encoded))
+                .delete_device_state_snapshot_for_test(encoded)
                 .await
                 .expect("delete checkpoint state");
         } else {
@@ -641,7 +639,7 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
             fixture
                 .db
                 .database
-                .test_sql(move |conn| conn.replace_device_state_snapshot(&encoded, &forged))
+                .replace_device_state_snapshot_for_test(encoded, forged)
                 .await
                 .expect("forge canonical checkpoint state");
         }

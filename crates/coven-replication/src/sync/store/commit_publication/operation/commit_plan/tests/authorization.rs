@@ -295,7 +295,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
     );
     owner_db
         .database
-        .test_sql(move |database| database.forge_device_in_state_snapshots(forged_device_id))
+        .forge_device_in_state_snapshots_for_test(forged_device_id)
         .await
         .expect("tamper local Store device projection");
 

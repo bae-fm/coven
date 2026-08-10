@@ -149,4 +149,89 @@ impl Database {
         self.test_sql(move |database| database.load_retained_merge_replay_inputs(&root).map(drop))
             .await
     }
+
+    pub async fn retained_canonical_input_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+    ) -> Result<Vec<u8>, DbError> {
+        self.test_sql(move |database| database.retained_canonical_input(&stream_id, sequence))
+            .await
+    }
+
+    pub async fn corrupt_retained_materialization_input_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.corrupt_retained_materialization_input(&stream_id, sequence)
+        })
+        .await
+    }
+
+    pub async fn write_retains_prepared_for_test(
+        &self,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<bool, DbError> {
+        self.test_sql(move |database| database.write_retains_prepared(&write_id))
+            .await
+    }
+
+    pub async fn install_outbound_completion_failure_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| database.install_outbound_completion_failure_trigger())
+            .await
+    }
+
+    pub async fn remove_outbound_completion_failure_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database
+                .execute_batch("DROP TRIGGER fail_outbound_completion")
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn replace_store_root_hash_for_test(
+        &self,
+        value: Option<String>,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.replace_store_root_hash(value.as_deref()))
+            .await
+    }
+
+    pub async fn delete_device_state_snapshot_for_test(
+        &self,
+        commit_ref: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.delete_device_state_snapshot(&commit_ref))
+            .await
+    }
+
+    pub async fn delete_retained_materialization_without_foreign_keys_for_test(
+        &self,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.delete_retained_materialization_without_foreign_keys(&reference)
+        })
+        .await
+    }
+
+    pub async fn replace_device_state_snapshot_for_test(
+        &self,
+        commit_ref: String,
+        state: coven_protocol::store_commit::ResolvedStoreDeviceState,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.replace_device_state_snapshot(&commit_ref, &state))
+            .await
+    }
+
+    pub async fn forge_device_in_state_snapshots_for_test(
+        &self,
+        forged_device_id: coven_protocol::store_commit::StoreDeviceId,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.forge_device_in_state_snapshots(forged_device_id))
+            .await
+    }
 }

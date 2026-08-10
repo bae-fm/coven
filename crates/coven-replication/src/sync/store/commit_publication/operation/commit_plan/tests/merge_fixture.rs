@@ -141,7 +141,7 @@ impl PreparedWriteFixture {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
             .database
-            .test_sql(move |database| database.retained_canonical_input(&stream_id, 1))
+            .retained_canonical_input_for_test(stream_id, 1)
             .await
             .expect("load retained local package application")
     }
@@ -150,9 +150,7 @@ impl PreparedWriteFixture {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
             .database
-            .test_sql(move |database| {
-                database.corrupt_retained_materialization_input(&stream_id, 1)
-            })
+            .corrupt_retained_materialization_input_for_test(stream_id, 1)
             .await
             .expect("corrupt retained local materialization");
     }
@@ -167,10 +165,9 @@ impl PreparedWriteFixture {
     }
 
     pub(super) async fn write_retains_prepared(&self) -> bool {
-        let write_id = self.write_id.clone();
         self.db
             .database
-            .test_sql(move |database| database.write_retains_prepared(&write_id))
+            .write_retains_prepared_for_test(self.write_id.clone())
             .await
             .expect("check durable losing candidate")
     }
@@ -178,7 +175,7 @@ impl PreparedWriteFixture {
     pub(super) async fn install_outbound_completion_failure(&self) {
         self.db
             .database
-            .test_sql(|database| database.install_outbound_completion_failure_trigger())
+            .install_outbound_completion_failure_for_test()
             .await
             .expect("install completion fault");
     }
@@ -186,11 +183,7 @@ impl PreparedWriteFixture {
     pub(super) async fn remove_outbound_completion_failure(&self) {
         self.db
             .database
-            .test_sql(|connection| {
-                connection
-                    .execute_batch("DROP TRIGGER fail_outbound_completion")
-                    .map_err(coven_database::DbError::from)
-            })
+            .remove_outbound_completion_failure_for_test()
             .await
             .expect("remove completion fault");
     }

@@ -685,7 +685,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .write_id
             .clone();
         db.database
-            .test_sql(move |conn| conn.replace_store_root_hash(invalid_root))
+            .replace_store_root_hash_for_test(invalid_root.map(str::to_string))
             .await
             .expect("make root unusable");
         drop(device);
@@ -840,13 +840,10 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         database.discard_blocked_write(&first).await.unwrap(),
         coven_database::BlockedWriteDiscard::Discarded(vec![first.clone(), second.clone()])
     );
-    let note_count: i64 = db
-        .database
-        .test_sql(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
-                .map_err(coven_database::DbError::from)
-        })
+    let note_count: i64 = database
+        .read(|sql| sql.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0)))
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(note_count, 0);
     assert!(database.pending_writes().await.unwrap().is_empty());
