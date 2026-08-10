@@ -74,6 +74,20 @@ enum StoredPayload {
     },
 }
 
+impl StoredPayload {
+    fn payload_size(&self) -> u64 {
+        match self {
+            Self::Inline { payload_size, .. } | Self::File { payload_size, .. } => *payload_size,
+        }
+    }
+}
+
+enum ExistingPayloadState {
+    Absent,
+    Verified(Vec<u8>),
+    RepairableFile,
+}
+
 /// One database connection's closed access to the payload bytes its rows own.
 /// The catalog on that connection selects inline SQLite bytes or the Store
 /// directory's file spool; callers never receive either dependency.
@@ -91,37 +105,25 @@ impl<'store> PayloadStore<'store> {
     pub(crate) fn install(self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
         let hash = ObjectHash::digest(bytes);
         self.require_transaction(hash)?;
+        let existing_file = match self.existing_payload_state(hash, bytes.len() as u64)? {
+            ExistingPayloadState::Absent => false,
+            ExistingPayloadState::RepairableFile => true,
+            ExistingPayloadState::Verified(installed) if installed == bytes => return Ok(hash),
+            ExistingPayloadState::Verified(_) => {
+                return Err(PayloadStoreError::Storage {
+                    hash,
+                    error: "installed logical bytes differ from the payload".to_string(),
+                });
+            }
+        };
         let compressed = compress_payload(hash, bytes)?;
-        match self.stored(hash)? {
-            Some(StoredPayload::Inline {
-                compressed: installed,
-                payload_size,
-            }) => {
-                if installed == compressed && payload_size == bytes.len() as u64 {
-                    Ok(hash)
-                } else {
-                    Err(PayloadStoreError::Storage {
-                        hash,
-                        error: "installed inline representation differs from the payload"
-                            .to_string(),
-                    })
-                }
-            }
-            Some(StoredPayload::File { .. }) => {
-                self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
-                write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
-                Ok(hash)
-            }
-            None if compressed.len() <= INLINE_PAYLOAD_LIMIT => {
-                self.record_inline(hash, bytes.len() as u64, &compressed)?;
-                Ok(hash)
-            }
-            None => {
-                self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
-                write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
-                Ok(hash)
-            }
+        if existing_file || compressed.len() > INLINE_PAYLOAD_LIMIT {
+            self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
+            write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
+        } else {
+            self.record_inline(hash, bytes.len() as u64, &compressed)?;
         }
+        Ok(hash)
     }
 
     pub(crate) fn read(self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
@@ -220,6 +222,51 @@ impl<'store> PayloadStore<'store> {
             });
         }
         Ok(())
+    }
+
+    fn existing_payload_state(
+        self,
+        hash: ObjectHash,
+        expected_size: u64,
+    ) -> Result<ExistingPayloadState, PayloadStoreError> {
+        let Some(stored) = self.stored(hash)? else {
+            return Ok(ExistingPayloadState::Absent);
+        };
+        let payload_size = stored.payload_size();
+        if payload_size != expected_size {
+            return Err(PayloadStoreError::Storage {
+                hash,
+                error: format!(
+                    "catalog records {payload_size} payload bytes, but installation has {expected_size}"
+                ),
+            });
+        }
+        let inline = matches!(stored, StoredPayload::Inline { .. });
+        let bytes = match self.decode_stored(hash, stored) {
+            Ok(bytes) => bytes,
+            Err(
+                PayloadStoreError::Missing { .. }
+                | PayloadStoreError::Storage { .. }
+                | PayloadStoreError::Compression { .. },
+            ) if !inline => return Ok(ExistingPayloadState::RepairableFile),
+            Err(error) => return Err(error),
+        };
+        let actual = ObjectHash::digest(&bytes);
+        if actual == hash {
+            return Ok(ExistingPayloadState::Verified(bytes));
+        }
+        if inline {
+            Err(PayloadStoreError::InlineContentMismatch {
+                expected: hash,
+                actual,
+            })
+        } else {
+            Err(PayloadStoreError::ContentMismatch {
+                expected: hash,
+                actual,
+                path: self.store_dir.payload_spool_path(hash),
+            })
+        }
     }
 
     fn stored(self, hash: ObjectHash) -> Result<Option<StoredPayload>, PayloadStoreError> {
@@ -354,10 +401,28 @@ impl<'store> PayloadStore<'store> {
                     error: error.to_string(),
                 }),
             Some(StoredPayload::File {
-                compressed_size: stored_compressed_size,
                 payload_size: stored_payload_size,
-            }) if stored_compressed_size == compressed_size as u64
-                && stored_payload_size == payload_size as u64 => Ok(()),
+                ..
+            }) if stored_payload_size == payload_size as u64 => {
+                let updated = self
+                    .conn
+                    .execute(
+                    "UPDATE payload_storage SET compressed_size = ?2
+                     WHERE payload_hash = ?1 AND storage = 'file'",
+                    rusqlite::params![hash.to_string(), compressed_size],
+                )
+                .map_err(|error| PayloadStoreError::Storage {
+                    hash,
+                    error: error.to_string(),
+                })?;
+                if updated != 1 {
+                    return Err(PayloadStoreError::Storage {
+                        hash,
+                        error: format!("file metadata update changed {updated} rows"),
+                    });
+                }
+                Ok(())
+            }
             Some(StoredPayload::File {
                 compressed_size: stored_compressed_size,
                 payload_size: stored_payload_size,
@@ -413,6 +478,11 @@ impl<'store> PayloadWriter<'store> {
             .parse::<ObjectHash>()
             .expect("SHA-256 hex is an ObjectHash");
         self.payloads.require_transaction(hash)?;
+        let existing_file = match self.payloads.existing_payload_state(hash, self.size)? {
+            ExistingPayloadState::Absent => false,
+            ExistingPayloadState::RepairableFile => true,
+            ExistingPayloadState::Verified(_) => return Ok((hash, self.size)),
+        };
         let compressed = self
             .encoder
             .finish()
@@ -420,11 +490,16 @@ impl<'store> PayloadWriter<'store> {
                 hash,
                 error: error.to_string(),
             })?;
-        match compressed.target {
-            PayloadWriterTarget::Inline(bytes) => {
+        match (existing_file, compressed.target) {
+            (true, PayloadWriterTarget::Inline(bytes)) => {
+                self.payloads
+                    .record_file(hash, self.size, compressed.size)?;
+                write_payload_file_bytes_blocking(self.payloads.store_dir, hash, &bytes)?;
+            }
+            (false, PayloadWriterTarget::Inline(bytes)) => {
                 self.payloads.record_inline(hash, self.size, &bytes)?;
             }
-            PayloadWriterTarget::File(staged) => {
+            (_, PayloadWriterTarget::File(staged)) => {
                 let path = self.payloads.store_dir.payload_spool_path(hash);
                 self.payloads
                     .record_file(hash, self.size, compressed.size)?;

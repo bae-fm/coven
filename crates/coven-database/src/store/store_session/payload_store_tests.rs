@@ -192,10 +192,12 @@ fn conflicting_file_metadata_fails_without_replacing_the_file() {
     let path = store_dir.payload_spool_path(hash);
     std::fs::write(&path, b"changed").expect("change installed payload");
     conn.execute(
-        "UPDATE payload_storage SET compressed_size = 7 WHERE payload_hash = ?1",
-        [hash.to_string()],
+        "UPDATE payload_storage
+         SET payload_size = ?2, compressed_size = 7
+         WHERE payload_hash = ?1",
+        rusqlite::params![hash.to_string(), bytes.len() as i64 - 1],
     )
-    .expect("change catalog compressed size");
+    .expect("change catalog sizes");
 
     let transaction = conn
         .unchecked_transaction()
@@ -204,7 +206,7 @@ fn conflicting_file_metadata_fails_without_replacing_the_file() {
         .install(&bytes)
         .expect_err("conflicting metadata must reject reinstall");
 
-    assert!(error.to_string().contains("catalog sizes"), "{error}");
+    assert!(error.to_string().contains("catalog records"), "{error}");
     assert_eq!(
         std::fs::read(path).expect("read unchanged file"),
         b"changed"
@@ -351,6 +353,44 @@ fn streamed_placement_uses_the_finished_compressed_size() {
                 .expect("read streamed payload"),
             bytes
         );
+    }
+}
+
+#[test]
+fn reinstall_accepts_the_same_payload_from_different_compression_chunks() {
+    let (_directory, store_dir, conn) = payload_store();
+    for bytes in [
+        payload(18, INLINE_PAYLOAD_LIMIT * 4),
+        incompressible_payload(19, INLINE_PAYLOAD_LIMIT * 2),
+    ] {
+        let transaction = conn
+            .unchecked_transaction()
+            .expect("begin streamed payload installation");
+        let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
+        for chunk in bytes.chunks(997) {
+            writer.write_all(chunk).expect("stream payload chunk");
+        }
+        let (hash, _) = writer.commit().expect("commit streamed payload");
+        transaction
+            .commit()
+            .expect("commit streamed payload installation");
+        let row = storage_row(&conn, hash);
+        let file = std::fs::read(store_dir.payload_spool_path(hash)).ok();
+
+        assert_eq!(install(&conn, &store_dir, &bytes), hash);
+        let transaction = conn
+            .unchecked_transaction()
+            .expect("begin differently chunked reinstall");
+        let mut writer = PayloadStore::new(&transaction, &store_dir).writer();
+        for chunk in bytes.chunks(4093) {
+            writer.write_all(chunk).expect("reinstall payload chunk");
+        }
+        assert_eq!(writer.commit().expect("commit streamed reinstall").0, hash);
+        transaction
+            .commit()
+            .expect("commit differently chunked reinstall");
+        assert_eq!(storage_row(&conn, hash), row);
+        assert_eq!(std::fs::read(store_dir.payload_spool_path(hash)).ok(), file);
     }
 }
 
