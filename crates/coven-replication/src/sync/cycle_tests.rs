@@ -451,7 +451,7 @@ fn exercise_pre_attempt_abandonment<'a>(
             .await
             .expect("bind owner Store");
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
@@ -533,7 +533,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             .await
             .expect("bind owner Store");
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
@@ -611,7 +611,7 @@ fn exercise_post_attempt_cancellation<'a>(
             .await
             .expect("bind owner Store");
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
@@ -945,7 +945,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .expect("create peer exact storage"),
         );
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");
@@ -5003,7 +5003,7 @@ impl<'storage> SamePrincipalApprovalFixture<'storage> {
             .await
             .expect("bind owner Store");
         let pending_dir = tempfile::tempdir().expect("create join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending.sqlite"),
         )
         .expect("open join journal");
@@ -5690,7 +5690,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .expect("bind owner Store");
         let joining_db = open_test_db();
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .expect("open pending join journal");

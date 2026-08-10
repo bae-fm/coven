@@ -116,8 +116,19 @@ pub struct DeviceJoinJournalDatabase {
 
 impl DeviceJoinJournalDatabase {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, DeviceJoinError> {
+        Self::from_store(coven_database::DeviceJoinJournalStore::open(path))
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_for_test(path: impl AsRef<std::path::Path>) -> Result<Self, DeviceJoinError> {
+        Self::from_store(coven_database::DeviceJoinJournalStore::open_for_test(path))
+    }
+
+    fn from_store(
+        store: Result<coven_database::DeviceJoinJournalStore, coven_database::DbError>,
+    ) -> Result<Self, DeviceJoinError> {
         Ok(Self {
-            store: coven_database::DeviceJoinJournalStore::open(path).map_err(database_error)?,
+            store: store.map_err(database_error)?,
         })
     }
 

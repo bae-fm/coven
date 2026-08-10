@@ -98,11 +98,25 @@ pub(crate) fn serialize_database_image(connection: &Connection) -> Result<Vec<u8
         .map_err(DbError::from)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ConnectionDurability {
     Full,
     #[cfg(any(test, feature = "test-utils"))]
     Disabled,
+}
+
+pub(crate) fn configure_connection_durability(
+    connection: &Connection,
+    durability: ConnectionDurability,
+) -> Result<(), DbError> {
+    let synchronous = match durability {
+        ConnectionDurability::Full => "FULL",
+        #[cfg(any(test, feature = "test-utils"))]
+        ConnectionDurability::Disabled => "OFF",
+    };
+    connection
+        .pragma_update(None, "synchronous", synchronous)
+        .map_err(DbError::from)
 }
 
 pub(crate) fn open_connection(
@@ -120,13 +134,7 @@ pub(crate) fn open_connection(
     // successful journal commit reaches the OS before an external step begins;
     // test construction can suppress physical durability with its file-sync
     // dependency.
-    let synchronous = match durability {
-        ConnectionDurability::Full => "FULL",
-        #[cfg(any(test, feature = "test-utils"))]
-        ConnectionDurability::Disabled => "OFF",
-    };
-    conn.pragma_update(None, "synchronous", synchronous)
-        .map_err(DbError::from)?;
+    configure_connection_durability(&conn, durability)?;
     Ok(conn)
 }
 

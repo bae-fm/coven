@@ -3642,7 +3642,7 @@ impl TestStore {
         let joining_database = coven_database::StoreDatabase::new(&joining_db.database);
         let activated_database = joining_database.clone();
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
             pending_dir.path().join("pending-device-join.sqlite"),
         )
         .map_err(|error| error.to_string())?;
@@ -3977,7 +3977,7 @@ impl TestStore {
                     .map_err(|error| error.to_string())?,
                 );
             let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-            let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
+            let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
                 pending_dir.path().join("pending-device-join.sqlite"),
             )
             .map_err(|error| error.to_string())?;

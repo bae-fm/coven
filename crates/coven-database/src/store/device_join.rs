@@ -11,16 +11,30 @@ use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash};
 #[derive(Clone, Debug)]
 pub struct DeviceJoinJournalStore {
     path: std::path::PathBuf,
+    connection: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
 impl DeviceJoinJournalStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, crate::DbError> {
+        Self::open_with_durability(path, crate::connection_io::ConnectionDurability::Full)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn open_for_test(path: impl AsRef<std::path::Path>) -> Result<Self, crate::DbError> {
+        Self::open_with_durability(path, crate::connection_io::ConnectionDurability::Disabled)
+    }
+
+    fn open_with_durability(
+        path: impl AsRef<std::path::Path>,
+        durability: crate::connection_io::ConnectionDurability,
+    ) -> Result<Self, crate::DbError> {
         let path = path.as_ref().to_path_buf();
         if let Some(directory) = path.parent() {
             std::fs::create_dir_all(directory)
                 .map_err(|error| crate::DbError::Message(error.to_string()))?;
         }
         let connection = rusqlite::Connection::open(&path).map_err(crate::DbError::from)?;
+        crate::connection_io::configure_connection_durability(&connection, durability)?;
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
@@ -32,7 +46,10 @@ impl DeviceJoinJournalStore {
                  ) STRICT, WITHOUT ROWID;",
             )
             .map_err(crate::DbError::from)?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            connection: std::sync::Arc::new(std::sync::Mutex::new(connection)),
+        })
     }
 
     pub fn insert_or_load(
@@ -41,7 +58,10 @@ impl DeviceJoinJournalStore {
         role: &str,
         payload: &str,
     ) -> Result<String, crate::DbError> {
-        let connection = rusqlite::Connection::open(&self.path).map_err(crate::DbError::from)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
         let transaction = connection
             .unchecked_transaction()
             .map_err(crate::DbError::from)?;
@@ -66,7 +86,10 @@ impl DeviceJoinJournalStore {
     pub fn load(&self, attempt_id: &str, role: &str) -> Result<Option<String>, crate::DbError> {
         use rusqlite::OptionalExtension;
 
-        let connection = rusqlite::Connection::open(&self.path).map_err(crate::DbError::from)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
         connection
             .query_row(
                 "SELECT payload FROM device_join_journals WHERE attempt_id = ?1 AND role = ?2",
@@ -78,7 +101,10 @@ impl DeviceJoinJournalStore {
     }
 
     pub fn records(&self) -> Result<Vec<(String, String, String)>, crate::DbError> {
-        let connection = rusqlite::Connection::open(&self.path).map_err(crate::DbError::from)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
         query_mapped_rows(
             &connection,
             "SELECT attempt_id, role, payload FROM device_join_journals
@@ -102,7 +128,10 @@ impl DeviceJoinJournalStore {
         previous_payload: &str,
         next_payload: &str,
     ) -> Result<bool, crate::DbError> {
-        let connection = rusqlite::Connection::open(&self.path).map_err(crate::DbError::from)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
         let changed = connection
             .execute(
                 "UPDATE device_join_journals SET payload = ?1
@@ -158,6 +187,21 @@ impl DeviceJoinJournalStore {
             })
             .await
     }
+
+    #[cfg(test)]
+    fn synchronous_for_test(&self) -> Result<i64, crate::DbError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| pending_join_connection_poisoned())?;
+        connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .map_err(crate::DbError::from)
+    }
+}
+
+fn pending_join_connection_poisoned() -> crate::DbError {
+    crate::DbError::Message("pending device-join journal connection lock was poisoned".to_string())
 }
 
 pub(crate) fn complete_device_join_from_pending_on(
@@ -447,11 +491,26 @@ impl StoreDatabase {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pending_join_test_store_disables_commit_durability() {
+        let pending_dir = tempfile::tempdir().expect("create pending join directory");
+        let pending =
+            DeviceJoinJournalStore::open_for_test(pending_dir.path().join("pending.sqlite"))
+                .expect("open pending join journal");
+
+        let synchronous = pending
+            .synchronous_for_test()
+            .expect("read synchronous setting");
+
+        assert_eq!(synchronous, 0);
+    }
+
     #[tokio::test]
     async fn conflicting_store_journal_keeps_the_pending_join() {
         let pending_dir = tempfile::tempdir().expect("create pending join directory");
-        let pending = DeviceJoinJournalStore::open(pending_dir.path().join("pending.sqlite"))
-            .expect("open pending join journal");
+        let pending =
+            DeviceJoinJournalStore::open_for_test(pending_dir.path().join("pending.sqlite"))
+                .expect("open pending join journal");
         pending
             .insert_or_load("attempt", "joiner", "pending")
             .expect("insert pending join");
