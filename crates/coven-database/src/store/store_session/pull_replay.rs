@@ -17,7 +17,8 @@ pub(crate) fn install_circle_bootstrap_image_on(
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,
 ) -> Result<(), DbError> {
-    let source = crate::open_database_image(bootstrap.image_bytes())
+    let mut source = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+    crate::connection_io::deserialize_database_image_into(&mut source, bootstrap.image_bytes())
         .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
     install_circle_bootstrap_connection_on(
         conn,

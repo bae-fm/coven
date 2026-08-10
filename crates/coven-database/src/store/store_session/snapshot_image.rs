@@ -148,12 +148,17 @@ impl SnapshotDatabaseImage {
                 return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
             }
         };
-        let mut snapshot = match crate::open_database_image(&source_image) {
+        let mut snapshot = match Connection::open_in_memory().map_err(DbError::from) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
             }
         };
+        if let Err(error) =
+            crate::connection_io::deserialize_database_image_into(&mut snapshot, &source_image)
+        {
+            return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+        }
         if let Err(error) = Self::project(
             &mut snapshot,
             store_dir,
@@ -431,7 +436,10 @@ impl SnapshotDatabaseImage {
     ) -> Result<Self, SnapshotImageError> {
         let result = (|| {
             let source = std::fs::read(self.path()).map_err(SnapshotImageError::Io)?;
-            let mut connection = crate::open_database_image(&source)
+            let mut connection = Connection::open_in_memory()
+                .map_err(DbError::from)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            crate::connection_io::deserialize_database_image_into(&mut connection, &source)
                 .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             connection
                 .pragma_update(None, "foreign_keys", "ON")
@@ -983,7 +991,10 @@ pub(super) fn verify_circle_bootstrap_image(
             "Circle bootstrap image differs from its signed hash".to_string(),
         ));
     }
-    let connection = crate::open_database_image(image)
+    let mut connection = Connection::open_in_memory()
+        .map_err(DbError::from)
+        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+    crate::connection_io::deserialize_database_image_into(&mut connection, image)
         .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
     verify_circle_bootstrap_connection(&connection, reference, circle_id, tables, routing_key)
 }

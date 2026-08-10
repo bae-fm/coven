@@ -15,8 +15,6 @@ pub(crate) use crate::circle_snapshot_records::load_published_circle_snapshot_on
 pub use crate::cloud_outbox_records::{
     outbox_identity, row_to_outbox_entry, CloudOutboxRecords, OutboxIdentity,
 };
-use crate::connection_io::open_connection;
-use crate::connection_io::open_connection_read_only;
 use crate::connection_io::scan_max_updated_at;
 use crate::connection_io::seed_from;
 pub(crate) use crate::local_state::{
@@ -109,7 +107,7 @@ mod cloud_outbox_records;
 mod connection_io;
 mod coven_schema;
 mod database_connection;
-pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
+pub(crate) use connection_io::capture_changeset;
 #[cfg(test)]
 pub(crate) use coven_schema::all_table_names;
 pub(crate) use coven_schema::{

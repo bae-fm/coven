@@ -89,7 +89,9 @@ fn blob_graph_installation_does_not_require_sqlite_sidecar_paths() {
     std::fs::remove_dir(journal_path).expect("remove journal-path reservation");
     let image = result.expect("install without opening the staged image as a disk database");
     let installed = image.read_and_discard().expect("read installed image");
-    let connection = crate::open_database_image(&installed).expect("open installed image");
+    let mut connection = Connection::open_in_memory().expect("open installed image connection");
+    crate::connection_io::deserialize_database_image_into(&mut connection, &installed)
+        .expect("deserialize installed image");
     let table_exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'marker')",

@@ -8,14 +8,20 @@ pub(crate) struct ReplayProjection {
 }
 
 impl ReplayProjection {
-    pub(super) fn new(
-        connection: rusqlite::Connection,
+    pub(super) fn from_image(
+        image: &[u8],
         store_dir: coven_foundation::store_dir::StoreDir,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DbError> {
+        let mut connection = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut connection, image)
+            .map_err(|error| DbError::context("open retained replay database image", error))?;
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .map_err(DbError::from)?;
+        Ok(Self {
             connection,
             store_dir,
-        }
+        })
     }
 
     pub(super) fn table_schema(
@@ -37,7 +43,8 @@ impl ReplayProjection {
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
     ) -> Result<(), DbError> {
-        let source = crate::open_database_image(image_bytes)
+        let mut source = rusqlite::Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut source, image_bytes)
             .map_err(|error| DbError::context("open retained Circle bootstrap image", error))?;
         crate::store::verify_circle_bootstrap_connection(
             &source,

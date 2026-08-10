@@ -1,9 +1,21 @@
-use crate::connection_io::attach_session;
 use crate::connection_io::capture_changeset;
 
 use super::fixtures::*;
 use crate::*;
 use coven_protocol::blob::BLOB_TOMBSTONE_GRACE;
+
+fn attached_session<'connection>(
+    connection: &'connection Connection,
+    tables: &[SyncedTable],
+) -> rusqlite::session::Session<'connection> {
+    let mut session = rusqlite::session::Session::new(connection).expect("create session");
+    for table in tables {
+        session
+            .attach(Some(table.name()))
+            .expect("attach synced table");
+    }
+    session
+}
 
 #[tokio::test]
 async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
@@ -493,7 +505,7 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
         coven_protocol::synced_schema::RowIdentity::SharedKey,
     )];
 
-    let mut primary_key_session = attach_session(&conn, &tables).expect("attach session");
+    let mut primary_key_session = attached_session(&conn, &tables);
     let primary_key_tx = conn.unchecked_transaction().expect("transaction");
     primary_key_tx
         .execute(
@@ -518,7 +530,7 @@ fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_i
         ]
     );
 
-    let mut upsert_session = attach_session(&conn, &tables).expect("attach session");
+    let mut upsert_session = attached_session(&conn, &tables);
     let upsert_tx = conn.unchecked_transaction().expect("transaction");
     upsert_tx
         .execute(

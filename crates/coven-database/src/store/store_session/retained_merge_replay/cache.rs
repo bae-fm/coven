@@ -494,14 +494,8 @@ impl RetainedReplayCache {
             .as_ref()
             .expect("retained replay baseline was installed in the cache")
             .clone();
-        let replay_connection = crate::open_database_image(
-            &transaction_records.replay_baseline_image_bytes(&baseline)?,
-        )
-        .map_err(|error| DbError::context("open retained replay database image", error))?;
-        replay_connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .map_err(DbError::from)?;
-        let replay = transaction_records.finish_replay_projection(replay_connection);
+        let replay = transaction_records
+            .open_replay_projection(&transaction_records.replay_baseline_image_bytes(&baseline)?)?;
         let schema = replay.table_schema(synced_tables, gates)?;
         let circle_bootstraps = transaction_records.claimed_circle_bootstrap_coverage_refs()?;
         let mut circle_bootstrap_cuts = BTreeMap::new();

@@ -13,9 +13,9 @@ impl DatabaseImageTest {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DbError> {
-        Ok(Self {
-            connection: crate::open_database_image(bytes)?,
-        })
+        let mut connection = Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut connection, bytes)?;
+        Ok(Self { connection })
     }
 
     pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>

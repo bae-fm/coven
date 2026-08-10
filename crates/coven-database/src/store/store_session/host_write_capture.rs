@@ -6,11 +6,11 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::BlobDecls;
 use crate::PublicationBlob;
 use crate::WriteId;
-use crate::{attach_session, capture_changeset, *};
 use crate::{
     audience_moves, capture_routing_changes, partition_outbound,
     validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, Gates, RoutingChanges,
 };
+use crate::{capture_changeset, *};
 
 use coven_protocol::blob::Provenance;
 
@@ -846,7 +846,20 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             write_id,
         } = self;
         (|| {
-            let mut journal = attach_session(&tx, synced_tables).map_err(E::from)?;
+            let mut journal = rusqlite::session::Session::new(&tx)
+                .map_err(|error| DbError::context("failed to create capture session", error))
+                .map_err(E::from)?;
+            for table in synced_tables {
+                journal
+                    .attach(Some(table.name()))
+                    .map_err(|error| {
+                        DbError::context(
+                            format!("failed to attach synced table {} to session", table.name()),
+                            error,
+                        )
+                    })
+                    .map_err(E::from)?;
+            }
             if gates.has_scoped_graph() {
                 for table in ["_coven_audience", "_coven_row_routes"] {
                     journal

@@ -183,7 +183,13 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
-        let mut conn = open_connection(path, connection_durability)?;
+        let mut conn = Connection::open(path).map_err(DbError::from)?;
+        // Rollback journaling lets one SQLite transaction commit the Store and an
+        // attached operation journal through a super-journal. Production selects
+        // DELETE + FULL so that cross-file commit is crash-atomic before an external
+        // step begins. Tests select MEMORY + OFF: transaction rollback remains real,
+        // while crash durability and its filesystem work are deliberately absent.
+        crate::connection_io::configure_connection_durability(&conn, connection_durability)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
         let initialized = match &metadata_open {
@@ -317,7 +323,11 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<Self, OpenError> {
-        let conn = open_connection_read_only(path)?;
+        use rusqlite::OpenFlags;
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI;
+        let conn = Connection::open_with_flags(path, flags).map_err(DbError::from)?;
         // `foreign_keys` is a per-connection runtime setting, not a write to the db
         // file, so it is allowed on a read-only connection; keeping it on matches the
         // writer's relational view. A read never inserts, so it enforces nothing new.

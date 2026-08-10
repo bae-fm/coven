@@ -482,11 +482,11 @@ impl StoreTransaction<'_, '_> {
         ))
     }
 
-    pub(crate) fn finish_replay_projection(
+    pub(crate) fn open_replay_projection(
         self,
-        connection: rusqlite::Connection,
-    ) -> crate::store::ReplayProjection {
-        crate::store::ReplayProjection::new(connection, self.records.store_dir.clone())
+        image: &[u8],
+    ) -> Result<crate::store::ReplayProjection, DbError> {
+        crate::store::ReplayProjection::from_image(image, self.records.store_dir.clone())
     }
 
     #[allow(clippy::too_many_arguments)]

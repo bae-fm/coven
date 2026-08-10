@@ -567,7 +567,12 @@ impl RetainedReplayBaseline {
                 "generation-zero retained replay baseline metadata is inconsistent".to_string(),
             ));
         }
-        let image = open_image(&self.image_bytes(conn, store_dir)?)?;
+        let mut image = Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(
+            &mut image,
+            &self.image_bytes(conn, store_dir)?,
+        )
+        .map_err(|error| DbError::context("open retained replay database image", error))?;
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {
@@ -712,11 +717,6 @@ impl RetainedReplayBaseline {
     }
 }
 
-fn open_image(image: &[u8]) -> Result<Connection, DbError> {
-    crate::open_database_image(image)
-        .map_err(|error| DbError::context("open retained replay database image", error))
-}
-
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
 /// unique key already exists in `target` is left untouched instead of failing —
 /// used when installing a Circle image onto a Store image that already carries the
@@ -768,7 +768,9 @@ pub(crate) fn copy_table_with_conflicts(
 
 pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
     let source_bytes = crate::connection_io::serialize_database_image(source)?;
-    let image = open_image(&source_bytes)?;
+    let mut image = Connection::open_in_memory().map_err(DbError::from)?;
+    crate::connection_io::deserialize_database_image_into(&mut image, &source_bytes)
+        .map_err(|error| DbError::context("open retained replay database image", error))?;
     image
         .pragma_update(None, "foreign_keys", "OFF")
         .map_err(DbError::from)?;
@@ -879,6 +881,13 @@ fn generation_zero_protocol_key(founder_membership_cursor: Option<&str>, key: &s
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;
+
+    fn open_image(image: &[u8]) -> Result<Connection, DbError> {
+        let mut connection = Connection::open_in_memory().map_err(DbError::from)?;
+        crate::connection_io::deserialize_database_image_into(&mut connection, image)
+            .map_err(|error| DbError::context("open retained replay database image", error))?;
+        Ok(connection)
+    }
 
     #[test]
     fn every_coven_table_has_one_retained_replay_disposition() {

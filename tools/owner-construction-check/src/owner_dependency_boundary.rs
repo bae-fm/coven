@@ -133,7 +133,7 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         .collect::<BTreeSet<_>>();
     let mut leaks = BTreeSet::new();
     collect_crate_root_session_fields(files, &internal_dependencies, &mut leaks);
-    collect_public_database_functions(files, &raw_database_types, &mut leaks);
+    collect_database_callables(files, &raw_database_types, &mut leaks);
     for method in methods {
         if !method.returns_owner {
             let retained = retained_dependencies
@@ -172,7 +172,7 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
     leaks.into_iter().collect()
 }
 
-fn collect_public_database_functions(
+fn collect_database_callables(
     files: &[RustFile],
     raw_database_types: &BTreeSet<String>,
     leaks: &mut BTreeSet<OwnerDependencyLeak>,
@@ -183,7 +183,7 @@ fn collect_public_database_functions(
         {
             continue;
         }
-        collect_public_database_functions_in_items(
+        collect_database_callables_in_items(
             &file.relative_path,
             &file.syntax.items,
             raw_database_types,
@@ -192,7 +192,7 @@ fn collect_public_database_functions(
     }
 }
 
-fn collect_public_database_functions_in_items(
+fn collect_database_callables_in_items(
     path: &str,
     items: &[syn::Item],
     raw_database_types: &BTreeSet<String>,
@@ -200,14 +200,12 @@ fn collect_public_database_functions_in_items(
 ) {
     for item in items {
         match item {
-            syn::Item::Fn(function)
-                if !is_test_only(&function.attrs)
-                    && matches!(function.vis, syn::Visibility::Public(_)) =>
-            {
-                collect_public_database_signature(
+            syn::Item::Fn(function) if !is_test_only(&function.attrs) => {
+                collect_database_signature(
                     path,
                     None,
                     &function.sig,
+                    matches!(function.vis, syn::Visibility::Public(_)),
                     raw_database_types,
                     leaks,
                 );
@@ -220,15 +218,14 @@ fn collect_public_database_functions_in_items(
                     let syn::ImplItem::Fn(method) = item else {
                         continue;
                     };
-                    if is_test_only(&method.attrs)
-                        || !matches!(method.vis, syn::Visibility::Public(_))
-                    {
+                    if is_test_only(&method.attrs) {
                         continue;
                     }
-                    collect_public_database_signature(
+                    collect_database_signature(
                         path,
                         Some(&owner),
                         &method.sig,
+                        matches!(method.vis, syn::Visibility::Public(_)),
                         raw_database_types,
                         leaks,
                     );
@@ -246,10 +243,11 @@ fn collect_public_database_functions_in_items(
                     if is_test_only(&method.attrs) {
                         continue;
                     }
-                    collect_public_database_signature(
+                    collect_database_signature(
                         path,
                         Some(&owner),
                         &method.sig,
+                        true,
                         raw_database_types,
                         leaks,
                     );
@@ -257,12 +255,7 @@ fn collect_public_database_functions_in_items(
             }
             syn::Item::Mod(module) if !is_test_only(&module.attrs) => {
                 if let Some((_, items)) = &module.content {
-                    collect_public_database_functions_in_items(
-                        path,
-                        items,
-                        raw_database_types,
-                        leaks,
-                    );
+                    collect_database_callables_in_items(path, items, raw_database_types, leaks);
                 }
             }
             _ => {}
@@ -270,10 +263,11 @@ fn collect_public_database_functions_in_items(
     }
 }
 
-fn collect_public_database_signature(
+fn collect_database_signature(
     path: &str,
     owner: Option<&str>,
     signature: &syn::Signature,
+    expose_parameters: bool,
     raw_database_types: &BTreeSet<String>,
     leaks: &mut BTreeSet<OwnerDependencyLeak>,
 ) {
@@ -297,6 +291,9 @@ fn collect_public_database_signature(
             );
             leaks.insert(leak);
         }
+    }
+    if !expose_parameters {
+        return;
     }
     for input in &signature.inputs {
         let syn::FnArg::Typed(input) = input else {
@@ -645,6 +642,24 @@ mod tests {
         );
 
         assert_eq!(find_owner_dependency_leaks(&[file]).len(), 2);
+    }
+
+    #[test]
+    fn production_callables_cannot_return_raw_database_dependencies() {
+        let file = production_file(
+            r#"
+            struct Connection;
+            struct Session;
+            struct Image;
+            pub(crate) fn open_image() -> Connection { todo!() }
+            fn attach_capture() -> Session { todo!() }
+            impl Image {
+                fn connection(&self) -> Connection { todo!() }
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 3);
     }
 
     #[test]
