@@ -195,7 +195,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
         Ok(
-            StoreDatabase::circle_current_state_on(self.transaction, circle_id)?
+            super::circle_operations::circle_current_state_on(self.transaction, circle_id)?
                 .is_some_and(|state| state.is_deleted()),
         )
     }

@@ -75,7 +75,8 @@ impl StoreSession<'_> {
         expected_control: &coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<Option<String>, DbError> {
-        let Some(state) = StoreDatabase::circle_current_state_on(self.conn, circle_id)? else {
+        let Some(state) = super::circle_operations::circle_current_state_on(self.conn, circle_id)?
+        else {
             return Ok(None);
         };
         let Some(current) = state

@@ -93,7 +93,7 @@ impl StoreSession<'_> {
                 ));
             }
             for exclusion in &local_exclusions {
-                StoreDatabase::record_circle_close_exclusion_on(&tx, exclusion)?;
+                super::circle_operations::record_circle_close_exclusion_on(&tx, exclusion)?;
             }
             let retracted = retractions
                 .iter()

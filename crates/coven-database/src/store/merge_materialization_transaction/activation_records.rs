@@ -278,7 +278,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 activation,
             )
             .map_err(DbError::Message)?;
-            let current_state = StoreDatabase::circle_current_state_on(conn, activation.circle_id)?;
+            let current_state = crate::store::circle_operations::circle_current_state_on(
+                conn,
+                activation.circle_id,
+            )?;
             let current_state = match current_state {
                 Some(current) => current.advance(next_state).map_err(DbError::Message)?,
                 None if activation.control.value.is_founder() => next_state,

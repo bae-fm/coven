@@ -11,6 +11,8 @@ mod circle_controls;
 mod circle_operation_discard;
 mod circle_operations;
 use circle_authority::circle_blob_opening_protection_on;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use circle_operations::circle_current_state_on;
 use circle_operations::circle_publication_context_on;
 mod circle_snapshot_publication;
 mod device_continuation;

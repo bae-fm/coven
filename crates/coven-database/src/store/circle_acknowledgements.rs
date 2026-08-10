@@ -40,7 +40,7 @@ impl StoreSession<'_> {
     ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
         let conn = self.conn;
         let mut inputs = Vec::new();
-        for state in StoreDatabase::circle_current_states_on(conn)? {
+        for state in super::circle_operations::circle_current_states_on(conn)? {
             let circle_id = state.circle_id();
             let Some(authoring) = state.authoring_state() else {
                 tracing::debug!(
@@ -86,7 +86,8 @@ impl StoreSession<'_> {
         &self,
         circle_id: CircleId,
     ) -> Result<BTreeSet<String>, DbError> {
-        let Some(state) = StoreDatabase::circle_current_state_on(self.conn, circle_id)? else {
+        let Some(state) = super::circle_operations::circle_current_state_on(self.conn, circle_id)?
+        else {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} has no current state"
             )));

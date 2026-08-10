@@ -358,7 +358,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     )
                 })?);
             }
-            crate::StoreDatabase::remove_local_circle_access_on(conn)?;
+            crate::store::circle_operations::remove_local_circle_access_on(conn)?;
         }
         let mut removal_session = rusqlite::session::Session::new(conn).map_err(DbError::from)?;
         for table in synced_tables {

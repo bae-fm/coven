@@ -51,7 +51,7 @@ impl StoreSession<'_> {
         identity_pubkey: &str,
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::Circle>, DbError> {
-        Ok(StoreDatabase::circle_current_states_on(self.conn)?
+        Ok(circle_current_states_on(self.conn)?
             .into_iter()
             .map(|state| {
                 let (name, role) = state.display(identity_pubkey);
@@ -71,7 +71,7 @@ impl StoreSession<'_> {
         identity_pubkey: &str,
         store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleMemberInfo>, DbError> {
-        let state = StoreDatabase::circle_current_state_on(self.conn, circle_id)?
+        let state = circle_current_state_on(self.conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
         let Some((_current, access, roster, _metadata)) = state.active() else {
             return Err(DbError::Message(format!(
@@ -111,7 +111,7 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let state = StoreDatabase::circle_current_state_on(self.conn, circle_id)?
+        let state = circle_current_state_on(self.conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
         let authoring =
             authoring(&state).ok_or_else(|| DbError::Message(missing_authoring(circle_id)))?;
@@ -135,20 +135,15 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<Vec<coven_protocol::circle::CircleControlCoord>>, DbError> {
-        Ok(
-            StoreDatabase::circle_current_state_on(self.conn, circle_id)?
-                .and_then(|state| state.conflict_branches()),
-        )
+        Ok(circle_current_state_on(self.conn, circle_id)?
+            .and_then(|state| state.conflict_branches()))
     }
 
     fn circle_is_deleted(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
-        Ok(
-            StoreDatabase::circle_current_state_on(self.conn, circle_id)?
-                .is_some_and(|state| state.is_deleted()),
-        )
+        Ok(circle_current_state_on(self.conn, circle_id)?.is_some_and(|state| state.is_deleted()))
     }
 
     fn current_circle_control(
@@ -156,7 +151,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
         Ok(
-            StoreDatabase::circle_current_state_on(self.conn, circle_id)?.and_then(|state| {
+            circle_current_state_on(self.conn, circle_id)?.and_then(|state| {
                 state
                     .authoring_state()
                     .map(|authoring| authoring.control.coord.clone())
@@ -167,7 +162,7 @@ impl StoreSession<'_> {
     fn closing_circle_controls(
         &self,
     ) -> Result<Vec<coven_protocol::circle::PreparedCircleControl>, DbError> {
-        Ok(StoreDatabase::circle_current_states_on(self.conn)?
+        Ok(circle_current_states_on(self.conn)?
             .into_iter()
             .filter_map(|state| state.closing_control().cloned())
             .collect())
@@ -194,7 +189,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Option<coven_protocol::circle::CirclePublicationBlocked>, DbError> {
-        let Some(state) = StoreDatabase::circle_current_state_on(self.conn, circle_id)? else {
+        let Some(state) = circle_current_state_on(self.conn, circle_id)? else {
             return Ok(None);
         };
         Ok(state
@@ -213,7 +208,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         for exclusion in exclusions {
-            StoreDatabase::record_circle_close_exclusion_on(&tx, exclusion)?;
+            record_circle_close_exclusion_on(&tx, exclusion)?;
         }
         tx.commit().map_err(DbError::from)
     }
@@ -225,7 +220,7 @@ impl StoreSession<'_> {
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleInfo>, DbError> {
         let mut circles = Vec::new();
-        for state in StoreDatabase::circle_current_states_on(self.conn)? {
+        for state in circle_current_states_on(self.conn)? {
             let circle_id = state.circle_id();
             if state.is_deleted() {
                 circles.push(coven_protocol::circle::CircleInfo::Deleted { id: circle_id });
@@ -487,45 +482,6 @@ impl StoreDatabase {
             .await
     }
 
-    /// Record this device's own exclusion from a Circle epoch close, derived from
-    /// the verified successor outcome at materialization. The row is keyed by
-    /// Circle: a later close for the same Circle supersedes it. It is never
-    /// deleted — the publication gate derives clear once the successor bootstrap's
-    /// coverage records.
-    pub fn record_circle_close_exclusion_on(
-        conn: &Connection,
-        exclusion: &coven_protocol::circle_activation::LocalCircleExclusion,
-    ) -> Result<(), DbError> {
-        let circle_id = exclusion.circle_id.to_string();
-        let close_id = serde_json::to_string(&exclusion.close_id)
-            .map_err(|error| DbError::context("serialize close exclusion id", error))?;
-        let excluded = serde_json::to_string(&exclusion.excluded)
-            .map_err(|error| DbError::context("serialize close exclusion registration", error))?;
-        let successor_control = serde_json::to_string(&exclusion.successor_control)
-            .map_err(|error| DbError::context("serialize close exclusion successor", error))?;
-        let activating_commit = serde_json::to_string(&exclusion.activating_commit)
-            .map_err(|error| DbError::context("serialize close exclusion activation", error))?;
-        conn.execute(
-            "INSERT INTO circle_close_exclusions
-             (circle_id, close_id, excluded_registration, successor_control, activating_commit)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(circle_id) DO UPDATE SET
-               close_id = excluded.close_id,
-               excluded_registration = excluded.excluded_registration,
-               successor_control = excluded.successor_control,
-               activating_commit = excluded.activating_commit",
-            rusqlite::params![
-                circle_id,
-                close_id,
-                excluded,
-                successor_control,
-                activating_commit,
-            ],
-        )
-        .map_err(DbError::from)?;
-        Ok(())
-    }
-
     pub async fn record_circle_close_exclusions(
         &self,
         exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
@@ -533,88 +489,6 @@ impl StoreDatabase {
         self.connection
             .call_store(move |session| session.record_circle_close_exclusions(&exclusions))
             .await
-    }
-
-    /// Every stored Circle current state, ordered by Circle id. The rows are read
-    /// and parsed up front so a caller can query or write through the same
-    /// connection while it walks them.
-    pub fn circle_current_states_on(
-        conn: &Connection,
-    ) -> Result<Vec<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
-        let rows = query_mapped_rows(
-            conn,
-            "SELECT circle_id, state FROM circle_current_state ORDER BY circle_id",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )?;
-        rows.into_iter()
-            .map(|(stored_circle_id, payload)| {
-                Self::parse_circle_current_state(&stored_circle_id, &payload)
-            })
-            .collect()
-    }
-
-    pub fn circle_current_state_on(
-        conn: &Connection,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
-        let stored = conn
-            .query_row(
-                "SELECT circle_id, state FROM circle_current_state WHERE circle_id = ?1",
-                [circle_id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        stored
-            .map(|(stored_circle_id, state)| {
-                Self::parse_circle_current_state(&stored_circle_id, &state)
-            })
-            .transpose()
-    }
-
-    fn parse_circle_current_state(
-        stored_circle_id: &str,
-        payload: &[u8],
-    ) -> Result<coven_protocol::circle_activation::CircleCurrentState, DbError> {
-        let circle_id: coven_protocol::circle::CircleId = stored_circle_id
-            .parse()
-            .map_err(|error| DbError::context("parse current Circle id", error))?;
-        let state: coven_protocol::circle_activation::CircleCurrentState =
-            serde_json::from_slice(payload)
-                .map_err(|error| DbError::context("parse Circle current state", error))?;
-        if !state.verify() || state.circle_id() != circle_id {
-            return Err(DbError::Message(format!(
-                "Circle {circle_id} has invalid current state"
-            )));
-        }
-        Ok(state)
-    }
-
-    pub fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
-        for state in Self::circle_current_states_on(conn)? {
-            let circle_id = state.circle_id().to_string();
-            let state = state.without_local_access();
-            let payload = serde_json::to_vec(&state).map_err(|error| {
-                DbError::context("serialize public Circle current state", error)
-            })?;
-            let changed = conn
-                .execute(
-                    "UPDATE circle_current_state
-                     SET state = ?2
-                     WHERE circle_id = ?1",
-                    rusqlite::params![circle_id, payload],
-                )
-                .map_err(DbError::from)?;
-            if changed != 1 {
-                return Err(DbError::Message(
-                    "Circle current state changed while removing local access".to_string(),
-                ));
-            }
-        }
-        conn.execute_batch("DELETE FROM circle_access_cache;")
-            .map_err(DbError::from)?;
-        Ok(())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -628,6 +502,122 @@ impl StoreDatabase {
             .call_store(move |session| session.circles(&identity_pubkey, &active_store_members))
             .await
     }
+}
+
+/// Record this device's own exclusion from a Circle epoch close, derived from
+/// the verified successor outcome at materialization. The row is keyed by
+/// Circle: a later close for the same Circle supersedes it. It is never
+/// deleted — the publication gate derives clear once the successor bootstrap's
+/// coverage records.
+pub(crate) fn record_circle_close_exclusion_on(
+    conn: &Connection,
+    exclusion: &coven_protocol::circle_activation::LocalCircleExclusion,
+) -> Result<(), DbError> {
+    let circle_id = exclusion.circle_id.to_string();
+    let close_id = serde_json::to_string(&exclusion.close_id)
+        .map_err(|error| DbError::context("serialize close exclusion id", error))?;
+    let excluded = serde_json::to_string(&exclusion.excluded)
+        .map_err(|error| DbError::context("serialize close exclusion registration", error))?;
+    let successor_control = serde_json::to_string(&exclusion.successor_control)
+        .map_err(|error| DbError::context("serialize close exclusion successor", error))?;
+    let activating_commit = serde_json::to_string(&exclusion.activating_commit)
+        .map_err(|error| DbError::context("serialize close exclusion activation", error))?;
+    conn.execute(
+        "INSERT INTO circle_close_exclusions
+         (circle_id, close_id, excluded_registration, successor_control, activating_commit)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(circle_id) DO UPDATE SET
+           close_id = excluded.close_id,
+           excluded_registration = excluded.excluded_registration,
+           successor_control = excluded.successor_control,
+           activating_commit = excluded.activating_commit",
+        rusqlite::params![
+            circle_id,
+            close_id,
+            excluded,
+            successor_control,
+            activating_commit,
+        ],
+    )
+    .map_err(DbError::from)?;
+    Ok(())
+}
+
+/// Every stored Circle current state, ordered by Circle id. The rows are read
+/// and parsed up front so a caller can query or write through the same
+/// connection while it walks them.
+pub(crate) fn circle_current_states_on(
+    conn: &Connection,
+) -> Result<Vec<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
+    let rows = query_mapped_rows(
+        conn,
+        "SELECT circle_id, state FROM circle_current_state ORDER BY circle_id",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    )?;
+    rows.into_iter()
+        .map(|(stored_circle_id, payload)| parse_circle_current_state(&stored_circle_id, &payload))
+        .collect()
+}
+
+pub(crate) fn circle_current_state_on(
+    conn: &Connection,
+    circle_id: coven_protocol::circle::CircleId,
+) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
+    let stored = conn
+        .query_row(
+            "SELECT circle_id, state FROM circle_current_state WHERE circle_id = ?1",
+            [circle_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    stored
+        .map(|(stored_circle_id, state)| parse_circle_current_state(&stored_circle_id, &state))
+        .transpose()
+}
+
+fn parse_circle_current_state(
+    stored_circle_id: &str,
+    payload: &[u8],
+) -> Result<coven_protocol::circle_activation::CircleCurrentState, DbError> {
+    let circle_id: coven_protocol::circle::CircleId = stored_circle_id
+        .parse()
+        .map_err(|error| DbError::context("parse current Circle id", error))?;
+    let state: coven_protocol::circle_activation::CircleCurrentState =
+        serde_json::from_slice(payload)
+            .map_err(|error| DbError::context("parse Circle current state", error))?;
+    if !state.verify() || state.circle_id() != circle_id {
+        return Err(DbError::Message(format!(
+            "Circle {circle_id} has invalid current state"
+        )));
+    }
+    Ok(state)
+}
+
+pub(crate) fn remove_local_circle_access_on(conn: &Connection) -> Result<(), DbError> {
+    for state in circle_current_states_on(conn)? {
+        let circle_id = state.circle_id().to_string();
+        let state = state.without_local_access();
+        let payload = serde_json::to_vec(&state)
+            .map_err(|error| DbError::context("serialize public Circle current state", error))?;
+        let changed = conn
+            .execute(
+                "UPDATE circle_current_state
+                 SET state = ?2
+                 WHERE circle_id = ?1",
+                rusqlite::params![circle_id, payload],
+            )
+            .map_err(DbError::from)?;
+        if changed != 1 {
+            return Err(DbError::Message(
+                "Circle current state changed while removing local access".to_string(),
+            ));
+        }
+    }
+    conn.execute_batch("DELETE FROM circle_access_cache;")
+        .map_err(DbError::from)?;
+    Ok(())
 }
 
 pub(crate) fn circle_publication_context_on(
@@ -666,7 +656,7 @@ pub(crate) fn circle_publication_context_on(
             });
         }
     }
-    let state = StoreDatabase::circle_current_state_on(conn, circle_id)?
+    let state = circle_current_state_on(conn, circle_id)?
         .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
     if state.is_deleted() {
         return Err(DbError::Message(format!("Circle {circle_id} is deleted")));

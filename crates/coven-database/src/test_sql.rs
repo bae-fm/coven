@@ -1515,7 +1515,7 @@ impl DatabaseTestSql<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
-        crate::StoreDatabase::circle_current_state_on(self.connection, circle_id)
+        crate::store::circle_current_state_on(self.connection, circle_id)
     }
 
     pub fn circle_state_counts(
