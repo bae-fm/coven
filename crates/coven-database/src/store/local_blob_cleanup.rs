@@ -171,18 +171,11 @@ pub(crate) fn complete_local_blob_cleanup_on(
 
 pub struct LocalBlobCleanup<'operation> {
     database: &'operation StoreDatabase,
-    store_dir: &'operation coven_foundation::store_dir::StoreDir,
 }
 
 impl<'operation> LocalBlobCleanup<'operation> {
-    pub fn new(
-        database: &'operation StoreDatabase,
-        store_dir: &'operation coven_foundation::store_dir::StoreDir,
-    ) -> Self {
-        Self {
-            database,
-            store_dir,
-        }
+    pub fn new(database: &'operation StoreDatabase) -> Self {
+        Self { database }
     }
 
     /// Drain every committed cleanup obligation. A filesystem or database
@@ -194,19 +187,13 @@ impl<'operation> LocalBlobCleanup<'operation> {
         database
             .reach_test_point(crate::DatabaseTestPoint::LocalBlobCleanupRequested)
             .await;
-        let _cleanup_guard = database
-            .runtime
-            .local_blob_cleanup
-            .clone()
-            .lock_owned()
-            .await;
+        let _cleanup_guard = database.local_blob_cleanup_permit().await;
         #[cfg(any(test, feature = "test-utils"))]
         database
             .reach_test_point(crate::DatabaseTestPoint::LocalBlobCleanupAcquired)
             .await;
 
         let intents = database
-            .connection
             .call_database(|session| session.local_blob_cleanup_intents())
             .await?;
 
@@ -229,12 +216,11 @@ impl<'operation> LocalBlobCleanup<'operation> {
                 })
                 .await;
             let persisted_identity = intent.persisted_identity()?;
-            intent.apply(self.store_dir).await?;
+            database.apply_local_blob_cleanup_intent(&intent).await?;
 
             let namespace = intent.namespace().to_string();
             let blob_id = intent.blob_id().to_string();
             database
-                .connection
                 .call_database(move |session| {
                     session.complete_local_blob_cleanup(&namespace, &blob_id, &persisted_identity)
                 })
@@ -245,6 +231,27 @@ impl<'operation> LocalBlobCleanup<'operation> {
             .reach_test_point(crate::DatabaseTestPoint::LocalBlobCleanupFinished)
             .await;
         Ok(pending)
+    }
+}
+
+#[cfg(test)]
+impl StoreSession<'_> {
+    fn record_obsolete_copy_intent_for_test(
+        &self,
+        intent: &LocalBlobCleanupIntent,
+    ) -> Result<(), DbError> {
+        record_obsolete_copy_intents_on(self.conn, self.blob_decls, intent)
+    }
+}
+
+#[cfg(test)]
+impl StoreDatabase {
+    async fn record_obsolete_copy_intent_for_test(
+        &self,
+        intent: LocalBlobCleanupIntent,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| session.record_obsolete_copy_intent_for_test(&intent))
+            .await
     }
 }
 
@@ -266,7 +273,7 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let decls = StoreDatabase::new(&db).blob_decls.clone();
+        let database = StoreDatabase::new(&db);
 
         db.test_sql(move |conn| {
             conn.execute_batch(&format!(
@@ -312,21 +319,28 @@ mod tests {
             conn.execute("DELETE FROM note_photos WHERE id = 'removed-row'", [])
                 .map_err(DbError::from)?;
 
-            let intent = LocalBlobCleanupIntent::for_row(
+            Ok(())
+        })
+        .await
+        .expect("seed removed and live blob bindings");
+
+        database
+            .record_obsolete_copy_intent_for_test(LocalBlobCleanupIntent::for_row(
                 "photos",
                 "shared-id",
                 "note_photos",
                 "removed-row",
-            );
-            conn.record_obsolete_copy_intents(&decls, &intent)?;
-            let identities = conn
-                .query(
-                    "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?;
-            Ok(identities)
+            ))
+            .await
+            .expect("record obsolete row copies");
+
+        db.test_sql(|conn| {
+            conn.query(
+                "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(DbError::from)
         })
         .await
         .map(|identities| {

@@ -553,8 +553,7 @@ impl StoreDatabase {
                 .map_err(store_reclaim_journal_error)?,
             _ => unreachable!("matched reclaim candidate"),
         };
-        self.connection
-            .call_store(move |session| session.begin_store_reclaim_operation(operation, remotes))
+        self.call_store(move |session| session.begin_store_reclaim_operation(operation, remotes))
             .await
     }
 
@@ -564,11 +563,10 @@ impl StoreDatabase {
         target: StorePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.store_package_is_retained_for_replay(&root, &target, &activation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.store_package_is_retained_for_replay(&root, &target, &activation)
+        })
+        .await
     }
 
     pub async fn circle_package_is_retained_for_replay(
@@ -577,11 +575,10 @@ impl StoreDatabase {
         target: coven_protocol::store_commit::CirclePackageRef,
         activation: StoreBatchCommitRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_package_is_retained_for_replay(&root, &target, &activation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_package_is_retained_for_replay(&root, &target, &activation)
+        })
+        .await
     }
 
     /// Whether a Circle bootstrap image is still the local device's live seed for
@@ -610,11 +607,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         image: coven_protocol::store_commit::SnapshotImageRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_image_is_retained_for_replay(circle_id, &image)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_image_is_retained_for_replay(circle_id, &image)
+        })
+        .await
     }
 
     /// Every stored row blob this device has an ownership record for, paired with
@@ -630,8 +626,7 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call_store(|session| session.stored_blob_reclaim_candidates())
+        self.call_store(|session| session.stored_blob_reclaim_candidates())
             .await
     }
 
@@ -644,8 +639,7 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| session.stored_blob_is_row_orphaned(&stored))
+        self.call_store(move |session| session.stored_blob_is_row_orphaned(&stored))
             .await
     }
 
@@ -663,16 +657,14 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| session.audience_blob_is_retained_for_replay(&stored))
+        self.call_store(move |session| session.audience_blob_is_retained_for_replay(&stored))
             .await
     }
 
     pub async fn store_reclaim_operations(
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
-        self.connection
-            .call_store(|session| session.store_reclaim_operations())
+        self.call_store(|session| session.store_reclaim_operations())
             .await
     }
 
@@ -707,8 +699,7 @@ impl StoreDatabase {
                 .map_err(store_reclaim_journal_error)?,
             _ => unreachable!("constructed receipt candidate"),
         };
-        self.connection
-            .call_store(move |session| session.begin_store_reclaim_receipt(expected, next, remotes))
+        self.call_store(move |session| session.begin_store_reclaim_receipt(expected, next, remotes))
             .await
     }
 
@@ -740,11 +731,10 @@ impl StoreDatabase {
             ReclaimedStorePackage::absent_verified(authorization.clone(), activation.clone())
                 .map_err(store_reclaim_journal_error)?;
         next.validate().map_err(store_reclaim_journal_error)?;
-        self.connection
-            .call_store(move |session| {
-                session.mark_store_reclaim_target_absent(expected, next, reclaimed)
-            })
-            .await
+        self.call_store(move |session| {
+            session.mark_store_reclaim_target_absent(expected, next, reclaimed)
+        })
+        .await
     }
 
     pub async fn replace_store_reclaim_candidate(
@@ -787,11 +777,10 @@ impl StoreDatabase {
             }
         };
         next.validate().map_err(store_reclaim_journal_error)?;
-        self.connection
-            .call_store(move |session| {
-                session.replace_store_reclaim_candidate(expected, current_candidate, next)
-            })
-            .await
+        self.call_store(move |session| {
+            session.replace_store_reclaim_candidate(expected, current_candidate, next)
+        })
+        .await
     }
 
     pub async fn begin_store_reclaim_candidate_replacement(
@@ -855,25 +844,23 @@ impl StoreDatabase {
         let replacement_remotes = object
             .remote_objects(&replacement)
             .map_err(store_reclaim_journal_error)?;
-        self.connection
-            .call_store(move |session| {
-                session.begin_store_reclaim_candidate_replacement(
-                    expected,
-                    next,
-                    replacement_remotes,
-                    nonactivation,
-                    losing_candidate,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_store_reclaim_candidate_replacement(
+                expected,
+                next,
+                replacement_remotes,
+                nonactivation,
+                losing_candidate,
+            )
+        })
+        .await
     }
 
     pub async fn store_reclaim_replacement_cleanup_targets(
         &self,
         expected: DurableStoreReclaimOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| session.store_reclaim_replacement_cleanup_targets(&expected))
+        self.call_store(move |session| session.store_reclaim_replacement_cleanup_targets(&expected))
             .await
     }
 
@@ -910,11 +897,10 @@ impl StoreDatabase {
             }
         };
         next.validate().map_err(store_reclaim_journal_error)?;
-        self.connection
-            .call_store(move |session| {
-                session.complete_store_reclaim_candidate_replacement(expected, losing, next)
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_store_reclaim_candidate_replacement(expected, losing, next)
+        })
+        .await
     }
 
     /// Whether a published snapshot generation lists this blob in its image, read
@@ -924,8 +910,7 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| session.stored_blob_has_snapshot_owner_for_test(&stored))
+        self.call_store(move |session| session.stored_blob_has_snapshot_owner_for_test(&stored))
             .await
     }
 

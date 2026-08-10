@@ -87,14 +87,12 @@ impl StoreSession<'_> {
 
 impl StoreDatabase {
     pub async fn load_rotation_gate(&self) -> Result<Option<RotationGate>, DbError> {
-        self.connection
-            .call_store(|session| session.load_rotation_gate())
+        self.call_store(|session| session.load_rotation_gate())
             .await
     }
 
     pub async fn record_peer_rotation(&self, generation: u64) -> Result<RotationGate, DbError> {
-        self.connection
-            .call_store(move |session| session.record_peer_rotation(generation))
+        self.call_store(move |session| session.record_peer_rotation(generation))
             .await
     }
 
@@ -102,8 +100,7 @@ impl StoreDatabase {
         &self,
         adopted_generation: u64,
     ) -> Result<Option<RotationGate>, DbError> {
-        self.connection
-            .call_store(move |session| session.complete_peer_rotation_adoption(adopted_generation))
+        self.call_store(move |session| session.complete_peer_rotation_adoption(adopted_generation))
             .await
     }
 
@@ -112,11 +109,10 @@ impl StoreDatabase {
         intent_hash: ObjectHash,
         generation: u64,
     ) -> Result<Option<RotationGate>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.complete_local_rotation_adoption(intent_hash, generation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_local_rotation_adoption(intent_hash, generation)
+        })
+        .await
     }
 }
 

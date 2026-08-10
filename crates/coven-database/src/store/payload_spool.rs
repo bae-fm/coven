@@ -425,8 +425,7 @@ impl StoreDatabase {
     /// store committed has been discharged.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        self.connection
-            .call_store(|session| session.owed_payload_spool_cleanup())
+        self.call_store(|session| session.owed_payload_spool_cleanup())
             .await
     }
 
@@ -434,8 +433,7 @@ impl StoreDatabase {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
         let owner_key = owner_key.to_string();
-        self.connection
-            .call_store(move |session| session.payload_owner_claims(&owner_key))
+        self.call_store(move |session| session.payload_owner_claims(&owner_key))
             .await
     }
 }

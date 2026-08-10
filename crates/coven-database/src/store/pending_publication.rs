@@ -285,7 +285,6 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
         let loaded = self
-            .connection
             .call_store(move |session| session.oldest_prepared_store_write())
             .await?;
         if let Some(batch) = &loaded {
@@ -334,7 +333,6 @@ impl StoreDatabase {
     ) -> Result<LocalCommitBase, DbError> {
         let authorship = self.author_own_stream().await;
         let (predecessor, frontier) = self
-            .connection
             .call_store(move |session| session.local_commit_ledger_base(&stream_id))
             .await?;
         Ok(LocalCommitBase {
@@ -348,8 +346,7 @@ impl StoreDatabase {
         &self,
         stream_id: AuthorStreamId,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        self.connection
-            .call_store(move |session| session.latest_local_store_position(&stream_id.to_string()))
+        self.call_store(move |session| session.latest_local_store_position(&stream_id.to_string()))
             .await
     }
 }

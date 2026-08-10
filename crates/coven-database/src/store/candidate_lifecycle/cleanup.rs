@@ -466,8 +466,7 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<bool, DbError> {
         let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.merge_candidate_cleanup_pending(&write_id))
+        self.call_store(move |session| session.merge_candidate_cleanup_pending(&write_id))
             .await
     }
 
@@ -475,8 +474,7 @@ impl StoreDatabase {
         &self,
         write_id: WriteId,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| session.merge_candidate_cleanup_targets(&write_id))
+        self.call_store(move |session| session.merge_candidate_cleanup_targets(&write_id))
             .await
     }
 
@@ -484,16 +482,14 @@ impl StoreDatabase {
         &self,
         write_id: WriteId,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.finish_retracted_merge_candidate_cleanup(&write_id))
+        self.call_store(move |session| session.finish_retracted_merge_candidate_cleanup(&write_id))
             .await
     }
 
     pub async fn pending_merge_retraction_cleanups(
         &self,
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
-        self.connection
-            .call_store(|session| session.pending_merge_retraction_cleanups())
+        self.call_store(|session| session.pending_merge_retraction_cleanups())
             .await
     }
 
@@ -502,19 +498,17 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         candidate: StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.merge_retraction_cleanup_verification(&root, &candidate)
-            })
-            .await
+        self.call_store(move |session| {
+            session.merge_retraction_cleanup_verification(&root, &candidate)
+        })
+        .await
     }
 
     pub async fn merge_retraction_cleanup_targets(
         &self,
         candidate: StoreBatchCommitRef,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| session.merge_retraction_cleanup_targets(&candidate))
+        self.call_store(move |session| session.merge_retraction_cleanup_targets(&candidate))
             .await
     }
 
@@ -527,24 +521,22 @@ impl StoreDatabase {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call_store(move |session| {
-                session.confirm_merge_retraction_cleanup_nonactivation(
-                    &root,
-                    &candidate,
-                    &durable,
-                    &head_nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.confirm_merge_retraction_cleanup_nonactivation(
+                &root,
+                &candidate,
+                &durable,
+                &head_nonactivation,
+            )
+        })
+        .await
     }
 
     pub async fn finish_merge_retraction_cleanup(
         &self,
         candidate: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.finish_merge_retraction_cleanup(&candidate))
+        self.call_store(move |session| session.finish_merge_retraction_cleanup(&candidate))
             .await
     }
 }

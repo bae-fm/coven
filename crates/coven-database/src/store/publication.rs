@@ -655,7 +655,6 @@ impl StoreDatabase {
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let (outcome, notification) = self
-            .connection
             .call_store(move |session| {
                 session.complete_prepared_store_write(root, accepted, nonactivations)
             })
@@ -721,7 +720,6 @@ impl StoreDatabase {
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let notified_write_id = write_id.clone();
         let blocked = self
-            .connection
             .call_store(move |session| {
                 session.mark_merge_candidate_conflict(
                     write_id,

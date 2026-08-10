@@ -153,23 +153,22 @@ impl StoreDatabase {
     ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
         let key = format!("owner_promotion/{promotion_id}");
-        self.connection
-            .call_store(move |session| {
-                session
-                    .protocol_state(&key)?
-                    .map(|value| {
-                        let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
-                            serde_json::from_str(&value).map_err(|error| {
-                                DbError::context("parse Owner-promotion journal", error)
-                            })?;
-                        journal
-                            .validate_id(promotion_id)
-                            .map_err(|error| DbError::Message(error.to_string()))?;
-                        Ok(journal)
-                    })
-                    .transpose()
-            })
-            .await
+        self.call_store(move |session| {
+            session
+                .protocol_state(&key)?
+                .map(|value| {
+                    let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
+                        serde_json::from_str(&value).map_err(|error| {
+                            DbError::context("parse Owner-promotion journal", error)
+                        })?;
+                    journal
+                        .validate_id(promotion_id)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    Ok(journal)
+                })
+                .transpose()
+        })
+        .await
     }
 
     pub async fn load_owner_promotion_target(
@@ -177,29 +176,28 @@ impl StoreDatabase {
         key: String,
     ) -> Result<Option<coven_protocol::owner_promotion_journal::OwnerPromotionJournal>, DbError>
     {
-        self.connection
-            .call_store(move |session| {
-                let value = session.protocol_state(&key)?;
-                let Some(value) = value else {
-                    return Ok(None);
-                };
-                let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
-                    serde_json::from_str(&value).map_err(|error| {
-                        DbError::context("parse Owner-promotion target journal", error)
-                    })?;
-                journal
-                    .validate_target_key(&key)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                let journal_key = format!("owner_promotion/{}", journal.promotion_id());
-                let by_id = session.protocol_state(&journal_key)?;
-                if by_id.as_deref() != Some(value.as_str()) {
-                    return Err(DbError::Message(
-                        "Owner-promotion target and id journals disagree".to_string(),
-                    ));
-                }
-                Ok(Some(journal))
-            })
-            .await
+        self.call_store(move |session| {
+            let value = session.protocol_state(&key)?;
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            let journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal =
+                serde_json::from_str(&value).map_err(|error| {
+                    DbError::context("parse Owner-promotion target journal", error)
+                })?;
+            journal
+                .validate_target_key(&key)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let journal_key = format!("owner_promotion/{}", journal.promotion_id());
+            let by_id = session.protocol_state(&journal_key)?;
+            if by_id.as_deref() != Some(value.as_str()) {
+                return Err(DbError::Message(
+                    "Owner-promotion target and id journals disagree".to_string(),
+                ));
+            }
+            Ok(Some(journal))
+        })
+        .await
     }
 
     pub async fn begin_owner_promotion_journal(
@@ -222,11 +220,10 @@ impl StoreDatabase {
         let journal_key = format!("owner_promotion/{}", journal.promotion_id());
         let value = serde_json::to_string(&journal)
             .map_err(|error| DbError::context("serialize Owner-promotion journal", error))?;
-        self.connection
-            .call_store(move |session| {
-                session.begin_owner_promotion_journal(&journal_key, &target_key, &value)
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_owner_promotion_journal(&journal_key, &target_key, &value)
+        })
+        .await
     }
 
     pub async fn begin_owner_promotion_acceptance_journal(
@@ -240,19 +237,17 @@ impl StoreDatabase {
         let value = serde_json::to_string(&journal).map_err(|error| {
             DbError::context("serialize Owner-promotion candidate acceptance", error)
         })?;
-        self.connection
-            .call_store(move |session| {
-                session.begin_owner_promotion_acceptance_journal(&journal_key, &value)
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_owner_promotion_acceptance_journal(&journal_key, &value)
+        })
+        .await
     }
 
     pub async fn advance_owner_promotion_journal(
         &self,
         transition: coven_protocol::owner_promotion_journal::OwnerPromotionJournalTransition,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.advance_owner_promotion_journal(transition))
+        self.call_store(move |session| session.advance_owner_promotion_journal(transition))
             .await
     }
 
@@ -280,16 +275,15 @@ impl StoreDatabase {
             ));
         }
         let nonactivation = nonactivation.into_durable();
-        self.connection
-            .call_store(move |session| {
-                session.end_nonactivated_owner_promotion_candidate(
-                    transition,
-                    candidate,
-                    objects,
-                    nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.end_nonactivated_owner_promotion_candidate(
+                transition,
+                candidate,
+                objects,
+                nonactivation,
+            )
+        })
+        .await
     }
 
     /// The published objects of a promotion candidate that already lost, still
@@ -301,11 +295,10 @@ impl StoreDatabase {
         candidate: coven_protocol::store_commit::StoreBatchCommitRef,
         objects: Vec<coven_protocol::objects::ExactObjectRef>,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.owner_promotion_candidate_cleanup_targets(&candidate, &objects)
-            })
-            .await
+        self.call_store(move |session| {
+            session.owner_promotion_candidate_cleanup_targets(&candidate, &objects)
+        })
+        .await
     }
 
     pub async fn replace_failed_owner_promotion_journal(
@@ -334,17 +327,16 @@ impl StoreDatabase {
         let replacement_value = serde_json::to_string(&replacement).map_err(|error| {
             DbError::context("serialize replacement Owner-promotion journal", error)
         })?;
-        self.connection
-            .call_store(move |session| {
-                session.replace_failed_owner_promotion_journal(
-                    replacement,
-                    target_key,
-                    replacement_key,
-                    previous_value,
-                    replacement_value,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.replace_failed_owner_promotion_journal(
+                replacement,
+                target_key,
+                replacement_key,
+                previous_value,
+                replacement_value,
+            )
+        })
+        .await
     }
 }
 

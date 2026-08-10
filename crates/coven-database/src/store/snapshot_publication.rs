@@ -257,7 +257,6 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
         let pending = self
-            .connection
             .call_store(|session| session.outbound_snapshot_publication())
             .await?;
         if let Some(pending) = &pending {
@@ -274,24 +273,16 @@ impl StoreDatabase {
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.stage_snapshot_publication(
-                    meta,
-                    meta_prepared,
-                    image,
-                    image_prepared,
-                    blobs,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_snapshot_publication(meta, meta_prepared, image, image_prepared, blobs)
+        })
+        .await
     }
 
     pub async fn latest_local_store_snapshot(
         &self,
     ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
-        self.connection
-            .call_store(|session| session.latest_local_store_snapshot())
+        self.call_store(|session| session.latest_local_store_snapshot())
             .await
     }
 
@@ -299,21 +290,18 @@ impl StoreDatabase {
         &self,
         accepted: StoreSnapshotRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.complete_snapshot_publication(accepted))
+        self.call_store(move |session| session.complete_snapshot_publication(accepted))
             .await
     }
 
     pub async fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
-        self.connection
-            .call_store(|session| session.snapshot_blob_spool_cleanup_paths())
+        self.call_store(|session| session.snapshot_blob_spool_cleanup_paths())
             .await
     }
 
     pub async fn complete_snapshot_blob_spool_cleanup(&self, path: &Path) -> Result<(), DbError> {
         let path = path.to_string_lossy().into_owned();
-        self.connection
-            .call_store(move |session| session.complete_snapshot_blob_spool_cleanup(&path))
+        self.call_store(move |session| session.complete_snapshot_blob_spool_cleanup(&path))
             .await
     }
 }

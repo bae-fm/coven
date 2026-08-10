@@ -147,7 +147,6 @@ impl DeviceJoinJournalStore {
     ) -> Result<(), crate::DbError> {
         let pending_path = self.path.to_string_lossy().into_owned();
         database
-            .connection
             .call_database(move |session| {
                 session.complete_device_join_from_pending(
                     &pending_path,
@@ -321,8 +320,7 @@ impl StoreDatabase {
         require_initial(&record)?;
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
-        self.connection
-            .call_database(move |session| session.begin_device_join(&key, &value))
+        self.call_database(move |session| session.begin_device_join(&key, &value))
             .await
             .map_err(DeviceJoinJournalError::Database)
     }
@@ -354,7 +352,6 @@ impl StoreDatabase {
         let previous = serde_json::to_string(previous)?;
         let next = serde_json::to_string(&next)?;
         let changed = self
-            .connection
             .call_database(move |session| session.advance_device_join(&key, &previous, &next))
             .await
             .map_err(DeviceJoinJournalError::Database)?;
@@ -373,7 +370,6 @@ impl StoreDatabase {
         let key = record.store_key();
         let value = serde_json::to_string(&record)?;
         let durable = self
-            .connection
             .call_database(move |session| {
                 session.begin_device_join_replacement_terminal(&key, &value)
             })
@@ -389,7 +385,6 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinJournalError> {
         let rows = self
-            .connection
             .call_database(|session| session.device_join_records())
             .await
             .map_err(DeviceJoinJournalError::Database)?;
@@ -433,8 +428,7 @@ impl StoreDatabase {
         role: DeviceJoinRole,
     ) -> Result<(), DeviceJoinJournalError> {
         let key = DeviceJoinJournalRecord::store_key_for(attempt_id, role);
-        self.connection
-            .call_database(move |session| session.forget_device_join(&key))
+        self.call_database(move |session| session.forget_device_join(&key))
             .await
             .map_err(DeviceJoinJournalError::Database)
     }
@@ -443,8 +437,7 @@ impl StoreDatabase {
     pub async fn forget_provider_administrator_journals_for_test(
         &self,
     ) -> Result<(), DeviceJoinJournalError> {
-        self.connection
-            .call_database(|session| session.forget_provider_administrator_device_joins())
+        self.call_database(|session| session.forget_provider_administrator_device_joins())
             .await
             .map_err(DeviceJoinJournalError::Database)
     }

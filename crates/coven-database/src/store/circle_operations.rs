@@ -260,9 +260,7 @@ impl StoreDatabase {
     pub async fn get_circle_operations(
         &self,
     ) -> Result<Vec<coven_protocol::circle::CircleOperationInfo>, DbError> {
-        self.connection
-            .call_store(|session| session.circle_operations())
-            .await
+        self.call_store(|session| session.circle_operations()).await
     }
 
     /// Every Circle the local identity can see, with its public derived state. A
@@ -275,11 +273,10 @@ impl StoreDatabase {
         active_store_members: std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::Circle>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.circle_states(&identity_pubkey, &active_store_members)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_states(&identity_pubkey, &active_store_members)
+        })
+        .await
     }
 
     pub async fn get_circle_members(
@@ -289,11 +286,10 @@ impl StoreDatabase {
         store_members: std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleMemberInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.circle_members(circle_id, &identity_pubkey, &store_members)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_members(circle_id, &identity_pubkey, &store_members)
+        })
+        .await
     }
 
     pub async fn circle_authoring_context(
@@ -337,17 +333,16 @@ impl StoreDatabase {
         DbError,
     > {
         let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.circle_signing_context(
-                    circle_id,
-                    &identity_pubkey,
-                    authoring,
-                    missing_authoring,
-                    foreign_identity,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_signing_context(
+                circle_id,
+                &identity_pubkey,
+                authoring,
+                missing_authoring,
+                foreign_identity,
+            )
+        })
+        .await
     }
 
     /// The authoring context a terminal deletion signs from, accepting any
@@ -383,8 +378,7 @@ impl StoreDatabase {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<Vec<coven_protocol::circle::CircleControlCoord>>, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_control_conflict_branches(circle_id))
+        self.call_store(move |session| session.circle_control_conflict_branches(circle_id))
             .await
     }
 
@@ -393,8 +387,7 @@ impl StoreDatabase {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_is_deleted(circle_id))
+        self.call_store(move |session| session.circle_is_deleted(circle_id))
             .await
     }
 
@@ -405,16 +398,14 @@ impl StoreDatabase {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
-        self.connection
-            .call_store(move |session| session.current_circle_control(circle_id))
+        self.call_store(move |session| session.current_circle_control(circle_id))
             .await
     }
 
     pub async fn closing_circle_controls(
         &self,
     ) -> Result<Vec<coven_protocol::circle::PreparedCircleControl>, DbError> {
-        self.connection
-            .call_store(|session| session.closing_circle_controls())
+        self.call_store(|session| session.closing_circle_controls())
             .await
     }
 
@@ -444,11 +435,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_publication_context(circle_id, &expected_control)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_publication_context(circle_id, &expected_control)
+        })
+        .await
     }
 
     /// The Circle's current active control coordinate. A durable write captured
@@ -460,8 +450,7 @@ impl StoreDatabase {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<crate::CirclePartitionControl, DbError> {
-        self.connection
-            .call_store(move |session| session.current_circle_partition_control(circle_id))
+        self.call_store(move |session| session.current_circle_partition_control(circle_id))
             .await
     }
 
@@ -475,19 +464,17 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         active_store_members: std::collections::BTreeSet<String>,
     ) -> Result<Option<coven_protocol::circle::CirclePublicationBlocked>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_publication_rotation_block(circle_id, &active_store_members)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_publication_rotation_block(circle_id, &active_store_members)
+        })
+        .await
     }
 
     pub async fn record_circle_close_exclusions(
         &self,
         exclusions: Vec<coven_protocol::circle_activation::LocalCircleExclusion>,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.record_circle_close_exclusions(&exclusions))
+        self.call_store(move |session| session.record_circle_close_exclusions(&exclusions))
             .await
     }
 
@@ -498,8 +485,7 @@ impl StoreDatabase {
         active_store_members: std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleInfo>, DbError> {
         let identity_pubkey = identity_pubkey.to_string();
-        self.connection
-            .call_store(move |session| session.circles(&identity_pubkey, &active_store_members))
+        self.call_store(move |session| session.circles(&identity_pubkey, &active_store_members))
             .await
     }
 }

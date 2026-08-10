@@ -366,11 +366,10 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.gated_root_locality(&root_table, &gate_column, &root_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.gated_root_locality(&root_table, &gate_column, &root_id)
+        })
+        .await
     }
 
     pub async fn begin_make_remote(
@@ -385,25 +384,23 @@ impl StoreDatabase {
         let root_table = root_table.to_string();
         let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.begin_make_remote(
-                    &root_table,
-                    &gate_column,
-                    &root_id,
-                    pin,
-                    &created_at,
-                    &uploads,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_make_remote(
+                &root_table,
+                &gate_column,
+                &root_id,
+                pin,
+                &created_at,
+                &uploads,
+            )
+        })
+        .await
     }
 
     pub async fn cancel_make_remote(&self, root_table: &str, root_id: &str) -> Result<(), DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
-        self.connection
-            .call_store(move |session| session.cancel_make_remote(&root_table, &root_id))
+        self.call_store(move |session| session.cancel_make_remote(&root_table, &root_id))
             .await
     }
 
@@ -443,19 +440,18 @@ impl StoreDatabase {
         let root_id = root_id.clone();
         let row = row.clone();
         let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                session.finalize_created_blob_upload(
-                    entry,
-                    root_table,
-                    root_id,
-                    row,
-                    &stamp,
-                    routing_encryption.as_ref(),
-                    write_id,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.finalize_created_blob_upload(
+                entry,
+                root_table,
+                root_id,
+                row,
+                &stamp,
+                routing_encryption.as_ref(),
+                write_id,
+            )
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -472,19 +468,18 @@ impl StoreDatabase {
         let root_id = root_id.to_string();
         let gate_column = gate_column.to_string();
         let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                session.commit_make_local(
-                    &root_table,
-                    &root_id,
-                    &gate_column,
-                    &stamp,
-                    routing_encryption.as_ref(),
-                    &materialized,
-                    write_id,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.commit_make_local(
+                &root_table,
+                &root_id,
+                &gate_column,
+                &stamp,
+                routing_encryption.as_ref(),
+                &materialized,
+                write_id,
+            )
+        })
+        .await
     }
 }
 

@@ -528,8 +528,7 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.insert_circle_operation(journal, prepared_objects))
+        self.call_store(move |session| session.insert_circle_operation(journal, prepared_objects))
             .await
     }
 
@@ -544,11 +543,10 @@ impl StoreDatabase {
         superseded: CircleOperationId,
         prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.insert_circle_operation_superseding(journal, superseded, prepared_objects)
-            })
-            .await
+        self.call_store(move |session| {
+            session.insert_circle_operation_superseding(journal, superseded, prepared_objects)
+        })
+        .await
     }
 
     pub async fn circle_operation(
@@ -556,22 +554,19 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| session.circle_operation(operation_id))
+        self.call_store(move |session| session.circle_operation(operation_id))
             .await
     }
 
     pub async fn oldest_pending_circle_operation(
         &self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
-        self.connection
-            .call_store(|session| session.oldest_pending_circle_operation())
+        self.call_store(|session| session.oldest_pending_circle_operation())
             .await
     }
 
     pub async fn waiting_circle_operations(&self) -> Result<Vec<CircleOperationJournal>, DbError> {
-        self.connection
-            .call_store(|session| session.waiting_circle_operations())
+        self.call_store(|session| session.waiting_circle_operations())
             .await
     }
 
@@ -594,11 +589,10 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
         let step = step.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.complete_circle_operation_upload_step(operation_id, step)
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_circle_operation_upload_step(operation_id, step)
+        })
+        .await
     }
 
     /// Replace a closed operation with its freshly prepared finalization.
@@ -613,11 +607,10 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         prepared_objects: PreparedCircleObjects,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.begin_circle_operation_finalization(journal, prepared_objects)
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_circle_operation_finalization(journal, prepared_objects)
+        })
+        .await
     }
 
     /// Replace one operation's prepared payload with a substituted one, leaving
@@ -632,8 +625,7 @@ impl StoreDatabase {
         &self,
         journal: CircleOperationJournal,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.substitute_circle_operation_for_test(journal))
+        self.call_store(move |session| session.substitute_circle_operation_for_test(journal))
             .await
     }
 
@@ -643,8 +635,7 @@ impl StoreDatabase {
         block: coven_protocol::circle::CircleOperationBlock,
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| session.block_circle_operation(operation_id, block))
+        self.call_store(move |session| session.block_circle_operation(operation_id, block))
             .await
     }
 
@@ -653,8 +644,7 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<(), DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| session.unblock_circle_operation(operation_id))
+        self.call_store(move |session| session.unblock_circle_operation(operation_id))
             .await
     }
 
@@ -663,8 +653,7 @@ impl StoreDatabase {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.activate_circle_operation(journal, verified))
+        self.call_store(move |session| session.activate_circle_operation(journal, verified))
             .await
     }
 }

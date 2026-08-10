@@ -566,8 +566,7 @@ impl StoreDatabase {
     pub async fn membership_head_cursors(
         &self,
     ) -> Result<crate::InitialStoreMembershipAuthority, DbError> {
-        self.connection
-            .call_store(|session| session.membership_head_cursors())
+        self.call_store(|session| session.membership_head_cursors())
             .await
     }
 
@@ -575,21 +574,19 @@ impl StoreDatabase {
         &self,
         head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.persist_membership_head_cursors(head_refs))
+        self.call_store(move |session| session.persist_membership_head_cursors(head_refs))
             .await
     }
 
     pub async fn local_store_root_ref(
         &self,
     ) -> Result<Option<coven_protocol::store_commit::StoreRootRef>, DbError> {
-        self.connection
-            .call_store(|session| {
-                session
-                    .root_authority()
-                    .map(|authority| authority.map(|(reference, _)| reference))
-            })
-            .await
+        self.call_store(|session| {
+            session
+                .root_authority()
+                .map(|authority| authority.map(|(reference, _)| reference))
+        })
+        .await
     }
 
     pub async fn validated_store_owner(
@@ -597,8 +594,7 @@ impl StoreDatabase {
         expected_root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<String, DbError> {
         let expected_root = expected_root.clone();
-        self.connection
-            .call_store(move |session| session.validated_store_owner(expected_root))
+        self.call_store(move |session| session.validated_store_owner(expected_root))
             .await
     }
 
@@ -618,27 +614,25 @@ impl StoreDatabase {
                 "Store founder registration author differs from the owner anchor".to_string(),
             ));
         }
-        self.connection
-            .call_store(move |session| {
-                session.install_store_owner_anchor(
-                    root,
-                    root_bytes,
-                    founder_reference,
-                    founder,
-                    founder_bytes,
-                    genesis,
-                    owner,
-                    membership,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.install_store_owner_anchor(
+                root,
+                root_bytes,
+                founder_reference,
+                founder,
+                founder_bytes,
+                genesis,
+                owner,
+                membership,
+            )
+        })
+        .await
     }
 
     pub async fn local_store_founder_graph(
         &self,
     ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
-        self.connection
-            .call_store(|session| session.local_store_founder_graph())
+        self.call_store(|session| session.local_store_founder_graph())
             .await
     }
 
@@ -647,8 +641,7 @@ impl StoreDatabase {
         graph: Box<DurableFounderGraph>,
     ) -> Result<(), DbError> {
         graph.validate()?;
-        self.connection
-            .call_store(move |session| session.stage_store_founder_graph(graph))
+        self.call_store(move |session| session.stage_store_founder_graph(graph))
             .await
     }
 
@@ -659,16 +652,15 @@ impl StoreDatabase {
         expected_initial_ack: StoreAckRef,
         expected_membership: FounderMembershipRefs,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.complete_store_founder_graph(
-                    expected_root,
-                    expected_registration,
-                    expected_initial_ack,
-                    expected_membership,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_store_founder_graph(
+                expected_root,
+                expected_registration,
+                expected_initial_ack,
+                expected_membership,
+            )
+        })
+        .await
     }
 
     pub async fn reset_store_founder_graph_publication(
@@ -677,10 +669,9 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         expected.validate()?;
         let expected_identity = founder_graph_identity(expected);
-        self.connection
-            .call_store(move |session| {
-                session.reset_store_founder_graph_publication(expected_identity)
-            })
-            .await
+        self.call_store(move |session| {
+            session.reset_store_founder_graph_publication(expected_identity)
+        })
+        .await
     }
 }

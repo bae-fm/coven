@@ -57,8 +57,7 @@ impl StoreDatabase {
         &self,
         activation_id: StreamActivationId,
     ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
-        self.connection
-            .call_store(move |session| session.registered_stream_activation(activation_id))
+        self.call_store(move |session| session.registered_stream_activation(activation_id))
             .await
     }
 }

@@ -249,9 +249,7 @@ impl StoreSession<'_> {
 impl StoreDatabase {
     #[doc(hidden)]
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
-        self.connection
-            .call_store(|session| session.pending_writes())
-            .await
+        self.call_store(|session| session.pending_writes()).await
     }
 
     #[doc(hidden)]
@@ -271,21 +269,12 @@ impl StoreDatabase {
     ) -> Result<tokio::sync::watch::Receiver<WriteStatus>, DbError> {
         let write_id = write_id.clone();
         let current = self
-            .connection
             .call_store({
                 let write_id = write_id.clone();
                 move |session| session.write_status(&write_id)
             })
             .await?;
-        let mut senders = self
-            .write_statuses
-            .lock()
-            .expect("write status mutex poisoned");
-        let sender = senders
-            .entry(write_id)
-            .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
-        sender.send_replace(current);
-        Ok(sender.subscribe())
+        Ok(self.subscribe_store_write_status(write_id, current))
     }
 
     pub async fn set_write_status(
@@ -295,8 +284,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let stored_id = write_id.clone();
         let stored_status = status.clone();
-        self.connection
-            .call_store(move |session| session.set_write_status(&stored_id, &stored_status))
+        self.call_store(move |session| session.set_write_status(&stored_id, &stored_status))
             .await?;
         self.notify_write_status(write_id.clone(), status);
         Ok(())
@@ -310,7 +298,6 @@ impl StoreDatabase {
         let write_id = write_id.clone();
         let notified_write_id = write_id.clone();
         let outcome = self
-            .connection
             .call_store(move |session| session.block_write_if_unresolved(&write_id, block))
             .await?;
         if let Some(status) = outcome {
@@ -328,7 +315,6 @@ impl StoreDatabase {
     pub async fn retry_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
         let write_id = write_id.clone();
         let retried = self
-            .connection
             .call_store(move |session| session.retry_blocked_write(write_id))
             .await?;
         let retried_ids = retried
@@ -350,7 +336,6 @@ impl StoreDatabase {
     ) -> Result<BlockedWriteDiscard, DbError> {
         let write_id = write_id.clone();
         let discarded_ids = self
-            .connection
             .call_store(move |session| session.discard_blocked_write(write_id))
             .await?;
         if let BlockedWriteDiscard::Discarded(discarded_ids) = &discarded_ids {

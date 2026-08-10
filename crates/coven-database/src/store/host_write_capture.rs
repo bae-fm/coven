@@ -431,10 +431,10 @@ impl StoreDatabase {
     }
 
     fn store_write_routing<'a>(
-        gates: &Gates,
+        has_scoped_graph: bool,
         routing_encryption: Option<&'a EncryptionService>,
     ) -> Result<StoreWriteRouting<'a>, DbError> {
-        if !gates.has_scoped_graph() {
+        if !has_scoped_graph {
             return Ok(StoreWriteRouting::Unscoped);
         }
         routing_encryption
@@ -450,12 +450,11 @@ impl StoreDatabase {
         &self,
         routing_encryption: Option<&EncryptionService>,
     ) -> Result<(), DbError> {
-        Self::store_write_routing(&self.gates, routing_encryption).map(drop)
+        Self::store_write_routing(self.has_scoped_graph(), routing_encryption).map(drop)
     }
 
     pub async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.connection
-            .call_store(|session| session.prepare_store_write())
+        self.call_store(|session| session.prepare_store_write())
             .await
     }
 }
@@ -551,7 +550,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         verified_authority: &'operation mut super::verified_store_authority::VerifiedStoreAuthority,
         write_id: WriteId,
     ) -> Result<Self, DbError> {
-        let routing = StoreDatabase::store_write_routing(gates, routing_encryption)?;
+        let routing =
+            StoreDatabase::store_write_routing(gates.has_scoped_graph(), routing_encryption)?;
         let changes_before = connection.total_changes();
         let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         Ok(Self {

@@ -721,17 +721,16 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        self.connection
-            .call_store(move |session| {
-                session.capture_snapshot_cut(
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    routing_encryption.as_ref(),
-                    coven_protocol::circle::Audience::Store,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.capture_snapshot_cut(
+                &root,
+                &temp_dir,
+                &tables,
+                routing_encryption.as_ref(),
+                coven_protocol::circle::Audience::Store,
+            )
+        })
+        .await
     }
 
     pub async fn capture_circle_snapshot_cut(
@@ -748,17 +747,16 @@ impl StoreDatabase {
         ),
         DbError,
     > {
-        self.connection
-            .call_store(move |session| {
-                session.capture_snapshot_cut(
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    Some(&routing_encryption),
-                    coven_protocol::circle::Audience::Circle(circle_id),
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.capture_snapshot_cut(
+                &root,
+                &temp_dir,
+                &tables,
+                Some(&routing_encryption),
+                coven_protocol::circle::Audience::Circle(circle_id),
+            )
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -772,19 +770,18 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.capture_circle_snapshot_at_cutoff(
-                    &root,
-                    &temp_dir,
-                    &tables,
-                    &routing_encryption,
-                    &routing_key,
-                    circle_id,
-                    &cutoff,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.capture_circle_snapshot_at_cutoff(
+                &root,
+                &temp_dir,
+                &tables,
+                &routing_encryption,
+                &routing_key,
+                circle_id,
+                &cutoff,
+            )
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -794,16 +791,15 @@ impl StoreDatabase {
         temp_dir: PathBuf,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Vec<u8>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.capture_snapshot_image_for_test(
-                    &root,
-                    &temp_dir,
-                    routing_encryption.as_ref(),
-                    coven_protocol::circle::Audience::Store,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.capture_snapshot_image_for_test(
+                &root,
+                &temp_dir,
+                routing_encryption.as_ref(),
+                coven_protocol::circle::Audience::Store,
+            )
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -814,16 +810,15 @@ impl StoreDatabase {
         routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Vec<u8>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.capture_snapshot_image_for_test(
-                    &root,
-                    &temp_dir,
-                    Some(&routing_encryption),
-                    coven_protocol::circle::Audience::Circle(circle_id),
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.capture_snapshot_image_for_test(
+                &root,
+                &temp_dir,
+                Some(&routing_encryption),
+                coven_protocol::circle::Audience::Circle(circle_id),
+            )
+        })
+        .await
     }
 }
 

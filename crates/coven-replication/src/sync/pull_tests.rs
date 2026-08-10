@@ -1660,7 +1660,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
          BEGIN SELECT RAISE(ABORT, 'injected materialized-position write failure'); END;",
         )
         .await;
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = target.store_dir.clone();
     let error = storage
         .pull_into_result(&target, &store_dir)
         .await
@@ -5032,7 +5032,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
         let db1 = open_test_db_with_blob(replaceable_photo_decl());
         let tables = test_synced_tables_with_blob(replaceable_photo_decl());
-        let (_t1, ld1) = temp_store_dir();
+        let ld1 = db1.store_dir.clone();
         ld1.store_local("p1cover", old_bytes).await;
         let outgoing = db1
             .capture_test_changeset(&[
@@ -5061,7 +5061,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         // Device B takes the cover before the replacement, so it is a peer holding the
         // replaced blob when the new one arrives.
         let db2 = open_test_db_with_blob(replaceable_photo_decl());
-        let (_t2, ld2) = temp_store_dir();
+        let ld2 = db2.store_dir.clone();
         db2.pull_exact_store_into(&db1, &storage, &keypair, &ld2)
             .await;
         let old_cache_path =
@@ -5415,7 +5415,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         ],
     )
     .await;
-    let (_source_tmp, source_store_dir) = temp_store_dir();
+    let source_store_dir = db1.store_dir.clone();
     source_store_dir
         .store_local("pdel1234", b"COVERBYTES")
         .await;
@@ -5425,7 +5425,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
 
     // dev2 pulls → the CacheEager cover lands in the evictable cache.
     let db2 = open_test_db_with_blob(photo_decl());
-    let (_t, ld) = temp_store_dir();
+    let ld = db2.store_dir.clone();
     storage.pull_into(&db2, &ld).await;
     let deleted_reference = db2.exact_row_blob_ref("note_photos", "pdel1234").await;
     let deleted_cache_path = exact_cache_path(&ld, &deleted_reference);
@@ -5476,7 +5476,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
             ),
         ])
         .await;
-    let (_source_tmp, source_store_dir) = temp_store_dir();
+    let source_store_dir = source.store_dir.clone();
     source_store_dir.store_local("cleanup01", b"cleanup").await;
     storage
         .make_root_remote(&source, &source_store_dir, "n1")
@@ -5485,7 +5485,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let database_dir = tempfile::tempdir().expect("database temp dir");
     let database_path = database_dir.path().join("store.db");
     let target = open_blob_test_db_at(&database_path, cleanup_decl());
-    let (_store_tmp, store_dir) = temp_store_dir();
+    let store_dir = target.store_dir.clone();
     storage.pull_into(&target, &store_dir).await;
     let deleted_locator_hash = target
         .row_blob_ref("note_photos", "cleanup01")
@@ -5571,7 +5571,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         .await
         .unwrap();
 
-    let (_tmp, store_dir) = temp_store_dir();
+    let store_dir = target.store_dir.clone();
     store_dir.store_local("cleanup-race", b"old bytes").await;
     let (reached_filesystem, resume_cleanup) = target.arm_test_pause(
         coven_database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
@@ -5674,9 +5674,8 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     let (first_reached_filesystem, resume_first) = target.arm_test_pause(before_filesystem.clone());
 
     let first_db = coven_database::StoreDatabase::new(&target);
-    let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
-        coven_database::LocalBlobCleanup::new(&first_db, &first_store_dir)
+        coven_database::LocalBlobCleanup::new(&first_db)
             .drain()
             .await
     });
@@ -5710,9 +5709,8 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     );
 
     let second_db = coven_database::StoreDatabase::new(&target);
-    let second_store_dir = store_dir.clone();
     let second = tokio::spawn(async move {
-        coven_database::LocalBlobCleanup::new(&second_db, &second_store_dir)
+        coven_database::LocalBlobCleanup::new(&second_db)
             .drain()
             .await
     });
@@ -5749,13 +5747,12 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     store_dir
         .store_local("shared-intent", b"recreated bytes")
         .await;
-    assert!(!coven_database::LocalBlobCleanup::new(
-        &coven_database::StoreDatabase::new(&target),
-        &store_dir,
-    )
-    .drain()
-    .await
-    .unwrap());
+    assert!(
+        !coven_database::LocalBlobCleanup::new(&coven_database::StoreDatabase::new(&target))
+            .drain()
+            .await
+            .unwrap()
+    );
     assert!(
         store_dir
             .local_blob_path("photos", "shared-intent")

@@ -103,11 +103,10 @@ impl StoreDatabase {
         let value = serde_json::to_string(&prepared).map_err(|error| {
             DbError::context("serialize device join challenge publication", error)
         })?;
-        self.connection
-            .call_store(move |session| {
-                session.prepare_device_join_challenge_publication(&key, &value, &prepared)
-            })
-            .await
+        self.call_store(move |session| {
+            session.prepare_device_join_challenge_publication(&key, &value, &prepared)
+        })
+        .await
     }
 
     pub async fn publish_device_join_challenge(
@@ -119,11 +118,10 @@ impl StoreDatabase {
             "device_join_challenge_publication/{}",
             hex::encode(challenge.probe_id.as_bytes())
         );
-        self.connection
-            .call_store(move |session| {
-                session.publish_device_join_challenge(&key, authorization, challenge)
-            })
-            .await
+        self.call_store(move |session| {
+            session.publish_device_join_challenge(&key, authorization, challenge)
+        })
+        .await
     }
 }
 

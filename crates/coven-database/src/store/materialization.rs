@@ -529,7 +529,6 @@ impl StoreDatabase {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure_injection();
         let applied = self
-            .connection
             .call_store(move |session| {
                 session.apply_received_merge_materialization(
                     materialization,
@@ -565,23 +564,22 @@ impl StoreDatabase {
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.materialize_published_store_operation(
-                    root,
-                    verified_commit,
-                    registrations,
-                    device_operations,
-                    circle_activations,
-                    activation_head,
-                    activation_head_object,
-                    history_evidence,
-                    membership_objects,
-                    operation_object_ids,
-                    membership_completion,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.materialize_published_store_operation(
+                root,
+                verified_commit,
+                registrations,
+                device_operations,
+                circle_activations,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+                membership_objects,
+                operation_object_ids,
+                membership_completion,
+            )
+        })
+        .await
     }
 
     pub async fn materialize_device_join_activation(
@@ -594,19 +592,18 @@ impl StoreDatabase {
         activation_head_object: ExactObjectRef,
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.materialize_device_join_activation(
-                    root,
-                    verified_commit,
-                    registrations,
-                    device_operations,
-                    activation_head,
-                    activation_head_object,
-                    history_evidence,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.materialize_device_join_activation(
+                root,
+                verified_commit,
+                registrations,
+                device_operations,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+            )
+        })
+        .await
     }
 
     pub async fn install_device_join_bootstrap(
@@ -614,8 +611,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.install_device_join_bootstrap(root, plan))
+        self.call_store(move |session| session.install_device_join_bootstrap(root, plan))
             .await
     }
 
@@ -627,16 +623,15 @@ impl StoreDatabase {
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.complete_owner_recovery(
-                    verified_commit,
-                    activation_head,
-                    activation_head_object,
-                    history_evidence,
-                    registration,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_owner_recovery(
+                verified_commit,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+                registration,
+            )
+        })
+        .await
     }
 }

@@ -353,8 +353,7 @@ impl StoreDatabase {
     pub async fn materialized_frontier(
         &self,
     ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        self.connection
-            .call_store(|session| session.materialized_frontier())
+        self.call_store(|session| session.materialized_frontier())
             .await
     }
 
@@ -362,16 +361,14 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.connection
-            .call_store(move |session| session.retained_merge_replay_inputs(root))
+        self.call_store(move |session| session.retained_merge_replay_inputs(root))
             .await
     }
 
     pub async fn retained_merge_materialization_refs(
         &self,
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
-        self.connection
-            .call_store(|session| session.retained_merge_materialization_refs())
+        self.call_store(|session| session.retained_merge_materialization_refs())
             .await
     }
 
@@ -380,11 +377,10 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.retained_merge_replay_inputs_with_verified_commits(root, verified)
-            })
-            .await
+        self.call_store(move |session| {
+            session.retained_merge_replay_inputs_with_verified_commits(root, verified)
+        })
+        .await
     }
 
     pub async fn retained_merge_materialization(
@@ -392,8 +388,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.connection
-            .call_store(move |session| session.retained_merge_materialization(root, reference))
+        self.call_store(move |session| session.retained_merge_materialization(root, reference))
             .await
     }
 
@@ -402,8 +397,7 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
-        self.connection
-            .call_store(move |session| session.retained_merge_history_frontier(root, references))
+        self.call_store(move |session| session.retained_merge_history_frontier(root, references))
             .await
     }
 
@@ -413,14 +407,12 @@ impl StoreDatabase {
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let stream_id = stream_id.to_string();
-        self.connection
-            .call_store(move |session| session.exact_materialized_ref(stream_id, sequence))
+        self.call_store(move |session| session.exact_materialized_ref(stream_id, sequence))
             .await
     }
 
     pub async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
-        self.connection
-            .call_store(|session| session.snapshot_coverage_frontier())
+        self.call_store(|session| session.snapshot_coverage_frontier())
             .await
     }
 
@@ -431,8 +423,7 @@ impl StoreDatabase {
         let cut = order
             .predecessor_cut()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call_store(move |session| session.store_device_state_for_history_cut(cut))
+        self.call_store(move |session| session.store_device_state_for_history_cut(cut))
             .await
     }
 
@@ -441,8 +432,7 @@ impl StoreDatabase {
         cut: &StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
         let cut = cut.clone();
-        self.connection
-            .call_store(move |session| session.store_device_state_for_history_cut(cut))
+        self.call_store(move |session| session.store_device_state_for_history_cut(cut))
             .await
     }
 
@@ -451,24 +441,21 @@ impl StoreDatabase {
         reference: &StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, DbError> {
         let reference = reference.clone();
-        self.connection
-            .call_store(move |session| session.resolved_store_device_state(reference))
+        self.call_store(move |session| session.resolved_store_device_state(reference))
             .await
     }
 
     pub async fn store_device_exclusion_freezes(
         &self,
     ) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
-        self.connection
-            .call_store(|session| session.store_device_exclusion_freezes())
+        self.call_store(|session| session.store_device_exclusion_freezes())
             .await
     }
 
     pub async fn activated_store_device_registration_records(
         &self,
     ) -> Result<Vec<ReferencedStoreDeviceRegistration>, DbError> {
-        self.connection
-            .call_store(|session| session.activated_store_device_registration_records())
+        self.call_store(|session| session.activated_store_device_registration_records())
             .await
     }
 
@@ -476,8 +463,7 @@ impl StoreDatabase {
         &self,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
-        self.connection
-            .call_store(move |session| session.activated_store_device_registration(reference))
+        self.call_store(move |session| session.activated_store_device_registration(reference))
             .await
     }
 
@@ -487,16 +473,14 @@ impl StoreDatabase {
     pub async fn local_activated_registration_ref(
         &self,
     ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
-        self.connection
-            .call_store(|session| session.local_activated_registration_ref())
+        self.call_store(|session| session.local_activated_registration_ref())
             .await
     }
 
     pub async fn local_blob_write_authority(
         &self,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
-        self.connection
-            .call_store(|session| session.local_store_authority())
+        self.call_store(|session| session.local_store_authority())
             .await
     }
 
@@ -506,22 +490,20 @@ impl StoreDatabase {
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
         let root = root.clone();
-        self.connection
-            .call_store(move |session| {
-                session.activated_store_device_registration_with_authority(root, reference)
-            })
-            .await
+        self.call_store(move |session| {
+            session.activated_store_device_registration_with_authority(root, reference)
+        })
+        .await
     }
 
     pub async fn activated_store_device_registration_for_device(
         &self,
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.activated_store_device_registration_for_device(device_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.activated_store_device_registration_for_device(device_id)
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]

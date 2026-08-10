@@ -600,8 +600,7 @@ impl StoreDatabase {
         &self,
         object: ExactObjectRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.mark_candidate_cleanup_absent(object))
+        self.call_store(move |session| session.mark_candidate_cleanup_absent(object))
             .await
     }
 
@@ -609,8 +608,7 @@ impl StoreDatabase {
         &self,
         write_id: WriteId,
     ) -> Result<Option<BlockedMergeCandidate>, DbError> {
-        self.connection
-            .call_store(move |session| session.blocked_merge_candidate(write_id))
+        self.call_store(move |session| session.blocked_merge_candidate(write_id))
             .await
     }
 
@@ -618,8 +616,7 @@ impl StoreDatabase {
         &self,
         write_id: WriteId,
     ) -> Result<Option<PreparedMergeAbandonmentCandidates>, DbError> {
-        self.connection
-            .call_store(move |session| session.prepared_merge_abandonment_candidates(write_id))
+        self.call_store(move |session| session.prepared_merge_abandonment_candidates(write_id))
             .await
     }
 
@@ -629,11 +626,10 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.author_exclusion_activation_for_candidate(root, candidate, author)
-            })
-            .await
+        self.call_store(move |session| {
+            session.author_exclusion_activation_for_candidate(root, candidate, author)
+        })
+        .await
     }
 
     pub async fn begin_blocked_merge_candidate_nonactivation(
@@ -643,11 +639,10 @@ impl StoreDatabase {
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
-        self.connection
-            .call_store(move |session| {
-                session.begin_blocked_merge_candidate_nonactivation(root, write_id, nonactivation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_blocked_merge_candidate_nonactivation(root, write_id, nonactivation)
+        })
+        .await
     }
 
     pub async fn begin_prepared_merge_abandonment_nonactivation(
@@ -663,7 +658,6 @@ impl StoreDatabase {
             blocked_merge_candidate_nonactivation(authority_nonactivation)?;
         let notified_write_id = write_id.clone();
         let blocked = self
-            .connection
             .call_store(move |session| {
                 session.begin_prepared_merge_abandonment_nonactivation(
                     root,
@@ -682,23 +676,20 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<MergeAbandonmentState, DbError> {
         let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.merge_abandonment_state(write_id))
+        self.call_store(move |session| session.merge_abandonment_state(write_id))
             .await
     }
 
     pub async fn resume_winning_merge_candidate(&self, write_id: WriteId) -> Result<(), DbError> {
         let notified_write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.resume_winning_merge_candidate(write_id))
+        self.call_store(move |session| session.resume_winning_merge_candidate(write_id))
             .await?;
         self.notify_write_status(notified_write_id, WriteStatus::Publishing);
         Ok(())
     }
 
     pub async fn finish_lost_merge_abandonment(&self, write_id: WriteId) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.finish_lost_merge_abandonment(write_id))
+        self.call_store(move |session| session.finish_lost_merge_abandonment(write_id))
             .await
     }
 
@@ -706,8 +697,7 @@ impl StoreDatabase {
         &self,
         write_id: WriteId,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.finish_author_excluded_merge_abandonment(write_id))
+        self.call_store(move |session| session.finish_author_excluded_merge_abandonment(write_id))
             .await
     }
 }

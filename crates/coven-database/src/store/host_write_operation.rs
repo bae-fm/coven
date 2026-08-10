@@ -76,7 +76,7 @@ impl std::fmt::Display for BlobFileFailures {
     }
 }
 
-struct NewBlob {
+pub(crate) struct NewBlob {
     namespace: String,
     id: String,
     bytes: Vec<u8>,
@@ -89,7 +89,7 @@ struct StagedBlob {
     published: Option<coven_foundation::local_file::PublishedAtomicFile>,
 }
 
-struct StagedBlobBatch {
+pub(crate) struct StagedBlobBatch {
     blobs: Vec<StagedBlob>,
 }
 
@@ -167,7 +167,7 @@ impl StagedBlob {
 }
 
 impl StagedBlobBatch {
-    async fn stage<E>(
+    pub(crate) async fn stage<E>(
         store_dir: &StoreDir,
         blobs: Vec<NewBlob>,
     ) -> Result<Self, HostWriteError<E>> {
@@ -515,12 +515,11 @@ impl StoreRowWrites {
     {
         let database = &self.database;
         let HostWriteOperation { batch, sql } = operation;
-        let staged = StagedBlobBatch::stage(&database.store_dir, batch.new_blobs).await?;
+        let staged = database.stage_host_write_blobs(batch.new_blobs).await?;
         let write_id = database.new_store_write_id();
         let deleted = batch.deleted_blobs;
 
         let outcome = database
-            .connection
             .call_store(move |session| {
                 session.execute_host_write(
                     staged,
@@ -539,10 +538,9 @@ impl StoreRowWrites {
             Err(error) => return Err(HostWriteError::Database(error)),
         };
 
-        if let Err(error) =
-            super::local_blob_cleanup::LocalBlobCleanup::new(database, &database.store_dir)
-                .drain()
-                .await
+        if let Err(error) = super::local_blob_cleanup::LocalBlobCleanup::new(database)
+            .drain()
+            .await
         {
             tracing::warn!(
                 error = %error,

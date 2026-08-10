@@ -612,11 +612,10 @@ impl StoreDatabase {
         const SUBJECT: &str = "local registration staging graph";
         let record =
             LocalRegistrationRecord::checked(registration, initial_ack_ref, initial_ack, SUBJECT)?;
-        self.connection
-            .call_store(move |session| {
-                session.stage_local_store_device_registration(record, SUBJECT)
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_local_store_device_registration(record, SUBJECT)
+        })
+        .await
     }
 
     pub async fn install_existing_local_founder_device(
@@ -632,11 +631,10 @@ impl StoreDatabase {
             initial_ack,
             SUBJECT,
         )?;
-        self.connection
-            .call_store(move |session| {
-                session.install_existing_local_founder_device(record, SUBJECT)
-            })
-            .await
+        self.call_store(move |session| {
+            session.install_existing_local_founder_device(record, SUBJECT)
+        })
+        .await
     }
 
     pub async fn stage_owner_recovery_registration(
@@ -678,11 +676,10 @@ impl StoreDatabase {
             initial_ack,
             SUBJECT,
         )?;
-        self.connection
-            .call_store(move |session| {
-                session.stage_owner_recovery_registration(record, activation, SUBJECT)
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_owner_recovery_registration(record, activation, SUBJECT)
+        })
+        .await
     }
 
     pub async fn oldest_unpublished_store_device_registration(
@@ -700,8 +697,7 @@ impl StoreDatabase {
         &self,
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        self.connection
-            .call_store(move |session| session.read_local_store_device_registration(sql))
+        self.call_store(move |session| session.read_local_store_device_registration(sql))
             .await
     }
 
@@ -711,14 +707,13 @@ impl StoreDatabase {
         initial_ack: StoreAckRef,
         initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.mark_local_store_device_registration_created(
-                    registration,
-                    initial_ack,
-                    initial_ack_object,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.mark_local_store_device_registration_created(
+                registration,
+                initial_ack,
+                initial_ack_object,
+            )
+        })
+        .await
     }
 }

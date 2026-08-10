@@ -341,11 +341,10 @@ impl StoreDatabase {
         expected: StoreAckRef,
         candidate: PreparedStoreOperationCommit,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.prepare_acknowledgement_activation(&expected, candidate)
-            })
-            .await
+        self.call_store(move |session| {
+            session.prepare_acknowledgement_activation(&expected, candidate)
+        })
+        .await
     }
 
     pub async fn begin_acknowledgement_nonactivation(
@@ -365,15 +364,14 @@ impl StoreDatabase {
             ));
         }
         let nonactivation = nonactivation.into_durable();
-        self.connection
-            .call_store(move |session| {
-                session.begin_acknowledgement_nonactivation(
-                    &expected,
-                    &verified_candidate,
-                    nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_acknowledgement_nonactivation(
+                &expected,
+                &verified_candidate,
+                nonactivation,
+            )
+        })
+        .await
     }
 
     pub async fn adopt_acknowledgement_head(
@@ -382,19 +380,17 @@ impl StoreDatabase {
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.adopt_acknowledgement_head(&expected, winner, winner_prepared)
-            })
-            .await
+        self.call_store(move |session| {
+            session.adopt_acknowledgement_head(&expected, winner, winner_prepared)
+        })
+        .await
     }
 
     pub async fn acknowledgement_cleanup_target(
         &self,
         expected: StoreAckRef,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| session.acknowledgement_cleanup_target(&expected))
+        self.call_store(move |session| session.acknowledgement_cleanup_target(&expected))
             .await
     }
 
@@ -402,8 +398,7 @@ impl StoreDatabase {
         &self,
         expected: StoreAckRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.complete_nonactivating_acknowledgement(&expected))
+        self.call_store(move |session| session.complete_nonactivating_acknowledgement(&expected))
             .await
     }
 }

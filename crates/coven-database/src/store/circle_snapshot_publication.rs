@@ -272,7 +272,6 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let pending = self
-            .connection
             .call_store(move |session| session.outbound_circle_snapshot_publication(circle_id))
             .await?;
         if let Some(pending) = &pending {
@@ -285,8 +284,7 @@ impl StoreDatabase {
         &self,
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleSnapshot>, DbError> {
-        self.connection
-            .call_store(move |session| session.latest_local_circle_snapshot(circle_id))
+        self.call_store(move |session| session.latest_local_circle_snapshot(circle_id))
             .await
     }
 
@@ -298,25 +296,23 @@ impl StoreDatabase {
         image_prepared: PreparedExactObject,
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.stage_circle_snapshot_publication(
-                    meta,
-                    meta_prepared,
-                    image,
-                    image_prepared,
-                    blobs,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_circle_snapshot_publication(
+                meta,
+                meta_prepared,
+                image,
+                image_prepared,
+                blobs,
+            )
+        })
+        .await
     }
 
     pub async fn complete_circle_snapshot_publication(
         &self,
         accepted: CircleSnapshotRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.complete_circle_snapshot_publication(accepted))
+        self.call_store(move |session| session.complete_circle_snapshot_publication(accepted))
             .await
     }
 }

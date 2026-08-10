@@ -1372,7 +1372,7 @@ mod test_device {
                 )
                 .drain_published_blob_drop_intents(u64::MAX)
                 .await?;
-                coven_database::LocalBlobCleanup::new(&self.db, store_dir)
+                coven_database::LocalBlobCleanup::new(&self.db)
                     .drain()
                     .await
                     .map_err(|error| error.to_string())?;

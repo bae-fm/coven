@@ -524,8 +524,7 @@ impl StoreSession<'_> {
 
 impl StoreDatabase {
     pub async fn table_schema_for_apply(&self) -> Result<crate::TableSchema, DbError> {
-        self.connection
-            .call_store(|session| session.table_schema_for_apply())
+        self.call_store(|session| session.table_schema_for_apply())
             .await
     }
 
@@ -534,8 +533,7 @@ impl StoreDatabase {
         stage: StoreWritePreparation,
     ) -> Result<(), DbError> {
         let write_id = stage.write_id.clone();
-        self.connection
-            .call_store(move |session| session.prepare_store_write_commit(stage))
+        self.call_store(move |session| session.prepare_store_write_commit(stage))
             .await?;
         self.notify_write_status(write_id, WriteStatus::Publishing);
         Ok(())
@@ -546,8 +544,7 @@ impl StoreDatabase {
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
         let notified_write_id = stage.write_id.clone();
-        self.connection
-            .call_store(move |session| session.prepare_merge_candidate_abandonment(stage))
+        self.call_store(move |session| session.prepare_merge_candidate_abandonment(stage))
             .await?;
         self.notify_write_status(notified_write_id, WriteStatus::Publishing);
         Ok(())
@@ -559,10 +556,9 @@ impl StoreDatabase {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                session.enqueue_store_changeset_for_test(write_id, changeset)
-            })
-            .await
+        self.call_store(move |session| {
+            session.enqueue_store_changeset_for_test(write_id, changeset)
+        })
+        .await
     }
 }

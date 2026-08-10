@@ -209,8 +209,7 @@ impl StoreDatabase {
     pub async fn circle_acknowledgement_publication_inputs(
         &self,
     ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
-        self.connection
-            .call_store(|session| session.circle_acknowledgement_publication_inputs())
+        self.call_store(|session| session.circle_acknowledgement_publication_inputs())
             .await
     }
 
@@ -222,8 +221,7 @@ impl StoreDatabase {
         circle_id: CircleId,
         device_id: StoreDeviceId,
     ) -> Result<Option<CircleAckRef>, DbError> {
-        self.connection
-            .call_store(move |session| session.activated_circle_ack(circle_id, device_id))
+        self.call_store(move |session| session.activated_circle_ack(circle_id, device_id))
             .await
     }
 
@@ -281,8 +279,7 @@ impl StoreDatabase {
         &self,
         circle_id: CircleId,
     ) -> Result<BTreeSet<String>, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_current_roster_members(circle_id))
+        self.call_store(move |session| session.circle_current_roster_members(circle_id))
             .await
     }
 
@@ -295,8 +292,7 @@ impl StoreDatabase {
         &self,
         circle_id: CircleId,
     ) -> Result<Vec<CircleAckRef>, DbError> {
-        self.connection
-            .call_store(move |session| session.activated_circle_acks(circle_id))
+        self.call_store(move |session| session.activated_circle_acks(circle_id))
             .await
     }
 
@@ -304,8 +300,7 @@ impl StoreDatabase {
         &self,
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleAck>, DbError> {
-        self.connection
-            .call_store(move |session| session.latest_published_circle_ack(circle_id))
+        self.call_store(move |session| session.latest_published_circle_ack(circle_id))
             .await
     }
 
@@ -314,8 +309,7 @@ impl StoreDatabase {
         ack: CircleAck,
         prepared: PreparedExactObject,
     ) -> Result<CircleAckRef, DbError> {
-        self.connection
-            .call_store(move |session| session.stage_circle_ack(ack, prepared))
+        self.call_store(move |session| session.stage_circle_ack(ack, prepared))
             .await
     }
 }

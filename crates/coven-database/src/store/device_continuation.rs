@@ -171,17 +171,16 @@ impl StoreDatabase {
             }
         }
 
-        self.connection
-            .call_store(move |session| {
-                session.install_activated_device_continuation(
-                    continuation,
-                    registration,
-                    ack_chain,
-                    latest_snapshot,
-                    latest_successor_slot,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.install_activated_device_continuation(
+                continuation,
+                registration,
+                ack_chain,
+                latest_snapshot,
+                latest_successor_slot,
+            )
+        })
+        .await
     }
 }
 

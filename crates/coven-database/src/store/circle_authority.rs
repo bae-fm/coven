@@ -385,11 +385,10 @@ impl StoreDatabase {
         }
         let covering = covering.clone();
         let covered = covered.clone();
-        self.connection
-            .call_store(move |session| {
-                session.circle_control_covers_strictly(&root, circle_id, &covering, &covered)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_control_covers_strictly(&root, circle_id, &covering, &covered)
+        })
+        .await
     }
 
     pub async fn circle_epoch_access(
@@ -398,11 +397,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::CircleEpochAccess>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_epoch_access(&root, circle_id, &expected_control)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_epoch_access(&root, circle_id, &expected_control)
+        })
+        .await
     }
 
     pub async fn circle_historical_package_keyring(
@@ -412,16 +410,15 @@ impl StoreDatabase {
         expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<Option<String>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_historical_package_keyring(
-                    &root,
-                    circle_id,
-                    &expected_control,
-                    expected_key_fingerprint,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_historical_package_keyring(
+                &root,
+                circle_id,
+                &expected_control,
+                expected_key_fingerprint,
+            )
+        })
+        .await
     }
 
     pub async fn verified_circle_activation_context(
@@ -436,11 +433,10 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call_store(move |session| {
-                session.verified_circle_activation_context(&root, circle_id, &control)
-            })
-            .await
+        self.call_store(move |session| {
+            session.verified_circle_activation_context(&root, circle_id, &control)
+        })
+        .await
     }
 
     pub async fn circle_blob_opening_protection(
@@ -450,16 +446,15 @@ impl StoreDatabase {
         expected_control: coven_protocol::circle::CircleControlCoord,
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.circle_blob_opening_protection(
-                    &root,
-                    circle_id,
-                    &expected_control,
-                    expected_key_fingerprint,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_blob_opening_protection(
+                &root,
+                circle_id,
+                &expected_control,
+                expected_key_fingerprint,
+            )
+        })
+        .await
     }
 
     pub async fn verified_circle_activation(
@@ -468,11 +463,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.verified_circle_activation(&root, circle_id, &control)
-            })
-            .await
+        self.call_store(move |session| {
+            session.verified_circle_activation(&root, circle_id, &control)
+        })
+        .await
     }
 
     pub async fn circle_restore_head(
@@ -487,8 +481,7 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        self.connection
-            .call_store(move |session| session.circle_restore_head(&root, circle_id, &controls))
+        self.call_store(move |session| session.circle_restore_head(&root, circle_id, &controls))
             .await
     }
 
@@ -497,11 +490,10 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         control: coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.retained_circle_activation_commit_ref(circle_id, &control)
-            })
-            .await
+        self.call_store(move |session| {
+            session.retained_circle_activation_commit_ref(circle_id, &control)
+        })
+        .await
     }
 
     pub async fn verified_circle_control_coord_covers(
@@ -511,11 +503,10 @@ impl StoreDatabase {
         covering: coven_protocol::circle::CircleControlCoord,
         covered: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.verified_circle_control_coord_covers(&root, circle_id, &covering, &covered)
-            })
-            .await
+        self.call_store(move |session| {
+            session.verified_circle_control_coord_covers(&root, circle_id, &covering, &covered)
+        })
+        .await
     }
 
     /// The head control of a Circle: the retained control whose lineage no other
@@ -610,11 +601,10 @@ impl StoreDatabase {
         current: coven_protocol::circle::PreparedCircleControl,
         prior: coven_protocol::circle::CircleControlCoord,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.verified_circle_control_covers(&root, circle_id, &current, &prior)
-            })
-            .await
+        self.call_store(move |session| {
+            session.verified_circle_control_covers(&root, circle_id, &current, &prior)
+        })
+        .await
     }
 
     pub(crate) fn verified_circle_control_covers_on(

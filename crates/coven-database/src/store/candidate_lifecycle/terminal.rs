@@ -329,11 +329,10 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         write_id: WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.merge_candidate_terminal_verifications(&root, &write_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.merge_candidate_terminal_verifications(&root, &write_id)
+        })
+        .await
     }
 
     pub async fn reconcile_merge_candidate_terminal_head(
@@ -354,16 +353,15 @@ impl StoreDatabase {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
             .map_err(|error| DbError::Message(error.to_string()))?;
-        self.connection
-            .call_store(move |session| {
-                session.reconcile_merge_candidate_terminal_head(
-                    &root,
-                    &write_id,
-                    durable,
-                    head_nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.reconcile_merge_candidate_terminal_head(
+                &root,
+                &write_id,
+                durable,
+                head_nonactivation,
+            )
+        })
+        .await
     }
 
     pub async fn adopt_alternate_merge_head(
@@ -372,10 +370,9 @@ impl StoreDatabase {
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.adopt_alternate_merge_head(&write_id, winner, winner_prepared)
-            })
-            .await
+        self.call_store(move |session| {
+            session.adopt_alternate_merge_head(&write_id, winner, winner_prepared)
+        })
+        .await
     }
 }

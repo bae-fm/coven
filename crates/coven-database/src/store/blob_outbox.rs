@@ -419,16 +419,13 @@ impl StoreDatabase {
         &self,
         root: Option<(String, String)>,
     ) -> Result<Vec<QueuedUpload>, DbError> {
-        self.connection
-            .call_store(move |session| session.queued_upload_rows(root))
+        self.call_store(move |session| session.queued_upload_rows(root))
             .await
     }
 
     #[doc(hidden)]
     pub async fn queued_deletes(&self) -> Result<Vec<QueuedDelete>, DbError> {
-        self.connection
-            .call_store(|session| session.queued_deletes())
-            .await
+        self.call_store(|session| session.queued_deletes()).await
     }
 
     pub async fn pending_blob_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
@@ -436,8 +433,7 @@ impl StoreDatabase {
     }
 
     async fn pending_outbox(&self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
-        self.connection
-            .call_store(move |session| session.pending_outbox(operation))
+        self.call_store(move |session| session.pending_outbox(operation))
             .await
     }
 
@@ -450,8 +446,7 @@ impl StoreDatabase {
         let id = entry.id;
         let stored = serde_json::to_string(stored)
             .map_err(|error| DbError::context("serialize stored blob ref", error))?;
-        self.connection
-            .call_store(move |session| session.remove_blob_delete(id, stored))
+        self.call_store(move |session| session.remove_blob_delete(id, stored))
             .await
     }
 
@@ -459,8 +454,7 @@ impl StoreDatabase {
         &self,
         max_seq: u64,
     ) -> Result<Vec<PublishedBlobDropIntent>, DbError> {
-        self.connection
-            .call_store(move |session| session.published_blob_drop_intents(max_seq))
+        self.call_store(move |session| session.published_blob_drop_intents(max_seq))
             .await
     }
 
@@ -472,11 +466,10 @@ impl StoreDatabase {
         let namespace = intent.drop.namespace.clone();
         let id = intent.drop.id.clone();
         let locator_hash = intent.drop.locator_hash.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.clear_published_blob_drop_intent(seq, namespace, id, locator_hash)
-            })
-            .await
+        self.call_store(move |session| {
+            session.clear_published_blob_drop_intent(seq, namespace, id, locator_hash)
+        })
+        .await
     }
 
     pub async fn pending_blob_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
@@ -578,8 +571,7 @@ impl StoreDatabase {
         let entry = entry.clone();
         let error = error.to_string();
         let attempted_at = attempted_at.to_string();
-        self.connection
-            .call_store(move |session| session.record_outbox_failure(entry, error, attempted_at))
+        self.call_store(move |session| session.record_outbox_failure(entry, error, attempted_at))
             .await
     }
 
@@ -595,18 +587,15 @@ impl StoreDatabase {
         let row_id = row.row_id().to_string();
         let column = row.column().to_string();
         let row_stamp = row.row_stamp().to_string();
-        self.connection
-            .call_store(move |session| {
-                session
-                    .swap_blob_upload_state(id, table, row_id, column, row_stamp, from, to, context)
-            })
-            .await
+        self.call_store(move |session| {
+            session.swap_blob_upload_state(id, table, row_id, column, row_stamp, from, to, context)
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_outbox_backoff(&self) -> Result<(), DbError> {
-        self.connection
-            .call_store(|session| session.reset_outbox_backoff())
+        self.call_store(|session| session.reset_outbox_backoff())
             .await
     }
 
@@ -617,8 +606,7 @@ impl StoreDatabase {
     ) -> Result<Option<MakeRemoteIntentState>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
-        self.connection
-            .call_store(move |session| session.make_remote_intent_state(root_table, root_id))
+        self.call_store(move |session| session.make_remote_intent_state(root_table, root_id))
             .await
     }
 
@@ -639,8 +627,7 @@ impl StoreDatabase {
 
     pub async fn finish_cancelled_blob_upload(&self, entry: &OutboxEntry) -> Result<bool, DbError> {
         let entry = entry.clone();
-        self.connection
-            .call_store(move |session| session.finish_cancelled_blob_upload(entry))
+        self.call_store(move |session| session.finish_cancelled_blob_upload(entry))
             .await
     }
 }

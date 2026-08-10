@@ -224,8 +224,7 @@ impl StoreSession<'_> {
 
 impl StoreDatabase {
     pub async fn latest_local_store_ack(&self) -> Result<Option<PublishedStoreAck>, DbError> {
-        self.connection
-            .call_store(|session| session.latest_local_store_ack())
+        self.call_store(|session| session.latest_local_store_ack())
             .await
     }
 
@@ -234,8 +233,7 @@ impl StoreDatabase {
         registration: &StoreDeviceRegistrationRef,
     ) -> Result<Option<StoreAckRef>, DbError> {
         let registration = registration.clone();
-        self.connection
-            .call_store(move |session| session.activated_store_ack(&registration))
+        self.call_store(move |session| session.activated_store_ack(&registration))
             .await
     }
 
@@ -244,8 +242,7 @@ impl StoreDatabase {
         ack: StoreAck,
         prepared: PreparedExactObject,
     ) -> Result<StoreAckRef, DbError> {
-        self.connection
-            .call_store(move |session| session.stage_store_ack(ack, prepared))
+        self.call_store(move |session| session.stage_store_ack(ack, prepared))
             .await
     }
 
@@ -255,26 +252,19 @@ impl StoreDatabase {
         winner_bytes: Vec<u8>,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.adopt_outbound_store_ack_slot_winner(
-                    &expected,
-                    winner_bytes,
-                    winner_prepared,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.adopt_outbound_store_ack_slot_winner(&expected, winner_bytes, winner_prepared)
+        })
+        .await
     }
 
     pub async fn oldest_outbound_store_ack(&self) -> Result<Option<OutboundStoreAck>, DbError> {
-        self.connection
-            .call_store(|session| session.oldest_outbound_store_ack())
+        self.call_store(|session| session.oldest_outbound_store_ack())
             .await
     }
 
     pub async fn complete_outbound_store_ack(&self, accepted: StoreAckRef) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.complete_outbound_store_ack(&accepted))
+        self.call_store(move |session| session.complete_outbound_store_ack(&accepted))
             .await
     }
 }

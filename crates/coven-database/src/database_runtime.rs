@@ -19,6 +19,182 @@ fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
 }
 
 impl Database {
+    pub(crate) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
+    where
+        F: for<'session> FnOnce(
+                &mut crate::database_session::DatabaseSession<'session>,
+            ) -> Result<R, DbError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.connection.call_database(operation).await
+    }
+
+    pub(crate) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
+    where
+        F: for<'session> FnOnce(&mut crate::store::StoreSession<'session>) -> Result<R, DbError>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        self.connection.call_store(operation).await
+    }
+
+    pub(crate) fn store_schema_version(&self) -> u32 {
+        self.state.schema_version
+    }
+
+    pub(crate) fn store_sync_routing_hash(&self) -> ObjectHash {
+        self.state.sync_routing_hash
+    }
+
+    pub(crate) fn store_synced_tables(&self) -> &[SyncedTable] {
+        &self.state.synced_tables
+    }
+
+    pub(crate) fn store_transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
+        self.state.transfer_limits
+    }
+
+    pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {
+        self.state.blob_tombstone_grace
+    }
+
+    pub(crate) fn store_has_scoped_graph(&self) -> bool {
+        self.state.gates.has_scoped_graph()
+    }
+
+    pub(crate) fn store_stamp(&self) -> String {
+        self.state.hlc.now().to_string()
+    }
+
+    pub(crate) fn store_hlc_high_water(&self) -> String {
+        self.state.hlc.high_water().to_string()
+    }
+
+    pub(crate) fn store_blob_ref_from_change(
+        &self,
+        change: &coven_foundation::changeset::RowChange,
+    ) -> Result<Option<coven_protocol::blob::BlobRef>, BlobDeclError> {
+        self.state.blob_decls.ref_from_change(change)
+    }
+
+    pub(crate) fn validate_store_local_blob_cleanup_changes(
+        &self,
+        old_changes: &[coven_foundation::changeset::RowChange],
+        new_changes: &[coven_foundation::changeset::RowChange],
+    ) -> Result<(), BlobDeclError> {
+        crate::local_blob_cleanup_intents::intents_from_changes(
+            self.state.blob_decls.as_ref(),
+            old_changes,
+            new_changes,
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn store_receive_wall_ms(&self) -> u64 {
+        self.state.hlc.wall_now_ms()
+    }
+
+    pub(crate) fn new_store_id(&self) -> String {
+        self.state.ids.new_id()
+    }
+
+    pub(crate) fn notify_store_write_status(&self, write_id: WriteId, status: WriteStatus) {
+        let senders = self
+            .state
+            .write_statuses
+            .lock()
+            .expect("write status mutex poisoned");
+        if let Some(sender) = senders.get(&write_id) {
+            sender.send_replace(status);
+        }
+    }
+
+    pub(crate) fn subscribe_store_write_status(
+        &self,
+        write_id: WriteId,
+        current: WriteStatus,
+    ) -> tokio::sync::watch::Receiver<WriteStatus> {
+        let mut senders = self
+            .state
+            .write_statuses
+            .lock()
+            .expect("write status mutex poisoned");
+        let sender = senders
+            .entry(write_id)
+            .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
+        sender.send_replace(current);
+        sender.subscribe()
+    }
+
+    pub(crate) async fn membership_load_permit(&self) -> crate::store::MembershipLoadPermit {
+        self.state.store_runtime.membership_load_permit().await
+    }
+
+    pub(crate) async fn membership_mutation_permit(
+        &self,
+    ) -> crate::store::MembershipMutationPermit {
+        self.state.store_runtime.membership_mutation_permit().await
+    }
+
+    pub(crate) async fn store_creation_permit(&self) -> crate::store::StoreCreationPermit {
+        self.state.store_runtime.store_creation_permit().await
+    }
+
+    pub(crate) async fn device_exclusion_permit(&self) -> crate::store::DeviceExclusionPermit {
+        self.state.store_runtime.device_exclusion_permit().await
+    }
+
+    pub(crate) async fn author_own_store_stream(&self) -> crate::store::OwnStreamAuthorship {
+        self.state.store_runtime.author_own_stream().await
+    }
+
+    pub(crate) async fn snapshot_publication_permit(
+        &self,
+    ) -> crate::store::SnapshotPublicationPermit {
+        self.state.store_runtime.snapshot_publication_permit().await
+    }
+
+    pub(crate) async fn local_blob_cleanup_permit(&self) -> crate::store::LocalBlobCleanupPermit {
+        self.state.store_runtime.local_blob_cleanup_permit().await
+    }
+
+    pub(crate) async fn apply_local_blob_cleanup_intent(
+        &self,
+        intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,
+    ) -> Result<(), DbError> {
+        intent.apply(&self.state.store_dir).await
+    }
+
+    pub(crate) async fn stage_host_write_blobs<E>(
+        &self,
+        blobs: Vec<crate::store::NewBlob>,
+    ) -> Result<crate::store::StagedBlobBatch, crate::HostWriteError<E>> {
+        crate::store::StagedBlobBatch::stage(&self.state.store_dir, blobs).await
+    }
+
+    pub(crate) async fn sync_store_parent_dir(&self, path: &Path) -> Result<(), String> {
+        self.state.store_dir.sync_parent_dir(path).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn store_merge_materialization_failure_injection(
+        &self,
+    ) -> MergeMaterializationFailureInjection {
+        StoreDatabaseTestAccess {
+            pause_points: self.state.test_pause_points.clone(),
+            merge_materialization_failure: self.state.merge_materialization_failure.clone(),
+        }
+        .merge_materialization_failure_injection()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn reach_store_test_point(&self, point: DatabaseTestPoint) {
+        self.state.test_pause_points.reach(point).await;
+    }
+
     /// Open and own the connection at `path`.
     ///
     /// Runs the host migration ladder and validates its final sync-routing

@@ -383,8 +383,7 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<CircleOperationDiscardCandidate, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| session.circle_operation_discard_candidate(operation_id))
+        self.call_store(move |session| session.circle_operation_discard_candidate(operation_id))
             .await
     }
 
@@ -397,11 +396,10 @@ impl StoreDatabase {
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| {
-                session.begin_circle_operation_discard(root, operation_id, nonactivation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_circle_operation_discard(root, operation_id, nonactivation)
+        })
+        .await
     }
 
     /// Return the terminal authorities that require fresh head evidence.
@@ -411,11 +409,10 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| {
-                session.circle_operation_discard_terminal_verifications(root, operation_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_operation_discard_terminal_verifications(root, operation_id)
+        })
+        .await
     }
 
     /// Reconcile an activation head against fresh excluded-author evidence.
@@ -438,16 +435,15 @@ impl StoreDatabase {
             .into_terminal_head_nonactivation()
             .map_err(|error| crate::DbError::Message(error.to_string()))?;
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| {
-                session.reconcile_circle_operation_terminal_head(
-                    root,
-                    operation_id,
-                    durable,
-                    head_nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.reconcile_circle_operation_terminal_head(
+                root,
+                operation_id,
+                durable,
+                head_nonactivation,
+            )
+        })
+        .await
     }
 
     /// Return candidate-exclusive cloud objects still awaiting cleanup.
@@ -456,19 +452,17 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<Vec<CandidateCleanupObject>, crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| {
-                session.circle_operation_discard_cleanup_targets(operation_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.circle_operation_discard_cleanup_targets(operation_id)
+        })
+        .await
     }
 
     /// Return every Circle operation durably in the discarding state.
     pub async fn discarding_circle_operations(
         &self,
     ) -> Result<Vec<CircleOperationId>, crate::DbError> {
-        self.connection
-            .call_store(|session| session.discarding_circle_operations())
+        self.call_store(|session| session.discarding_circle_operations())
             .await
     }
 
@@ -479,8 +473,7 @@ impl StoreDatabase {
         operation_id: &CircleOperationId,
     ) -> Result<(), crate::DbError> {
         let operation_id = operation_id.as_str().to_string();
-        self.connection
-            .call_store(move |session| session.finish_circle_operation_discard(operation_id))
+        self.call_store(move |session| session.finish_circle_operation_discard(operation_id))
             .await
     }
 }

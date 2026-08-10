@@ -73,8 +73,7 @@ impl StoreDatabase {
     pub async fn eager_row_blob_refs(
         &self,
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
-        self.connection
-            .call_store(|session| session.eager_row_blob_refs())
+        self.call_store(|session| session.eager_row_blob_refs())
             .await
     }
 
@@ -82,8 +81,7 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::StoredBlobReferenceState, DbError> {
-        self.connection
-            .call_store(move |session| session.stored_blob_reference_state(&stored))
+        self.call_store(move |session| session.stored_blob_reference_state(&stored))
             .await
     }
 
@@ -106,8 +104,7 @@ impl StoreDatabase {
             )));
         }
         let row_id = row_id.to_string();
-        self.connection
-            .call_store(move |session| session.row_blob_ref(&table, &row_id))
+        self.call_store(move |session| session.row_blob_ref(&table, &row_id))
             .await
     }
 
@@ -118,8 +115,7 @@ impl StoreDatabase {
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
-        self.connection
-            .call_store(move |session| session.row_blob_refs_for_root(&root_table, &root_id))
+        self.call_store(move |session| session.row_blob_refs_for_root(&root_table, &root_id))
             .await
     }
 
@@ -147,8 +143,7 @@ impl StoreDatabase {
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<Option<ExternalBlob>, DbError> {
         let reference = reference.clone();
-        self.connection
-            .call_store(move |session| session.external_blob_for_row(&reference))
+        self.call_store(move |session| session.external_blob_for_row(&reference))
             .await
     }
 

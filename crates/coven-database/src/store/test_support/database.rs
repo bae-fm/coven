@@ -13,18 +13,11 @@ impl StoreDatabase {
         let cloud_path = cloud_path.to_string();
         let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
         let hash = coven_protocol::blob::content_hash(bytes);
-        self.connection
-            .call_store(move |session| {
-                session.seed_local_release_rows_for_test(
-                    &note_id,
-                    &photo_id,
-                    &cloud_path,
-                    size,
-                    hash,
-                )
-            })
-            .await
-            .expect("seed exact release rows");
+        self.call_store(move |session| {
+            session.seed_local_release_rows_for_test(&note_id, &photo_id, &cloud_path, size, hash)
+        })
+        .await
+        .expect("seed exact release rows");
     }
 
     pub async fn register_external_blob_for_test(
@@ -38,8 +31,7 @@ impl StoreDatabase {
             .await
             .expect("load exact Local row blob reference");
         let path = path.to_path_buf();
-        self.connection
-            .call_store(move |session| session.register_external_blob_for_test(&reference, &path))
+        self.call_store(move |session| session.register_external_blob_for_test(&reference, &path))
             .await
             .expect("register exact external blob reference");
     }
@@ -57,17 +49,16 @@ impl StoreDatabase {
         let root_id = root_id.to_string();
         let source_path = source_path.to_path_buf();
         let created_at = created_at.to_string();
-        self.connection
-            .call_store(move |session| {
-                session.enqueue_blob_upload_for_test(
-                    &root_table,
-                    &root_id,
-                    &reference,
-                    &source_path,
-                    &created_at,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.enqueue_blob_upload_for_test(
+                &root_table,
+                &root_id,
+                &reference,
+                &source_path,
+                &created_at,
+            )
+        })
+        .await
     }
 
     pub async fn insert_fixture_position_for_test(&self, note_id: &str) -> Result<(), DbError> {
@@ -101,16 +92,15 @@ impl StoreDatabase {
         R: Send + 'static,
     {
         let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                session.run_host_store_write_for_test(
-                    routing_encryption,
-                    blob_staging,
-                    write_id,
-                    operation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.run_host_store_write_for_test(
+                routing_encryption,
+                blob_staging,
+                write_id,
+                operation,
+            )
+        })
+        .await
     }
 
     pub async fn run_prepared_blob_transition_write_for_test<R>(
@@ -126,15 +116,14 @@ impl StoreDatabase {
         R: Send + 'static,
     {
         let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                session.run_prepared_blob_transition_write_for_test(
-                    routing_encryption,
-                    write_id,
-                    operation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.run_prepared_blob_transition_write_for_test(
+                routing_encryption,
+                write_id,
+                operation,
+            )
+        })
+        .await
     }
 
     pub async fn cleanup_intent_count_for_test(
@@ -144,8 +133,7 @@ impl StoreDatabase {
     ) -> Result<i64, DbError> {
         let namespace = namespace.to_string();
         let blob_id = blob_id.to_string();
-        self.connection
-            .call_store(move |session| session.cleanup_intent_count_for_test(&namespace, &blob_id))
+        self.call_store(move |session| session.cleanup_intent_count_for_test(&namespace, &blob_id))
             .await
     }
 
@@ -153,26 +141,22 @@ impl StoreDatabase {
         &self,
         table: crate::DatabaseTestTable,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| session.coven_table_exists_for_test(table))
+        self.call_store(move |session| session.coven_table_exists_for_test(table))
             .await
     }
 
     pub async fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
-        self.connection
-            .call_store(|session| session.install_store_write_failure_trigger_for_test())
+        self.call_store(|session| session.install_store_write_failure_trigger_for_test())
             .await
     }
 
     pub async fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
-        self.connection
-            .call_store(|session| session.remove_store_write_failure_trigger_for_test())
+        self.call_store(|session| session.remove_store_write_failure_trigger_for_test())
             .await
     }
 
     pub async fn write_blob_facts_for_test(&self, write_id: WriteId) -> Result<String, DbError> {
-        self.connection
-            .call_store(move |session| session.write_blob_facts_for_test(&write_id))
+        self.call_store(move |session| session.write_blob_facts_for_test(&write_id))
             .await
     }
 
@@ -180,8 +164,7 @@ impl StoreDatabase {
         &self,
         label: String,
     ) -> Result<coven_protocol::circle::CircleId, DbError> {
-        self.connection
-            .call_store(move |session| Ok(session.install_test_active_circle(&label)))
+        self.call_store(move |session| Ok(session.install_test_active_circle(&label)))
             .await
     }
 
@@ -193,27 +176,15 @@ impl StoreDatabase {
         let base = serde_json::json!({ "dependencies": {} }).to_string();
         let status = serde_json::to_string(&status)
             .map_err(|error| DbError::context("serialize write status", error))?;
-        self.connection
-            .call_store(move |session| {
-                session.insert_write_status_for_test(&write_id, &status, &base)
-            })
-            .await
+        self.call_store(move |session| {
+            session.insert_write_status_for_test(&write_id, &status, &base)
+        })
+        .await
     }
 
     pub async fn delete_write_for_test(&self, write_id: WriteId) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.delete_write_for_test(&write_id))
+        self.call_store(move |session| session.delete_write_for_test(&write_id))
             .await
-    }
-
-    pub fn arm_test_pause(
-        &self,
-        point: crate::DatabaseTestPoint,
-    ) -> (
-        std::sync::Arc<tokio::sync::Notify>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ) {
-        self.test_access.arm(point)
     }
 
     pub async fn store_write_partition_for_test(
@@ -221,8 +192,7 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<Vec<u8>, DbError> {
         let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.store_write_partition_for_test(&write_id))
+        self.call_store(move |session| session.store_write_partition_for_test(&write_id))
             .await
     }
 
@@ -231,16 +201,14 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<i64, DbError> {
         let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.write_blob_lease_count_for_test(&write_id))
+        self.call_store(move |session| session.write_blob_lease_count_for_test(&write_id))
             .await
     }
 
     pub async fn latest_materialized_commit_coordinate_for_test(
         &self,
     ) -> Result<(String, u64), DbError> {
-        self.connection
-            .call_store(|session| session.latest_materialized_commit_coordinate_for_test())
+        self.call_store(|session| session.latest_materialized_commit_coordinate_for_test())
             .await
     }
 
@@ -251,24 +219,22 @@ impl StoreDatabase {
         historical_id: String,
         late_id: String,
     ) -> Result<(i64, i64, i64, i64), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.compare_circle_bootstrap_replay_with_missing_coverage_for_test(
-                    &root,
-                    &routing_key,
-                    &historical_id,
-                    &late_id,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.compare_circle_bootstrap_replay_with_missing_coverage_for_test(
+                &root,
+                &routing_key,
+                &historical_id,
+                &late_id,
+            )
+        })
+        .await
     }
 
     pub async fn circle_bootstrap_coverage_count_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_bootstrap_coverage_count_for_test(circle_id))
+        self.call_store(move |session| session.circle_bootstrap_coverage_count_for_test(circle_id))
             .await
     }
 
@@ -276,11 +242,10 @@ impl StoreDatabase {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<String, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.reject_missing_circle_bootstrap_payload_claim_for_test(circle_id)
-            })
-            .await
+        self.call_store(move |session| {
+            session.reject_missing_circle_bootstrap_payload_claim_for_test(circle_id)
+        })
+        .await
     }
 
     pub async fn reject_changed_circle_bootstrap_image_hash_for_test(
@@ -290,15 +255,14 @@ impl StoreDatabase {
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<String, DbError> {
         let activation_commit = activation_commit.clone();
-        self.connection
-            .call_store(move |session| {
-                session.reject_changed_circle_bootstrap_image_hash_for_test(
-                    circle_id,
-                    &root,
-                    &activation_commit,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.reject_changed_circle_bootstrap_image_hash_for_test(
+                circle_id,
+                &root,
+                &activation_commit,
+            )
+        })
+        .await
     }
 
     pub async fn transfer_prepared_write_to_for_test(
@@ -308,13 +272,11 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let source_write_id = write_id.clone();
         let transfer = self
-            .connection
             .call_store(move |session| session.export_prepared_write(&source_write_id))
             .await?;
 
         let destination_write_id = write_id.clone();
         destination
-            .connection
             .call_store(move |session| {
                 session.import_prepared_write(&destination_write_id, transfer)
             })
@@ -327,11 +289,10 @@ impl StoreDatabase {
     ) -> Result<(String, String), DbError> {
         let exclusion = serde_json::to_string(exclusion)
             .map_err(|error| DbError::context("serialize exclusion ref", error))?;
-        self.connection
-            .call_store(move |session| {
-                session.author_exclusion_activation_evidence_for_test(&exclusion)
-            })
-            .await
+        self.call_store(move |session| {
+            session.author_exclusion_activation_evidence_for_test(&exclusion)
+        })
+        .await
     }
 
     pub async fn tamper_author_exclusion_locator_for_test(
@@ -342,10 +303,9 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let exclusion = exclusion.clone();
         let candidate = candidate.clone();
-        self.connection
-            .call_store(move |session| {
-                session.tamper_author_exclusion_locator_for_test(exclusion, &candidate, tamper)
-            })
-            .await
+        self.call_store(move |session| {
+            session.tamper_author_exclusion_locator_for_test(exclusion, &candidate, tamper)
+        })
+        .await
     }
 }

@@ -692,7 +692,7 @@ impl StoreDatabase {
         let remotes = operation
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.begin_outbound_store_device_exclusion(operation, remotes)
         }))
         .await
@@ -701,11 +701,7 @@ impl StoreDatabase {
     pub async fn active_outbound_store_device_exclusion(
         &self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(
-            self.connection
-                .call_store(|session| session.active_outbound_store_device_exclusion()),
-        )
-        .await
+        Box::pin(self.call_store(|session| session.active_outbound_store_device_exclusion())).await
     }
 
     pub async fn replace_outbound_store_device_exclusion_candidate(
@@ -732,7 +728,7 @@ impl StoreDatabase {
                     .to_string(),
             ));
         }
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.replace_outbound_store_device_exclusion_candidate(expected, next, candidate)
         }))
         .await
@@ -762,7 +758,7 @@ impl StoreDatabase {
             };
             let expected = Box::new(expected);
             let next = Box::new(next);
-            Box::pin(self.connection.call_store(move |session| {
+            Box::pin(self.call_store(move |session| {
                 session.complete_outbound_store_device_exclusion_activation(expected, next)
             }))
             .await
@@ -785,7 +781,7 @@ impl StoreDatabase {
         let remotes = expected
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.complete_outbound_store_device_exclusion_slot_loss(expected, next, remotes)
         }))
         .await
@@ -818,7 +814,7 @@ impl StoreDatabase {
                     .to_string(),
             ));
         }
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.begin_outbound_store_device_exclusion_nonactivation(
                 expected,
                 next,
@@ -873,7 +869,7 @@ impl StoreDatabase {
         }
         .remote_objects()
         .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.begin_outbound_store_device_exclusion_replacement(
                 expected,
                 next,
@@ -891,7 +887,7 @@ impl StoreDatabase {
         &self,
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.nonactivating_store_device_exclusion_cleanup_targets(&expected)
         }))
         .await
@@ -917,7 +913,7 @@ impl StoreDatabase {
         };
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.complete_store_device_exclusion_replacement_cleanup(expected, next)
         }))
         .await
@@ -946,7 +942,7 @@ impl StoreDatabase {
         );
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
-        Box::pin(self.connection.call_store(move |session| {
+        Box::pin(self.call_store(move |session| {
             session.complete_nonactivating_store_device_exclusion(expected, next)
         }))
         .await
@@ -968,21 +964,17 @@ impl StoreDatabase {
             })?
             .reference
             .clone();
-        self.connection
-            .call_store(move |session| {
-                session.mark_store_device_exclusion_authority_uploaded(expected, candidate)
-            })
-            .await
+        self.call_store(move |session| {
+            session.mark_store_device_exclusion_authority_uploaded(expected, candidate)
+        })
+        .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn outbound_store_device_exclusion_operations(
         &self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(
-            self.connection
-                .call_store(|session| session.outbound_store_device_exclusion_operations()),
-        )
-        .await
+        Box::pin(self.call_store(|session| session.outbound_store_device_exclusion_operations()))
+            .await
     }
 }

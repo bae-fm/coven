@@ -33,6 +33,7 @@ mod host_sql;
 mod host_sql_transaction;
 mod host_write_capture;
 mod host_write_operation;
+pub(crate) use host_write_operation::{NewBlob, StagedBlobBatch};
 mod local_blob_cleanup;
 pub(crate) use local_blob_cleanup::{
     complete_local_blob_cleanup_on, local_blob_cleanup_intents_on,
@@ -70,8 +71,10 @@ mod snapshot_image;
 mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
+mod store_database;
 mod store_device_state;
 mod store_records;
+pub use store_database::StoreDatabase;
 pub(crate) use store_records::{StoreRecordTransaction, StoreRecords};
 mod store_session;
 mod stream_activation_records;
@@ -243,6 +246,48 @@ impl StoreDatabaseRuntime {
             local_blob_cleanup: Default::default(),
         }
     }
+
+    pub(crate) async fn membership_load_permit(&self) -> MembershipLoadPermit {
+        MembershipLoadPermit {
+            _guard: self.membership_load.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn membership_mutation_permit(&self) -> MembershipMutationPermit {
+        MembershipMutationPermit {
+            _guard: self.membership_mutation.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn store_creation_permit(&self) -> StoreCreationPermit {
+        StoreCreationPermit {
+            _guard: self.store_creation.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn device_exclusion_permit(&self) -> DeviceExclusionPermit {
+        DeviceExclusionPermit {
+            _guard: self.device_exclusion.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn author_own_stream(&self) -> OwnStreamAuthorship {
+        OwnStreamAuthorship {
+            _guard: self.own_stream_authorship.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn snapshot_publication_permit(&self) -> SnapshotPublicationPermit {
+        SnapshotPublicationPermit {
+            _guard: self.snapshot_publication.clone().lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn local_blob_cleanup_permit(&self) -> LocalBlobCleanupPermit {
+        LocalBlobCleanupPermit {
+            _guard: self.local_blob_cleanup.clone().lock_owned().await,
+        }
+    }
 }
 
 pub struct MembershipLoadPermit {
@@ -271,6 +316,10 @@ pub struct SnapshotPublicationPermit {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+pub struct LocalBlobCleanupPermit {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
 /// One connection-thread Store operation.
 ///
 /// The Store implementation can combine its row-and-payload capability with
@@ -286,32 +335,6 @@ pub(crate) struct StoreSession<'session> {
     sync_routing_hash: coven_protocol::store_commit::ObjectHash,
     hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
     blob_decls: &'session crate::BlobDecls,
-}
-
-#[derive(Clone)]
-pub struct StoreDatabase {
-    store_dir: coven_foundation::store_dir::StoreDir,
-    connection: crate::DatabaseConnection,
-    runtime: StoreDatabaseRuntime,
-    hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
-    synced_tables: std::sync::Arc<Vec<coven_protocol::synced_schema::SyncedTable>>,
-    schema_version: u32,
-    sync_routing_hash: coven_protocol::store_commit::ObjectHash,
-    gates: std::sync::Arc<crate::Gates>,
-    blob_decls: std::sync::Arc<crate::BlobDecls>,
-    blob_tombstone_grace: chrono::Duration,
-    transfer_limits: coven_protocol::blob::TransferLimits,
-    ids: coven_foundation::id_provider::IdRef,
-    write_statuses: std::sync::Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<
-                coven_protocol::write::WriteId,
-                tokio::sync::watch::Sender<coven_protocol::write::WriteStatus>,
-            >,
-        >,
-    >,
-    #[cfg(any(test, feature = "test-utils"))]
-    test_access: crate::StoreDatabaseTestAccess,
 }
 
 impl StoreSession<'_> {
@@ -505,360 +528,5 @@ impl StoreSession<'_> {
             self.conn,
             self.store_dir,
         ))
-    }
-}
-
-impl StoreDatabase {
-    #[doc(hidden)]
-    pub fn from_database(database: Database) -> Self {
-        let Database { connection, state } = database;
-        Self {
-            connection,
-            store_dir: state.store_dir,
-            runtime: state.store_runtime,
-            hlc: state.hlc,
-            synced_tables: state.synced_tables,
-            schema_version: state.schema_version,
-            sync_routing_hash: state.sync_routing_hash,
-            gates: state.gates,
-            blob_decls: state.blob_decls,
-            blob_tombstone_grace: state.blob_tombstone_grace,
-            transfer_limits: state.transfer_limits,
-            ids: state.ids,
-            write_statuses: state.write_statuses,
-            #[cfg(any(test, feature = "test-utils"))]
-            test_access: crate::StoreDatabaseTestAccess {
-                pause_points: state.test_pause_points,
-                merge_materialization_failure: state.merge_materialization_failure,
-            },
-        }
-    }
-
-    pub async fn read<F, R, E>(&self, read: F) -> Result<Result<R, E>, DbError>
-    where
-        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
-        R: Send + 'static,
-        E: Send + 'static,
-    {
-        self.connection
-            .call_store(move |session| session.read(read))
-            .await
-    }
-
-    pub fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-
-    pub fn sync_routing_hash(&self) -> coven_protocol::store_commit::ObjectHash {
-        self.sync_routing_hash
-    }
-
-    pub fn synced_tables(&self) -> &[coven_protocol::synced_schema::SyncedTable] {
-        &self.synced_tables
-    }
-
-    pub fn transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
-        self.transfer_limits
-    }
-
-    pub fn blob_tombstone_grace(&self) -> chrono::Duration {
-        self.blob_tombstone_grace
-    }
-
-    pub fn has_scoped_graph(&self) -> bool {
-        self.gates.has_scoped_graph()
-    }
-
-    pub fn stamp(&self) -> String {
-        self.hlc.now().to_string()
-    }
-
-    pub async fn persist_hlc_high_water(&self) -> Result<(), DbError> {
-        self.set_protocol_state(
-            coven_protocol::hlc::HIGHWATER_STATE_KEY,
-            &self.hlc.high_water().to_string(),
-        )
-        .await
-    }
-
-    pub fn blob_ref_from_change(
-        &self,
-        change: &coven_foundation::changeset::RowChange,
-    ) -> Result<Option<coven_protocol::blob::BlobRef>, crate::BlobDeclError> {
-        self.blob_decls.ref_from_change(change)
-    }
-
-    pub fn validate_local_blob_cleanup_changes(
-        &self,
-        old_changes: &[coven_foundation::changeset::RowChange],
-        new_changes: &[coven_foundation::changeset::RowChange],
-    ) -> Result<(), crate::BlobDeclError> {
-        crate::local_blob_cleanup_intents::intents_from_changes(
-            self.blob_decls.as_ref(),
-            old_changes,
-            new_changes,
-        )
-        .map(|_| ())
-    }
-
-    pub fn receive_wall_ms(&self) -> u64 {
-        self.hlc.wall_now_ms()
-    }
-
-    pub fn new_store_write_id(&self) -> coven_protocol::write::WriteId {
-        coven_protocol::write::WriteId::from_generated(self.ids.new_id())
-    }
-
-    pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
-        let key = key.to_string();
-        self.connection
-            .call_store(move |session| session.protocol_state(&key))
-            .await
-    }
-
-    pub async fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
-        let key = key.to_string();
-        let value = value.to_string();
-        self.connection
-            .call_store(move |session| session.set_protocol_state(&key, &value))
-            .await
-    }
-
-    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
-        let key = cache_budget_state_key(namespace);
-        match self.get_protocol_state(&key).await? {
-            Some(raw) => raw.parse::<u64>().map(Some).map_err(|error| {
-                DbError::context(
-                    format!("cache budget for {namespace:?} in protocol_state is not a byte count"),
-                    error,
-                )
-            }),
-            None => Ok(None),
-        }
-    }
-
-    #[doc(hidden)]
-    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
-        let key = cache_budget_state_key(namespace);
-        self.set_protocol_state(&key, &max_bytes.to_string()).await
-    }
-
-    pub async fn write_status(
-        &self,
-        write_id: &coven_protocol::write::WriteId,
-    ) -> Result<coven_protocol::write::WriteStatus, DbError> {
-        let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.write_status(&write_id))
-            .await
-    }
-
-    pub fn notify_write_status(
-        &self,
-        write_id: coven_protocol::write::WriteId,
-        status: coven_protocol::write::WriteStatus,
-    ) {
-        let senders = self
-            .write_statuses
-            .lock()
-            .expect("write status mutex poisoned");
-        if let Some(sender) = senders.get(&write_id) {
-            sender.send_replace(status);
-        }
-    }
-
-    pub async fn membership_load_permit(&self) -> MembershipLoadPermit {
-        MembershipLoadPermit {
-            _guard: self.runtime.membership_load.clone().lock_owned().await,
-        }
-    }
-
-    pub async fn membership_mutation_permit(&self) -> MembershipMutationPermit {
-        MembershipMutationPermit {
-            _guard: self.runtime.membership_mutation.clone().lock_owned().await,
-        }
-    }
-
-    pub async fn store_creation_permit(&self) -> StoreCreationPermit {
-        StoreCreationPermit {
-            _guard: self.runtime.store_creation.clone().lock_owned().await,
-        }
-    }
-
-    pub async fn device_exclusion_permit(&self) -> DeviceExclusionPermit {
-        DeviceExclusionPermit {
-            _guard: self.runtime.device_exclusion.clone().lock_owned().await,
-        }
-    }
-
-    /// Wait for this device's turn to author its own next Store commit.
-    ///
-    /// Every path that reads the local position to compose a commit, and every
-    /// path that publishes a device head, takes this and holds it across the
-    /// pair. Never taken twice in one call chain: a composer holds it until its
-    /// candidate is either activated or durably persisted, and a publisher of an
-    /// already-persisted candidate takes it for that publication alone.
-    pub async fn author_own_stream(&self) -> OwnStreamAuthorship {
-        OwnStreamAuthorship {
-            _guard: self
-                .runtime
-                .own_stream_authorship
-                .clone()
-                .lock_owned()
-                .await,
-        }
-    }
-
-    pub async fn snapshot_publication_permit(&self) -> SnapshotPublicationPermit {
-        SnapshotPublicationPermit {
-            _guard: self.runtime.snapshot_publication.clone().lock_owned().await,
-        }
-    }
-
-    pub async fn begin_store_creation_attempt(
-        &self,
-        initialized: coven_protocol::store_creation::StoreCreationAttempt,
-    ) -> Result<coven_protocol::store_creation::StoreCreationAttempt, DbError> {
-        let value = serde_json::to_string(&initialized)
-            .map_err(|error| DbError::context("serialize Store creation attempt", error))?;
-        self.connection
-            .call_store(move |session| session.begin_store_creation_attempt(&value))
-            .await
-    }
-
-    pub async fn load_store_creation_attempt(
-        &self,
-    ) -> Result<Option<coven_protocol::store_creation::StoreCreationAttempt>, DbError> {
-        self.connection
-            .call_store(|session| session.load_store_creation_attempt())
-            .await
-    }
-
-    pub async fn advance_store_creation_attempt(
-        &self,
-        previous: coven_protocol::store_creation::StoreCreationAttempt,
-        next: coven_protocol::store_creation::StoreCreationAttempt,
-    ) -> Result<(), DbError> {
-        let previous = serde_json::to_string(&previous)
-            .map_err(|error| DbError::context("serialize Store creation predecessor", error))?;
-        let next = serde_json::to_string(&next)
-            .map_err(|error| DbError::context("serialize Store creation successor", error))?;
-        self.connection
-            .call_store(move |session| session.advance_store_creation_attempt(&previous, &next))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn new(database: &Database) -> Self {
-        Self::from_database(database.clone())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn set_invalid_cache_budget_for_test(
-        &self,
-        namespace: &str,
-        value: &str,
-    ) -> Result<(), DbError> {
-        let key = cache_budget_state_key(namespace);
-        self.set_protocol_state(&key, value).await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn merge_materialization_failure_injection(
-        &self,
-    ) -> crate::MergeMaterializationFailureInjection {
-        self.test_access.merge_materialization_failure_injection()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn reach_test_point(&self, point: crate::DatabaseTestPoint) {
-        self.test_access.reach(point).await;
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn required_store_root_hash(
-        &self,
-    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
-        self.connection
-            .call_store(|session| Ok(session.required_root_authority()?.store_root_hash))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn scoped_snapshot_counts_for_test(&self) -> Result<(i64, i64, i64), DbError> {
-        self.connection
-            .call_store(|session| session.scoped_snapshot_counts())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn migrated_scoped_snapshot_facts_for_test(
-        &self,
-    ) -> Result<(i64, i64, String), DbError> {
-        self.connection
-            .call_store(|session| session.migrated_scoped_snapshot_facts())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn generation_zero_replay_baseline_for_test(
-        &self,
-    ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        self.connection
-            .call_store(|session| session.generation_zero_replay_baseline())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn replace_generation_zero_replay_authority_for_test(
-        &self,
-        authority_bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.replace_generation_zero_replay_authority(&authority_bytes)
-            })
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn circle_bootstrap_coverage_ref(
-        &self,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_bootstrap_coverage_ref(circle_id))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn circle_bootstrap_replay_inputs(
-        &self,
-    ) -> Result<
-        Vec<(
-            StoreBatchCommitRef,
-            coven_protocol::circle_activation::VerifiedCircleImage,
-        )>,
-        DbError,
-    > {
-        self.connection
-            .call_store(|session| session.circle_bootstrap_replay_inputs())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn circle_control_activation_count_for_test(
-        &self,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<i64, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_control_activation_count(circle_id))
-            .await
-    }
-}
-
-impl coven_foundation::id_provider::IdProvider for StoreDatabase {
-    fn new_id(&self) -> String {
-        self.ids.new_id()
     }
 }

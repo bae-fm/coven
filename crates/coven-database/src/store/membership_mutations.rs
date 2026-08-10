@@ -527,8 +527,7 @@ impl StoreDatabase {
     pub async fn outbound_membership_mutation(
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
-        self.connection
-            .call_store(|session| session.outbound_membership_mutation())
+        self.call_store(|session| session.outbound_membership_mutation())
             .await
     }
 
@@ -551,13 +550,12 @@ impl StoreDatabase {
         reusable: std::collections::BTreeSet<coven_protocol::membership::AuthorStreamId>,
     ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
         let candidate = coven_protocol::membership::AuthorStreamId::from_digest(
-            ObjectHash::digest(self.ids.new_id().as_bytes()),
+            ObjectHash::digest(self.new_store_write_id().as_str().as_bytes()),
         );
-        self.connection
-            .call_store(move |session| {
-                session.select_causal_author_stream(&key, &reusable, candidate)
-            })
-            .await
+        self.call_store(move |session| {
+            session.select_causal_author_stream(&key, &reusable, candidate)
+        })
+        .await
     }
 
     pub async fn stage_membership_mutation(
@@ -566,15 +564,14 @@ impl StoreDatabase {
         progress_bytes: Vec<u8>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.stage_membership_mutation(
-                    plan_bytes,
-                    progress_bytes,
-                    pending_rotation_generation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_membership_mutation(
+                plan_bytes,
+                progress_bytes,
+                pending_rotation_generation,
+            )
+        })
+        .await
     }
 
     pub async fn stage_membership_candidate_mutation(
@@ -584,16 +581,15 @@ impl StoreDatabase {
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.stage_membership_candidate_mutation(
-                    plan_bytes,
-                    progress_bytes,
-                    remote_objects,
-                    pending_rotation_generation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.stage_membership_candidate_mutation(
+                plan_bytes,
+                progress_bytes,
+                remote_objects,
+                pending_rotation_generation,
+            )
+        })
+        .await
     }
 
     pub async fn update_membership_mutation_progress(
@@ -601,11 +597,10 @@ impl StoreDatabase {
         intent_hash: ObjectHash,
         progress_bytes: Vec<u8>,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.update_membership_mutation_progress(intent_hash, progress_bytes)
-            })
-            .await
+        self.call_store(move |session| {
+            session.update_membership_mutation_progress(intent_hash, progress_bytes)
+        })
+        .await
     }
 
     pub async fn adopt_merge_membership_candidate_head(
@@ -661,18 +656,17 @@ impl StoreDatabase {
                 DbError::context("mark adopted Merge membership head uploaded", error)
             })?;
         let replacement_hash = ObjectHash::digest(&plan_bytes);
-        self.connection
-            .call_store(move |session| {
-                session.adopt_merge_membership_candidate_head(
-                    intent_hash,
-                    plan_bytes,
-                    previous,
-                    replacement,
-                    rotation_generation,
-                    replacement_hash,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.adopt_merge_membership_candidate_head(
+                intent_hash,
+                plan_bytes,
+                previous,
+                replacement,
+                rotation_generation,
+                replacement_hash,
+            )
+        })
+        .await
     }
 
     pub async fn begin_membership_candidate_nonactivation(
@@ -694,18 +688,17 @@ impl StoreDatabase {
             ));
         }
         let nonactivation = nonactivation.into_durable();
-        self.connection
-            .call_store(move |session| {
-                session.begin_membership_candidate_nonactivation(
-                    intent_hash,
-                    candidate,
-                    candidate_objects,
-                    retained_authorities,
-                    progress_bytes,
-                    nonactivation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.begin_membership_candidate_nonactivation(
+                intent_hash,
+                candidate,
+                candidate_objects,
+                retained_authorities,
+                progress_bytes,
+                nonactivation,
+            )
+        })
+        .await
     }
 
     pub async fn complete_nonactivating_membership_candidate_mutation(
@@ -716,17 +709,16 @@ impl StoreDatabase {
         retained_authorities: Vec<ExactObjectRef>,
         rotation_generation: Option<u64>,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.complete_nonactivating_membership_candidate_mutation(
-                    intent_hash,
-                    candidate,
-                    candidate_objects,
-                    retained_authorities,
-                    rotation_generation,
-                )
-            })
-            .await
+        self.call_store(move |session| {
+            session.complete_nonactivating_membership_candidate_mutation(
+                intent_hash,
+                candidate,
+                candidate_objects,
+                retained_authorities,
+                rotation_generation,
+            )
+        })
+        .await
     }
 
     pub async fn membership_candidate_cleanup_targets(
@@ -735,11 +727,10 @@ impl StoreDatabase {
         candidate: StoreBatchCommitRef,
         objects: Vec<ExactObjectRef>,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.membership_candidate_cleanup_targets(intent_hash, &candidate, &objects)
-            })
-            .await
+        self.call_store(move |session| {
+            session.membership_candidate_cleanup_targets(intent_hash, &candidate, &objects)
+        })
+        .await
     }
 
     pub async fn record_direct_revoke_activation(
@@ -748,19 +739,17 @@ impl StoreDatabase {
         progress_bytes: Vec<u8>,
         generation: u64,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.record_direct_revoke_activation(intent_hash, progress_bytes, generation)
-            })
-            .await
+        self.call_store(move |session| {
+            session.record_direct_revoke_activation(intent_hash, progress_bytes, generation)
+        })
+        .await
     }
 
     pub async fn complete_membership_mutation(
         &self,
         intent_hash: ObjectHash,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.complete_membership_mutation(intent_hash))
+        self.call_store(move |session| session.complete_membership_mutation(intent_hash))
             .await
     }
 }

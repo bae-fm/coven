@@ -17,10 +17,7 @@ struct UploadedBlobSpool {
 }
 
 impl UploadedBlobSpool {
-    async fn retire(
-        &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<(), String> {
+    async fn retire(&self, database: &StoreDatabase) -> Result<(), String> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -31,7 +28,7 @@ impl UploadedBlobSpool {
                 ))
             }
         }
-        store_dir.sync_parent_dir(&self.path).await
+        database.sync_store_parent_dir(&self.path).await
     }
 }
 
@@ -278,8 +275,7 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| session.prepared_remote_objects(&write_id))
+        self.call_store(move |session| session.prepared_remote_objects(&write_id))
             .await
     }
 
@@ -287,30 +283,24 @@ impl StoreDatabase {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        self.connection
-            .call_store(move |session| session.mark_remote_object_uploaded(expected))
+        self.call_store(move |session| session.mark_remote_object_uploaded(expected))
             .await
     }
 
     pub async fn retire_uploaded_blob_spools(&self) -> Result<(), DbError> {
         let spools = self
-            .connection
             .call_store(|session| session.uploaded_blob_spools())
             .await?;
 
         for spool in spools {
-            spool
-                .retire(&self.store_dir)
-                .await
-                .map_err(DbError::Message)?;
+            spool.retire(self).await.map_err(DbError::Message)?;
             self.clear_uploaded_blob_spool(spool).await?;
         }
         Ok(())
     }
 
     async fn clear_uploaded_blob_spool(&self, spool: UploadedBlobSpool) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.clear_uploaded_blob_spool(spool))
+        self.call_store(move |session| session.clear_uploaded_blob_spool(spool))
             .await
     }
 
@@ -318,8 +308,7 @@ impl StoreDatabase {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        self.connection
-            .call_store(move |session| session.mark_reusable_retained_authority_uploaded(expected))
+        self.call_store(move |session| session.mark_reusable_retained_authority_uploaded(expected))
             .await
     }
 
@@ -327,8 +316,7 @@ impl StoreDatabase {
         &self,
         commit: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.mark_candidate_commit_uploaded(commit))
+        self.call_store(move |session| session.mark_candidate_commit_uploaded(commit))
             .await
     }
 
@@ -336,8 +324,7 @@ impl StoreDatabase {
         &self,
         head: coven_protocol::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| session.mark_store_head_uploaded(head))
+        self.call_store(move |session| session.mark_store_head_uploaded(head))
             .await
     }
 
@@ -348,7 +335,6 @@ impl StoreDatabase {
     ) -> Result<PreparedAudienceObjects, DbError> {
         let write_id = write_id.clone();
         let loaded = self
-            .connection
             .call_store(move |session| session.prepared_audience_objects(&write_id))
             .await?;
 
@@ -385,8 +371,7 @@ impl StoreDatabase {
         &self,
         object: ExactObjectRef,
     ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
-        self.connection
-            .call_store(move |session| session.protocol_inert_object(object))
+        self.call_store(move |session| session.protocol_inert_object(object))
             .await
     }
 }

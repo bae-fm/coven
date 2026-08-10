@@ -192,8 +192,7 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        self.connection
-            .call_store(move |session| session.prepare_circle_restore_selection(&root))
+        self.call_store(move |session| session.prepare_circle_restore_selection(&root))
             .await
     }
 
@@ -202,19 +201,17 @@ impl StoreDatabase {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        self.connection
-            .call_store(move |session| {
-                session.retained_merge_materialization_by_ref(&root, &reference)
-            })
-            .await
+        self.call_store(move |session| {
+            session.retained_merge_materialization_by_ref(&root, &reference)
+        })
+        .await
     }
 
     pub async fn circle_replay_epoch_index(
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.connection
-            .call_store(move |session| session.circle_replay_epoch_index(&root))
+        self.call_store(move |session| session.circle_replay_epoch_index(&root))
             .await
     }
 

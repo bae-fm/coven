@@ -65,8 +65,7 @@ impl ProviderProbeJournal for StoreDatabase {
         probe_id: ProviderProbeId,
     ) -> Result<Option<ProviderProbeJournalRecord>, StorageError> {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
-        self.connection
-            .call_store(move |session| session.load_provider_probe_journal(&key))
+        self.call_store(move |session| session.load_provider_probe_journal(&key))
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))
     }
@@ -85,8 +84,7 @@ impl ProviderProbeJournal for StoreDatabase {
         let value = serde_json::to_string(&prepared).map_err(|error| {
             StorageError::Storage(format!("serialize provider probe journal: {error}"))
         })?;
-        self.connection
-            .call_store(move |session| session.begin_provider_probe_journal(&key, &value))
+        self.call_store(move |session| session.begin_provider_probe_journal(&key, &value))
             .await
             .map_err(|error| StorageError::Storage(error.to_string()))
     }
@@ -109,12 +107,11 @@ impl ProviderProbeJournal for StoreDatabase {
         let next = serde_json::to_string(&next).map_err(|error| {
             StorageError::Storage(format!("serialize provider probe journal: {error}"))
         })?;
-        self.connection
-            .call_store(move |session| {
-                session.advance_provider_probe_journal(&key, &previous, &next)
-            })
-            .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
+        self.call_store(move |session| {
+            session.advance_provider_probe_journal(&key, &previous, &next)
+        })
+        .await
+        .map_err(|error| StorageError::Storage(error.to_string()))
     }
 }
 
