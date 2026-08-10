@@ -47,6 +47,11 @@ pub(crate) fn partition_outbound(
     unsafe {
         let mut groups = AudiencePartitionGroups::new(conn, gates);
         let audience_moves = audience_moves(conn, changeset, gates)?;
+        let destination_materialized_rows = audience_moves
+            .iter()
+            .filter(|audience_move| audience_move.destination != Audience::Local)
+            .flat_map(|audience_move| audience_move.rows.iter().cloned())
+            .collect::<HashSet<_>>();
         let mut ancestor_inserts = HashSet::new();
         let mut ancestor_deletes = HashSet::new();
         let captured_deletes = collect_deletes(changeset)?;
@@ -58,7 +63,11 @@ pub(crate) fn partition_outbound(
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            store_rows.insert((row.table.clone(), row_id.to_string()));
+            let row_key = (row.table.clone(), row_id.to_string());
+            if destination_materialized_rows.contains(&row_key) {
+                return Ok(());
+            }
+            store_rows.insert(row_key);
             groups.group(Audience::Store)?.group.add_change(iter)?;
             Ok(())
         })?;
@@ -66,13 +75,15 @@ pub(crate) fn partition_outbound(
             if !gates.tables.contains_key(&row.table) {
                 return Ok(());
             }
-            if row_audience_move(conn, gates, &row)?.is_some() {
-                return Ok(());
-            }
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
             let row_key = (row.table.clone(), row_id.to_string());
+            if row_audience_move(conn, gates, &row)?.is_some()
+                || destination_materialized_rows.contains(&row_key)
+            {
+                return Ok(());
+            }
             let audience = if !gates.table_is_scoped(&row.table) {
                 if store_rows.contains(&row_key) {
                     Audience::Store

@@ -461,6 +461,13 @@ mod test_device {
                 .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
         }
 
+        pub async fn execute_unscoped_host_sql_for_test(
+            &self,
+            sql: String,
+        ) -> Result<(), coven_database::DbError> {
+            self.store.execute_unscoped_host_sql_for_test(sql).await
+        }
+
         pub async fn membership_for_test(
             &self,
         ) -> Result<coven_protocol::membership::MembershipChain, crate::sync::store::StoreError>
@@ -2588,6 +2595,15 @@ impl TestStoreFixture {
 }
 
 impl TestStore {
+    pub async fn execute_unscoped_host_sql_for_test(
+        &self,
+        sql: impl Into<String>,
+    ) -> Result<(), coven_database::DbError> {
+        self.founder
+            .execute_unscoped_host_sql_for_test(sql.into())
+            .await
+    }
+
     pub async fn bind_founder_device(
         &self,
         database: &SyntheticStoreFixture,

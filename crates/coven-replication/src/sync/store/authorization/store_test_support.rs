@@ -2,6 +2,27 @@ use super::*;
 
 impl Store {
     #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn execute_unscoped_host_sql_for_test(
+        &self,
+        sql: String,
+    ) -> Result<(), coven_database::DbError> {
+        let staging = HostWriteBlobStaging::new(
+            tokio::runtime::Handle::current(),
+            Arc::clone(&self.storage),
+            self.root.reference().clone(),
+            self.store_dir.clone(),
+        );
+        self.database
+            .run_host_store_write_for_test(None, Some(Box::new(staging)), move |context| {
+                context
+                    .execute_batch(&sql)
+                    .map_err(coven_database::DbError::from)
+            })
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_test_storage(&self, storage: Arc<dyn CloudSyncObjectStorage>) -> Self {
         Self::new(
             self.database.clone(),

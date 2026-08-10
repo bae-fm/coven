@@ -1172,7 +1172,7 @@ async fn cache_lazy_fetches_on_first_read() {
         .open_into(&db1)
         .await
         .expect("open source into exact test Store");
-    let (source_tmp, source_store_dir) = temp_store_dir();
+    let source_tmp = tempfile::tempdir().expect("create external source directory");
     let bytes = b"AUDIO-PAYLOAD".to_vec();
     let external_path = write_external_file(source_tmp.path(), "audio.bin", &bytes);
     db1.database
@@ -1187,16 +1187,17 @@ async fn cache_lazy_fetches_on_first_read() {
     coven_database::StoreDatabase::new(&db1.database)
         .register_external_blob_for_test("note_photos", "aud01234", &external_path)
         .await;
-    db1.database
-        .execute_test_host_write(
+    storage
+        .execute_unscoped_host_sql_for_test(
             "UPDATE notes
          SET shared = 1, _updated_at = '0000000002000-0000-dev1'
          WHERE id = 'n1'",
         )
-        .await;
+        .await
+        .expect("move the source row into the Store audience");
     assert!(
         storage
-            .publish_pending(&db1, &source_store_dir)
+            .publish_pending(&db1, &db1.store_dir)
             .await
             .expect("publish exact source write"),
         "source write publishes a Store commit",
