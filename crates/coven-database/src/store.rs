@@ -54,6 +54,7 @@ pub mod payload_spool;
 mod pending_publication;
 mod preparation;
 mod prepared_remote_objects;
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use prepared_remote_objects::persist_prepared_audience_objects_on;
 mod provider_probe;
 mod publication;
@@ -95,9 +96,7 @@ use coven_protocol::prepared_commit::PreparedStoreOperationCommit;
 use coven_protocol::remote_object::{
     remote_object_id, CandidateNonactivationProof, VerifiedCandidateNonactivation,
 };
-#[cfg(any(test, feature = "test-utils"))]
-use coven_protocol::store_commit::StoreBatchCommitRef;
-use coven_protocol::store_commit::{StoreAckRef, StoreDeviceHead};
+use coven_protocol::store_commit::{StoreAckRef, StoreBatchCommitRef, StoreDeviceHead};
 
 const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 
@@ -122,6 +121,7 @@ pub use host_write_capture::{
 pub use host_write_operation::StoreRowWrites;
 pub use host_write_operation::{BlobFileFailure, BlobFileFailures, WriteBatch};
 pub use host_write_operation::{HostWriteError, HostWriteOperation};
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use local_blob_cleanup::record_obsolete_copy_intents_on;
 pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{

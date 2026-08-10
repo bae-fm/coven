@@ -110,7 +110,9 @@ impl DatabaseConnection {
         self.on_connection_thread(move |core| {
             let mut session = DatabaseSession::new(
                 &core.conn,
+                #[cfg(any(test, feature = "test-utils"))]
                 &core.context.gates,
+                #[cfg(any(test, feature = "test-utils"))]
                 &core.context.synced_tables,
                 #[cfg(any(test, feature = "test-utils"))]
                 &core.context.store_dir,

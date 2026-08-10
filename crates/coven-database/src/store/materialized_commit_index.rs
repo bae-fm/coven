@@ -1,8 +1,10 @@
 use crate::query_mapped_rows;
 use crate::*;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_protocol::store_commit::StoreDeviceRegistration;
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CommitFrontier, ReferencedStoreDeviceRegistration,
-    ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceProposalAck, StoreDeviceRegistration,
+    ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceProposalAck,
     StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
 use rusqlite::{Connection, OptionalExtension};

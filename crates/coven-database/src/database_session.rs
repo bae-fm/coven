@@ -5,7 +5,9 @@ use super::*;
 /// retained schema services remain private to this module.
 pub(crate) struct DatabaseSession<'session> {
     conn: &'session Connection,
+    #[cfg(any(test, feature = "test-utils"))]
     gates: &'session Gates,
+    #[cfg(any(test, feature = "test-utils"))]
     synced_tables: &'session [SyncedTable],
     #[cfg(any(test, feature = "test-utils"))]
     store_dir: &'session coven_foundation::store_dir::StoreDir,
@@ -14,14 +16,16 @@ pub(crate) struct DatabaseSession<'session> {
 impl<'session> DatabaseSession<'session> {
     pub(crate) fn new(
         conn: &'session Connection,
-        gates: &'session Gates,
-        synced_tables: &'session [SyncedTable],
+        #[cfg(any(test, feature = "test-utils"))] gates: &'session Gates,
+        #[cfg(any(test, feature = "test-utils"))] synced_tables: &'session [SyncedTable],
         #[cfg(any(test, feature = "test-utils"))]
         store_dir: &'session coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             conn,
+            #[cfg(any(test, feature = "test-utils"))]
             gates,
+            #[cfg(any(test, feature = "test-utils"))]
             synced_tables,
             #[cfg(any(test, feature = "test-utils"))]
             store_dir,

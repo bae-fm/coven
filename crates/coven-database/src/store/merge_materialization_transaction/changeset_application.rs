@@ -44,6 +44,11 @@ use coven_protocol::synced_schema::SyncedTable;
 use super::MergeMaterializationTransaction;
 
 /// Result of applying a changeset.
+#[cfg_attr(
+    not(any(test, feature = "test-utils")),
+    allow(unreachable_pub),
+    doc = "Public when the `test-utils` feature exposes changeset application."
+)]
 pub struct ApplyResult {
     /// True if any FK violations were reported. The caller may retry this
     /// changeset after applying other changesets that contain the missing parent
