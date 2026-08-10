@@ -31,6 +31,23 @@ fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
     .expect("open exclusion test database")
 }
 
+async fn note_row_count(database: &coven_database::Database, ids: &[&str]) -> i64 {
+    let ids = ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>();
+    StoreDatabase::new(database)
+        .read(move |sql| {
+            ids.into_iter().try_fold(0_i64, |count, id| {
+                sql.query_row("SELECT COUNT(*) FROM notes WHERE id = ?1", [id], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map(|rows| count + rows)
+                .map_err(coven_database::DbError::from)
+            })
+        })
+        .await
+        .expect("read host note rows")
+        .expect("count host note rows")
+}
+
 #[tokio::test]
 async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
     let directory = tempfile::tempdir().expect("exclusion test directory");
@@ -269,9 +286,8 @@ async fn snapshot_preserves_author_exclusion_activation_evidence() {
         .restore_membership()
         .await
         .expect("retain post-exclusion snapshot membership authority");
-    let live_evidence = owner_db
-        .database
-        .test_sql(|database| database.author_exclusion_activation_evidence())
+    let live_evidence = StoreDatabase::new(&owner_db.database)
+        .sole_author_exclusion_activation_evidence_for_test()
         .await
         .expect("read live author exclusion evidence");
 
@@ -1246,11 +1262,11 @@ async fn run_excluded_author_candidate_cleanup_case(
                          '0000000002001-0000-excluded-peer', '2026-07-18')",
             )
             .await;
-        let (local_status, local_partitions, local_changeset_bytes) = peer_db
-            .database
-            .test_sql(|database| database.latest_local_write_facts())
-            .await
-            .expect("load local-only replay input");
+        let (local_status, local_partitions, local_changeset_bytes) =
+            StoreDatabase::new(&peer_db.database)
+                .latest_local_write_facts_for_test()
+                .await
+                .expect("load local-only replay input");
         assert_eq!(local_status, "\"local_only\"");
         assert_eq!(local_partitions, 1);
         assert!(local_changeset_bytes > 0);
@@ -1273,10 +1289,8 @@ async fn run_excluded_author_candidate_cleanup_case(
                         peer_db.database.fail_next_merge_materialization_at(point);
                     }
                     TerminalMergeTransactionFailure::DeleteDeviceStateDuringRetraction => {
-                        peer_db
-                            .database.test_sql(|database| {
-                                database.install_retracted_device_state_failure_trigger()
-                            })
+                        StoreDatabase::new(&peer_db.database)
+                            .install_retracted_device_state_failure_trigger_for_test()
                             .await
                             .expect("install early device-state deletion trigger");
                     }
@@ -1316,22 +1330,15 @@ async fn run_excluded_author_candidate_cleanup_case(
                     coven_protocol::write::WriteStatus::Published(position) if position.as_ref() == &original
                 ));
                 assert_eq!(
-                    peer_db
-                        .database.test_sql(|connection| {
-                            connection
-                                .query_row(
-                                    "SELECT COUNT(*) FROM notes WHERE id IN (
-                                         'excluded-peer-note',
-                                         'excluded-peer-local-note',
-                                         'surviving-owner-note'
-                                     )",
-                                    [],
-                                    |row| row.get::<_, i64>(0),
-                                )
-                                .map_err(coven_database::DbError::from)
-                        })
-                        .await
-                        .expect("count rows after transaction rollback"),
+                    note_row_count(
+                        &peer_db.database,
+                        &[
+                            "excluded-peer-note",
+                            "excluded-peer-local-note",
+                            "surviving-owner-note",
+                        ],
+                    )
+                    .await,
                     3,
                 );
                 assert!(!coven_database::StoreDatabase::new(&peer_db.database)
@@ -1360,48 +1367,13 @@ async fn run_excluded_author_candidate_cleanup_case(
             status => panic!("accepted candidate was not retracted: {status:?}"),
         };
         assert_eq!(witness.original_position(), &original);
-        let row_count = peer_db
-            .database
-            .test_sql(|connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM notes WHERE id = 'excluded-peer-note'",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(coven_database::DbError::from)
-            })
-            .await
-            .expect("count retracted host row");
+        let row_count = note_row_count(&peer_db.database, &["excluded-peer-note"]).await;
         assert_eq!(row_count, 0);
-        let local_row_count = peer_db
-            .database
-            .test_sql(|connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM notes
-                             WHERE id = 'excluded-peer-local-note'",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(coven_database::DbError::from)
-            })
-            .await
-            .expect("count retained local-only host row");
+        let local_row_count =
+            note_row_count(&peer_db.database, &["excluded-peer-local-note"]).await;
         assert_eq!(local_row_count, 1);
-        let surviving_row_count = peer_db
-            .database
-            .test_sql(|connection| {
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM notes WHERE id = 'surviving-owner-note'",
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(coven_database::DbError::from)
-            })
-            .await
-            .expect("count surviving retained Store-package row");
+        let surviving_row_count =
+            note_row_count(&peer_db.database, &["surviving-owner-note"]).await;
         assert_eq!(surviving_row_count, 1);
         assert!(coven_database::StoreDatabase::new(&peer_db.database)
             .merge_candidate_cleanup_pending(&write_id)
@@ -1425,12 +1397,8 @@ async fn run_excluded_author_candidate_cleanup_case(
                 witness: current,
             }) if current == witness
         ));
-        let prepared_count = reopened
-            .database
-            .test_sql({
-                let write_id = write_id.clone();
-                move |database| database.prepared_write_count(&write_id)
-            })
+        let prepared_count = StoreDatabase::new(&reopened.database)
+            .prepared_write_count_for_test(write_id.clone())
             .await
             .expect("count retracted candidate preparation");
         assert_eq!(prepared_count, 0);
@@ -1606,12 +1574,8 @@ async fn run_excluded_author_candidate_cleanup_case(
             .iter()
             .map(|record| (record.object_id(), record.object().clone()))
             .collect::<Vec<_>>();
-        let indexed_write_id = write_id.clone();
-        peer_db
-            .database
-            .test_sql(move |database| {
-                database.install_indexed_shared_blobs(&indexed_write_id, records)
-            })
+        StoreDatabase::new(&peer_db.database)
+            .install_indexed_shared_blobs_for_test(write_id.clone(), records)
             .await
             .expect("index shared blobs under excluded candidate");
         identities

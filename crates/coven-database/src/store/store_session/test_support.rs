@@ -629,6 +629,33 @@ impl StoreSession<'_> {
             .map_err(DbError::from)
     }
 
+    fn sole_author_exclusion_activation_evidence_for_test(
+        &self,
+    ) -> Result<(String, String, String, String), DbError> {
+        crate::test_support::author_exclusion_activation_evidence(self.conn)
+    }
+
+    fn latest_local_write_facts_for_test(&self) -> Result<(String, i64, i64), DbError> {
+        crate::DatabaseTestSql::for_store(self.conn, self.store_dir).latest_local_write_facts()
+    }
+
+    fn install_retracted_device_state_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        crate::DatabaseTestSql::new(self.conn).install_retracted_device_state_failure_trigger()
+    }
+
+    fn prepared_write_count_for_test(&self, write_id: &WriteId) -> Result<i64, DbError> {
+        crate::DatabaseTestSql::new(self.conn).prepared_write_count(write_id)
+    }
+
+    fn install_indexed_shared_blobs_for_test(
+        &self,
+        write_id: &WriteId,
+        records: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
+    ) -> Result<(), DbError> {
+        crate::DatabaseTestSql::for_store(self.conn, self.store_dir)
+            .install_indexed_shared_blobs(write_id, records)
+    }
+
     fn tamper_author_exclusion_locator_for_test(
         &self,
         exclusion: StoreDeviceExclusionRef,
@@ -730,3 +757,4 @@ impl StoreSession<'_> {
 }
 
 mod database;
+mod device_exclusion;

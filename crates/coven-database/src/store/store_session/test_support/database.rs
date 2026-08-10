@@ -292,32 +292,6 @@ impl StoreDatabase {
             })
             .await
     }
-
-    pub async fn author_exclusion_activation_evidence_for_test(
-        &self,
-        exclusion: &StoreDeviceExclusionRef,
-    ) -> Result<(String, String), DbError> {
-        let exclusion = serde_json::to_string(exclusion)
-            .map_err(|error| DbError::context("serialize exclusion ref", error))?;
-        self.call_store(move |session| {
-            session.author_exclusion_activation_evidence_for_test(&exclusion)
-        })
-        .await
-    }
-
-    pub async fn tamper_author_exclusion_locator_for_test(
-        &self,
-        exclusion: &StoreDeviceExclusionRef,
-        candidate: &StoreBatchCommitRef,
-        tamper: AuthorExclusionLocatorTamper,
-    ) -> Result<(), DbError> {
-        let exclusion = exclusion.clone();
-        let candidate = candidate.clone();
-        self.call_store(move |session| {
-            session.tamper_author_exclusion_locator_for_test(exclusion, &candidate, tamper)
-        })
-        .await
-    }
 }
 
 fn test_host_write_error(error: crate::HostWriteError<DbError>) -> DbError {
