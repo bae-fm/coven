@@ -7,14 +7,196 @@ use rusqlite::OptionalExtension;
 
 use super::*;
 
+impl StoreSession<'_> {
+    fn membership_head_cursors(&mut self) -> Result<InitialStoreMembershipAuthority, DbError> {
+        InitialStoreMembershipAuthority::load_on(self.records.conn)
+    }
+
+    fn persist_membership_head_cursors(
+        &mut self,
+        head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
+    ) -> Result<(), DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        InitialStoreMembershipAuthority { head_refs }.install_on(&transaction)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    fn validated_store_owner(
+        &mut self,
+        expected_root: coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<String, DbError> {
+        let records = self.records;
+        let (root, protocol_root) = self
+            .verified_store_authority
+            .root_authority_on(records)?
+            .ok_or(DbError::StoreRootHashMissing)?;
+        if root != expected_root {
+            return Err(DbError::Message(
+                "local Store root differs from the operation authority".to_string(),
+            ));
+        }
+        let owner = get_protocol_state_on(
+            records.conn,
+            coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
+        )?
+        .ok_or_else(|| DbError::Message("Store owner anchor is absent".to_string()))?;
+        if owner != protocol_root.descriptor.founder_pubkey {
+            return Err(DbError::Message(
+                "Store owner anchor differs from its signed root".to_string(),
+            ));
+        }
+        let baseline = self
+            .verified_store_authority
+            .retained_replay_baseline_on(records)?;
+        let (baseline_root, founder_reference) = match &baseline.authority {
+            RetainedReplayAuthority::Genesis(authority) => (
+                authority.store_root.clone(),
+                authority.founder_registration.clone(),
+            ),
+            RetainedReplayAuthority::StableSnapshot(authority) => (
+                authority.store_root.clone(),
+                authority.founder_registration.clone(),
+            ),
+        };
+        if baseline_root != root {
+            return Err(DbError::Message(
+                "retained replay baseline belongs to another Store root".to_string(),
+            ));
+        }
+        let founder = self.verified_store_authority.activated_registration_on(
+            records,
+            &root,
+            &founder_reference,
+        )?;
+        let expected_genesis = ResolvedStoreDeviceState::founder(
+            &root,
+            founder_reference,
+            &protocol_root.descriptor.founder_pubkey,
+            protocol_root.descriptor.founder_grant.clone(),
+            &protocol_root.descriptor.founder_recovery,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
+            &required_protocol_state_on(records.conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
+        )
+        .map_err(|error| DbError::context("Store device genesis state", error))?;
+        if founder.author_pubkey != owner || stored_genesis != expected_genesis {
+            return Err(DbError::Message(
+                "Store device genesis differs from installed founder authority".to_string(),
+            ));
+        }
+        Ok(owner)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_store_owner_anchor(
+        &mut self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        root_bytes: Vec<u8>,
+        founder_reference: StoreDeviceRegistrationRef,
+        founder: StoreDeviceRegistration,
+        founder_bytes: Vec<u8>,
+        genesis: ResolvedStoreDeviceState,
+        owner: String,
+        membership: InitialStoreMembershipAuthority,
+    ) -> Result<(), DbError> {
+        let records = self.records;
+        let tx = records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let root_value = install_store_root_authority_on(&tx, &root, &root_bytes)?;
+        install_store_founder_state_on(
+            &tx,
+            &root,
+            &founder_reference,
+            &founder,
+            &founder_bytes,
+            &genesis,
+        )?;
+        set_protocol_state_on(
+            &tx,
+            coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
+            &owner,
+        )?;
+        membership.install_on(&tx)?;
+        ensure_founder_replay_baseline_on(
+            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            self.schema_version,
+            self.sync_routing_hash,
+            RetainedReplayGenesisAuthority {
+                store_root: root.clone(),
+                founder_registration: founder_reference.clone(),
+            },
+        )?;
+        tx.commit().map_err(DbError::from)?;
+        self.verified_store_authority
+            .commit_installed_root(root, root_value);
+        self.verified_store_authority
+            .commit_installed_registration(founder_reference, founder);
+        Ok(())
+    }
+
+    fn local_store_founder_graph(&mut self) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
+        load_local_store_founder_graph_on(self.records.conn)
+    }
+
+    fn reset_store_founder_graph_publication(
+        &mut self,
+        expected_identity: coven_protocol::store_commit::ObjectHash,
+    ) -> Result<(), DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let durable = load_local_store_founder_graph_on(&tx)?
+            .ok_or_else(|| DbError::Message("local Store founder graph is absent".to_string()))?;
+        if founder_graph_identity(&durable) != expected_identity {
+            return Err(DbError::Message(
+                "local Store founder graph changed before publication rollback".to_string(),
+            ));
+        }
+        match durable.registration_state {
+            LocalDeviceRegistrationState::Prepared => {}
+            LocalDeviceRegistrationState::Created => {
+                let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
+                    .map_err(|error| DbError::context("serialize created journal state", error))?;
+                let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
+                    .map_err(|error| DbError::context("serialize prepared journal state", error))?;
+                let updated = tx
+                    .execute(
+                        "UPDATE local_store_device_registration SET state = ?1 \
+                         WHERE singleton = 1 AND state = ?2",
+                        (prepared, created),
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(
+                        "created founder journal did not reset after exact rollback".to_string(),
+                    ));
+                }
+            }
+            LocalDeviceRegistrationState::Activated { .. } => {
+                return Err(DbError::Message(
+                    "activated founder graph cannot be rolled back".to_string(),
+                ));
+            }
+        }
+        tx.commit().map_err(DbError::from)
+    }
+}
+
 impl StoreDatabase {
     pub async fn membership_head_cursors(
         &self,
     ) -> Result<crate::InitialStoreMembershipAuthority, DbError> {
         self.connection
-            .call_store(|session| {
-                crate::InitialStoreMembershipAuthority::load_on(session.records.conn)
-            })
+            .call_store(|session| session.membership_head_cursors())
             .await
     }
 
@@ -23,12 +205,7 @@ impl StoreDatabase {
         head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
     ) -> Result<(), DbError> {
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let transaction = conn.unchecked_transaction().map_err(DbError::from)?;
-                crate::InitialStoreMembershipAuthority { head_refs }.install_on(&transaction)?;
-                transaction.commit().map_err(DbError::from)
-            })
+            .call_store(move |session| session.persist_membership_head_cursors(head_refs))
             .await
     }
 
@@ -50,65 +227,7 @@ impl StoreDatabase {
     ) -> Result<String, DbError> {
         let expected_root = expected_root.clone();
         self.connection
-            .call_store(move |session| {
-                let records = session.records;
-                let state = &mut *session.verified_store_authority;
-                let conn = records.conn;
-                let (root, protocol_root) = state
-                    .root_authority_on(records)?
-                    .ok_or(DbError::StoreRootHashMissing)?;
-                if root != expected_root {
-                    return Err(DbError::Message(
-                        "local Store root differs from the operation authority".to_string(),
-                    ));
-                }
-                let owner = get_protocol_state_on(
-                    conn,
-                    coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
-                )?
-                .ok_or_else(|| DbError::Message("Store owner anchor is absent".to_string()))?;
-                if owner != protocol_root.descriptor.founder_pubkey {
-                    return Err(DbError::Message(
-                        "Store owner anchor differs from its signed root".to_string(),
-                    ));
-                }
-                let baseline = state.retained_replay_baseline_on(records)?;
-                let (baseline_root, founder_reference) = match &baseline.authority {
-                    RetainedReplayAuthority::Genesis(authority) => (
-                        authority.store_root.clone(),
-                        authority.founder_registration.clone(),
-                    ),
-                    RetainedReplayAuthority::StableSnapshot(authority) => (
-                        authority.store_root.clone(),
-                        authority.founder_registration.clone(),
-                    ),
-                };
-                if baseline_root != root {
-                    return Err(DbError::Message(
-                        "retained replay baseline belongs to another Store root".to_string(),
-                    ));
-                }
-                let founder =
-                    state.activated_registration_on(records, &root, &founder_reference)?;
-                let expected_genesis = ResolvedStoreDeviceState::founder(
-                    &root,
-                    founder_reference,
-                    &protocol_root.descriptor.founder_pubkey,
-                    protocol_root.descriptor.founder_grant.clone(),
-                    &protocol_root.descriptor.founder_recovery,
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?;
-                let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
-                    &required_protocol_state_on(conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
-                )
-                .map_err(|error| DbError::context("Store device genesis state", error))?;
-                if founder.author_pubkey != owner || stored_genesis != expected_genesis {
-                    return Err(DbError::Message(
-                        "Store device genesis differs from installed founder authority".to_string(),
-                    ));
-                }
-                Ok(owner)
-            })
+            .call_store(move |session| session.validated_store_owner(expected_root))
             .await
     }
 
@@ -128,44 +247,18 @@ impl StoreDatabase {
                 "Store founder registration author differs from the owner anchor".to_string(),
             ));
         }
-        let schema_version = self.schema_version();
-        let routing_hash = self.sync_routing_hash();
         self.connection
             .call_store(move |session| {
-                let records = session.records;
-                let authority = &mut *session.verified_store_authority;
-                let tx = records
-                    .conn
-                    .unchecked_transaction()
-                    .map_err(DbError::from)?;
-                let root_value = install_store_root_authority_on(&tx, &root, &root_bytes)?;
-                install_store_founder_state_on(
-                    &tx,
-                    &root,
-                    &founder_reference,
-                    &founder,
-                    &founder_bytes,
-                    &genesis,
-                )?;
-                crate::set_protocol_state_on(
-                    &tx,
-                    coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
-                    &owner,
-                )?;
-                membership.install_on(&tx)?;
-                ensure_founder_replay_baseline_on(
-                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
-                    schema_version,
-                    routing_hash,
-                    RetainedReplayGenesisAuthority {
-                        store_root: root.clone(),
-                        founder_registration: founder_reference.clone(),
-                    },
-                )?;
-                tx.commit().map_err(DbError::from)?;
-                authority.commit_installed_root(root, root_value);
-                authority.commit_installed_registration(founder_reference, founder);
-                Ok(())
+                session.install_store_owner_anchor(
+                    root,
+                    root_bytes,
+                    founder_reference,
+                    founder,
+                    founder_bytes,
+                    genesis,
+                    owner,
+                    membership,
+                )
             })
             .await
     }
@@ -174,7 +267,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
         self.connection
-            .call_store(|session| load_local_store_founder_graph_on(session.records.conn))
+            .call_store(|session| session.local_store_founder_graph())
             .await
     }
 
@@ -597,49 +690,7 @@ impl StoreDatabase {
         let expected_identity = founder_graph_identity(expected);
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let durable = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
-                    DbError::Message("local Store founder graph is absent".to_string())
-                })?;
-                if founder_graph_identity(&durable) != expected_identity {
-                    return Err(DbError::Message(
-                        "local Store founder graph changed before publication rollback".to_string(),
-                    ));
-                }
-                match durable.registration_state {
-                    LocalDeviceRegistrationState::Prepared => {}
-                    LocalDeviceRegistrationState::Created => {
-                        let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
-                            .map_err(|error| {
-                                DbError::context("serialize created journal state", error)
-                            })?;
-                        let prepared =
-                            serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
-                                .map_err(|error| {
-                                    DbError::context("serialize prepared journal state", error)
-                                })?;
-                        let updated = tx
-                            .execute(
-                                "UPDATE local_store_device_registration SET state = ?1 \
-                             WHERE singleton = 1 AND state = ?2",
-                                (prepared, created),
-                            )
-                            .map_err(DbError::from)?;
-                        if updated != 1 {
-                            return Err(DbError::Message(
-                                "created founder journal did not reset after exact rollback"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    LocalDeviceRegistrationState::Activated { .. } => {
-                        return Err(DbError::Message(
-                            "activated founder graph cannot be rolled back".to_string(),
-                        ));
-                    }
-                }
-                tx.commit().map_err(DbError::from)
+                session.reset_store_founder_graph_publication(expected_identity)
             })
             .await
     }

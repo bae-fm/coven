@@ -65,6 +65,8 @@ impl DatabaseConnection {
                     &mut core.verified_store_authority,
                     &core.gates,
                     &core.synced_tables,
+                    core.schema_version,
+                    core.sync_routing_hash,
                     &core.hlc,
                     &core.blob_decls,
                 );

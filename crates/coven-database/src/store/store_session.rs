@@ -10,6 +10,8 @@ impl<'session> StoreSession<'session> {
         verified_store_authority: &'session mut VerifiedStoreAuthority,
         gates: &'session crate::Gates,
         synced_tables: &'session [coven_protocol::synced_schema::SyncedTable],
+        schema_version: u32,
+        sync_routing_hash: coven_protocol::store_commit::ObjectHash,
         hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
         blob_decls: &'session crate::BlobDecls,
     ) -> Self {
@@ -18,6 +20,8 @@ impl<'session> StoreSession<'session> {
             verified_store_authority,
             gates,
             synced_tables,
+            schema_version,
+            sync_routing_hash,
             hlc,
             blob_decls,
         }
