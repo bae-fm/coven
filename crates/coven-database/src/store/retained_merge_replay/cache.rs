@@ -81,6 +81,30 @@ impl RetainedReplayCache {
         }
     }
 
+    pub(super) fn validate_owner_anchor(
+        &self,
+        authority: &RetainedReplayGenesisAuthority,
+    ) -> Result<(), DbError> {
+        let baseline = self.baseline.as_ref().ok_or_else(|| {
+            DbError::Message(
+                "verified Store owner anchor has no retained replay baseline".to_string(),
+            )
+        })?;
+        let matches = match &baseline.authority {
+            RetainedReplayAuthority::Genesis(existing) => existing == authority,
+            RetainedReplayAuthority::StableSnapshot(existing) => {
+                existing.store_root == authority.store_root
+                    && existing.founder_registration == authority.founder_registration
+            }
+        };
+        if !matches {
+            return Err(DbError::Message(
+                "verified replay baseline differs from the Store owner anchor".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn baseline_on(
         &mut self,
         records: StoreRecords<'_>,

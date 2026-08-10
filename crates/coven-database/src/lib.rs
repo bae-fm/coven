@@ -259,7 +259,7 @@ pub(crate) use store_authority_records::{
     load_store_root_authority_on,
 };
 pub use store_authority_records::{
-    DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs,
+    DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs, StoreOwnerAnchor,
 };
 pub use write_models::{
     AuthorExclusionActivationLocator, BlockedMergeCandidate, CompletePreparedStoreWriteOutcome,

@@ -1,7 +1,7 @@
 use crate::*;
 use crate::{RetainedReplayAuthority, RetainedReplayGenesisAuthority, GENERATION_ZERO};
 use coven_protocol::store_commit::{
-    ResolvedStoreDeviceState, StoreAckRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    ResolvedStoreDeviceState, StoreAckRef, StoreDeviceRegistrationRef,
 };
 use rusqlite::OptionalExtension;
 
@@ -48,17 +48,14 @@ impl StoreSession<'_> {
         let baseline = self
             .verified_store_authority
             .retained_replay_baseline_on(records)?;
-        let (baseline_root, founder_reference) = match &baseline.authority {
-            RetainedReplayAuthority::Genesis(authority) => (
-                authority.store_root.clone(),
-                authority.founder_registration.clone(),
-            ),
-            RetainedReplayAuthority::StableSnapshot(authority) => (
-                authority.store_root.clone(),
-                authority.founder_registration.clone(),
-            ),
+        let owner_authority = match &baseline.authority {
+            RetainedReplayAuthority::Genesis(authority) => authority.clone(),
+            RetainedReplayAuthority::StableSnapshot(authority) => RetainedReplayGenesisAuthority {
+                store_root: authority.store_root.clone(),
+                founder_registration: authority.founder_registration.clone(),
+            },
         };
-        if baseline_root != root {
+        if owner_authority.store_root != root {
             return Err(DbError::Message(
                 "retained replay baseline belongs to another Store root".to_string(),
             ));
@@ -66,11 +63,11 @@ impl StoreSession<'_> {
         let founder = self.verified_store_authority.activated_registration_on(
             records,
             &root,
-            &founder_reference,
+            &owner_authority.founder_registration,
         )?;
         let expected_genesis = ResolvedStoreDeviceState::founder(
             &root,
-            founder_reference,
+            owner_authority.founder_registration.clone(),
             &protocol_root.descriptor.founder_pubkey,
             protocol_root.descriptor.founder_grant.clone(),
             &protocol_root.descriptor.founder_recovery,
@@ -85,53 +82,50 @@ impl StoreSession<'_> {
                 "Store device genesis differs from installed founder authority".to_string(),
             ));
         }
+        self.verified_store_authority
+            .remember_verified_owner_anchor(owner_authority)?;
         Ok(owner)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn install_store_owner_anchor(
         &mut self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        root_bytes: Vec<u8>,
-        founder_reference: StoreDeviceRegistrationRef,
-        founder: StoreDeviceRegistration,
-        founder_bytes: Vec<u8>,
-        genesis: ResolvedStoreDeviceState,
-        owner: String,
+        anchor: crate::StoreOwnerAnchor,
         membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
+        if self.verified_store_authority.reuses_owner_anchor(&anchor)? {
+            return self.persist_membership_head_cursors(membership.head_refs);
+        }
+        let authority = anchor.authority().clone();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let root_value = install_store_root_authority_on(&tx, &root, &root_bytes)?;
+        let root_value =
+            install_store_root_authority_on(&tx, &authority.store_root, &anchor.root().bytes)?;
         install_store_founder_state_on(
             &tx,
-            &root,
-            &founder_reference,
-            &founder,
-            &founder_bytes,
-            &genesis,
+            &authority.store_root,
+            &authority.founder_registration,
+            &anchor.founder().value,
+            &anchor.founder().bytes,
+            anchor.genesis(),
         )?;
         set_protocol_state_on(
             &tx,
             coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
-            &owner,
+            anchor.owner(),
         )?;
         membership.install_on(&tx)?;
         let baseline = ensure_founder_replay_baseline_on(
             crate::store::StoreRecords::new(&tx, self.store_dir),
             self.schema_version,
             self.sync_routing_hash,
-            RetainedReplayGenesisAuthority {
-                store_root: root.clone(),
-                founder_registration: founder_reference.clone(),
-            },
+            authority.clone(),
         )?;
         tx.commit().map_err(DbError::from)?;
-        self.verified_store_authority
-            .commit_installed_root(root, root_value);
-        self.verified_store_authority
-            .commit_installed_registration(founder_reference, founder);
-        self.verified_store_authority
-            .commit_installed_retained_replay_baseline(baseline);
+        self.verified_store_authority.commit_installed_owner_anchor(
+            authority,
+            root_value,
+            anchor.founder().value.clone(),
+            baseline,
+        );
         Ok(())
     }
 
@@ -443,29 +437,27 @@ impl StoreSession<'_> {
                             .to_string(),
                     ));
                 }
-                let baseline = load_generation_zero_replay_baseline_on(
-                    crate::store::StoreRecords::new(&tx, store_dir),
-                )?
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "activated founder state has no generation-zero replay baseline"
-                            .to_string(),
-                    )
-                })?;
-                if baseline.generation != GENERATION_ZERO
-                    || baseline.schema_version != schema_version
-                    || baseline.routing_hash != routing_hash
-                    || baseline.authority
-                        != RetainedReplayAuthority::Genesis(RetainedReplayGenesisAuthority {
-                            store_root: root.clone(),
-                            founder_registration: registration.clone(),
-                        })
-                {
+                let owner_authority = RetainedReplayGenesisAuthority {
+                    store_root: root.clone(),
+                    founder_registration: registration.clone(),
+                };
+                let baseline_matches = {
+                    let baseline = verified_authority.retained_replay_baseline_on(
+                        crate::store::StoreRecords::new(&tx, store_dir),
+                    )?;
+                    baseline.generation == GENERATION_ZERO
+                        && baseline.schema_version == schema_version
+                        && baseline.routing_hash == routing_hash
+                        && baseline.authority
+                            == RetainedReplayAuthority::Genesis(owner_authority.clone())
+                };
+                if !baseline_matches {
                     return Err(DbError::Message(
                         "activated founder state differs from its generation-zero replay baseline"
                             .to_string(),
                     ));
                 }
+                verified_authority.remember_verified_owner_anchor(owner_authority)?;
                 return Ok(());
             }
         }
@@ -558,9 +550,15 @@ impl StoreSession<'_> {
             },
         )?;
         tx.commit().map_err(DbError::from)?;
-        verified_authority.commit_installed_root(root, root_value);
-        verified_authority.commit_installed_registration(registration, graph.registration.value);
-        verified_authority.commit_installed_retained_replay_baseline(baseline);
+        verified_authority.commit_installed_owner_anchor(
+            RetainedReplayGenesisAuthority {
+                store_root: root,
+                founder_registration: registration,
+            },
+            root_value,
+            graph.registration.value,
+            baseline,
+        );
         Ok(())
     }
 }
@@ -603,33 +601,11 @@ impl StoreDatabase {
 
     pub async fn install_store_owner_anchor(
         &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        root_bytes: Vec<u8>,
-        founder_reference: StoreDeviceRegistrationRef,
-        founder: StoreDeviceRegistration,
-        founder_bytes: Vec<u8>,
-        genesis: ResolvedStoreDeviceState,
-        owner: String,
+        anchor: crate::StoreOwnerAnchor,
         membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
-        if founder.author_pubkey != owner {
-            return Err(DbError::Message(
-                "Store founder registration author differs from the owner anchor".to_string(),
-            ));
-        }
-        self.call_store(move |session| {
-            session.install_store_owner_anchor(
-                root,
-                root_bytes,
-                founder_reference,
-                founder,
-                founder_bytes,
-                genesis,
-                owner,
-                membership,
-            )
-        })
-        .await
+        self.call_store(move |session| session.install_store_owner_anchor(anchor, membership))
+            .await
     }
 
     pub async fn local_store_founder_graph(

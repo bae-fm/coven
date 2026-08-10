@@ -119,6 +119,32 @@ async fn committed_owner_anchor_publishes_its_verified_replay_baseline() {
 }
 
 #[tokio::test]
+async fn repeated_store_initialization_reuses_its_verified_owner_anchor() {
+    let db = open_test_db();
+    let signer = UserKeypair::generate();
+    let fixture = TestStore::create(
+        &db,
+        "repeated-owner-anchor-initialization",
+        signer,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let database = coven_database::StoreDatabase::new(&db.database);
+    database
+        .replace_generation_zero_replay_authority_for_test(
+            b"invalid retained replay authority".to_vec(),
+        )
+        .await
+        .expect("alter durable replay authority after connection verification");
+
+    fixture
+        .open_into_store_database(&database)
+        .await
+        .expect("initialize another Store handle from the connection-owned authority");
+}
+
+#[tokio::test]
 async fn failed_owner_recovery_materialization_does_not_publish_registration_authority() {
     let source = open_test_db();
     let owner = UserKeypair::generate();

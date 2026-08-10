@@ -296,8 +296,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         )
         .await?;
         let root = self.history_verifier.verified_root().reference().clone();
-        let root_bytes = self.history_verifier.verified_root().object().bytes.clone();
-        let protocol_root = self.history_verifier.verified_root().protocol().clone();
+        let root_object = self.history_verifier.verified_root().object().clone();
         let founder = chain.founder_coord().ok_or_else(|| {
             crate::sync::store::membership::AnchoredChainError::LoadFailed(
                 "owner-anchored membership chain is empty".to_string(),
@@ -325,46 +324,25 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .load_registration(&founder_registration_ref)
             .await
             .map_err(crate::sync::store::membership::AnchoredChainError::from_store_object)?;
-        let founder_registration_bytes = founder_registration.bytes;
-        let founder_registration = founder_registration.value;
-        if founder_registration.author_pubkey != owner_pubkey
-            || !matches!(
-                founder_registration.origin,
-                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
-            )
-        {
-            return Err(
-                crate::sync::store::membership::AnchoredChainError::LoadFailed(
-                    "founder head registration is not activated by the Store root".to_string(),
-                ),
-            );
-        }
-        if protocol_root.descriptor.founder_pubkey != owner_pubkey {
+        if root_object.value.descriptor.founder_pubkey != owner_pubkey {
             return Err(
                 crate::sync::store::membership::AnchoredChainError::LoadFailed(
                     "owner anchor differs from the Store root founder".to_string(),
                 ),
             );
         }
-        let founder_genesis = coven_protocol::store_commit::ResolvedStoreDeviceState::founder(
-            &root,
+        let owner_anchor = coven_database::StoreOwnerAnchor::new(
+            root,
+            root_object,
             founder_registration_ref.clone(),
-            &protocol_root.descriptor.founder_pubkey,
-            protocol_root.descriptor.founder_grant.clone(),
-            &protocol_root.descriptor.founder_recovery,
+            founder_registration,
         )
         .map_err(|error| {
             crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string())
         })?;
         self.database
             .install_store_owner_anchor(
-                root,
-                root_bytes,
-                founder_registration_ref,
-                founder_registration,
-                founder_registration_bytes,
-                founder_genesis,
-                owner_pubkey.to_string(),
+                owner_anchor,
                 coven_database::InitialStoreMembershipAuthority {
                     head_refs: chain.head_refs().to_vec(),
                 },

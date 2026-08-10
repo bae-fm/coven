@@ -1,6 +1,94 @@
 use super::*;
 
 #[derive(Debug, Clone)]
+pub struct StoreOwnerAnchor {
+    root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+    founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+    authority: RetainedReplayGenesisAuthority,
+    genesis: ResolvedStoreDeviceState,
+}
+
+impl StoreOwnerAnchor {
+    pub fn new(
+        root_reference: coven_protocol::store_commit::StoreRootRef,
+        root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
+        founder_reference: StoreDeviceRegistrationRef,
+        founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
+    ) -> Result<Self, DbError> {
+        let parsed_root_reference = coven_protocol::store_commit::StoreRootRef {
+            store_root_id: root.value.descriptor.store_root_id(),
+            store_root_hash: root.value.object_hash(),
+            object: root.object.clone(),
+        };
+        if root.bytes != root.value.to_bytes()
+            || root.semantic_hash != root.value.object_hash()
+            || parsed_root_reference != root_reference
+        {
+            return Err(DbError::Message(
+                "Store owner root differs from its verified exact object".to_string(),
+            ));
+        }
+        let parsed_founder_reference =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        if founder.bytes != founder.value.to_bytes()
+            || founder.semantic_hash != founder.value.registration_hash()
+            || parsed_founder_reference != founder_reference
+            || founder.value.author_pubkey != root.value.descriptor.founder_pubkey
+            || founder.object.slot() != &root.value.descriptor.founder_registration
+            || founder.value.provider != root.value.descriptor.founder_provider_admin.provider
+            || !matches!(
+                founder.value.origin,
+                coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+            )
+        {
+            return Err(DbError::Message(
+                "Store owner founder registration differs from its root or verified exact object"
+                    .to_string(),
+            ));
+        }
+        let genesis = ResolvedStoreDeviceState::founder(
+            &root_reference,
+            founder_reference.clone(),
+            &root.value.descriptor.founder_pubkey,
+            root.value.descriptor.founder_grant.clone(),
+            &root.value.descriptor.founder_recovery,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        Ok(Self {
+            root,
+            founder,
+            authority: RetainedReplayGenesisAuthority {
+                store_root: root_reference,
+                founder_registration: founder_reference,
+            },
+            genesis,
+        })
+    }
+
+    pub(crate) fn authority(&self) -> &RetainedReplayGenesisAuthority {
+        &self.authority
+    }
+
+    pub(crate) fn root(&self) -> &coven_protocol::objects::VerifiedObject<StoreProtocolRoot> {
+        &self.root
+    }
+
+    pub(crate) fn founder(
+        &self,
+    ) -> &coven_protocol::objects::VerifiedObject<StoreDeviceRegistration> {
+        &self.founder
+    }
+
+    pub(crate) fn genesis(&self) -> &ResolvedStoreDeviceState {
+        &self.genesis
+    }
+
+    pub(crate) fn owner(&self) -> &str {
+        &self.root.value.descriptor.founder_pubkey
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DurableFounderGraph {
     pub root: ExactProtocolObject<StoreProtocolRoot>,
     pub registration: ExactProtocolObject<StoreDeviceRegistration>,

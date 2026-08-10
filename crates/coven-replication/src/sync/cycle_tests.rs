@@ -2101,7 +2101,21 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
-    let db = open_test_db();
+    let directory = tempfile::tempdir().expect("owner reanchor database directory");
+    let path = directory.path().join("owner-reanchor.sqlite3");
+    let open = || {
+        SyntheticStoreFixture::open(
+            &path,
+            test_synced_tables(),
+            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            "owner-reanchor-device".to_string(),
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            &test_migrations(),
+        )
+        .expect("open owner reanchor database")
+    };
+    let db = open();
     let storage = TestStore::create(
         &db,
         "test-store",
@@ -2114,12 +2128,14 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
         .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .expect("remove local owner pin");
+    let reopened = open();
     storage
-        .open_into(&db)
+        .open_into(&reopened)
         .await
         .expect("re-open Store through its founder");
     assert_eq!(
-        db.database
+        reopened
+            .database
             .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),

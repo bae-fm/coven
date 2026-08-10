@@ -23,6 +23,7 @@ pub(crate) struct VerifiedStoreAuthority {
     root_authority: Option<(StoreRootRef, StoreProtocolRoot)>,
     registrations: BTreeMap<StoreDeviceRegistrationRef, StoreDeviceRegistration>,
     retained_replay: RetainedReplayCache,
+    owner_anchor: Option<RetainedReplayGenesisAuthority>,
 }
 
 /// Verified authority staged beside one SQL transaction.
@@ -153,11 +154,7 @@ impl VerifiedStoreAuthorityTransaction {
 }
 
 impl VerifiedStoreAuthority {
-    pub(super) fn commit_installed_root(
-        &mut self,
-        reference: StoreRootRef,
-        value: StoreProtocolRoot,
-    ) {
+    fn commit_installed_root(&mut self, reference: StoreRootRef, value: StoreProtocolRoot) {
         match &self.root_authority {
             Some(existing) => assert_eq!(
                 existing,
@@ -168,7 +165,7 @@ impl VerifiedStoreAuthority {
         }
     }
 
-    pub(super) fn commit_installed_registration(
+    fn commit_installed_registration(
         &mut self,
         reference: StoreDeviceRegistrationRef,
         value: StoreDeviceRegistration,
@@ -185,10 +182,7 @@ impl VerifiedStoreAuthority {
         }
     }
 
-    pub(super) fn commit_installed_retained_replay_baseline(
-        &mut self,
-        baseline: RetainedReplayBaseline,
-    ) {
+    fn commit_installed_retained_replay_baseline(&mut self, baseline: RetainedReplayBaseline) {
         let baseline_root = match &baseline.authority {
             RetainedReplayAuthority::Genesis(authority) => &authority.store_root,
             RetainedReplayAuthority::StableSnapshot(authority) => &authority.store_root,
@@ -199,6 +193,89 @@ impl VerifiedStoreAuthority {
             "committed retained replay baseline belongs to another Store root"
         );
         self.retained_replay.commit_installed_baseline(baseline);
+    }
+
+    fn validate_owner_anchor_cache(
+        &self,
+        authority: &RetainedReplayGenesisAuthority,
+    ) -> Result<(), DbError> {
+        let (root, _) = self.root_authority.as_ref().ok_or_else(|| {
+            DbError::Message("verified Store owner anchor has no Store root".to_string())
+        })?;
+        if root != &authority.store_root {
+            return Err(DbError::Message(
+                "verified Store owner anchor belongs to another Store root".to_string(),
+            ));
+        }
+        if !self
+            .registrations
+            .contains_key(&authority.founder_registration)
+        {
+            return Err(DbError::Message(
+                "verified Store owner anchor has no founder registration".to_string(),
+            ));
+        }
+        self.retained_replay.validate_owner_anchor(authority)
+    }
+
+    pub(super) fn remember_verified_owner_anchor(
+        &mut self,
+        authority: RetainedReplayGenesisAuthority,
+    ) -> Result<(), DbError> {
+        self.validate_owner_anchor_cache(&authority)?;
+        match &self.owner_anchor {
+            Some(existing) if existing != &authority => {
+                return Err(DbError::Message(
+                    "verified Store owner anchor conflicts with connection authority".to_string(),
+                ));
+            }
+            Some(_) => {}
+            None => self.owner_anchor = Some(authority),
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit_installed_owner_anchor(
+        &mut self,
+        authority: RetainedReplayGenesisAuthority,
+        root: StoreProtocolRoot,
+        founder: StoreDeviceRegistration,
+        baseline: RetainedReplayBaseline,
+    ) {
+        self.commit_installed_root(authority.store_root.clone(), root);
+        self.commit_installed_registration(authority.founder_registration.clone(), founder);
+        self.commit_installed_retained_replay_baseline(baseline);
+        self.remember_verified_owner_anchor(authority)
+            .expect("committed Store owner anchor must match its connection authority");
+    }
+
+    pub(super) fn reuses_owner_anchor(
+        &self,
+        anchor: &crate::StoreOwnerAnchor,
+    ) -> Result<bool, DbError> {
+        let Some(installed) = &self.owner_anchor else {
+            return Ok(false);
+        };
+        if installed != anchor.authority() {
+            return Err(DbError::Message(
+                "Store owner anchor differs from connection authority".to_string(),
+            ));
+        }
+        self.validate_owner_anchor_cache(installed)?;
+        let (_, root) = self
+            .root_authority
+            .as_ref()
+            .expect("validated Store owner anchor has a root");
+        let founder = self
+            .registrations
+            .get(&installed.founder_registration)
+            .expect("validated Store owner anchor has a founder registration");
+        if root != &anchor.root().value || founder != &anchor.founder().value {
+            return Err(DbError::Message(
+                "Store owner anchor values differ from connection authority".to_string(),
+            ));
+        }
+        Ok(true)
     }
 
     pub(super) fn prepared_merge_candidate_on(
