@@ -35,6 +35,54 @@ impl UploadedBlobSpool {
     }
 }
 
+impl StoreSession<'_> {
+    fn uploaded_blob_spools(&self) -> Result<Vec<UploadedBlobSpool>, DbError> {
+        let conn = self.records.conn;
+        let mut statement = conn
+            .prepare(
+                "SELECT write_id, remote_object_id, spool_path
+                 FROM store_write_blobs
+                 WHERE spool_path IS NOT NULL
+                 ORDER BY write_id, audience, remote_object_id",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let rows = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
+        drop(statement);
+        let mut spools = Vec::new();
+        for (write_id, remote_object_id, path) in rows {
+            let remote_object_id = remote_object_id
+                .parse()
+                .map_err(|error| DbError::context("prepared blob remote object id", error))?;
+            let remote = load_remote_object_on(conn, remote_object_id)?;
+            if remote_object_is_uploaded(&remote) {
+                spools.push(UploadedBlobSpool {
+                    write_id: WriteId::from_generated(write_id),
+                    remote_object_id,
+                    path: PathBuf::from(path),
+                });
+            }
+        }
+        Ok(spools)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn prepared_audience_objects(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<PreparedAudienceObjects, DbError> {
+        load_prepared_audience_objects_on(self.records.conn, self.records.store_dir, write_id)
+    }
+}
+
 impl StoreDatabase {
     pub(crate) fn persist_prepared_audience_objects_on(
         records: crate::payload_spool::StoreRecords<'_>,
@@ -196,43 +244,7 @@ impl StoreDatabase {
     pub async fn retire_uploaded_blob_spools(&self) -> Result<(), DbError> {
         let spools = self
             .connection
-            .call_database(|session| {
-                let conn = session.conn;
-                let mut statement = conn
-                    .prepare(
-                        "SELECT write_id, remote_object_id, spool_path
-                         FROM store_write_blobs
-                         WHERE spool_path IS NOT NULL
-                         ORDER BY write_id, audience, remote_object_id",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(DbError::from)?;
-                let rows = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
-                drop(statement);
-                let mut spools = Vec::new();
-                for (write_id, remote_object_id, path) in rows {
-                    let remote_object_id = remote_object_id.parse().map_err(|error| {
-                        DbError::context("prepared blob remote object id", error)
-                    })?;
-                    let remote = load_remote_object_on(conn, remote_object_id)?;
-                    if remote_object_is_uploaded(&remote) {
-                        spools.push(UploadedBlobSpool {
-                            write_id: WriteId::from_generated(write_id),
-                            remote_object_id,
-                            path: PathBuf::from(path),
-                        });
-                    }
-                }
-                Ok(spools)
-            })
+            .call_store(|session| session.uploaded_blob_spools())
             .await?;
 
         for spool in spools {
@@ -377,13 +389,10 @@ impl StoreDatabase {
         &self,
         write_id: &WriteId,
     ) -> Result<PreparedAudienceObjects, DbError> {
-        let store_dir = self.store_dir.clone();
         let write_id = write_id.clone();
         let loaded = self
             .connection
-            .call_database(move |session| {
-                load_prepared_audience_objects_on(session.conn, &store_dir, &write_id)
-            })
+            .call_store(move |session| session.prepared_audience_objects(&write_id))
             .await?;
 
         let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
