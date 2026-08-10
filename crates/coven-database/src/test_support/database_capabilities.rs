@@ -150,6 +150,31 @@ impl Database {
             .await
     }
 
+    pub async fn replace_retained_merge_input_for_test(
+        &self,
+        stream_id: String,
+        canonical_input: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.replace_retained_merge_input(&stream_id, &canonical_input)
+        })
+        .await
+    }
+
+    pub async fn insert_invalid_materialized_commit_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| database.insert_invalid_materialized_commit())
+            .await
+    }
+
+    pub async fn retained_materialization_input_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+    ) -> Result<(Vec<u8>, String, String), DbError> {
+        self.test_sql(move |database| database.retained_materialization_input(&stream_id, sequence))
+            .await
+    }
+
     pub async fn retained_canonical_input_for_test(
         &self,
         stream_id: String,
@@ -166,6 +191,55 @@ impl Database {
     ) -> Result<(), DbError> {
         self.test_sql(move |database| {
             database.corrupt_retained_materialization_input(&stream_id, sequence)
+        })
+        .await
+    }
+
+    pub async fn insert_retained_replay_object_for_test(
+        &self,
+        owner: coven_protocol::remote_object::RetainedReplayOwner,
+        object: coven_protocol::objects::ExactObjectRef,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.insert_retained_replay_object(&owner, &object))
+            .await
+    }
+
+    pub async fn retained_merge_input_hash_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
+        self.test_sql(move |database| {
+            database
+                .retained_merge_input(&stream_id, sequence)
+                .map(|(input_hash, _)| input_hash)
+        })
+        .await
+    }
+
+    pub async fn materialized_commit_exists_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+    ) -> Result<bool, DbError> {
+        self.test_sql(move |database| database.materialized_commit_exists(&stream_id, sequence))
+            .await
+    }
+
+    pub async fn remove_materialized_note_for_test(
+        &self,
+        stream_id: String,
+        sequence: u64,
+        row_id: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.transaction(|transaction| {
+                transaction.delete_materialized_commit(&stream_id, sequence)?;
+                transaction
+                    .execute("DELETE FROM notes WHERE id = ?1", [row_id])
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
         })
         .await
     }
@@ -402,6 +476,31 @@ impl Database {
                     .table_row_count(DatabaseTestTable::named("retained_merge_materializations"))?,
                 database.table_row_count(DatabaseTestTable::named("retained_replay_objects"))?,
             ))
+        })
+        .await
+    }
+
+    pub async fn scoped_routing_counts_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<(i64, i64), DbError> {
+        self.test_sql(move |database| database.scoped_routing_counts(circle_id))
+            .await
+    }
+
+    pub async fn cleanup_intent_copy_identities_for_test(&self) -> Result<Vec<String>, DbError> {
+        self.test_sql(|database| database.cleanup_intent_copy_identities())
+            .await
+    }
+
+    pub async fn insert_cleanup_intent_for_test(
+        &self,
+        namespace: String,
+        blob_id: String,
+        copy_identity: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.insert_cleanup_intent(&namespace, &blob_id, &copy_identity)
         })
         .await
     }

@@ -123,9 +123,7 @@ impl PullTestDatabaseOps for coven_database::SyntheticStoreFixture {
 
     async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>) {
         self.database
-            .test_sql(move |database| {
-                database.replace_retained_merge_input(&stream_id, &canonical_input)
-            })
+            .replace_retained_merge_input_for_test(stream_id, canonical_input)
             .await
             .expect("replace retained Merge input and its exact ownership closure");
     }
@@ -1824,7 +1822,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
     let target = open_test_db();
     let invalid_insert = target
         .database
-        .test_sql(|database| database.insert_invalid_materialized_commit())
+        .insert_invalid_materialized_commit_for_test()
         .await;
     assert!(invalid_insert.is_err());
     assert!(store_database(&target.database)
@@ -1878,7 +1876,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let queried_stream = stream_id.clone();
     let (canonical_input, input_hash, retained_ref) = target
         .database
-        .test_sql(move |database| database.retained_materialization_input(&queried_stream, 1))
+        .retained_materialization_input_for_test(queried_stream, 1)
         .await
         .expect("read retained Merge materialization input");
     assert_eq!(
@@ -2013,9 +2011,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let corrupt_stream = stream_id.clone();
     target
         .database
-        .test_sql(move |database| {
-            database.corrupt_retained_materialization_input(&corrupt_stream, 1)
-        })
+        .corrupt_retained_materialization_input_for_test(corrupt_stream, 1)
         .await
         .expect("corrupt retained Merge input");
     let verified_after_corruption = target_store
@@ -2111,7 +2107,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     assert!(target
         .database
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .validate_retained_merge_replay_for_test(root)
         .await
         .expect_err("missing replay pin must fail durable retained-history verification")
         .to_string()
@@ -2145,7 +2141,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     assert!(target
         .database
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .validate_retained_merge_replay_for_test(root)
         .await
         .expect_err("tampered replay pin must fail durable retained-history verification")
         .to_string()
@@ -2174,9 +2170,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let first_object = first_package.object.clone();
     target
         .database
-        .test_sql(move |database| {
-            database.insert_retained_replay_object(&second_owner_for_insert, &first_object)
-        })
+        .insert_retained_replay_object_for_test(second_owner_for_insert, first_object)
         .await
         .expect("invent replay ownership index row");
     assert!(target
@@ -2189,7 +2183,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     assert!(target
         .database
-        .test_sql(move |database| { database.load_retained_merge_replay_inputs(&root).map(drop) })
+        .validate_retained_merge_replay_for_test(root)
         .await
         .expect_err("invented replay pin must fail durable retained-history verification")
         .to_string()
@@ -2218,11 +2212,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let copied_path = target_path.clone();
     source
         .database
-        .test_sql(move |conn| {
-            conn.execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
-                .map(|_| ())
-                .map_err(coven_database::DbError::from)
-        })
+        .vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
         .await
         .expect("copy the locally-authored retained input");
     crate::sync::test_helpers::copy_payload_files(
@@ -2242,15 +2232,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let conflicting_stream = stream_id.clone();
     target
         .database
-        .test_sql(move |database| {
-            database.transaction(|transaction| {
-                transaction.delete_materialized_commit(&conflicting_stream, 1)?;
-                transaction
-                    .execute("DELETE FROM notes WHERE id = 'rollback-row'", [])
-                    .map_err(coven_database::DbError::from)?;
-                Ok(())
-            })
-        })
+        .remove_materialized_note_for_test(conflicting_stream, 1, "rollback-row".to_string())
         .await
         .expect("remove the locally materialized outcome while retaining its exact input");
 
@@ -2273,7 +2255,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let checked_stream = stream_id.clone();
     let materialized = target
         .database
-        .test_sql(move |database| database.materialized_commit_exists(&checked_stream, 1))
+        .materialized_commit_exists_for_test(checked_stream, 1)
         .await
         .expect("read rolled-back materialization state");
     assert!(!materialized);
@@ -3737,11 +3719,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let sequence = commit.coord.sequence();
     let input_hash = db2
         .database
-        .test_sql(move |database| {
-            database
-                .retained_merge_input(&stream_id, sequence)
-                .map(|v| v.0)
-        })
+        .retained_merge_input_hash_for_test(stream_id, sequence)
         .await
         .expect("load retained blob input hash");
     assert!(matches!(
@@ -3794,15 +3772,9 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     let (source_tmp, ld1) = temp_store_dir();
     let source = source_tmp.path().join("audio1.flac");
     std::fs::write(&source, b"AUDIO-PAYLOAD").expect("write exact external audio fixture");
-    let reference = db1
-        .database
-        .row_blob_ref("note_photos", "audio1")
-        .await
-        .expect("load exact external audio row");
-    db1.database
-        .test_sql(move |database| database.register_external_blob(&reference, &source))
-        .await
-        .expect("register exact external audio fixture");
+    coven_database::StoreDatabase::new(&db1.database)
+        .register_external_blob_for_test("note_photos", "audio1", &source)
+        .await;
     storage.make_root_remote(&db1, &ld1, "n1").await;
     let audio_blob = db1
         .database
@@ -3976,7 +3948,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     );
     let (routes, mirrors): (i64, i64) = target
         .database
-        .test_sql(move |database| database.scoped_routing_counts(circle_id))
+        .scoped_routing_counts_for_test(circle_id)
         .await
         .expect("read pulled routing state");
     assert_eq!((routes, mirrors), (2, 2));
@@ -4273,16 +4245,9 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
             coven_protocol::blob::content_hash(b"local audio"),
         ))
         .await;
-    let reference = db
-        .database
-        .row_blob_ref("note_photos", "audio1")
-        .await
-        .expect("load exact external row blob reference");
-    let external = external.clone();
-    db.database
-        .test_sql(move |database| database.register_external_blob(&reference, &external))
-        .await
-        .expect("register exact external blob reference");
+    coven_database::StoreDatabase::new(&db.database)
+        .register_external_blob_for_test("note_photos", "audio1", &external)
+        .await;
     let outgoing = db
         .database
         .capture_test_changeset(&["UPDATE notes SET title = 'Changed', \
@@ -4374,15 +4339,9 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     let (tmp, store_dir) = temp_store_dir();
     let source = tmp.path().join("audio1.flac");
     std::fs::write(&source, b"AUDIO-PAYLOAD").expect("write exact external audio fixture");
-    let reference = db
-        .database
-        .row_blob_ref("note_photos", "audio1")
-        .await
-        .expect("load exact external row blob reference");
-    db.database
-        .test_sql(move |database| database.register_external_blob(&reference, &source))
-        .await
-        .expect("register exact external audio fixture");
+    coven_database::StoreDatabase::new(&db.database)
+        .register_external_blob_for_test("note_photos", "audio1", &source)
+        .await;
     storage.make_root_remote(&db, &store_dir, "n1").await;
     let result = device
         .latest_local_store_position()
@@ -4891,10 +4850,9 @@ async fn plain_scheme_two_replacements_write_two_objects() {
             "the original and both replacements all apply",
         );
 
-        let winner: String = db_c
-            .database
-            .test_sql(|conn| {
-                conn.query_row(
+        let winner: String = coven_database::StoreDatabase::new(&db_c.database)
+            .read(|sql| {
+                sql.query_row(
                     "SELECT blob_id FROM note_photos WHERE id = 'ph1'",
                     [],
                     |r| r.get::<_, String>(0),
@@ -4902,6 +4860,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
                 .map_err(coven_database::DbError::from)
             })
             .await
+            .expect("access the cover row")
             .expect("the cover row");
         assert_eq!(winner, "pBcover");
         let expected = from_b.as_slice();
@@ -5656,7 +5615,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     );
     let pending_before_restart = target
         .database
-        .test_sql(|database| database.cleanup_intent_copy_identities())
+        .cleanup_intent_copy_identities_for_test()
         .await
         .unwrap();
     assert_eq!(
@@ -5674,13 +5633,8 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert_eq!(second.changesets_applied, 0);
     assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
-    let pending_after_restart: i64 = restarted
-        .database
-        .test_sql(|database| {
-            database.table_row_count(coven_database::DatabaseTestTable::named(
-                "local_cleanup_intents",
-            ))
-        })
+    let pending_after_restart = coven_database::StoreDatabase::new(&restarted.database)
+        .cleanup_intent_count_for_test("photos", "cleanup01")
         .await
         .unwrap();
     assert_eq!(pending_after_restart, 0);
@@ -5706,7 +5660,11 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         .await;
     target
         .database
-        .test_sql(|database| database.insert_cleanup_intent("photos", "cleanup-race", "local"))
+        .insert_cleanup_intent_for_test(
+            "photos".to_string(),
+            "cleanup-race".to_string(),
+            "local".to_string(),
+        )
         .await
         .unwrap();
 
@@ -5803,7 +5761,11 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         .await;
     target
         .database
-        .test_sql(|database| database.insert_cleanup_intent("photos", "shared-intent", "local"))
+        .insert_cleanup_intent_for_test(
+            "photos".to_string(),
+            "shared-intent".to_string(),
+            "local".to_string(),
+        )
         .await
         .unwrap();
 
