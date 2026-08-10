@@ -556,7 +556,7 @@ where
     P: rusqlite::Params,
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
 {
-    let mut statement = conn.prepare(sql)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let rows = statement.query_map(params, |row| mapper(row))?;
     let mut mapped = Vec::new();
     for row in rows {
