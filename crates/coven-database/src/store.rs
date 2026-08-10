@@ -1,4 +1,5 @@
 mod acknowledgements;
+mod activated_registration_records;
 mod blob_bindings;
 mod blob_outbox;
 mod blob_transitions;
@@ -25,7 +26,7 @@ pub mod local_blob_cleanup_intents;
 mod materialization;
 pub mod materialization_models;
 mod materialized_commit_index;
-use materialized_commit_index::record_activated_store_device_registrations_on;
+use activated_registration_records::record_activated_store_device_registrations_on;
 mod membership_mutations;
 mod merge_materialization_transaction;
 mod owner_promotion;
