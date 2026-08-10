@@ -72,4 +72,44 @@ impl<'session> StoreSession<'session> {
         self.verified_store_authority
             .local_store_authority_on(self.records)
     }
+
+    pub(super) fn verified_store_transaction<R>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut super::VerifiedStoreTransaction<'_, '_, '_>,
+        ) -> Result<super::StoreTransactionOutcome<R>, DbError>,
+    ) -> Result<R, DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let store = super::StoreTransaction::new(&transaction, self.records.store_dir);
+        let mut authority =
+            store.begin_verified_authority_transaction(self.verified_store_authority)?;
+        let outcome = {
+            let mut capability = super::VerifiedStoreTransaction {
+                store,
+                authority: &mut authority,
+                gates: self.gates,
+                synced_tables: self.synced_tables,
+                blob_decls: self.blob_decls,
+                #[cfg(any(test, feature = "test-utils"))]
+                merge_materialization_failure: self.merge_materialization_failure,
+            };
+            operation(&mut capability)
+        };
+        match outcome {
+            Ok(super::StoreTransactionOutcome::Commit(value)) => {
+                transaction.commit().map_err(DbError::from)?;
+                self.verified_store_authority.commit_transaction(authority);
+                Ok(value)
+            }
+            Ok(super::StoreTransactionOutcome::Rollback(value)) => {
+                transaction.rollback().map_err(DbError::from)?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }

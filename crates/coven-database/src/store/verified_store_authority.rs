@@ -104,6 +104,46 @@ impl VerifiedStoreAuthorityTransaction {
             .replay_inputs_on(records, &self.root, &mut registrations)
     }
 
+    pub(super) fn prepared_merge_candidate_on(
+        &mut self,
+        records: crate::store::StoreRecords<'_>,
+        prepared: &super::publication_state::PreparedStoreWriteState,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        let (commit, head) = super::candidate_records::prepared_merge_candidate_objects(prepared);
+        self.prepared_merge_candidate_parts_on(
+            records,
+            commit.semantic_bytes(),
+            commit.prepared().reference(),
+            head.semantic_bytes(),
+            head.prepared().reference(),
+        )
+    }
+
+    pub(super) fn prepared_merge_candidate_parts_on(
+        &mut self,
+        records: crate::store::StoreRecords<'_>,
+        commit_bytes: &[u8],
+        commit_object: &coven_protocol::objects::ExactObjectRef,
+        head_bytes: &[u8],
+        head_object: &coven_protocol::objects::ExactObjectRef,
+    ) -> Result<PreparedMergeCandidate, DbError> {
+        let unverified: coven_protocol::store_commit::StoreBatchCommit =
+            serde_json::from_slice(commit_bytes)
+                .map_err(|error| DbError::context("signed Merge candidate", error))?;
+        let root = self.root.clone();
+        let registration =
+            self.activated_registration_on(records, &root, &unverified.author_registration)?;
+        super::candidate_records::verify_prepared_merge_candidate_parts(
+            &root,
+            unverified,
+            &registration,
+            commit_bytes,
+            commit_object,
+            head_bytes,
+            head_object,
+        )
+    }
+
     fn retained_materialization_by_ref_on(
         &mut self,
         records: crate::store::StoreRecords<'_>,
@@ -532,21 +572,6 @@ impl VerifiedStoreAuthority {
             &mut registrations,
             reference,
         )
-    }
-
-    pub(super) fn validate_retained_materialization_insert(
-        &self,
-        materialization: &OwnedVerifiedMergeMaterialization,
-    ) -> Result<(), DbError> {
-        self.retained_replay
-            .validate_insert_verified(materialization)
-    }
-
-    pub(super) fn insert_retained_materialization(
-        &mut self,
-        materialization: OwnedVerifiedMergeMaterialization,
-    ) -> Result<(), DbError> {
-        self.retained_replay.insert_verified(materialization)
     }
 
     pub(super) fn verified_circle_activation_on(

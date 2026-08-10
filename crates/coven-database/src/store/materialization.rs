@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::{MergeMaterializationTransaction, StoreDatabase, StoreSession};
+use super::{
+    MergeMaterializationTransaction, StoreDatabase, StoreSession, StoreTransactionOutcome,
+    VerifiedStoreTransaction,
+};
 use crate::{install_store_founder_state_on, DbError, VerifiedMergeMaterialization};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::objects::ExactObjectRef;
@@ -24,7 +27,7 @@ fn reach_materialization_failure(
     Ok(true)
 }
 
-impl StoreSession<'_> {
+impl VerifiedStoreTransaction<'_, '_, '_> {
     fn apply_received_merge_materialization(
         &mut self,
         materialization: crate::PreparedMergeMaterialization,
@@ -36,7 +39,7 @@ impl StoreSession<'_> {
     {
         #[cfg(any(test, feature = "test-utils"))]
         let materialization_failure = self.merge_materialization_failure;
-        let authority = &mut *self.verified_store_authority;
+        let authority = &mut *self.authority;
         let blob_decls = self.blob_decls;
         let gates = self.gates;
         let synced_tables = self.synced_tables;
@@ -62,16 +65,9 @@ impl StoreSession<'_> {
             .circle_activations
             .local_exclusions()
             .to_vec();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let mut transaction_authority =
-            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .begin_verified_authority_transaction(authority)?;
+        let tx = self.store.transaction;
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?,
+            crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?,
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let candidate_predecessors = materialization
@@ -82,9 +78,10 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?
             .frontier();
         let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
-        let merge_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
+        let merge_transaction =
+            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
         let mut applied = merge_transaction.apply_prepared_merge_materialization(
-            &mut transaction_authority,
+            authority,
             blob_decls,
             gates,
             synced_tables,
@@ -103,7 +100,7 @@ impl StoreSession<'_> {
                     "applied Merge materialization omitted its verified retained input".to_string(),
                 )
             })?;
-            transaction_authority.insert_verified(retained)?;
+            authority.insert_verified(retained)?;
             #[cfg(any(test, feature = "test-utils"))]
             if reach_materialization_failure(
                 materialization_failure,
@@ -114,7 +111,7 @@ impl StoreSession<'_> {
                 ));
             }
             for exclusion in &local_exclusions {
-                super::circle_operations::record_circle_close_exclusion_on(&tx, exclusion)?;
+                super::circle_operations::record_circle_close_exclusion_on(tx, exclusion)?;
             }
             let retracted = retractions
                 .iter()
@@ -129,7 +126,7 @@ impl StoreSession<'_> {
                     super::merge_materialization_transaction::retract_verified_merge_materializations(
                         &merge_transaction,
                         &root,
-                        &mut transaction_authority,
+                        authority,
                         retractions,
                     )?;
                 #[cfg(any(test, feature = "test-utils"))]
@@ -147,8 +144,8 @@ impl StoreSession<'_> {
                 || installs_circle_bootstrap
                 || !retracted.is_empty()
             {
-                let replay = transaction_authority.replay_projection_on(
-                    crate::store::StoreTransaction::new(&tx, self.records.store_dir),
+                let replay = authority.replay_projection_on(
+                    crate::store::StoreTransaction::new(tx, self.store.records.store_dir),
                     blob_decls,
                     gates,
                     synced_tables,
@@ -159,7 +156,7 @@ impl StoreSession<'_> {
                     local_store_membership,
                 )?;
                 let mut host_changes =
-                    rusqlite::session::Session::new(&tx).map_err(DbError::from)?;
+                    rusqlite::session::Session::new(tx).map_err(DbError::from)?;
                 for table in synced_tables {
                     host_changes
                         .attach(Some(table.name()))
@@ -175,7 +172,7 @@ impl StoreSession<'_> {
                     tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                         .map_err(DbError::from)?;
                 }
-                crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+                crate::store::StoreTransaction::new(tx, self.store.records.store_dir)
                     .replace_tables_from_projection(&replay, &tables)?;
                 let violations: bool = tx
                     .query_row(
@@ -222,7 +219,7 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::Message(error.to_string()))?
                 {
                     super::local_blob_cleanup::record_obsolete_copy_intents_on(
-                        &tx, blob_decls, &intent,
+                        tx, blob_decls, &intent,
                     )?;
                 }
                 if let coven_protocol::membership::ApplyOutcome::Applied(rows) =
@@ -231,11 +228,6 @@ impl StoreSession<'_> {
                     rows.extend(new_projection);
                 }
             }
-            tx.commit().map_err(DbError::from)?;
-            authority.commit_transaction(transaction_authority);
-        }
-        if let Some(max_applied) = applied.max_updated_at.as_ref() {
-            self.hlc.advance_past(max_applied);
         }
         Ok(applied)
     }
@@ -258,21 +250,16 @@ impl StoreSession<'_> {
         >,
     ) -> Result<(), DbError> {
         let reference = verified_commit.reference().clone();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let mut transaction_authority =
-            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .begin_verified_authority_transaction(self.verified_store_authority)?;
-        let store_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
+        let tx = self.store.transaction;
+        let authority = &mut *self.authority;
+        let store_transaction =
+            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(&reference, &object_ids)?;
         }
         if !registrations.is_empty() {
             super::record_activated_store_device_registrations_on(
-                &tx,
+                tx,
                 verified_commit.value(),
                 &registrations,
             )?;
@@ -296,12 +283,9 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("complete exact membership journal", error))?;
         }
         let retained = store_transaction
-            .record_verified_merge_materialization(&mut transaction_authority, materialization)
+            .record_verified_merge_materialization(authority, materialization)
             .map_err(|error| DbError::context("record exact Merge materialization", error))?;
-        transaction_authority.insert_verified(retained)?;
-        tx.commit().map_err(DbError::from)?;
-        self.verified_store_authority
-            .commit_transaction(transaction_authority);
+        authority.insert_verified(retained)?;
         Ok(())
     }
 
@@ -318,14 +302,10 @@ impl StoreSession<'_> {
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.store.transaction;
         if let Some(materialized) =
             crate::store::materialized_commit_index::materialized_commit_ref_on(
-                &tx, &stream_id, sequence,
+                tx, &stream_id, sequence,
             )?
         {
             if materialized != expected_ref {
@@ -333,14 +313,11 @@ impl StoreSession<'_> {
                     "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
                 )));
             }
-            tx.commit().map_err(DbError::from)?;
             return Ok(());
         }
-        let mut transaction_authority =
-            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .begin_verified_authority_transaction(self.verified_store_authority)?;
+        let authority = &mut *self.authority;
         super::record_activated_store_device_registrations_on(
-            &tx,
+            tx,
             verified_commit.value(),
             &registrations,
         )?;
@@ -360,12 +337,9 @@ impl StoreSession<'_> {
             &[],
             None,
         )?;
-        let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
-            .record_verified_merge_materialization(&mut transaction_authority, materialization)?;
-        transaction_authority.insert_verified(retained)?;
-        tx.commit().map_err(DbError::from)?;
-        self.verified_store_authority
-            .commit_transaction(transaction_authority);
+        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+            .record_verified_merge_materialization(authority, materialization)?;
+        authority.insert_verified(retained)?;
         Ok(())
     }
 
@@ -374,22 +348,16 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let mut transaction_authority =
-            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .begin_verified_authority_transaction(self.verified_store_authority)?;
-        let installed_root = transaction_authority.root().clone();
+        let tx = self.store.transaction;
+        let authority = &mut *self.authority;
+        let installed_root = authority.root().clone();
         if installed_root != root || plan.founder.store_root != root {
             return Err(DbError::Message(
                 "device join bootstrap root differs from the installed exact root".to_string(),
             ));
         }
         install_store_founder_state_on(
-            &tx,
+            tx,
             &root,
             &plan.founder_reference,
             &plan.founder,
@@ -397,21 +365,20 @@ impl StoreSession<'_> {
             &plan.genesis,
         )?;
         crate::set_protocol_state_on(
-            &tx,
+            tx,
             coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
             &plan.founder.author_pubkey,
         )?;
-        plan.membership.install_on(&tx)?;
+        plan.membership.install_on(tx)?;
 
-        let frontier =
-            crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?;
+        let frontier = crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?;
         let mut represented = BTreeSet::new();
         for prepared in &plan.commits {
             let stream_id = prepared.reference.coord.stream_id.to_string();
             let sequence = prepared.reference.coord.sequence();
             if let Some(existing) =
                 crate::store::materialized_commit_index::materialized_commit_ref_on(
-                    &tx, &stream_id, sequence,
+                    tx, &stream_id, sequence,
                 )?
             {
                 if existing != prepared.reference {
@@ -461,7 +428,7 @@ impl StoreSession<'_> {
             let stream_id = prepared.reference.coord.stream_id.to_string();
             if let Some(existing) =
                 crate::store::materialized_commit_index::materialized_commit_ref_on(
-                    &tx,
+                    tx,
                     &stream_id,
                     prepared.reference.coord.sequence(),
                 )?
@@ -476,7 +443,7 @@ impl StoreSession<'_> {
             }
             let commit = prepared.commit.value();
             super::record_activated_store_device_registrations_on(
-                &tx,
+                tx,
                 commit,
                 &prepared.registrations,
             )?;
@@ -496,16 +463,10 @@ impl StoreSession<'_> {
                 &[],
                 None,
             )?;
-            let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
-                .record_verified_merge_materialization(
-                    &mut transaction_authority,
-                    materialization,
-                )?;
-            transaction_authority.insert_verified(retained)?;
+            let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+                .record_verified_merge_materialization(authority, materialization)?;
+            authority.insert_verified(retained)?;
         }
-        tx.commit().map_err(DbError::from)?;
-        self.verified_store_authority
-            .commit_transaction(transaction_authority);
         Ok(())
     }
 
@@ -517,21 +478,15 @@ impl StoreSession<'_> {
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let mut transaction_authority =
-            crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .begin_verified_authority_transaction(self.verified_store_authority)?;
-        let root = transaction_authority.root().clone();
+        let tx = self.store.transaction;
+        let authority = &mut *self.authority;
+        let root = authority.root().clone();
         let registrations = vec![registration];
         let commit = verified_commit.value();
-        super::record_activated_store_device_registrations_on(&tx, commit, &registrations)?;
-        let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
+        super::record_activated_store_device_registrations_on(tx, commit, &registrations)?;
+        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
             .record_materialized_merge_commit(
-                &mut transaction_authority,
+                authority,
                 &root,
                 &verified_commit,
                 &registrations,
@@ -541,9 +496,9 @@ impl StoreSession<'_> {
                 &[],
                 None,
             )?;
-        transaction_authority.insert_verified(retained)?;
+        authority.insert_verified(retained)?;
         super::owner_recovery_publication::complete_owner_recovery_publication_on(
-            &tx,
+            tx,
             &verified_commit,
             &activation_head,
             &activation_head_object,
@@ -557,10 +512,131 @@ impl StoreSession<'_> {
                 "injected failure after Merge summary materialization".to_string(),
             ));
         }
-        tx.commit().map_err(DbError::from)?;
-        self.verified_store_authority
-            .commit_transaction(transaction_authority);
         Ok(())
+    }
+}
+
+impl StoreSession<'_> {
+    fn apply_received_merge_materialization(
+        &mut self,
+        materialization: crate::PreparedMergeMaterialization,
+        retractions: Vec<coven_protocol::remote_object::VerifiedCandidateNonactivation>,
+        local_store_membership: coven_protocol::membership::LocalStoreMembership,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
+        receiver_wall_ms: u64,
+    ) -> Result<super::merge_materialization_transaction::AppliedMergeMaterialization, DbError>
+    {
+        let applied = self.verified_store_transaction(move |transaction| {
+            let applied = transaction.apply_received_merge_materialization(
+                materialization,
+                retractions,
+                local_store_membership,
+                routing_key,
+                receiver_wall_ms,
+            )?;
+            if matches!(
+                applied.outcome,
+                coven_protocol::membership::ApplyOutcome::Applied(_)
+            ) {
+                Ok(StoreTransactionOutcome::Commit(applied))
+            } else {
+                Ok(StoreTransactionOutcome::Rollback(applied))
+            }
+        })?;
+        if let Some(max_applied) = applied.max_updated_at.as_ref() {
+            self.hlc.advance_past(max_applied);
+        }
+        Ok(applied)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_published_store_operation(
+        &mut self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        verified_commit: VerifiedStoreBatchCommit,
+        registrations: Vec<ActivatedStoreDeviceRegistration>,
+        device_operations: VerifiedStoreDeviceOperations,
+        circle_activations: VerifiedCircleActivations,
+        activation_head: StoreDeviceHead,
+        activation_head_object: ExactObjectRef,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
+        membership_objects: Option<crate::VerifiedMergeMembershipObjects>,
+        operation_object_ids: Option<Vec<coven_protocol::store_commit::ObjectHash>>,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<(), DbError> {
+        self.verified_store_transaction(move |transaction| {
+            transaction.materialize_published_store_operation(
+                root,
+                verified_commit,
+                registrations,
+                device_operations,
+                circle_activations,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+                membership_objects,
+                operation_object_ids,
+                membership_completion,
+            )?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
+    }
+
+    fn materialize_device_join_activation(
+        &mut self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        verified_commit: VerifiedStoreBatchCommit,
+        registrations: Vec<ActivatedStoreDeviceRegistration>,
+        device_operations: VerifiedStoreDeviceOperations,
+        activation_head: StoreDeviceHead,
+        activation_head_object: ExactObjectRef,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
+    ) -> Result<(), DbError> {
+        self.verified_store_transaction(move |transaction| {
+            transaction.materialize_device_join_activation(
+                root,
+                verified_commit,
+                registrations,
+                device_operations,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+            )?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
+    }
+
+    fn install_device_join_bootstrap(
+        &mut self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        plan: crate::DeviceJoinBootstrapPlan,
+    ) -> Result<(), DbError> {
+        self.verified_store_transaction(move |transaction| {
+            transaction.install_device_join_bootstrap(root, plan)?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
+    }
+
+    fn complete_owner_recovery(
+        &mut self,
+        verified_commit: VerifiedStoreBatchCommit,
+        activation_head: StoreDeviceHead,
+        activation_head_object: ExactObjectRef,
+        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
+        registration: ActivatedStoreDeviceRegistration,
+    ) -> Result<(), DbError> {
+        self.verified_store_transaction(move |transaction| {
+            transaction.complete_owner_recovery(
+                verified_commit,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+                registration,
+            )?;
+            Ok(StoreTransactionOutcome::Commit(()))
+        })
     }
 }
 

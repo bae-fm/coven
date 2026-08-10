@@ -1,7 +1,8 @@
 use super::{
     candidate_records::begin_merge_candidate_nonactivation_on,
     publication_state::{MergeAbandonmentOutcome, PreparedStoreWriteState},
-    MergeMaterializationTransaction, StoreDatabase, StoreSession,
+    MergeMaterializationTransaction, StoreDatabase, StoreSession, StoreTransactionOutcome,
+    VerifiedStoreTransaction,
 };
 use crate::{
     candidate_graph_exact_objects, load_prepared_audience_objects_on, load_remote_object_on,
@@ -15,7 +16,7 @@ use coven_protocol::store_commit::{
 };
 use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteStatus};
 
-impl StoreSession<'_> {
+impl VerifiedStoreTransaction<'_, '_, '_> {
     fn complete_prepared_store_write(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
@@ -28,12 +29,12 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let state = &mut *self.verified_store_authority;
+        let state = &mut *self.authority;
         let gates = self.gates;
         let synced_tables = self.synced_tables;
-        let conn = self.records.conn;
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        let local_device_id = crate::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
+        let store_transaction = self.store;
+        let tx = store_transaction.transaction;
+        let local_device_id = crate::required_protocol_state_on(tx, LOCAL_DEVICE_ID_STATE_KEY)?;
         let prepared_count: i64 = tx
             .query_row(
                 "SELECT COUNT(*) FROM store_writes WHERE prepared IS NOT NULL",
@@ -58,8 +59,8 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::context("prepared Store write status", error))?;
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Store write", error))?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
-        let exclusion_candidate = store_transaction.prepared_merge_candidate(state, &prepared)?;
+        let exclusion_candidate =
+            state.prepared_merge_candidate_on(self.store.records, &prepared)?;
         if store_transaction
             .author_exclusion_activation_for_candidate(
                 state,
@@ -105,7 +106,6 @@ impl StoreSession<'_> {
                         "terminally retracted Store write changed during completion".to_string(),
                     ));
                 }
-                tx.commit().map_err(DbError::from)?;
                 return Ok((
                     CompletePreparedStoreWriteOutcome::AuthorExcluded { device_id },
                     None,
@@ -117,8 +117,7 @@ impl StoreSession<'_> {
                         "Store author {device_id} was excluded before candidate activation"
                     ),
                 });
-            Database::set_write_status_on(&tx, &write_id, &status)?;
-            tx.commit().map_err(DbError::from)?;
+            Database::set_write_status_on(tx, &write_id, &status)?;
             return Ok((
                 CompletePreparedStoreWriteOutcome::AuthorExcluded { device_id },
                 Some((write_id, status)),
@@ -133,16 +132,16 @@ impl StoreSession<'_> {
             ..
         } = &prepared
         {
-            let root = store_transaction.required_root_authority(state)?;
-            let candidate = store_transaction.prepared_merge_candidate_parts(
-                state,
+            let root = state.root().clone();
+            let candidate = state.prepared_merge_candidate_parts_on(
+                self.store.records,
                 candidate_commit.semantic_bytes(),
                 candidate_commit.prepared().reference(),
                 candidate_head.semantic_bytes(),
                 candidate_head.prepared().reference(),
             )?;
-            let authority = store_transaction.prepared_merge_candidate_parts(
-                state,
+            let authority = state.prepared_merge_candidate_parts_on(
+                self.store.records,
                 authority_commit.semantic_bytes(),
                 authority_commit.prepared().reference(),
                 authority_head.semantic_bytes(),
@@ -159,8 +158,9 @@ impl StoreSession<'_> {
                     "accepted Merge abandonment differs from its durable authority".to_string(),
                 ));
             }
-            let registration = store_transaction.activated_registration(
+            let registration = super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
                 state,
+                self.store.records,
                 &root,
                 &authority.commit.author_registration,
             )?;
@@ -176,7 +176,7 @@ impl StoreSession<'_> {
                 authority_head.prepared().reference(),
             ] {
                 let object_id = remote_object_id(object);
-                let remote = load_remote_object_on(&tx, object_id)?
+                let remote = load_remote_object_on(tx, object_id)?
                     .into_activated(&accepted)
                     .map_err(|error| {
                         DbError::context(
@@ -184,7 +184,7 @@ impl StoreSession<'_> {
                             error,
                         )
                     })?;
-                update_remote_object_on(&tx, object_id, &remote)?;
+                update_remote_object_on(tx, object_id, &remote)?;
             }
             let nonactivation = nonactivations.get(&candidate.reference).ok_or_else(|| {
                 DbError::Message(
@@ -193,26 +193,26 @@ impl StoreSession<'_> {
                 )
             })?;
             begin_merge_candidate_nonactivation_on(
-                &tx,
+                tx,
                 &WriteId::from_generated(stored_write_id.clone()),
                 &candidate,
                 nonactivation,
                 true,
                 &[],
             )?;
-            let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
+            let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
                 .record_materialized_merge_commit(
-                    state,
-                    &root,
-                    &authority.commit,
-                    &[],
-                    &authority.head,
-                    &authority.head_object,
-                    authority_history_evidence,
-                    &[],
-                    None,
-                )?;
-            state.validate_retained_materialization_insert(&retained)?;
+                state,
+                &root,
+                &authority.commit,
+                &[],
+                &authority.head,
+                &authority.head_object,
+                authority_history_evidence,
+                &[],
+                None,
+            )?;
+            state.insert_verified(retained)?;
             let mut completed_preparation = prepared.clone();
             let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
                 &mut completed_preparation
@@ -248,11 +248,7 @@ impl StoreSession<'_> {
                     ),
                 });
             let write_id = authority.commit.write_id.clone();
-            Database::set_write_status_on(&tx, &write_id, &blocked)?;
-            tx.commit().map_err(DbError::from)?;
-            state
-                .insert_retained_materialization(retained)
-                .expect("committed Merge abandonment passed cache validation");
+            Database::set_write_status_on(tx, &write_id, &blocked)?;
             return Ok((
                 CompletePreparedStoreWriteOutcome::Published,
                 Some((write_id, blocked)),
@@ -270,15 +266,16 @@ impl StoreSession<'_> {
                 "Merge abandonment reached ordinary publication completion".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
-        let root = store_transaction.required_root_authority(state)?;
+        let root = state.root().clone();
         let unverified: StoreBatchCommit = serde_json::from_slice(commit.semantic_bytes())
             .map_err(|error| DbError::context("prepared Store commit", error))?;
-        let registration = store_transaction.activated_registration(
-            state,
-            &root,
-            &unverified.author_registration,
-        )?;
+        let registration =
+            super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
+                state,
+                self.store.records,
+                &root,
+                &unverified.author_registration,
+            )?;
         let expected_stream =
             coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
                 root.store_root_hash,
@@ -328,7 +325,8 @@ impl StoreSession<'_> {
                 "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
             )));
         }
-        let audiences = load_prepared_audience_objects_on(&tx, self.records.store_dir, &write_id)?;
+        let audiences =
+            load_prepared_audience_objects_on(tx, self.store.records.store_dir, &write_id)?;
         let retained_packages = audiences
             .packages
             .iter()
@@ -355,7 +353,7 @@ impl StoreSession<'_> {
         );
         object_ids.insert(head_object_id);
         for object_id in object_ids {
-            let remote = load_remote_object_on(&tx, object_id)?
+            let remote = load_remote_object_on(tx, object_id)?
                 .into_activated(commit_ref)
                 .map_err(|error| {
                     DbError::context(format!("activate remote object {object_id}"), error)
@@ -377,9 +375,10 @@ impl StoreSession<'_> {
         let activation = BlobActivation {
             coord: commit_ref.coord.clone(),
         };
-        let apply_schema = crate::TableSchema::for_apply(&tx, synced_tables, gates)?;
-        let store_transaction = MergeMaterializationTransaction::new(&tx, self.records.store_dir);
-        let cloud_outbox = CloudOutboxRecords::new(&tx);
+        let apply_schema = crate::TableSchema::for_apply(tx, synced_tables, gates)?;
+        let store_transaction =
+            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
+        let cloud_outbox = CloudOutboxRecords::new(tx);
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
             let winning_rows = store_transaction
@@ -397,7 +396,7 @@ impl StoreSession<'_> {
                 }
             }
         }
-        match Database::make_remote_publication_root_on(&tx, &write_id)? {
+        match Database::make_remote_publication_root_on(tx, &write_id)? {
             Some((root_table, root_id)) => {
                 if consumed_uploads == 0 {
                     return Err(DbError::Message(format!(
@@ -417,7 +416,7 @@ impl StoreSession<'_> {
                                 "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
                             )));
                 }
-                Database::complete_make_remote_publication_on(&tx, &write_id)?;
+                Database::complete_make_remote_publication_on(tx, &write_id)?;
             }
             None if consumed_uploads != 0 => {
                 return Err(DbError::Message(format!(
@@ -464,7 +463,7 @@ impl StoreSession<'_> {
             [write_id.as_str()],
         )
         .map_err(DbError::from)?;
-        let retained = MergeMaterializationTransaction::new(&tx, self.records.store_dir)
+        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
             .record_materialized_merge_commit(
                 state,
                 &root,
@@ -477,7 +476,7 @@ impl StoreSession<'_> {
                 (!retained_packages.is_empty())
                     .then_some(RetainedPackageApplication::LocallyAuthored),
             )?;
-        state.validate_retained_materialization_insert(&retained)?;
+        state.insert_verified(retained)?;
         let cleared = tx
             .execute(
                 "UPDATE store_writes SET prepared = NULL
@@ -494,15 +493,32 @@ impl StoreSession<'_> {
             device_id: local_device_id,
             commit: accepted.clone(),
         }));
-        Database::set_write_status_on(&tx, &write_id, &status)?;
-        tx.commit().map_err(DbError::from)?;
-        state
-            .insert_retained_materialization(retained)
-            .expect("committed local Store publication passed cache validation");
+        Database::set_write_status_on(tx, &write_id, &status)?;
         Ok((
             CompletePreparedStoreWriteOutcome::Published,
             Some((write_id, status)),
         ))
+    }
+}
+
+impl StoreSession<'_> {
+    fn complete_prepared_store_write(
+        &mut self,
+        root: coven_protocol::store_commit::StoreRootRef,
+        accepted: StoreBatchCommitRef,
+        nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
+    ) -> Result<
+        (
+            CompletePreparedStoreWriteOutcome,
+            Option<(WriteId, WriteStatus)>,
+        ),
+        DbError,
+    > {
+        self.verified_store_transaction(move |transaction| {
+            let result =
+                transaction.complete_prepared_store_write(root, accepted, nonactivations)?;
+            Ok(StoreTransactionOutcome::Commit(result))
+        })
     }
 
     fn mark_merge_candidate_conflict(

@@ -106,6 +106,26 @@ pub(crate) struct StoreTransaction<'store, 'connection> {
     records: StoreRecords<'store>,
 }
 
+/// One Store SQL transaction and the authority facts staged beside it.
+///
+/// StoreSession owns commit and rollback. Operations borrow this capability so
+/// no workflow can promote verified cache state independently from its rows.
+struct VerifiedStoreTransaction<'transaction, 'connection, 'authority> {
+    store: StoreTransaction<'transaction, 'connection>,
+    authority: &'authority mut verified_store_authority::VerifiedStoreAuthorityTransaction,
+    gates: &'authority crate::Gates,
+    synced_tables: &'authority [coven_protocol::synced_schema::SyncedTable],
+    blob_decls: &'authority crate::BlobDecls,
+    #[cfg(any(test, feature = "test-utils"))]
+    merge_materialization_failure:
+        &'authority std::sync::Mutex<Option<crate::MergeMaterializationFailurePoint>>,
+}
+
+enum StoreTransactionOutcome<T> {
+    Commit(T),
+    Rollback(T),
+}
+
 use crate::{
     begin_remote_candidate_nonactivation_on, finish_outbound_store_ack_on,
     load_protocol_inert_object_on, load_remote_object_on, persist_exact_remote_object_on,
