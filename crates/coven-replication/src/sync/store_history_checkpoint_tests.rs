@@ -376,6 +376,41 @@ async fn retained_history_depth_does_not_repeat_exact_membership_head_reads() {
     );
 }
 
+async fn registration_reads_for_retained_history(history_length: u64) -> usize {
+    let fixture = PublishedHistory::publish(history_length).await;
+    let registration_slot = fixture.retained_history().await[0]
+        .activation_head()
+        .author_registration
+        .object
+        .slot()
+        .clone();
+    fixture.home.clear_exact_reads();
+
+    fixture
+        .device
+        .run_cycle(&fixture.store_dir, None)
+        .await
+        .expect("pull retained registration history");
+
+    fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| slot == &registration_slot)
+        .count()
+}
+
+#[tokio::test]
+async fn retained_history_depth_does_not_repeat_exact_registration_reads() {
+    let shallow = registration_reads_for_retained_history(1).await;
+    let deep = registration_reads_for_retained_history(12).await;
+
+    assert!(
+        deep <= shallow,
+        "one retained commit read its exact registration {shallow} times; twelve read it {deep} times",
+    );
+}
+
 #[tokio::test]
 async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
     let fixture = PublishedHistory::publish(3).await;

@@ -63,6 +63,14 @@ impl<'a> StoreCommitVerifier<'a> {
         &self,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
+        if let Some(registration) = self
+            .registrations
+            .lock()
+            .expect("verified registration cache mutex is not poisoned")
+            .get(reference)
+        {
+            return Ok(registration.clone());
+        }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreDeviceRegistration,
@@ -89,12 +97,20 @@ impl<'a> StoreCommitVerifier<'a> {
             }),
         )
         .await?;
-        Ok(VerifiedObject {
+        let verified = VerifiedObject {
             value,
             bytes,
             semantic_hash: reference.registration_hash,
             object: reference.object.clone(),
-        })
+        };
+        let mut registrations = self
+            .registrations
+            .lock()
+            .expect("verified registration cache mutex is not poisoned");
+        Ok(registrations
+            .entry(reference.clone())
+            .or_insert(verified)
+            .clone())
     }
 
     pub(crate) async fn verify_owner_recovery_activation(

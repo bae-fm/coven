@@ -98,6 +98,9 @@ pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn CloudSyncObjectStorage,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commits: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
+    registrations: std::sync::Mutex<
+        BTreeMap<StoreDeviceRegistrationRef, VerifiedObject<StoreDeviceRegistration>>,
+    >,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
@@ -240,6 +243,7 @@ impl<'a> StoreCommitVerifier<'a> {
             storage,
             root,
             commits: BTreeMap::new(),
+            registrations: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }
     }
