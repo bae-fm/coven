@@ -168,6 +168,14 @@ pub struct TestStore {
     founder_store_dir: StoreDir,
 }
 
+/// The sibling outputs of composing a test Store with its cloud connection.
+/// Tests that exercise the storage boundary retain both explicitly; `TestStore`
+/// never returns the connection it owns.
+pub struct TestStoreFixture {
+    pub store: Arc<TestStore>,
+    pub storage: Arc<coven_storage::CloudSyncConnection>,
+}
+
 /// Why a test pull did not produce a result. Keeps the three steps a test pull
 /// runs — opening the store, authorizing the writer, running the cycle — apart,
 /// so a test asserting on one of them cannot pass on another.
@@ -2511,6 +2519,65 @@ struct TestStoreProducers {
     by_name: HashMap<String, TestDevice>,
 }
 
+impl TestStoreFixture {
+    pub async fn create(
+        db: &SyntheticStoreFixture,
+        store_id: &str,
+        signer: UserKeypair,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+    ) -> Result<Self, String> {
+        Box::pin(TestStore::create_fixture_with_protection_database(
+            coven_database::StoreDatabase::new(&db.database),
+            db.store_dir.clone(),
+            store_id,
+            signer,
+            home,
+            coven_storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_key([42; 32]),
+            ),
+            coven_storage::BlobPathScheme::Hashed,
+        ))
+        .await
+    }
+
+    pub async fn create_encrypted(
+        db: &SyntheticStoreFixture,
+        store_id: &str,
+        signer: UserKeypair,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+        encryption: coven_keys::encryption::EncryptionService,
+    ) -> Result<Self, String> {
+        TestStore::create_fixture_with_protection_database(
+            coven_database::StoreDatabase::new(&db.database),
+            db.store_dir.clone(),
+            store_id,
+            signer,
+            home,
+            coven_storage::CloudCipher::Encrypted(encryption),
+            coven_storage::BlobPathScheme::Hashed,
+        )
+        .await
+    }
+
+    pub async fn create_browsable(
+        db: &SyntheticStoreFixture,
+        store_id: &str,
+        signer: UserKeypair,
+        home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+    ) -> Result<Self, String> {
+        Box::pin(TestStore::create_fixture_with_protection_database(
+            coven_database::StoreDatabase::new(&db.database),
+            db.store_dir.clone(),
+            store_id,
+            signer,
+            home,
+            coven_storage::CloudCipher::Plaintext,
+            coven_storage::BlobPathScheme::Plain,
+        ))
+        .await
+    }
+}
+
 impl TestStore {
     pub async fn bind_founder_device(
         &self,
@@ -2570,7 +2637,7 @@ impl TestStore {
         key: &str,
         bytes: Vec<u8>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.storage().write_provider_object(key, bytes).await
+        self.storage.write_provider_object(key, bytes).await
     }
 
     /// Plants a typed tombstone through the exact plaintext Store layout while
@@ -2852,7 +2919,7 @@ impl TestStore {
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Arc<Self>, String> {
-        Box::pin(Self::create_with_protection_database(
+        Box::pin(Self::create_fixture_with_protection_database(
             database,
             store_dir,
             store_id,
@@ -2864,6 +2931,7 @@ impl TestStore {
             coven_storage::BlobPathScheme::Hashed,
         ))
         .await
+        .map(|fixture| fixture.store)
     }
 
     /// A store whose home keeps blobs **browsable**: stored in the clear under
@@ -2895,7 +2963,7 @@ impl TestStore {
         cipher: coven_storage::CloudCipher,
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
-        Self::create_with_protection_database(
+        Self::create_fixture_with_protection_database(
             coven_database::StoreDatabase::new(&db.database),
             db.store_dir.clone(),
             store_id,
@@ -2905,9 +2973,10 @@ impl TestStore {
             blob_paths,
         )
         .await
+        .map(|fixture| fixture.store)
     }
 
-    async fn create_with_protection_database(
+    async fn create_fixture_with_protection_database(
         database: coven_database::StoreDatabase,
         store_dir: StoreDir,
         store_id: &str,
@@ -2915,7 +2984,7 @@ impl TestStore {
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
         cipher: coven_storage::CloudCipher,
         blob_paths: coven_storage::BlobPathScheme,
-    ) -> Result<Arc<Self>, String> {
+    ) -> Result<TestStoreFixture, String> {
         let storage = std::sync::Arc::new(
             coven_storage::CloudSyncConnection::new(
                 home.clone(),
@@ -2936,9 +3005,9 @@ impl TestStore {
         )
         .await?;
         let root = founder.store_root().clone();
-        Ok(Arc::new(Self {
+        let store = Arc::new(Self {
             home,
-            storage,
+            storage: storage.clone(),
             root,
             signer,
             founder: founder.clone(),
@@ -2947,16 +3016,12 @@ impl TestStore {
                 by_name: HashMap::new(),
             })),
             founder_store_dir,
-        }))
+        });
+        Ok(TestStoreFixture { store, storage })
     }
 
     pub fn protocol_founder_pubkey(&self) -> String {
         coven_keys::keys::public_key_hex(&self.signer)
-    }
-
-    /// The storage handle tests hand to code that takes a [`CloudSyncObjectStorage`].
-    pub fn storage(&self) -> std::sync::Arc<coven_storage::CloudSyncConnection> {
-        self.storage.clone()
     }
 
     pub async fn create_exact_protocol_object(

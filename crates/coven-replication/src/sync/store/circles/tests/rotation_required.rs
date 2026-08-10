@@ -63,6 +63,7 @@ fn open_circle_routing_test_db() -> SyntheticStoreFixture {
 struct RotationFixture {
     db: SyntheticStoreFixture,
     store: std::sync::Arc<TestStore>,
+    cloud_storage: Arc<coven_storage::CloudSyncConnection>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     owner_device: TestDevice,
     signer: UserKeypair,
@@ -117,7 +118,12 @@ impl RotationMemberDevice {
 impl RotationFixture {
     async fn build(label: &str) -> Self {
         let db = open_circle_routing_test_db();
-        let (store, _home, signer, founder) = persist_merge_operation(&db, label).await;
+        let (store_fixture, _home, signer, founder) =
+            persist_merge_operation_fixture(&db, label).await;
+        let TestStoreFixture {
+            store,
+            storage: cloud_storage,
+        } = store_fixture;
         let circle_id = founder.circle_id();
         let owner_device = store
             .bind_device(&db, &signer)
@@ -167,6 +173,7 @@ impl RotationFixture {
         Self {
             db,
             store,
+            cloud_storage,
             home: _home,
             owner_device,
             signer,
@@ -1147,7 +1154,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     let (_joined_temp, joined_dir) = temp_store_dir();
     let joined_store = crate::sync::store::Store::load(
         StoreDatabase::new(&joined_db.database),
-        fixture.store.storage(),
+        fixture.cloud_storage.clone(),
         joined_dir,
         fixture.signer.clone(),
     )

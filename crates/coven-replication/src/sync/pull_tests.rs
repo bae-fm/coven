@@ -411,8 +411,11 @@ trait PullTestStoreOps {
         root_id: &str,
     );
 
-    async fn read_exact_blob(&self, blob: &coven_protocol::blob::locator::StoredBlobRef)
-        -> Vec<u8>;
+    async fn read_exact_blob(
+        &self,
+        cloud_storage: &CloudSyncConnection,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Vec<u8>;
 
     async fn author_scoped_write(&self, db: &coven_database::SyntheticStoreFixture, sql: String);
 
@@ -423,6 +426,7 @@ trait PullTestStoreOps {
 
     async fn publish_exact_changeset_with_authority(
         &self,
+        cloud_storage: &CloudSyncConnection,
         signer: &UserKeypair,
         name: &str,
         sequence: u64,
@@ -465,6 +469,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn read_exact_blob(
         &self,
+        cloud_storage: &CloudSyncConnection,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Vec<u8> {
         let temp = tempfile::tempdir().expect("create exact blob read directory");
@@ -473,8 +478,7 @@ impl PullTestStoreOps for TestStore {
             .stage_atomic_file(&destination)
             .await
             .expect("create exact blob stage");
-        let staged = self
-            .storage()
+        let staged = cloud_storage
             .stage_verified_blob_plaintext(
                 blob,
                 match blob.locator() {
@@ -535,6 +539,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn publish_exact_changeset_with_authority(
         &self,
+        cloud_storage: &CloudSyncConnection,
         signer: &UserKeypair,
         name: &str,
         sequence: u64,
@@ -545,7 +550,7 @@ impl PullTestStoreOps for TestStore {
             .publish_changeset(name, sequence, changeset, SCHEMA_VERSION)
             .await
             .expect("publish exact Store changeset");
-        let graph = ExactPublishedCommit::load(self, reference, signer).await;
+        let graph = ExactPublishedCommit::load(self, cloud_storage, reference, signer).await;
         let commit = graph
             .resign_commit(
                 SCHEMA_VERSION,
@@ -685,6 +690,20 @@ async fn create_store(
     .expect("create exact test Store for the test database")
 }
 
+async fn create_store_fixture(
+    db: &coven_database::SyntheticStoreFixture,
+    signer: UserKeypair,
+) -> TestStoreFixture {
+    TestStoreFixture::create(
+        db,
+        "test-store",
+        signer,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create exact test Store for the test database")
+}
+
 fn constraint_conflicts(result: &crate::sync::store::StorePullResult) -> Vec<&HeldStorePosition> {
     result
         .held_positions
@@ -792,7 +811,8 @@ fn signed_member_grant(
 }
 
 struct ExactMembershipChain<'storage> {
-    storage: &'storage TestStore,
+    store: &'storage TestStore,
+    cloud_storage: &'storage CloudSyncConnection,
     chain: MembershipChain,
 }
 
@@ -811,24 +831,32 @@ impl std::ops::DerefMut for ExactMembershipChain<'_> {
 }
 
 impl<'storage> ExactMembershipChain<'storage> {
-    async fn load(storage: &'storage TestStore) -> Self {
+    async fn load(
+        store: &'storage TestStore,
+        cloud_storage: &'storage CloudSyncConnection,
+    ) -> Self {
         let db = open_test_db();
-        let device = storage
+        let device = store
             .open_into(&db)
             .await
             .expect("load exact test Store membership");
-        Self::load_from_device(storage, &device).await
+        Self::load_from_device(store, cloud_storage, &device).await
     }
 
     async fn load_from_device(
-        storage: &'storage TestStore,
+        store: &'storage TestStore,
+        cloud_storage: &'storage CloudSyncConnection,
         device: &crate::sync::test_helpers::TestDevice,
     ) -> Self {
         let chain = device
             .membership_for_test()
             .await
             .expect("authorize exact test Store membership");
-        Self { storage, chain }
+        Self {
+            store,
+            cloud_storage,
+            chain,
+        }
     }
 
     async fn publish_entry(
@@ -842,9 +870,10 @@ impl<'storage> ExactMembershipChain<'storage> {
             membership_head_slot_prefix, StreamActivation, SuccessorLink,
         };
 
-        let storage = self.storage;
+        let store = self.store;
+        let cloud_storage = self.cloud_storage;
         let chain = &mut self.chain;
-        let authority = storage
+        let authority = store
             .founder_device()
             .await
             .expect("authenticate exact membership publication");
@@ -885,11 +914,10 @@ impl<'storage> ExactMembershipChain<'storage> {
                 entry.author_owner_grant.clone(),
                 1,
             );
-            let recovery_slot = storage
-                .storage()
+            let recovery_slot = cloud_storage
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
-                        storage.root.store_root_hash,
+                        store.root.store_root_hash,
                         ProtocolObjectDomain::OwnerRecoveryNode,
                     ),
                     &recovery_prefix,
@@ -903,12 +931,11 @@ impl<'storage> ExactMembershipChain<'storage> {
                 owner_grant: entry.author_owner_grant.clone(),
             };
             let device_id =
-                coven_protocol::store_commit::StoreDeviceId::derive(&storage.root, &origin);
-            let announcement_slot = storage
-                .storage()
+                coven_protocol::store_commit::StoreDeviceId::derive(&store.root, &origin);
+            let announcement_slot = cloud_storage
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
-                        storage.root.store_root_hash,
+                        store.root.store_root_hash,
                         ProtocolObjectDomain::StoreHead,
                     ),
                     &coven_protocol::store_commit::head_slot_prefix(&device_id.to_string(), 1),
@@ -916,11 +943,10 @@ impl<'storage> ExactMembershipChain<'storage> {
                 )
                 .await
                 .expect("allocate exact announcement slot");
-            let acknowledgement_slot = storage
-                .storage()
+            let acknowledgement_slot = cloud_storage
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
-                        storage.root.store_root_hash,
+                        store.root.store_root_hash,
                         ProtocolObjectDomain::StoreAck,
                     ),
                     &coven_protocol::store_commit::ack_slot_prefix(&device_id.to_string(), 1),
@@ -928,11 +954,10 @@ impl<'storage> ExactMembershipChain<'storage> {
                 )
                 .await
                 .expect("allocate exact acknowledgement slot");
-            let snapshot_slot = storage
-                .storage()
+            let snapshot_slot = cloud_storage
                 .allocate_protocol_slot(
                     &ProtocolObjectContext::signed_plaintext(
-                        storage.root.store_root_hash,
+                        store.root.store_root_hash,
                         ProtocolObjectDomain::StoreSnapshotMeta,
                     ),
                     &coven_protocol::store_commit::snapshot_slot_prefix(&device_id.to_string(), 0),
@@ -940,12 +965,12 @@ impl<'storage> ExactMembershipChain<'storage> {
                 )
                 .await
                 .expect("allocate exact snapshot slot");
-            let founder_authority = storage
+            let founder_authority = store
                 .founder_device_authority()
                 .await
                 .expect("load exact founder device registration");
             let registration = StoreDeviceRegistration::signed(
-                storage.root.clone(),
+                store.root.clone(),
                 origin,
                 founder_authority.registration().provider.clone(),
                 DeviceStreamAnchor::StoreAnnouncements {
@@ -964,20 +989,17 @@ impl<'storage> ExactMembershipChain<'storage> {
                 &registration.device_id.to_string(),
             );
             let context = ProtocolObjectContext::signed_plaintext(
-                storage.root.store_root_hash,
+                store.root.store_root_hash,
                 ProtocolObjectDomain::StoreDeviceRegistration,
             );
-            let slot = storage
-                .storage()
+            let slot = cloud_storage
                 .allocate_protocol_slot(&context, &semantic_prefix, ".json")
                 .await
                 .expect("allocate exact membership registration object");
-            let prepared = storage
-                .storage()
+            let prepared = cloud_storage
                 .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
                 .expect("prepare exact membership registration object");
-            storage
-                .storage()
+            cloud_storage
                 .create_protocol_object(&prepared)
                 .await
                 .expect("publish exact membership registration object");
@@ -1025,20 +1047,19 @@ impl<'storage> ExactMembershipChain<'storage> {
             },
         };
         let (entry_object, entry_ref) = coven_storage::prepare_membership_entry(
-            &*storage.storage(),
-            storage.root.store_root_hash,
+            cloud_storage,
+            store.root.store_root_hash,
             &entry,
         )
         .await
         .expect("prepare exact membership entry");
-        storage
-            .storage()
+        cloud_storage
             .create_protocol_object(&entry_object)
             .await
             .expect("publish exact membership entry");
 
         let context = ProtocolObjectContext::signed_plaintext(
-            storage.root.store_root_hash,
+            store.root.store_root_hash,
             ProtocolObjectDomain::StoreMembershipHead,
         );
         let next_prefix = membership_head_slot_prefix(
@@ -1050,8 +1071,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 .checked_add(1)
                 .expect("membership sequence overflow"),
         );
-        let next_slot = storage
-            .storage()
+        let next_slot = cloud_storage
             .allocate_protocol_slot(&context, &next_prefix, ".json")
             .await
             .expect("allocate exact membership successor slot");
@@ -1064,7 +1084,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 resolutions: entry.resolution_dependencies.clone(),
                 successor: SuccessorLink {
                     activation: StreamActivation::grant_authorized(
-                        storage.root.store_root_hash,
+                        store.root.store_root_hash,
                         registration_ref.clone(),
                         coord.author_owner_grant.clone(),
                         anchor.clone(),
@@ -1086,8 +1106,7 @@ impl<'storage> ExactMembershipChain<'storage> {
             coord.stream_id,
             coord.seq,
         );
-        let prepared = storage
-            .storage()
+        let prepared = cloud_storage
             .prepare_protocol_object(
                 &context,
                 current_slot,
@@ -1095,8 +1114,7 @@ impl<'storage> ExactMembershipChain<'storage> {
                 serde_json::to_vec(&head).expect("serialize exact membership head"),
             )
             .expect("prepare exact membership head");
-        storage
-            .storage()
+        cloud_storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish exact membership head");
@@ -1114,7 +1132,8 @@ impl<'storage> ExactMembershipChain<'storage> {
 }
 
 struct ExactPublishedCommit<'storage> {
-    storage: &'storage TestStore,
+    store: &'storage TestStore,
+    cloud_storage: &'storage CloudSyncConnection,
     reference: coven_protocol::store_commit::StoreBatchCommitRef,
     commit: coven_protocol::store_commit::VerifiedStoreBatchCommit,
     registration: coven_protocol::store_commit::StoreDeviceRegistration,
@@ -1168,15 +1187,17 @@ impl<'storage> ExactPublishedCommit<'storage> {
     }
 
     async fn load(
-        storage: &'storage TestStore,
+        store: &'storage TestStore,
+        cloud_storage: &'storage CloudSyncConnection,
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
         identity: &UserKeypair,
     ) -> Self {
-        Self::load_as(storage, reference, identity).await
+        Self::load_as(store, cloud_storage, reference, identity).await
     }
 
     async fn load_as(
-        storage: &'storage TestStore,
+        store: &'storage TestStore,
+        cloud_storage: &'storage CloudSyncConnection,
         reference: coven_protocol::store_commit::StoreBatchCommitRef,
         identity: &UserKeypair,
     ) -> Self {
@@ -1185,7 +1206,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             head_slot_prefix, StoreDeviceHead, StoreDeviceRegistration,
         };
 
-        let commit = storage
+        let commit = store
             .founder_device()
             .await
             .expect("open Store authority")
@@ -1202,15 +1223,14 @@ impl<'storage> ExactPublishedCommit<'storage> {
             panic!("pull test registration has a Store announcement anchor")
         };
         let head_context = ProtocolObjectContext::signed_plaintext(
-            storage.root.store_root_hash,
+            store.root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
         let mut slot = first_slot.clone();
         let mut sequence = 1_u64;
         let (head, head_object) = loop {
             let prefix = head_slot_prefix(&registration.device_id.to_string(), sequence);
-            let (bytes, object) = storage
-                .storage()
+            let (bytes, object) = cloud_storage
                 .read_protocol_slot(&head_context, &slot, &prefix)
                 .await
                 .expect("read exact published Store head");
@@ -1231,7 +1251,8 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .is_ok());
         let _: StoreDeviceRegistration = registration.clone();
         Self {
-            storage,
+            store,
+            cloud_storage,
             reference,
             commit,
             registration,
@@ -1264,7 +1285,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
 
         let stream_id = commit_stream_id(&self.reference);
         let commit_context = ProtocolObjectContext::signed_plaintext(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
         );
         let semantic_prefix = coven_protocol::store_commit::commit_semantic_prefix(
@@ -1274,18 +1295,15 @@ impl<'storage> ExactPublishedCommit<'storage> {
             commit_hash,
         );
         let slot = self
-            .storage
-            .storage()
+            .cloud_storage
             .allocate_protocol_slot(&commit_context, &semantic_prefix, ".json")
             .await
             .expect("allocate replacement exact Store commit slot");
         let commit_prepared = self
-            .storage
-            .storage()
+            .cloud_storage
             .prepare_protocol_object(&commit_context, slot, &semantic_prefix, commit_bytes)
             .expect("prepare replacement exact Store commit");
-        self.storage
-            .storage()
+        self.cloud_storage
             .create_protocol_object(&commit_prepared)
             .await
             .expect("publish replacement exact Store commit");
@@ -1306,16 +1324,15 @@ impl<'storage> ExactPublishedCommit<'storage> {
         use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let head_context = ProtocolObjectContext::signed_plaintext(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
-        self.storage
-            .storage()
+        self.cloud_storage
             .delete_protocol_object(&self.head_object)
             .await
             .expect("delete replaced exact Store head");
         let head = StoreDeviceHead::signed(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             head_registration,
             reference.clone(),
             self.head.successor.clone(),
@@ -1327,8 +1344,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             reference.coord.sequence(),
         );
         let head_prepared = self
-            .storage
-            .storage()
+            .cloud_storage
             .prepare_protocol_object(
                 &head_context,
                 self.head_object.slot().clone(),
@@ -1336,8 +1352,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
                 head.to_bytes(),
             )
             .expect("prepare replacement exact Store head");
-        self.storage
-            .storage()
+        self.cloud_storage
             .create_protocol_object(&head_prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1367,16 +1382,15 @@ impl<'storage> ExactPublishedCommit<'storage> {
         use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 
         let context = ProtocolObjectContext::signed_plaintext(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
-        self.storage
-            .storage()
+        self.cloud_storage
             .delete_protocol_object(&self.head_object)
             .await
             .expect("delete replaced exact Store head");
         let head = StoreDeviceHead::signed(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             author_registration,
             commit,
             self.head.successor.clone(),
@@ -1388,8 +1402,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             self.reference.coord.sequence(),
         );
         let prepared = self
-            .storage
-            .storage()
+            .cloud_storage
             .prepare_protocol_object(
                 &context,
                 self.head_object.slot().clone(),
@@ -1397,8 +1410,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
                 head.to_bytes(),
             )
             .expect("prepare replacement exact Store head");
-        self.storage
-            .storage()
+        self.cloud_storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store head");
@@ -1414,7 +1426,7 @@ impl<'storage> ExactPublishedCommit<'storage> {
             .store_package()
             .expect("test Store commit carries a Store package");
         let package_bytes = self
-            .storage
+            .store
             .founder_device()
             .await
             .expect("load Store package authority")
@@ -1459,21 +1471,18 @@ impl<'storage> ExactPublishedCommit<'storage> {
             package.content_hash,
         );
         let context = ProtocolObjectContext::store_encrypted(
-            self.storage.root.store_root_hash,
+            self.store.root.store_root_hash,
             ProtocolObjectDomain::StorePackage,
         );
-        self.storage
-            .storage()
+        self.cloud_storage
             .delete_protocol_object(&package.object)
             .await
             .expect("delete replaced exact Store package");
         let prepared = self
-            .storage
-            .storage()
+            .cloud_storage
             .prepare_protocol_object(&context, package.object.slot().clone(), &prefix, bytes)
             .expect("prepare replacement exact Store package");
-        self.storage
-            .storage()
+        self.cloud_storage
             .create_protocol_object(&prepared)
             .await
             .expect("publish replacement exact Store package");
@@ -1485,10 +1494,10 @@ impl<'storage> ExactPublishedCommit<'storage> {
         let malformed = b"not a SQLite changeset";
         let stream_id = commit_stream_id(&self.reference);
         let package_object = self
-            .storage
+            .store
             .create_exact_protocol_object(
                 &coven_protocol::objects::ProtocolObjectContext::store_encrypted(
-                    self.storage.root.store_root_hash,
+                    self.store.root.store_root_hash,
                     coven_protocol::objects::ProtocolObjectDomain::StorePackage,
                 ),
                 &coven_protocol::store_commit::package_semantic_prefix(
@@ -2383,7 +2392,10 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
 async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     let db1 = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
 
     // The source device's head advertises seq 1, but the changeset object is
     // gone: reclamation deleted it as superseded. `store_changeset` both writes
@@ -2401,13 +2413,12 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
         .await
         .expect("publish exact Store changeset");
     let stream_id = commit_stream_id(&commit);
-    let graph = ExactPublishedCommit::load(&storage, commit, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, commit, &founder).await;
     let package = graph
         .commit
         .store_package()
         .expect("Store commit carries a Store package");
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&package.object)
         .await
         .expect("delete exact Store package");
@@ -2836,7 +2847,10 @@ async fn fk_violation_still_retries_and_resolves() {
 async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     let db1 = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
     // A changeset stamped one schema version above the local db, signed at its own
     // position so the position check passes and the loop reaches the signature and
     // schema checks.
@@ -2851,7 +2865,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let commit = graph
         .resign_commit(
             SCHEMA_VERSION + 1,
@@ -2906,7 +2920,10 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
 async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     let db1 = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
     let cs = db1
         .database
         .capture_test_changeset(&[
@@ -2918,7 +2935,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let commit = graph
         .resign_commit(
             SCHEMA_VERSION + 1,
@@ -2960,7 +2977,10 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
 async fn pull_gate_tracks_the_dbs_schema_version() {
     let db1 = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
 
     let n = db1.database.schema_version();
 
@@ -2990,7 +3010,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         .publish_changeset("dev1", 2, &cs2, n)
         .await
         .expect("publish second exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let commit = graph
         .resign_commit(n + 1, graph.commit.membership_authority.clone())
         .await;
@@ -3114,7 +3134,10 @@ async fn sync_reuses_opened_schema_models() {
 #[tokio::test]
 async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let db1 = open_test_db_with_blob(photo_decl());
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, UserKeypair::generate()).await;
     let source_device = storage
         .founder_device()
         .await
@@ -3151,8 +3174,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .stored()
         .cloned()
         .expect("published row carries exact blob authority");
-    storage
-        .storage()
+    cloud_storage
         .delete_blob_object(&stored)
         .await
         .expect("remove exact remote blob fixture");
@@ -3218,7 +3240,10 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let db1 = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
 
     let cs = db1
         .database
@@ -3231,7 +3256,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         .publish_changeset("dev1", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let package = graph
         .commit
         .store_package()
@@ -3284,7 +3309,10 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
 async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let src = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&src, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&src, founder.clone()).await;
 
     let cs = src
         .database
@@ -3297,7 +3325,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         .publish_changeset("dev", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = &graph.reference.coord;
     let relocated_coord = coven_protocol::store_commit::StoreCommitCoord {
         stream_id: *stream_id,
@@ -3367,7 +3395,10 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
 async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let src = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&src, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&src, founder.clone()).await;
 
     let cs = src
         .database
@@ -3380,7 +3411,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         .publish_changeset("devVictim", 1, &cs, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let relocated_stream = coven_protocol::membership::AuthorStreamId::from_bytes([99; 32]);
     let relocated_object = storage
         .create_exact_protocol_object(
@@ -3585,7 +3616,10 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
 async fn malformed_store_package_isolates_to_one_device() {
     let bad_source = open_test_db();
     let founder = UserKeypair::generate();
-    let storage = create_store(&bad_source, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&bad_source, founder.clone()).await;
     storage
         .device_id("founder")
         .await
@@ -3631,10 +3665,11 @@ async fn malformed_store_package_isolates_to_one_device() {
         .await
         .expect("publish valid exact Store changeset");
     let good_stream_id = commit_stream_id(&good_reference);
-    let bad_reference = ExactPublishedCommit::load(&storage, bad_reference, &founder)
-        .await
-        .replace_package_with_malformed_bytes()
-        .await;
+    let bad_reference =
+        ExactPublishedCommit::load(&storage, &cloud_storage, bad_reference, &founder)
+            .await
+            .replace_package_with_malformed_bytes()
+            .await;
     let bad_stream_id = commit_stream_id(&bad_reference);
 
     let (updated, result) = storage
@@ -3764,7 +3799,10 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, UserKeypair::generate()).await;
 
     // Source: a shared note + an audio row, declared user-provided · CacheLazy.
     db1.database.capture_test_changeset(&[
@@ -3801,7 +3839,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("published audio row carries exact blob authority");
 
     assert_eq!(
-        storage.read_exact_blob(&audio_blob).await,
+        storage.read_exact_blob(&cloud_storage, &audio_blob).await,
         b"AUDIO-PAYLOAD",
         "the transition publishes the exact user-provided bytes",
     );
@@ -3819,7 +3857,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
         .expect("open exact Store before failed lazy verification");
     let failing: Arc<dyn CloudSyncObjectStorage> =
         Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-            storage.storage(),
+            cloud_storage.clone(),
             FaultingStorage::blob(),
         ));
     let error = storage
@@ -5471,7 +5509,10 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     let eager_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
     let lazy_decl = || BlobDecl::new("covers", Provenance::HostProvided, CacheFill::CacheLazy);
     let db1 = open_test_db_with_user_and_host_blobs(eager_decl(), lazy_decl());
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, UserKeypair::generate()).await;
 
     // Both children host-provided, differing only in fill: the photo is CacheEager,
     // the cover CacheLazy. Both inherit the `notes` gate, so a shared note carries
@@ -5523,8 +5564,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
         .row_blob_ref("note_photos", "peager01")
         .await
         .expect("load exact eager row blob reference");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(eager.stored().expect("eager blob was published"))
         .await
         .expect("verify exact eager blob object");
@@ -5533,8 +5573,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
         .row_blob_ref("note_covers", "clazy001")
         .await
         .expect("load exact lazy row blob reference");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(lazy.stored().expect("lazy blob was published"))
         .await
         .expect("verify exact lazy blob object");
@@ -5547,7 +5586,10 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
 #[tokio::test]
 async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let db1 = open_test_db_with_blob(photo_decl());
-    let storage = create_store(&db1, UserKeypair::generate()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, UserKeypair::generate()).await;
 
     // Source dev1: a note + a CacheEager cover row, the cover present in the cloud.
     db1.database.capture_test_changeset(&[
@@ -5589,7 +5631,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         coven_database::StoreDatabase::new(&db1.database),
         source_store_dir.clone(),
     )
-    .connected_blob_transitions(storage.storage(), None, None)
+    .connected_blob_transitions(cloud_storage, None, None)
     .make_local("notes", "n1", &HashMap::new(), &cancel)
     .await
     .expect("make exact blob root Local");
@@ -6006,9 +6048,12 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     let founder = UserKeypair::generate();
     let db1 = open_test_db();
-    let storage = create_store(&db1, founder.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, founder.clone()).await;
 
-    let chain = ExactMembershipChain::load(&storage).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
 
     let cs = db1
         .database
@@ -6019,6 +6064,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &founder,
             "dev1",
             1,
@@ -6031,7 +6077,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
             ),
         )
         .await;
-    let graph = ExactPublishedCommit::load(&storage, reference, &founder).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &founder).await;
     let mut unsigned: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     unsigned
         .as_object_mut()
@@ -6116,7 +6162,10 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
     let owner = UserKeypair::generate();
     let owner_pubkey = hex::encode(owner.public_key());
     let source = open_test_db();
-    let storage = create_store(&source, owner).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner).await;
     let db2 = open_test_db();
     let loaded = storage
         .open_into(&db2)
@@ -6137,8 +6186,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
         .await
         .unwrap();
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&founder_head.object)
         .await
         .expect("remove exact founder membership head");
@@ -6155,6 +6203,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
 struct PersistedCycleRemoval {
     storage: std::sync::Arc<TestStore>,
+    cloud_storage: std::sync::Arc<CloudSyncConnection>,
     db: coven_database::SyntheticStoreFixture,
     founder_pubkey: String,
     second_owner_head: coven_protocol::membership::MembershipHeadRef,
@@ -6170,7 +6219,10 @@ impl PersistedCycleRemoval {
         let second_owner_pubkey = hex::encode(second_owner.public_key());
         let removed_member_pubkey = hex::encode(removed_member.public_key());
         let db = open_test_db();
-        let storage = create_store(&db, founder.clone()).await;
+        let TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        } = create_store_fixture(&db, founder.clone()).await;
         let encryption = EncryptionService::from_key([42; 32]);
         storage
             .invite_member(
@@ -6203,7 +6255,8 @@ impl PersistedCycleRemoval {
             .open_into(&db)
             .await
             .expect("load membership after second Owner promotion");
-        let mut chain = ExactMembershipChain::load_from_device(&storage, &loaded).await;
+        let mut chain =
+            ExactMembershipChain::load_from_device(&storage, &cloud_storage, &loaded).await;
         let second_owner_stream = membership_author_stream(&chain, &second_owner);
         let add_member = chain
             .signed_set_member_in_stream(
@@ -6240,6 +6293,7 @@ impl PersistedCycleRemoval {
 
         Self {
             storage,
+            cloud_storage,
             db,
             founder_pubkey,
             second_owner_head,
@@ -6278,8 +6332,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
 async fn cycle_rejects_missing_state_required_by_a_persisted_floor() {
     let fixture = PersistedCycleRemoval::build().await;
     fixture
-        .storage
-        .storage()
+        .cloud_storage
         .delete_protocol_object(&fixture.second_owner_head.object)
         .await
         .expect("delete exact persisted membership head");
@@ -6308,7 +6361,10 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let owner_pubkey = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let source = open_test_db();
-    let storage = create_store(&source, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner.clone()).await;
     let target = open_test_db();
     let loaded = storage
         .open_into(&target)
@@ -6320,7 +6376,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .unwrap();
 
-    let mut chain = ExactMembershipChain::load_from_device(&storage, &loaded).await;
+    let mut chain = ExactMembershipChain::load_from_device(&storage, &cloud_storage, &loaded).await;
     let mut writer = loaded
         .authorize_writer()
         .await
@@ -6337,6 +6393,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "devM",
             1,
@@ -6383,11 +6440,14 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
     // A founder entry + a changeset the owner authored: without the fail-closed
     // guard the cycle would (fail to list, drop to chain=None, then) apply this.
-    let _chain = ExactMembershipChain::load(&storage).await;
+    let _chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let cs = db1
         .database
         .capture_test_changeset(&[
@@ -6411,7 +6471,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .await
         .expect("open exact Store before fault injection");
     let failing = std::sync::Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.storage(),
+        cloud_storage.clone(),
         FaultingStorage::membership(1),
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
@@ -6447,9 +6507,12 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     // `devOwner` with the owner keypair, so the head's author is a current member
     // and passes the head-authorization check.
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
-    let chain = ExactMembershipChain::load(&storage).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     // The owner authors a signed changeset.
     let cs = db1
         .database
@@ -6460,6 +6523,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "devOwner",
             1,
@@ -6497,7 +6561,10 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     let owner_pk = hex::encode(owner.public_key());
     let second_owner = UserKeypair::generate();
     let source = open_test_db();
-    let storage = create_store(&source, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner.clone()).await;
     storage
         .device_id("founder")
         .await
@@ -6555,6 +6622,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "devOwner",
             1,
@@ -6610,9 +6678,12 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let source = open_test_db();
-    let storage = create_store(&source, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner.clone()).await;
 
-    let _chain = ExactMembershipChain::load(&storage).await;
+    let _chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
 
     let changeset = source
         .database
@@ -6625,7 +6696,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         .publish_changeset("devOwner", 1, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish valid Store changeset before removing its authority");
-    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &owner).await;
     let commit = graph.resign_commit(SCHEMA_VERSION, None).await;
     let reference = graph
         .replace_commit_bytes_before_validation(
@@ -6662,7 +6733,10 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let source = open_test_db();
-    let storage = create_store(&source, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner.clone()).await;
     storage
         .device_id("devOwner")
         .await
@@ -6700,7 +6774,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("devOwner", owner_sequence, &changeset, SCHEMA_VERSION)
         .await
         .expect("publish exact Store changeset");
-    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &owner).await;
     let other_sequence = storage
         .next_commit_sequence("other-device")
         .await
@@ -6709,9 +6783,8 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
         .publish_changeset("other-device", other_sequence, &[], SCHEMA_VERSION)
         .await
         .expect("publish second exact device graph");
-    let other = ExactPublishedCommit::load(&storage, other_reference, &owner).await;
-    storage
-        .storage()
+    let other = ExactPublishedCommit::load(&storage, &cloud_storage, other_reference, &owner).await;
+    cloud_storage
         .delete_protocol_object(&graph.head_object)
         .await
         .expect("remove original stream head");
@@ -6768,10 +6841,13 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = create_store(&owner_db, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&owner_db, owner.clone()).await;
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     let lagging_authority = add_member.coord();
     chain.publish_entry(add_member, &owner).await;
@@ -6826,7 +6902,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .unwrap();
 
     let lagging = Arc::new(InterceptedStorage::new(
-        storage.storage(),
+        cloud_storage.clone(),
         MissingProtocolSlot {
             semantic_prefix: hidden_head,
         },
@@ -6882,9 +6958,12 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // Head signed by the owner (a current member) so the head passes its check and
     // pull reaches the changeset-level judgment.
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_outsider = chain
         .signed_set_member_in_stream(
             &owner,
@@ -6908,7 +6987,14 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         ])
         .await;
     let reference = storage
-        .publish_exact_changeset_with_authority(&owner, "devX", 1, &cs, Some(unrelated_authority))
+        .publish_exact_changeset_with_authority(
+            &cloud_storage,
+            &owner,
+            "devX",
+            1,
+            &cs,
+            Some(unrelated_authority),
+        )
         .await;
     let stream_id = commit_stream_id(&reference);
 
@@ -6954,9 +7040,12 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
-    let chain = ExactMembershipChain::load(&storage).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
 
     // The owner (a current member) authors a changeset that WOULD be authorized,
     // then its signature is corrupted. The signature check must reject it before
@@ -6970,6 +7059,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "dev1",
             1,
@@ -6982,7 +7072,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
             ),
         )
         .await;
-    let graph = ExactPublishedCommit::load(&storage, reference, &owner).await;
+    let graph = ExactPublishedCommit::load(&storage, &cloud_storage, reference, &owner).await;
     let mut forged: serde_json::Value = serde_json::from_slice(&graph.commit.to_bytes()).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
     let commit_ref = graph
@@ -7041,9 +7131,12 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = create_store(&owner_db, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&owner_db, owner.clone()).await;
 
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let member_db = open_test_db();
@@ -7125,12 +7218,15 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = create_store(&owner_db, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&owner_db, owner.clone()).await;
     let owner_device = storage
         .founder_device()
         .await
         .expect("retain revocation-witness Owner device");
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
 
@@ -7161,7 +7257,8 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .await
         .expect("publish member candidate")
         .expect("member candidate produces a Store commit");
-    let candidate_graph = ExactPublishedCommit::load_as(&storage, candidate, &member).await;
+    let candidate_graph =
+        ExactPublishedCommit::load_as(&storage, &cloud_storage, candidate, &member).await;
     let write_id = candidate_graph.commit.write_id.clone();
 
     let remove_member = chain
@@ -7267,9 +7364,12 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let remove_member = chain
@@ -7310,7 +7410,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .expect("membership head slot key has a .json suffix")
         .to_string();
     let lagging = std::sync::Arc::new(InterceptedStorage::new(
-        storage.storage(),
+        cloud_storage.clone(),
         MissingProtocolSlot {
             semantic_prefix: hidden,
         },
@@ -7346,23 +7446,25 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
     // The owner publishes a head covering only the founder entry (seq 1) before
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
-    let chain = ExactMembershipChain::load(&storage).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     let grant = add_member.coord();
     let (prepared, _) = coven_storage::prepare_membership_entry(
-        &*storage.storage(),
+        &*cloud_storage,
         storage.root.store_root_hash,
         &add_member,
     )
     .await
     .expect("prepare uncommitted exact membership entry");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish uncommitted exact membership entry");
@@ -7377,7 +7479,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         ])
         .await;
     let reference = storage
-        .publish_exact_changeset_with_authority(&owner, "devM", 1, &cs, Some(grant))
+        .publish_exact_changeset_with_authority(&cloud_storage, &owner, "devM", 1, &cs, Some(grant))
         .await;
     let stream_id = commit_stream_id(&reference);
 
@@ -7410,9 +7512,12 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let member = UserKeypair::generate();
     let relocated_author = hex::encode(UserKeypair::generate().public_key());
     let source = open_test_db();
-    let storage = create_store(&source, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&source, owner.clone()).await;
 
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     let owner_grant = add_member.coord();
     let grant_bytes = serde_json::to_vec(&add_member).expect("serialize exact membership grant");
@@ -7428,17 +7533,14 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         storage.root.store_root_hash,
         coven_protocol::objects::ProtocolObjectDomain::StoreMembershipEntry,
     );
-    let slot = storage
-        .storage()
+    let slot = cloud_storage
         .allocate_protocol_slot(&context, &relocated_prefix, ".json")
         .await
         .expect("allocate relocated exact membership grant slot");
-    let prepared = storage
-        .storage()
+    let prepared = cloud_storage
         .prepare_protocol_object(&context, slot, &relocated_prefix, grant_bytes)
         .expect("prepare relocated exact membership grant");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared)
         .await
         .expect("relocate the grant to another author's coordinate");
@@ -7452,6 +7554,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "devM",
             1,
@@ -7502,11 +7605,14 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
     // Capture the cycle's founder-only membership view before committing the
     // member Add and activating that member's device.
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
 
     let db2 = open_test_db();
     db2.database
@@ -7518,7 +7624,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await
         .expect("load exact committed membership prefix");
     let failing = Arc::new(crate::sync::test_helpers::InterceptedStorage::new(
-        storage.storage(),
+        cloud_storage.clone(),
         FaultingStorage::membership(0),
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
@@ -7599,9 +7705,12 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
     let db2 = open_test_db();
-    let storage = create_store(&db2, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db2, owner.clone()).await;
 
-    let mut chain = ExactMembershipChain::load(&storage).await;
+    let mut chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member.clone(), &owner).await;
     let remove_member = chain
@@ -7632,8 +7741,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     // reader's watermark at 3.
     storage.pull_into(&db2, &temp_store_dir().1).await;
 
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&remove_head.object)
         .await
         .expect("hide exact remove head to serve the predecessor as terminal");
@@ -7653,8 +7761,11 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
 #[tokio::test]
 async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
     let db2 = open_test_db();
-    let storage = create_store(&db2, UserKeypair::generate()).await;
-    let chain = ExactMembershipChain::load(&storage).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db2, UserKeypair::generate()).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
     let founder = chain.entries().first().expect("exact founder entry");
     let coord = founder.coord();
     let head_ref = chain
@@ -7684,13 +7795,11 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         coord.seq,
         coord.entry_hash,
     );
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&head.body.entry.object)
         .await
         .expect("delete exact founder entry before corruption");
-    let prepared = storage
-        .storage()
+    let prepared = cloud_storage
         .prepare_protocol_object(
             &context,
             head.body.entry.object.slot().clone(),
@@ -7698,8 +7807,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
             serde_json::to_vec(&bad).expect("serialize corrupt founder"),
         )
         .expect("prepare corrupt exact founder entry");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish corrupt exact founder entry");
@@ -7726,9 +7834,12 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     // The mock is the owner's device, so the head it publishes for `devA` is
     // owner-signed — a current member.
     let db1 = open_test_db();
-    let storage = create_store(&db1, owner.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store_fixture(&db1, owner.clone()).await;
 
-    let chain = ExactMembershipChain::load(&storage).await;
+    let chain = ExactMembershipChain::load(&storage, &cloud_storage).await;
 
     let cs = db1
         .database
@@ -7739,6 +7850,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         .await;
     let reference = storage
         .publish_exact_changeset_with_authority(
+            &cloud_storage,
             &owner,
             "devA",
             1,

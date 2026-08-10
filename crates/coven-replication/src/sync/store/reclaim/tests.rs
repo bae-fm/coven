@@ -19,6 +19,7 @@ fn proof_object(path: &str) -> ExactObjectRef {
 /// Store packages, released from replay retention so both are reclaim-eligible.
 struct ReclaimJourneyFixture {
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     device: crate::sync::test_helpers::TestDevice,
     packages: Vec<StorePackageReclaimTarget>,
@@ -29,14 +30,15 @@ impl ReclaimJourneyFixture {
         let db = crate::sync::test_helpers::open_test_db();
         let signer = UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
-        let store = crate::sync::test_helpers::TestStore::create(
-            &db,
-            store_id,
-            signer.clone(),
-            home.clone(),
-        )
-        .await
-        .expect("create Store");
+        let crate::sync::test_helpers::TestStoreFixture { store, storage } =
+            crate::sync::test_helpers::TestStoreFixture::create(
+                &db,
+                store_id,
+                signer.clone(),
+                home.clone(),
+            )
+            .await
+            .expect("create Store");
         let device = store
             .bind_device(&db, &signer)
             .await
@@ -112,6 +114,7 @@ impl ReclaimJourneyFixture {
 
         Self {
             store,
+            storage,
             home,
             device,
             packages,
@@ -140,8 +143,7 @@ impl ReclaimJourneyFixture {
             ProtocolObjectDomain::StorePackage,
         );
         match self
-            .store
-            .storage()
+            .storage
             .read_protocol_object(&context, &target.package.object, &prefix)
             .await
         {
@@ -254,7 +256,10 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
 async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletion() {
     let db = crate::sync::test_helpers::open_test_db();
     let signer = UserKeypair::generate();
-    let store = crate::sync::test_helpers::TestStore::create(
+    let crate::sync::test_helpers::TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = crate::sync::test_helpers::TestStoreFixture::create(
         &db,
         "signed-reclaim-authority",
         signer.clone(),
@@ -321,13 +326,11 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         ProtocolObjectDomain::StoreReclaimEvidence,
     );
     let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
-    let evidence_slot = store
-        .storage()
+    let evidence_slot = cloud_storage
         .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
         .await
         .expect("allocate evidence slot");
-    let prepared_evidence = store
-        .storage()
+    let prepared_evidence = cloud_storage
         .prepare_protocol_object(
             &evidence_context,
             evidence_slot,
@@ -335,8 +338,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
             evidence.to_bytes(),
         )
         .expect("prepare evidence");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared_evidence)
         .await
         .expect("create evidence");
@@ -365,13 +367,11 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     );
     let authorization_prefix =
         reclaim_authorization_semantic_prefix(authorization.authorization_hash());
-    let authorization_slot = store
-        .storage()
+    let authorization_slot = cloud_storage
         .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
         .await
         .expect("allocate authorization slot");
-    let prepared_authorization = store
-        .storage()
+    let prepared_authorization = cloud_storage
         .prepare_protocol_object(
             &authorization_context,
             authorization_slot,
@@ -379,8 +379,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
             authorization.to_bytes(),
         )
         .expect("prepare authorization");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared_authorization)
         .await
         .expect("create authorization");
@@ -466,8 +465,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         unreachable!("Store package reclaim target");
     };
     let StoreCommitCoord { stream_id, .. } = target.activation.coord;
-    store
-        .storage()
+    cloud_storage
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -489,7 +487,10 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
 async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     let db = crate::sync::test_helpers::open_test_db();
     let signer = UserKeypair::generate();
-    let store = crate::sync::test_helpers::TestStore::create(
+    let crate::sync::test_helpers::TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = crate::sync::test_helpers::TestStoreFixture::create(
         &db,
         "reclaim-activation-head",
         signer.clone(),
@@ -588,8 +589,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .drive_candidate(candidate)
         .await
         .expect("activate reclaim authorization");
-    store
-        .storage()
+    cloud_storage
         .delete_protocol_object(&activation_head.object)
         .await
         .expect("remove reclaim activation head");
@@ -607,8 +607,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         deletion.is_err(),
         "a reclaim authorization without its exact Merge activation head must not delete"
     );
-    store
-        .storage()
+    cloud_storage
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -625,8 +624,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .await
         .expect("missing activation authority leaves target readable");
 
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&activation_head_prepared)
         .await
         .expect("restore exact reclaim activation head");
@@ -643,8 +641,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         reclaim.execute_delete(authorized).await.is_err(),
         "a retracted Merge reclaim activation must not delete"
     );
-    store
-        .storage()
+    cloud_storage
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,

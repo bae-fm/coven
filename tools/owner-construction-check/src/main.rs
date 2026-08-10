@@ -328,13 +328,28 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStoreFixture",
+        "create",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStoreFixture",
+        "create_encrypted",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStoreFixture",
+        "create_browsable",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "create_with_protection",
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
-        "create_with_protection_database",
+        "create_fixture_with_protection_database",
     ),
 ];
 

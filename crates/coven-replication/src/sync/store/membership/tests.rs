@@ -1,5 +1,7 @@
 use super::*;
-use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
+use crate::sync::test_helpers::{
+    open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore, TestStoreFixture,
+};
 use coven_database::StoreDatabase;
 use coven_database::SyntheticStoreFixture;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
@@ -17,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 struct MergeFixture {
     store: std::sync::Arc<TestStore>,
+    storage: Arc<coven_storage::CloudSyncConnection>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     store_id: String,
     device: crate::sync::test_helpers::TestDevice,
@@ -34,9 +37,10 @@ impl MergeFixture {
         let owner = UserKeypair::generate();
         let owner_pubkey = pubkey_hex(&owner);
         let home = crate::sync::test_helpers::test_cloud_home();
-        let store = TestStore::create(&db, store_id, owner.clone(), home.clone())
-            .await
-            .expect("create exact Store");
+        let TestStoreFixture { store, storage } =
+            TestStoreFixture::create(&db, store_id, owner.clone(), home.clone())
+                .await
+                .expect("create exact Store");
         let device = store
             .bind_device(&db, &owner)
             .await
@@ -45,6 +49,7 @@ impl MergeFixture {
         let (store_dir_temp, store_dir) = temp_store_dir();
         Self {
             store,
+            storage,
             home,
             store_id: store_id.to_string(),
             device,
@@ -162,8 +167,7 @@ async fn current_floor_requires_every_exact_entry() {
         .await
         .expect("load exact head");
     fixture
-        .store
-        .storage()
+        .storage
         .delete_protocol_object(&loaded_head.body.entry.object)
         .await
         .expect("remove exact selected entry");
@@ -182,8 +186,7 @@ async fn persisted_author_floor_requires_readable_head() {
     let chain = fixture.load().await;
     let head = chain.head_refs().last().expect("current head").clone();
     fixture
-        .store
-        .storage()
+        .storage
         .delete_protocol_object(&head.object)
         .await
         .expect("remove exact head");
@@ -313,8 +316,7 @@ async fn missing_membership_head_is_rejected() {
     let chain = fixture.load().await;
     let head = chain.head_refs().first().expect("founder head");
     fixture
-        .store
-        .storage()
+        .storage
         .delete_protocol_object(&head.object)
         .await
         .expect("remove founder head");
@@ -343,15 +345,14 @@ async fn entry_beyond_membership_head_is_not_committed() {
         )
         .expect("sign entry after exact head");
     let (prepared, _) = coven_storage::prepare_membership_entry(
-        &*fixture.store.storage(),
+        &*fixture.storage,
         fixture.store.root.store_root_hash,
         &entry,
     )
     .await
     .expect("prepare unheaded entry");
     fixture
-        .store
-        .storage()
+        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish unheaded entry");
@@ -630,14 +631,12 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         founder_ref.coord.seq,
     );
     let slot = fixture
-        .store
-        .storage()
+        .storage
         .allocate_protocol_slot(&context, &prefix, ".json")
         .await
         .expect("allocate relocated membership head slot");
     let prepared = fixture
-        .store
-        .storage()
+        .storage
         .prepare_protocol_object(
             &context,
             slot,
@@ -646,8 +645,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         )
         .expect("prepare relocated membership head");
     fixture
-        .store
-        .storage()
+        .storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish relocated membership head");
@@ -716,8 +714,7 @@ async fn suppressed_remove_is_detected_by_the_exact_cursor() {
     let chain = fixture.load().await;
     let remove_head = chain.head_refs().last().expect("remove head").clone();
     fixture
-        .store
-        .storage()
+        .storage
         .delete_protocol_object(&remove_head.object)
         .await
         .expect("suppress exact remove head");
@@ -944,7 +941,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
 
     assert!(crate::sync::store::Store::open(
         coven_database::StoreDatabase::new(&db.database),
-        fixture.store.storage(),
+        fixture.storage.clone(),
         fixture.store_dir.clone(),
         &fixture.store.root,
         &fixture.owner,
@@ -985,8 +982,7 @@ async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
         .clone()
         .expect("remove predecessor");
     fixture
-        .store
-        .storage()
+        .storage
         .delete_protocol_object(&latest.object)
         .await
         .expect("remove latest exact head");

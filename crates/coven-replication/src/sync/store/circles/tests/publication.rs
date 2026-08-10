@@ -728,8 +728,12 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
 #[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let db = open_circle_blob_test_db();
-    let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-member-bootstrap").await;
+    let (store_fixture, _home, signer, founder) =
+        persist_merge_operation_fixture(&db, "circle-member-bootstrap").await;
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = store_fixture;
     let circle_id = founder.circle_id();
     store
         .bind_device(&db, &signer)
@@ -1083,12 +1087,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         store_dir.clone(),
     );
     blob_owners
-        .materialize_blob(Some(store.storage()), &historical_blob)
+        .materialize_blob(Some(cloud_storage.clone()), &historical_blob)
         .await
         .expect("materialize a blob through its retained founder control");
     assert_eq!(
         blob_owners
-            .read_blob(Some(store.storage()), &historical_blob)
+            .read_blob(Some(cloud_storage.clone()), &historical_blob)
             .await
             .expect("read a blob through its retained founder control"),
         blob_bytes,
@@ -1107,8 +1111,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .stage_atomic_file(&opened_destination)
         .await
         .expect("create opened blob stage");
-    let opened = store
-        .storage()
+    let opened = cloud_storage
         .stage_verified_blob_plaintext(
             historical_blob
                 .stored()
@@ -1143,7 +1146,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     )
     .expect("construct same-Circle successor-control substitution");
     let substitution_error = blob_owners
-        .read_blob(Some(store.storage()), &substituted)
+        .read_blob(Some(cloud_storage.clone()), &substituted)
         .await
         .expect_err("row blob binding must reject a substituted Circle control");
     assert!(
@@ -1242,8 +1245,12 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
 #[tokio::test]
 async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses() {
     let db = open_circle_routing_test_db();
-    let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-member-removal").await;
+    let (store_fixture, _home, signer, founder) =
+        persist_merge_operation_fixture(&db, "circle-member-removal").await;
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = store_fixture;
     let circle_id = founder.circle_id();
     store
         .bind_device(&db, &signer)
@@ -1490,8 +1497,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .publish_circle_epoch_close_responses()
         .await
         .expect("publish local Circle epoch-close response");
-    let (bytes, response_object) = store
-        .storage()
+    let (bytes, response_object) = cloud_storage
         .read_protocol_slot(&response_context, &participant.response_slot, &prefix)
         .await
         .expect("read exact Circle epoch-close response");
@@ -1522,8 +1528,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let correct_stored = _home
         .get(&response_storage_key)
         .expect("read stored Circle epoch-close response fixture");
-    let malformed = store
-        .storage()
+    let malformed = cloud_storage
         .prepare_protocol_object(
             &response_context,
             participant.response_slot.clone(),
@@ -1699,8 +1704,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         "each remaining Circle member receives a successor bootstrap"
     );
     assert_eq!(outcome_ref.outcome_hash, *outcome_hash);
-    let outcome_bytes = store
-        .storage()
+    let outcome_bytes = cloud_storage
         .read_protocol_object(
             &ProtocolObjectContext::store_encrypted(
                 store.root.store_root_hash,
@@ -1808,8 +1812,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_commit.store_root_hash,
         ProtocolObjectDomain::CirclePackage,
     );
-    let candidate_package_slot = store
-        .storage()
+    let candidate_package_slot = cloud_storage
         .allocate_protocol_slot(
             &candidate_package_context,
             &candidate_package_prefix,
@@ -1817,8 +1820,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect("allocate exact old-control package slot");
-    let candidate_package_object = store
-        .storage()
+    let candidate_package_object = cloud_storage
         .prepare_protocol_object(
             &candidate_package_context,
             candidate_package_slot,
@@ -1826,8 +1828,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             candidate_package_bytes.clone(),
         )
         .expect("prepare exact old-control package");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&candidate_package_object)
         .await
         .expect("publish exact old-control package");
@@ -1876,13 +1877,11 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         successor_commit.store_root_hash,
         ProtocolObjectDomain::StoreCommit,
     );
-    let candidate_commit_slot = store
-        .storage()
+    let candidate_commit_slot = cloud_storage
         .allocate_protocol_slot(&candidate_commit_context, &candidate_commit_prefix, ".json")
         .await
         .expect("allocate combined Circle candidate slot");
-    let candidate_commit_object = store
-        .storage()
+    let candidate_commit_object = cloud_storage
         .prepare_protocol_object(
             &candidate_commit_context,
             candidate_commit_slot,
@@ -2165,6 +2164,7 @@ struct ClosingFounderCircle {
     _temp: tempfile::TempDir,
     db: SyntheticStoreFixture,
     store: std::sync::Arc<TestStore>,
+    cloud_storage: Arc<coven_storage::CloudSyncConnection>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
     components: crate::sync::cycle::SyncComponents,
@@ -2184,7 +2184,12 @@ impl ClosingFounderCircle {
     /// The returned fixture resumes from `CircleOperationState::WaitingForCloseResponses`.
     async fn build(name: &str) -> Self {
         let db = open_circle_routing_test_db();
-        let (store, _home, signer, founder) = persist_merge_operation(&db, name).await;
+        let (store_fixture, _home, signer, founder) =
+            persist_merge_operation_fixture(&db, name).await;
+        let TestStoreFixture {
+            store,
+            storage: cloud_storage,
+        } = store_fixture;
         let circle_id = founder.circle_id();
         let owner_device = store
             .bind_device(&db, &signer)
@@ -2290,6 +2295,7 @@ impl ClosingFounderCircle {
             _temp,
             db,
             store,
+            cloud_storage,
             home: _home,
             signer,
             components,
@@ -2835,8 +2841,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
             continue;
         }
         fixture
-            .store
-            .storage()
+            .cloud_storage
             .create_protocol_object(object)
             .await
             .expect("publish reopen exact object");
@@ -3110,8 +3115,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     assert!(
         matches!(
             fixture
-                .store
-                .storage()
+                .cloud_storage
                 .read_protocol_slot(&control_context, control_object.slot(), &control_prefix)
                 .await,
             Err(coven_protocol::objects::StorageError::NotFound(_))
@@ -4601,8 +4605,12 @@ async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
 #[tokio::test]
 async fn cancelling_a_deleted_circles_close_is_refused() {
     let db = open_circle_routing_test_db();
-    let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-cancel-deleted").await;
+    let (store_fixture, _home, signer, founder) =
+        persist_merge_operation_fixture(&db, "circle-cancel-deleted").await;
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = store_fixture;
     let circle_id = founder.circle_id();
     store
         .bind_device(&db, &signer)
@@ -4624,7 +4632,7 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let error = crate::sync::store::Store::load(
         coven_database::StoreDatabase::new(&db.database),
-        store.storage(),
+        cloud_storage,
         store_dir,
         signer.clone(),
     )

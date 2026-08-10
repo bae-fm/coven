@@ -1,4 +1,4 @@
-use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore};
+use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore, TestStoreFixture};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
@@ -72,7 +72,7 @@ impl PublishedHistory {
         let signer = UserKeypair::generate();
         let db = open_test_db();
         let home = crate::sync::test_helpers::test_cloud_home();
-        let store = TestStore::create(
+        let TestStoreFixture { store, storage } = TestStoreFixture::create(
             &db,
             &format!("checkpoint-sabotage-{history_length}"),
             signer.clone(),
@@ -84,7 +84,6 @@ impl PublishedHistory {
             .bind_device(&db, &signer)
             .await
             .expect("load Merge Store");
-        let storage = store.storage();
         let membership = device
             .membership_for_test()
             .await
@@ -431,7 +430,7 @@ async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySab
     let path = directory.path().join("authority.sqlite");
     let signer = UserKeypair::generate();
     let database = open_persistent_history_database(&path, "authority-reopen-device");
-    let store = TestStore::create(
+    let TestStoreFixture { store, storage } = TestStoreFixture::create(
         &database,
         "authority-reopen",
         signer.clone(),
@@ -465,7 +464,6 @@ async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySab
             .await
             .expect("corrupt verified Store registration"),
     }
-    let storage = store.storage();
     drop(device);
     drop(store);
     drop(store_database);

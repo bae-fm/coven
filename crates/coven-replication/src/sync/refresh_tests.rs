@@ -15,7 +15,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::sync::store::authorization::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
-use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
+use crate::sync::test_helpers::{
+    open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore, TestStoreFixture,
+};
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::MasterKeyCustody;
@@ -64,6 +66,7 @@ trait RefreshTestStoreOps {
 
     async fn create_unreferenced_wrapped_key(
         &self,
+        cloud_storage: &coven_storage::CloudSyncConnection,
         owner_db: &coven_database::SyntheticStoreFixture,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
@@ -167,6 +170,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn create_unreferenced_wrapped_key(
         &self,
+        cloud_storage: &coven_storage::CloudSyncConnection,
         owner_db: &coven_database::SyntheticStoreFixture,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
@@ -188,7 +192,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .prepare_wrapped_key(&recipient_pubkey, wrapped)
             .await
             .expect("prepare exact wrapped Store key");
-        self.storage()
+        cloud_storage
             .create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrapped Store key");
@@ -196,15 +200,18 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     }
 }
 
-async fn exact_store(
-    owner: &UserKeypair,
-    encryption: &EncryptionService,
-) -> (
-    std::sync::Arc<TestStore>,
-    coven_database::SyntheticStoreFixture,
-) {
+struct ExactStoreFixture {
+    store: Arc<TestStore>,
+    cloud_storage: Arc<coven_storage::CloudSyncConnection>,
+    db: coven_database::SyntheticStoreFixture,
+}
+
+async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> ExactStoreFixture {
     let owner_db = open_test_db();
-    let storage = Box::pin(TestStore::create_encrypted(
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = Box::pin(TestStoreFixture::create_encrypted(
         &owner_db,
         LIB_ID,
         owner.clone(),
@@ -213,10 +220,14 @@ async fn exact_store(
     ))
     .await
     .expect("create exact refresh Store");
-    Box::pin(storage.open_into(&owner_db))
+    Box::pin(store.open_into(&owner_db))
         .await
         .expect("open exact refresh Store on owner device");
-    (storage, owner_db)
+    ExactStoreFixture {
+        store,
+        cloud_storage,
+        db: owner_db,
+    }
 }
 
 #[derive(Clone)]
@@ -271,7 +282,11 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let old_key: [u8; 32] = [11u8; 32];
 
     let encryption = EncryptionService::from_key(old_key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -370,7 +385,11 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     let removed_member = UserKeypair::generate();
     let invited_member = UserKeypair::generate();
     let initial = EncryptionService::from_key([52u8; 32]);
-    let (storage, owner_db) = exact_store(&owner, &initial).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage,
+        db: owner_db,
+    } = exact_store(&owner, &initial).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -418,9 +437,8 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         )
         .await
         .expect("publish post-rotation invitation");
-    let pinned_storage = storage.storage();
     let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
-        .open_pinned(&*pinned_storage, &invitation.store_root)
+        .open_pinned(&*cloud_storage, &invitation.store_root)
         .await
         .expect("open invitation history");
     let chain = history
@@ -431,7 +449,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .await
         .expect("load invitation membership");
     let invited_keyring =
-        crate::sync::store::StoreKeyrings::new(&*pinned_storage, invitation.store_root.clone())
+        crate::sync::store::StoreKeyrings::new(&*cloud_storage, invitation.store_root.clone())
             .open_containing(&invited_member, &chain, &invitation.wrapped_key)
             .await
             .expect("invited member opens the activated exact wrap");
@@ -457,7 +475,11 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     // The cloud is the owner's, so a changeset it serves is authored by a member
     // the pull will authorize against the chain.
     let encryption = EncryptionService::from_key(old_key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -472,7 +494,13 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         .with_appended_generation(2, rotated_key)
         .unwrap();
     let unreferenced = storage
-        .create_unreferenced_wrapped_key(&owner_db, &device_b, &pending_keyring, &owner)
+        .create_unreferenced_wrapped_key(
+            &cloud_storage,
+            &owner_db,
+            &device_b,
+            &pending_keyring,
+            &owner,
+        )
         .await;
     assert!(
         !chain
@@ -523,13 +551,9 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         old_key,
         "an unreferenced key must not replace the live cipher",
     );
-    load_wrapped_store_key(
-        &*storage.storage(),
-        storage.root.store_root_hash,
-        &unreferenced,
-    )
-    .await
-    .expect("the ignored exact object remains readable by its exact reference");
+    load_wrapped_store_key(&*cloud_storage, storage.root.store_root_hash, &unreferenced)
+        .await
+        .expect("the ignored exact object remains readable by its exact reference");
 }
 
 #[tokio::test]
@@ -540,7 +564,11 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let old_key: [u8; 32] = [12u8; 32];
 
     let encryption = EncryptionService::from_key(old_key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -592,7 +620,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     );
 
     load_wrapped_store_key(
-        &*storage.storage(),
+        &*cloud_storage,
         storage.root.store_root_hash,
         &old_reference,
     )
@@ -634,7 +662,11 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
     let expected = current
         .merged_with(&replacement)
         .expect("same-generation keyrings merge");
-    let (storage, owner_db) = exact_store(&owner, &current).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: owner_db,
+    } = exact_store(&owner, &current).await;
     storage
         .invite_exact_member(&owner_db, &owner, &device_b, MemberRole::Member, &current)
         .await;
@@ -696,7 +728,11 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let old_key: [u8; 32] = [15u8; 32];
 
     let encryption = EncryptionService::from_key(old_key);
-    let (storage, owner_db) = exact_store(&founder, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: owner_db,
+    } = exact_store(&founder, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -785,7 +821,11 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     let second_victim = UserKeypair::generate();
     let initial = EncryptionService::from_key([41u8; 32]);
 
-    let (storage, founder_db) = exact_store(&founder, &initial).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: founder_db,
+    } = exact_store(&founder, &initial).await;
     storage
         .invite_exact_member(
             &founder_db,
@@ -929,7 +969,11 @@ async fn removed_owner_key_is_not_adopted() {
     let current_key: [u8; 32] = [16u8; 32];
 
     let encryption = EncryptionService::from_key(current_key);
-    let (storage, owner_db) = exact_store(&founder, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: owner_db,
+    } = exact_store(&founder, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -1013,7 +1057,11 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     let real_key: [u8; 32] = [22u8; 32];
 
     let encryption = EncryptionService::from_key(real_key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
@@ -1027,6 +1075,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     let forged_key: [u8; 32] = [0xCDu8; 32];
     let forged = storage
         .create_unreferenced_wrapped_key(
+            &cloud_storage,
             &owner_db,
             &device_b,
             &EncryptionService::from_key(forged_key),
@@ -1065,7 +1114,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         forged_key,
         "the attacker's key was rejected",
     );
-    load_wrapped_store_key(&*storage.storage(), storage.root.store_root_hash, &forged)
+    load_wrapped_store_key(&*cloud_storage, storage.root.store_root_hash, &forged)
         .await
         .expect("the ignored attacker object exists at its exact reference");
 }
@@ -1081,7 +1130,11 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let key: [u8; 32] = [44u8; 32];
 
     let encryption = EncryptionService::from_key(key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     let chain = storage
         .invite_exact_member(
             &owner_db,
@@ -1111,8 +1164,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         )
         .await
         .expect("load exact active membership head");
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&head.body.entry.object)
         .await
         .expect("remove exact membership entry before refresh");
@@ -1142,7 +1194,11 @@ async fn one_cycle_loads_exact_membership_once() {
     let key: [u8; 32] = [7u8; 32];
 
     let encryption = EncryptionService::from_key(key);
-    let (storage, owner_db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db: owner_db,
+    } = exact_store(&owner, &encryption).await;
     let chain = storage
         .invite_exact_member(
             &owner_db,
@@ -1212,7 +1268,11 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     let old_key: [u8; 32] = [11u8; 32];
 
     let encryption = EncryptionService::from_key(old_key);
-    let (storage, db) = exact_store(&owner, &encryption).await;
+    let ExactStoreFixture {
+        store: storage,
+        cloud_storage: _,
+        db,
+    } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(&db, &owner, &member, MemberRole::Member, &encryption)
         .await;

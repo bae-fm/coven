@@ -15,7 +15,7 @@ use crate::blob::delete::{BlobTombstoneJson, TombstoneDrain};
 use crate::sync::test_helpers::{
     exact_tombstone_key, open_test_db, open_test_db_with_blob, open_test_db_with_tombstone_grace,
     plaintext_cipher, pubkey_hex, InterceptedStorage, ProviderObjectExistsInterception,
-    StorageInterceptor, TestStore,
+    StorageInterceptor, TestStore, TestStoreFixture,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use coven_database::StoreDatabase;
@@ -55,9 +55,9 @@ fn open_outbox_db() -> SyntheticStoreFixture {
     db
 }
 
-async fn test_store() -> Arc<TestStore> {
+async fn test_store() -> TestStoreFixture {
     let database = open_test_db();
-    TestStore::create(
+    TestStoreFixture::create(
         &database,
         "test-store",
         UserKeypair::generate(),
@@ -91,10 +91,11 @@ impl<'a> TombstoneCollector<'a> {
 
     async fn for_founder(
         database: StoreDatabase,
-        storage: &Arc<TestStore>,
+        fixture: &TestStore,
+        storage: Arc<dyn CloudSyncObjectStorage>,
         cipher: &'a RwLock<CloudCipher>,
     ) -> Result<Self, String> {
-        Self::for_founder_with_storage(database, storage, storage.storage(), cipher).await
+        Self::for_founder_with_storage(database, fixture, storage, cipher).await
     }
 
     async fn for_founder_with_storage(
@@ -127,10 +128,10 @@ impl<'a> TombstoneCollector<'a> {
 /// a member, a non-member, or the founder.
 async fn storage_with_chain(
     db: &SyntheticStoreFixture,
-) -> (std::sync::Arc<TestStore>, UserKeypair, UserKeypair) {
+) -> (TestStoreFixture, UserKeypair, UserKeypair) {
     let founder = UserKeypair::generate();
     let member = UserKeypair::generate();
-    let storage = TestStore::create(
+    let fixture = TestStoreFixture::create(
         db,
         "test-store",
         founder.clone(),
@@ -138,7 +139,8 @@ async fn storage_with_chain(
     )
     .await
     .expect("create exact Store membership fixture");
-    storage
+    fixture
+        .store
         .invite_member(
             db,
             &founder,
@@ -151,12 +153,11 @@ async fn storage_with_chain(
         .await
         .expect("publish exact member invitation");
 
-    (storage, founder, member)
+    (fixture, founder, member)
 }
 
-async fn tombstone_exists(storage: &TestStore, key: &str) -> bool {
+async fn tombstone_exists(storage: &coven_storage::CloudSyncConnection, key: &str) -> bool {
     storage
-        .storage()
         .provider_object_exists(key)
         .await
         .expect("inspect exact tombstone")
@@ -311,7 +312,10 @@ impl StorageInterceptor for FailStorageOpOnKey {
 async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
     let stored = storage
@@ -326,7 +330,7 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
         .expect("enqueue exact blob deletion");
 
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+    let n = drain_at(&store_database, &*cloud_storage, &cipher, &kp, &clock)
         .await
         .expect("drain");
     assert_eq!(n, 1, "one tombstone written");
@@ -372,7 +376,10 @@ async fn enqueued_delete_becomes_a_tombstone_and_clears_the_outbox() {
 async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
     let stored = storage
@@ -389,7 +396,7 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
         .await
         .expect("enqueue exact blob deletion");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+    let n = drain_at(&store_database, &*cloud_storage, &cipher, &kp, &clock)
         .await
         .expect("drain");
 
@@ -415,7 +422,10 @@ async fn garbage_at_the_tombstone_key_does_not_clear_the_delete() {
 async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
     let stored = storage
@@ -438,7 +448,7 @@ async fn valid_existing_tombstone_is_preserved_by_delete_drain() {
         .await
         .expect("enqueue exact blob deletion");
     let clock = FixedClock(at("2024-06-10T00:00:00Z"));
-    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &clock)
+    let n = drain_at(&store_database, &*cloud_storage, &cipher, &kp, &clock)
         .await
         .expect("drain");
 
@@ -499,7 +509,10 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
         })
         .await
         .expect("enqueue exact upload");
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = test_store().await;
     let stored = storage
         .create_exact_opaque_blob("delete-tests", "shape-delete", b"delete")
         .await;
@@ -541,14 +554,17 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
 async fn delete_validation_failure_backs_off_then_retries() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let stored = storage
         .create_exact_opaque_blob("delete-tests", "validation-retry", b"body")
         .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let failure = FailStorageOpOnKey::new(FailingCloudOp::Read, &tombstone_key, 1);
     let calls = failure.calls.clone();
-    let intercepted = InterceptedStorage::new(storage.storage(), failure);
+    let intercepted = InterceptedStorage::new(cloud_storage.clone(), failure);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -628,14 +644,17 @@ async fn delete_validation_failure_backs_off_then_retries() {
 async fn delete_write_failure_backs_off_then_retries() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let stored = storage
         .create_exact_opaque_blob("delete-tests", "write-retry", b"body")
         .await;
     let tombstone_key = exact_tombstone_key(&stored);
     let failure = FailStorageOpOnKey::new(FailingCloudOp::PutObject, &tombstone_key, 1);
     let calls = failure.calls.clone();
-    let intercepted = InterceptedStorage::new(storage.storage(), failure);
+    let intercepted = InterceptedStorage::new(cloud_storage.clone(), failure);
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
 
@@ -699,7 +718,10 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
             tokio::task::spawn_local(async {
                 let db = open_outbox_db();
                 let store_database = StoreDatabase::new(&db.database);
-                let storage = Box::pin(test_store()).await;
+                let TestStoreFixture {
+                    store: storage,
+                    storage: cloud_storage,
+                } = Box::pin(test_store()).await;
                 let corrupt = Box::pin(storage.create_exact_opaque_blob(
                     "delete-tests",
                     "corrupt-retry",
@@ -734,7 +756,7 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
 
                 let clock = FixedClock(at("2024-06-01T00:00:10Z"));
                 let pending_rotation = PendingRotation::none();
-                let drain_storage = storage.storage();
+                let drain_storage = cloud_storage.clone();
                 let drain = TombstoneDrain::new(
                     &store_database,
                     &*drain_storage,
@@ -789,7 +811,14 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
 #[tokio::test]
 async fn tombstone_is_reclaimed_only_after_the_grace() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     // The exact blob exists; a member tombstoned it at a known instant.
@@ -801,10 +830,14 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     // A GC one day later — well inside the 7-day grace — keeps the blob.
     let inside = FixedClock(at("2024-06-02T00:00:00Z"));
@@ -818,7 +851,7 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
         "the blob survives a GC inside the grace",
     );
     assert!(
-        tombstone_exists(&storage, &tombstone_key).await,
+        tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is kept inside the grace",
     );
 
@@ -834,7 +867,7 @@ async fn tombstone_is_reclaimed_only_after_the_grace() {
         "the blob is deleted past the grace",
     );
     assert!(
-        !tombstone_exists(&storage, &tombstone_key).await,
+        !tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is deleted after reclaiming its blob",
     );
 }
@@ -846,7 +879,14 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     db.database
@@ -861,10 +901,14 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc");
@@ -878,7 +922,7 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         "the referenced blob remains in cloud",
     );
     assert!(
-        !tombstone_exists(&storage, &tombstone_key).await,
+        !tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the stale tombstone is canceled",
     );
 }
@@ -895,7 +939,14 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
             .with_id_column("blob_id")
             .with_cloud_path_column("cloud_path"),
     );
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let replaced = storage
         .create_exact_opaque_blob("photos", "p1cover", b"old cover")
@@ -921,10 +972,14 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
         let tombstone = signed_store_tombstone(&storage, stored, deleted_at.to_string(), &member);
         storage.plant_tombstone(&tombstone).await;
     }
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let reclaimed = collector.collect(&past).await.expect("gc");
@@ -945,7 +1000,7 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
         "the blob the row now holds is protected by the live-row check",
     );
     assert!(
-        !tombstone_exists(&storage, &exact_tombstone_key(&live)).await,
+        !tombstone_exists(&cloud_storage, &exact_tombstone_key(&live)).await,
         "the stale tombstone over the live blob is canceled",
     );
 }
@@ -963,7 +1018,14 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     db.database
@@ -979,10 +1041,14 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     // GC inside the grace, with the row still reading live+remote: the fresh tombstone
     // must NOT be canceled.
@@ -997,7 +1063,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         "the blob survives inside the grace",
     );
     assert!(
-        tombstone_exists(&storage, &tombstone_key).await,
+        tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone survives inside the grace despite the stale live row",
     );
 
@@ -1021,7 +1087,7 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         "the blob is deleted past the grace",
     );
     assert!(
-        !tombstone_exists(&storage, &tombstone_key).await,
+        !tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is deleted after reclaiming its blob",
     );
 }
@@ -1036,7 +1102,14 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     db.database
@@ -1061,10 +1134,14 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let error = collector
@@ -1081,7 +1158,7 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
         "the blob is untouched when locality is unresolved",
     );
     assert!(
-        tombstone_exists(&storage, &tombstone_key).await,
+        tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is kept when locality is unresolved",
     );
 }
@@ -1097,7 +1174,14 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let member_db = open_test_db_with_blob(BlobDecl::new(
         "photos",
@@ -1137,7 +1221,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     let collector = TombstoneCollector::load(
         StoreDatabase::new(&member_db.database),
         &storage,
-        storage.storage(),
+        cloud_storage.clone(),
         &cipher,
         &member,
     )
@@ -1163,7 +1247,7 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
         "a blob under another member's prefix is left for its owner or an owner sweep",
     );
     assert!(
-        tombstone_exists(&storage, &exact_tombstone_key(&foreign)).await,
+        tombstone_exists(&cloud_storage, &exact_tombstone_key(&foreign)).await,
         "the foreign blob's tombstone is kept so its uploader or an owner can still act",
     );
 }
@@ -1178,7 +1262,14 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let member_db = open_test_db_with_blob(BlobDecl::new(
         "photos",
@@ -1199,10 +1290,14 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
     let tombstone =
         signed_store_tombstone(&storage, foreign.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load Owner tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load Owner tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc");
@@ -1231,7 +1326,14 @@ fn past_grace_instant(deleted_at: &str) -> String {
 #[tokio::test]
 async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     // Authorization passes, so GC reaches the pre-delete re-check where the
@@ -1247,7 +1349,7 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
 
     // The cloud home removes the tombstone in GC's re-check window.
     let racing_storage = Arc::new(InterceptedStorage::new(
-        storage.storage(),
+        cloud_storage.clone(),
         CancelTombstoneOnExists {
             tombstone_key,
             fired: AtomicBool::new(false),
@@ -1280,7 +1382,14 @@ async fn tombstone_removed_mid_gc_leaves_the_exact_blob() {
 #[tokio::test]
 async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     let stored = storage
@@ -1291,10 +1400,14 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc past grace");
@@ -1308,7 +1421,7 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
         "the blob is gone after a plain-delete reclaim",
     );
     assert!(
-        !tombstone_exists(&storage, &tombstone_key).await,
+        !tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is removed after reclaiming its blob",
     );
 }
@@ -1320,7 +1433,14 @@ async fn past_grace_tombstone_erases_the_blob_on_a_plain_delete_provider() {
 async fn a_configured_one_hour_grace_is_honored() {
     let grace = chrono::Duration::hours(1);
     let db = open_test_db_with_tombstone_grace(grace);
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     let stored = storage
@@ -1330,10 +1450,14 @@ async fn a_configured_one_hour_grace_is_honored() {
     let tombstone =
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     // Half an hour in — inside the configured hour — the blob survives.
     let within = FixedClock(at("2024-06-01T00:30:00Z"));
@@ -1375,7 +1499,14 @@ async fn a_configured_one_hour_grace_is_honored() {
 #[tokio::test]
 async fn tombstone_by_a_non_member_is_ignored() {
     let db = open_test_db();
-    let (storage, _founder, _member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        _member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let outsider = UserKeypair::generate(); // not in the chain
 
@@ -1393,10 +1524,14 @@ async fn tombstone_by_a_non_member_is_ignored() {
         "the forged tombstone is self-consistently signed (only authorization rejects it)",
     );
     storage.plant_tombstone(&tombstone).await;
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
 
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc");
@@ -1546,7 +1681,14 @@ async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
 #[tokio::test]
 async fn tombstone_with_a_bad_signature_is_ignored() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     let stored = storage
@@ -1566,10 +1708,14 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
     );
     storage.plant_tombstone(&tombstone).await;
 
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc");
     assert_eq!(n, 0, "a tombstone with a bad signature reclaims nothing");
@@ -1591,7 +1737,14 @@ async fn tombstone_with_a_bad_signature_is_ignored() {
 #[tokio::test]
 async fn tombstone_bound_to_a_different_store_is_ignored() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
 
     let stored = storage
@@ -1608,10 +1761,14 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
     );
     storage.plant_tombstone(&tombstone).await;
 
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let n = collector.collect(&past).await.expect("gc");
     assert_eq!(n, 0, "a foreign-store tombstone reclaims nothing");
@@ -1632,7 +1789,10 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
 /// cancel either intent.
 #[tokio::test]
 async fn enqueue_upload_and_delete_remain_independent_for_exact_objects() {
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = test_store().await;
     let deleted = storage
         .create_exact_opaque_blob("photos", "same-id", b"old")
         .await;
@@ -1768,7 +1928,14 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let tmp = tempfile::tempdir().unwrap();
 
@@ -1807,12 +1974,16 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
         .contains_stored_blob_object(&replacement)
         .await
         .expect("verify exact blob object"));
-    assert!(tombstone_exists(&storage, &exact_tombstone_key(&old)).await);
+    assert!(tombstone_exists(&cloud_storage, &exact_tombstone_key(&old)).await);
 
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let gc = collector.collect(&past).await.expect("gc");
     assert_eq!(gc, 1, "the old exact object is reclaimed");
@@ -1839,7 +2010,10 @@ async fn reupload_through_the_drain_preserves_the_old_exact_tombstone() {
 async fn re_draining_a_delete_keeps_the_original_deleted_at() {
     let db = open_outbox_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = test_store().await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = test_store().await;
     let cipher = plaintext_cipher();
     let kp = UserKeypair::generate();
     let stored = storage
@@ -1853,7 +2027,7 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         .await
         .expect("enqueue exact blob deletion");
     let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &first)
+    let n = drain_at(&store_database, &*cloud_storage, &cipher, &kp, &first)
         .await
         .expect("first drain");
     assert_eq!(n, 1, "the first drain writes the tombstone");
@@ -1873,14 +2047,13 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
         .await
         .expect("reenqueue exact blob deletion");
     let second = FixedClock(at("2024-06-02T00:00:00Z"));
-    let n = drain_at(&store_database, &*storage.storage(), &cipher, &kp, &second)
+    let n = drain_at(&store_database, &*cloud_storage, &cipher, &kp, &second)
         .await
         .expect("second drain");
     assert_eq!(n, 0, "the re-drain writes no new tombstone");
 
     // Exactly one tombstone, still carrying the first drain's deleted_at.
-    let tombstones = storage
-        .storage()
+    let tombstones = cloud_storage
         .list_provider_objects("blob_tombstones/")
         .await
         .unwrap();
@@ -1914,7 +2087,14 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
 #[tokio::test]
 async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let old = storage
         .create_exact_opaque_blob("photos", "blob", b"same bytes")
@@ -1931,10 +2111,14 @@ async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
     let tombstone = signed_store_tombstone(&storage, old.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
 
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let reclaimed = collector
         .collect(&past)
@@ -1957,7 +2141,14 @@ async fn old_tombstone_reclaims_only_the_exact_replaced_object() {
 #[tokio::test]
 async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
     let db = open_test_db();
-    let (storage, _founder, member) = storage_with_chain(&db).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = storage_with_chain(&db).await;
     let cipher = plaintext_cipher();
     let stored = storage
         .create_exact_opaque_blob("photos", "retry", b"retry bytes")
@@ -1967,10 +2158,14 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         signed_store_tombstone(&storage, stored.clone(), deleted_at.to_string(), &member);
     storage.plant_tombstone(&tombstone).await;
     storage.fail_exact_delete_on_call(1);
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
 
     let error = collector
@@ -1982,7 +2177,7 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         .contains_stored_blob_object(&stored)
         .await
         .expect("verify failed exact delete blob"));
-    assert!(tombstone_exists(&storage, &exact_tombstone_key(&stored)).await);
+    assert!(tombstone_exists(&cloud_storage, &exact_tombstone_key(&stored)).await);
 
     let second = collector.collect(&past).await.expect("retry GC");
     assert_eq!(second, 1);
@@ -1990,7 +2185,7 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         .contains_stored_blob_object(&stored)
         .await
         .expect("verify exact blob object"));
-    assert!(!tombstone_exists(&storage, &exact_tombstone_key(&stored)).await);
+    assert!(!tombstone_exists(&cloud_storage, &exact_tombstone_key(&stored)).await);
 }
 
 // ----- the GC tolerates a tombstone left over by a failed tombstone delete -----
@@ -2006,7 +2201,14 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
-    let (storage, _founder, member) = Box::pin(storage_with_chain(&db)).await;
+    let (
+        TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        },
+        _founder,
+        member,
+    ) = Box::pin(storage_with_chain(&db)).await;
     let cipher = plaintext_cipher();
     let old = storage
         .create_exact_opaque_blob("photos", "blob-key", b"contents")
@@ -2019,7 +2221,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     // First GC past the grace: the blob delete succeeds, but the tombstone delete
     // fails (injected). The blob is reclaimed; the tombstone is left behind.
     let failing = FailStorageOpOnKey::new(FailingCloudOp::Delete, &tombstone_key, 1);
-    let failing_storage = Arc::new(InterceptedStorage::new(storage.storage(), failing));
+    let failing_storage = Arc::new(InterceptedStorage::new(cloud_storage.clone(), failing));
     let past = FixedClock(at(&past_grace_instant(deleted_at)));
     let failing_collector = TombstoneCollector::for_founder_with_storage(
         StoreDatabase::new(&db.database),
@@ -2042,7 +2244,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         "the blob is deleted",
     );
     assert!(
-        tombstone_exists(&storage, &tombstone_key).await,
+        tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the tombstone is left behind because its delete failed",
     );
 
@@ -2069,20 +2271,24 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         .await;
     assert_ne!(old.object(), replacement.object());
     assert!(
-        tombstone_exists(&storage, &tombstone_key).await,
+        tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the replacement does not cancel a tombstone for another exact object",
     );
 
     // The next GC sees the old object already absent, removes its tombstone without
     // counting another reclaim, and leaves the replacement object intact.
-    let collector =
-        TombstoneCollector::for_founder(StoreDatabase::new(&db.database), &storage, &cipher)
-            .await
-            .expect("load tombstone collector");
+    let collector = TombstoneCollector::for_founder(
+        StoreDatabase::new(&db.database),
+        &storage,
+        cloud_storage.clone(),
+        &cipher,
+    )
+    .await
+    .expect("load tombstone collector");
     let n = collector.collect(&past).await.expect("gc after re-upload");
     assert_eq!(n, 0, "the absent old object is not counted twice");
     assert!(
-        !tombstone_exists(&storage, &tombstone_key).await,
+        !tombstone_exists(&cloud_storage, &tombstone_key).await,
         "the leftover tombstone is cleaned up",
     );
     assert!(

@@ -159,7 +159,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
 
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(
+    let fixture = TestStoreFixture::create(
         &db,
         "retained-circle-activation",
         founder.clone(),
@@ -167,6 +167,8 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     )
     .await
     .expect("create retained Circle Store");
+    let store = fixture.store;
+    let cloud_storage = fixture.storage;
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
@@ -189,8 +191,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .await
         .expect("prepare retained Circle activation");
     for object in prepared.prepared_objects.values() {
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(object)
             .await
             .expect("publish retained Circle activation object");

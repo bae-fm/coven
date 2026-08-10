@@ -4,6 +4,7 @@ use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::sync::test_helpers::{
     open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
+    TestStoreFixture,
 };
 use coven_database::StoreDatabase;
 use coven_database::{DbError, SyntheticStoreFixture};
@@ -34,10 +35,21 @@ async fn create_test_store_in_its_own_task(
     signer: &UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
+    create_test_store_fixture_in_its_own_task(db, name, signer, home)
+        .await
+        .store
+}
+
+async fn create_test_store_fixture_in_its_own_task(
+    db: &SyntheticStoreFixture,
+    name: &str,
+    signer: &UserKeypair,
+    home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
+) -> TestStoreFixture {
     let db = db.clone();
     let name = name.to_string();
     let signer = signer.clone();
-    tokio::spawn(async move { TestStore::create(&db, &name, signer, home).await })
+    tokio::spawn(async move { TestStoreFixture::create(&db, &name, signer, home).await })
         .await
         .expect("join Circle test Store creation")
         .expect("create exact Circle test Store")
@@ -52,10 +64,24 @@ async fn persist_merge_operation(
     UserKeypair,
     CircleOperationJournal,
 ) {
+    let (fixture, home, signer, journal) = persist_merge_operation_fixture(db, name).await;
+    (fixture.store, home, signer, journal)
+}
+
+async fn persist_merge_operation_fixture(
+    db: &SyntheticStoreFixture,
+    name: &str,
+) -> (
+    TestStoreFixture,
+    std::sync::Arc<coven_storage::InMemoryCloudHome>,
+    UserKeypair,
+    CircleOperationJournal,
+) {
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let store = create_test_store_in_its_own_task(db, name, &signer, home.clone()).await;
-    let prepared = store
+    let fixture = create_test_store_fixture_in_its_own_task(db, name, &signer, home.clone()).await;
+    let prepared = fixture
+        .store
         .bind_device(db, &signer)
         .await
         .expect("bind Circle preparation Store")
@@ -66,7 +92,7 @@ async fn persist_merge_operation(
         .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
         .await
         .expect("persist circle operation");
-    (store, home, signer, prepared.journal)
+    (fixture, home, signer, prepared.journal)
 }
 
 /// The bytes an operation's object was spooled under when it was prepared.

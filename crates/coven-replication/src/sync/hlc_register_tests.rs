@@ -356,7 +356,10 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = TestStore::create(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = TestStoreFixture::create(
         &owner_db,
         "test-store",
         owner.clone(),
@@ -405,7 +408,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let (_member_temp, member_store_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
         coven_database::StoreDatabase::new(&member_db.database),
-        storage.storage(),
+        cloud_storage,
         member_store_dir,
         member.clone(),
     )

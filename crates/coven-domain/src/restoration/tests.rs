@@ -30,7 +30,7 @@ use coven_protocol::membership::MembershipFloor;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_replication::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
-    test_synced_tables, test_synced_tables_with_blob, TestDevice,
+    test_synced_tables, test_synced_tables_with_blob, TestDevice, TestStoreFixture,
 };
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
@@ -1396,7 +1396,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     let owner = UserKeypair::generate();
     let db_owner = open_test_db();
-    let storage = coven_replication::sync::test_helpers::TestStore::create(
+    let fixture = TestStoreFixture::create(
         &db_owner,
         "test-lib",
         owner.clone(),
@@ -1404,6 +1404,8 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("create exact owner Store");
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
@@ -1465,8 +1467,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
 
     for head in chain.head_refs() {
         if !pre_removal_heads.contains(head) {
-            storage
-                .storage()
+            cloud_storage
                 .delete_protocol_object(&head.object)
                 .await
                 .expect("remove post-removal membership head");

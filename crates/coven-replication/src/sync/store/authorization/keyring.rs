@@ -179,7 +179,7 @@ pub(crate) async fn load_wrapped_store_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStore};
+    use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStoreFixture};
     use coven_keys::keys::UserKeypair;
     use coven_protocol::wrapped_store_key::WrappedStoreKey;
     use coven_storage::CloudSyncObjectStorage as _;
@@ -190,7 +190,10 @@ mod tests {
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
         let db = open_test_db();
-        let store = TestStore::create(
+        let TestStoreFixture {
+            store,
+            storage: cloud_storage,
+        } = TestStoreFixture::create(
             &db,
             "wrapped-key-exact-objects",
             owner.clone(),
@@ -219,19 +222,17 @@ mod tests {
             .expect("prepare second exact wrap");
 
         assert_ne!(first.reference, second.reference);
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(&first.object)
             .await
             .expect("create first exact wrap");
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(&second.object)
             .await
             .expect("create second exact wrap");
         assert_eq!(
             load_wrapped_store_key(
-                &*store.storage(),
+                &*cloud_storage,
                 store.root.store_root_hash,
                 &first.reference,
             )
@@ -241,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             load_wrapped_store_key(
-                &*store.storage(),
+                &*cloud_storage,
                 store.root.store_root_hash,
                 &second.reference,
             )
@@ -257,7 +258,10 @@ mod tests {
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
         let db = open_test_db();
-        let store = TestStore::create(
+        let TestStoreFixture {
+            store,
+            storage: cloud_storage,
+        } = TestStoreFixture::create(
             &db,
             "wrapped-key-relocation",
             owner.clone(),
@@ -282,8 +286,7 @@ mod tests {
             )
             .await
             .expect("prepare exact wrap");
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(&prepared.object)
             .await
             .expect("create exact wrap");
@@ -291,7 +294,7 @@ mod tests {
         relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
 
         assert!(
-            load_wrapped_store_key(&*store.storage(), store.root.store_root_hash, &relocated)
+            load_wrapped_store_key(&*cloud_storage, store.root.store_root_hash, &relocated)
                 .await
                 .is_err()
         );

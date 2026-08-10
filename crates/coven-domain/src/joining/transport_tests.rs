@@ -117,8 +117,8 @@ impl TransportFixture {
             test_cloud_home()
         };
         let create_store_home = home.clone();
-        let store = tokio::spawn(async move {
-            TestStore::create(
+        let fixture = tokio::spawn(async move {
+            TestStoreFixture::create(
                 &create_store_db,
                 &store_id_owned,
                 create_store_owner,
@@ -129,6 +129,8 @@ impl TransportFixture {
         .await
         .expect("Store creation task")
         .expect("create Owner Store");
+        let store = fixture.store;
+        let owner_storage = fixture.storage;
         let join_request =
             crate::joining::generate_join_request(None).expect("generate join request");
         let member_pubkey = crate::joining::decode_join_request(&join_request)
@@ -170,7 +172,7 @@ impl TransportFixture {
         let app = tempfile::tempdir().expect("join app directory");
         let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
         let provider_binding =
-            coven_storage::CloudSyncObjectStorage::provider_binding(&*store.storage())
+            coven_storage::CloudSyncObjectStorage::provider_binding(owner_storage.as_ref())
                 .await
                 .expect("load owner provider binding");
         let joiner_home = match joiner_principal {
@@ -192,7 +194,7 @@ impl TransportFixture {
             owner_store,
             owner_db,
             owner_database,
-            owner_storage: store.storage(),
+            owner_storage,
             owner_test_store: store,
             owner_store_dir,
             home,

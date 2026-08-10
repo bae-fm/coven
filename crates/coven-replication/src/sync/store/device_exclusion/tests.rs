@@ -5,7 +5,7 @@ use super::*;
 use crate::sync::store::merge_conflict::MergeCandidateAbandonment;
 use crate::sync::store::Store;
 use crate::sync::test_helpers::{
-    open_test_db, store_database, temp_store_dir, TestDevice, TestStore,
+    open_test_db, store_database, temp_store_dir, TestDevice, TestStore, TestStoreFixture,
 };
 use coven_database::SyntheticStoreFixture;
 use coven_database::{AuthorExclusionLocatorTamper, StoreDatabase};
@@ -1073,16 +1073,17 @@ async fn run_excluded_author_candidate_cleanup_case(
     let signer = UserKeypair::generate();
     let owner_db = open_test_db();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let store = Arc::new(
-        Box::pin(TestStore::create(
-            &owner_db,
-            "excluded-author-candidate-store",
-            signer.clone(),
-            home.clone(),
-        ))
-        .await
-        .expect("create excluded-author Store"),
-    );
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = Box::pin(TestStoreFixture::create(
+        &owner_db,
+        "excluded-author-candidate-store",
+        signer.clone(),
+        home.clone(),
+    ))
+    .await
+    .expect("create excluded-author Store");
     let owner_device = Box::pin(store.open_into(&owner_db))
         .await
         .expect("open excluded-author Store");
@@ -1179,8 +1180,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     )
     .expect("derive excluded candidate commit prefix");
     let write_id = candidate.commit.value.write_id.clone();
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&candidate.commit.prepared)
         .await
         .expect("upload excluded peer candidate commit");
@@ -1511,14 +1511,12 @@ async fn run_excluded_author_candidate_cleanup_case(
             head_publication,
             ExcludedCandidateHeadPublication::ExactLate
         ) {
-            store
-                .storage()
+            cloud_storage
                 .create_protocol_object(&candidate.head.prepared)
                 .await
                 .expect("publish exact late excluded-author head");
             assert_eq!(
-                store
-                    .storage()
+                cloud_storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1536,7 +1534,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     };
     let peer_store = Store::load(
         StoreDatabase::new(&peer_db.database),
-        store.storage(),
+        cloud_storage.clone(),
         store_dir.clone(),
         signer.clone(),
     )
@@ -1802,7 +1800,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     };
     let retried_store = Store::load(
         StoreDatabase::new(&retried.database),
-        store.storage(),
+        cloud_storage.clone(),
         store_dir.clone(),
         signer.clone(),
     )
@@ -1818,8 +1816,7 @@ async fn run_excluded_author_candidate_cleanup_case(
     match head_publication {
         ExcludedCandidateHeadPublication::Absent => {
             assert!(matches!(
-                store
-                    .storage()
+                cloud_storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1838,8 +1835,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         | ExcludedCandidateHeadPublication::AfterAbsentProofExactLate
         | ExcludedCandidateHeadPublication::AfterHeadReadBack => {
             assert_eq!(
-                store
-                    .storage()
+                cloud_storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1883,8 +1879,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         }
         ExcludedCandidateHeadPublication::AfterCommitUpload => {
             assert!(matches!(
-                store
-                    .storage()
+                cloud_storage
                     .read_protocol_object(
                         &candidate_head_context,
                         &candidate_head,
@@ -1903,8 +1898,7 @@ async fn run_excluded_author_candidate_cleanup_case(
         }
     }
     assert!(matches!(
-        store
-            .storage()
+        cloud_storage
             .read_protocol_object(
                 &candidate_commit_context,
                 &candidate_ref.object,

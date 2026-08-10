@@ -107,9 +107,17 @@ async fn cycle_test_store(
     signer: &UserKeypair,
     home: Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
-    TestStore::create(db, "test-lib", signer.clone(), home)
+    cycle_test_store_fixture(db, signer, home).await.store
+}
+
+async fn cycle_test_store_fixture(
+    db: &SyntheticStoreFixture,
+    signer: &UserKeypair,
+    home: Arc<coven_storage::InMemoryCloudHome>,
+) -> TestStoreFixture {
+    TestStoreFixture::create(db, "test-lib", signer.clone(), home)
         .await
-        .expect("create exact cycle test Store")
+        .expect("create exact cycle test Store fixture")
 }
 
 /// A fresh owner Store plus the second identity its device-join cases admit.
@@ -117,13 +125,14 @@ struct OwnerAndMember {
     owner: UserKeypair,
     owner_db: SyntheticStoreFixture,
     storage: Arc<TestStore>,
+    cloud_storage: Arc<CloudSyncConnection>,
     member: UserKeypair,
 }
 
 async fn owner_and_member() -> OwnerAndMember {
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = cycle_test_store(
+    let fixture = cycle_test_store_fixture(
         &owner_db,
         &owner,
         crate::sync::test_helpers::test_cloud_home(),
@@ -132,7 +141,8 @@ async fn owner_and_member() -> OwnerAndMember {
     OwnerAndMember {
         owner,
         owner_db,
-        storage,
+        storage: fixture.store,
+        cloud_storage: fixture.storage,
         member: UserKeypair::generate(),
     }
 }
@@ -164,11 +174,15 @@ async fn invite_test_member(
 async fn blob_cycle_store(
     keypair: &UserKeypair,
     fill: CacheFill,
-) -> (SyntheticStoreFixture, Arc<TestStore>) {
+) -> (
+    SyntheticStoreFixture,
+    Arc<TestStore>,
+    Arc<CloudSyncConnection>,
+) {
     let db = open_test_db_with_blob(BlobDecl::new("photos", Provenance::HostProvided, fill));
-    let storage =
-        cycle_test_store(&db, keypair, crate::sync::test_helpers::test_cloud_home()).await;
-    (db, storage)
+    let fixture =
+        cycle_test_store_fixture(&db, keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    (db, fixture.store, fixture.storage)
 }
 
 async fn run_cycle_in_task(
@@ -190,9 +204,8 @@ async fn run_cycle_in_task(
 async fn tombstone_provider_failure_fails_cycle_and_preserves_intent() {
     let db = open_test_db();
     let keypair = UserKeypair::generate();
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let device = storage.open_into(&db).await.expect("open exact test Store");
     let stored = storage
         .create_exact_opaque_blob("photos", "maintenance", b"maintenance")
@@ -859,7 +872,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             },
         },
     });
-    let storage = TestStore::create(
+    let fixture = TestStoreFixture::create(
         &database,
         "cross-principal-revocation-store",
         owner.clone(),
@@ -867,6 +880,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     )
     .await
     .expect("create cross-principal test Store");
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let member = UserKeypair::generate();
     storage
         .invite_member(
@@ -883,6 +898,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     let owner_db = coven_database::StoreDatabase::new(&database.database);
     let owner_db = &owner_db;
     let storage = &storage;
+    let cloud_storage = &cloud_storage;
     let home = home.as_ref();
     let owner = &owner;
     let member = &member;
@@ -897,7 +913,9 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .bind_store_device(owner_db, owner)
             .await
             .expect("bind owner Store");
-        let owner_binding = coven_storage::CloudSyncObjectStorage::provider_binding(&*storage.storage())
+        let owner_binding = coven_storage::CloudSyncObjectStorage::provider_binding(
+            cloud_storage.as_ref(),
+        )
             .await
             .expect("resolve owner provider binding");
         let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
@@ -1085,10 +1103,9 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                 let blob_decl =
                     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
                 let db = open_test_db_with_blob(blob_decl.clone());
-                let storage = Arc::new(
+                let storage =
                     cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home())
-                        .await,
-                );
+                        .await;
                 let (_tmp, ld) = temp_store_dir();
                 storage
                     .retain_store_packages_for_assertion(&db, b"existing-pending-upload-snapshot")
@@ -1191,10 +1208,9 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                 let blob_decl =
                     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager);
                 let db = open_test_db_with_blob(blob_decl.clone());
-                let storage = Arc::new(
+                let storage =
                     cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home())
-                        .await,
-                );
+                        .await;
                 let (_tmp, ld) = temp_store_dir();
                 let peer = UserKeypair::generate();
                 storage
@@ -1336,8 +1352,10 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         )),
         test_migrations(),
     );
-    let storage =
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let fixture =
+        cycle_test_store_fixture(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let (_tmp, ld) = temp_store_dir();
     db.database
         .execute_test_host_write(
@@ -1369,8 +1387,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         .stored_blob_for_row("note_photos", "cover1")
         .await
         .expect("the snapshot activates its exact host blob binding");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&stored)
         .await
         .expect("the blob referenced by the initial snapshot exists");
@@ -1387,9 +1404,10 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
     );
     let db = open_test_db_schema(tables.clone(), test_migrations());
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let fixture =
+        cycle_test_store_fixture(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let (_tmp, ld) = temp_store_dir();
     db.database
         .execute_test_sql(
@@ -1454,7 +1472,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         .as_ref()
         .is_some_and(|path| path.is_file()));
     assert!(matches!(
-        storage.storage().verify_blob_object(&rejected[0]).await,
+        cloud_storage.verify_blob_object(&rejected[0]).await,
         Err(StorageError::NotFound(_))
     ));
     assert!(
@@ -1504,8 +1522,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         )
     ));
     assert!(live.stored().is_none());
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&rejected[0])
         .await
         .expect("retry publishes exact retained blob");
@@ -1582,9 +1599,8 @@ async fn initial_snapshot_removes_current_spool_when_blob_preparation_fails() {
         )),
     ];
     let db = open_test_db_schema(tables, test_migrations());
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, store_dir) = temp_store_dir();
     db.database
         .execute_test_sql(
@@ -1671,9 +1687,10 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
         .expect("open snapshot cleanup database")
     };
     let db = open();
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let fixture =
+        cycle_test_store_fixture(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let (_store_temp, store_dir) = temp_store_dir();
     db.database
         .execute_test_sql(
@@ -1725,7 +1742,7 @@ async fn snapshot_blob_spool_cleanup_survives_database_restart() {
     let reopened = open();
     let store = crate::sync::store::Store::load(
         coven_database::StoreDatabase::new(&reopened.database),
-        storage.storage(),
+        cloud_storage,
         store_dir.clone(),
         keypair,
     )
@@ -1771,9 +1788,8 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
         ) STRICT;",
     )];
     let db = open_test_db_schema(tables, migrations);
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_temp, store_dir) = temp_store_dir();
     let hash = coven_protocol::blob::content_hash(b"shared");
     db.database
@@ -1828,9 +1844,8 @@ async fn initial_snapshot_requires_existing_exact_user_blob_without_uploading_it
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (external_dir, store_dir) = temp_store_dir();
     let external_path = external_dir.path().join("audio1.flac");
     coven_foundation::local_file::AtomicStagedFile::write_for_test(&external_path, b"AUDIO")
@@ -1974,7 +1989,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let db = open_test_db();
-    let storage = TestStore::create(
+    let fixture = TestStoreFixture::create(
         &db,
         "test-store",
         owner.clone(),
@@ -1982,6 +1997,8 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
     )
     .await
     .expect("create exact Store");
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
 
     assert_eq!(
         db.database
@@ -2018,8 +2035,7 @@ async fn owner_membership_anchor_founds_pins_and_refuses_tampering() {
         .expect("read founder graph")
         .expect("founder graph exists");
     let coven_database::DurableFounderMembership { head, .. } = graph.membership;
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(head.prepared.reference())
         .await
         .expect("delete exact founder head");
@@ -2113,7 +2129,7 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
 
     let attacker = UserKeypair::generate();
     let attacker_db = open_test_db();
-    let seeded = TestStore::create(
+    let seeded = TestStoreFixture::create(
         &attacker_db,
         "foreign-store",
         attacker,
@@ -2121,14 +2137,15 @@ async fn exact_root_reanchors_own_founder_and_open_refuses_foreign_founder() {
     )
     .await
     .expect("create foreign exact Store");
+    let seeded_store = seeded.store;
     let fresh_db = open_test_db();
     let (_foreign_store_dir_temp, foreign_store_dir) = temp_store_dir();
     assert!(
         crate::sync::store::Store::open(
             store_database(&fresh_db.database),
-            seeded.storage(),
+            seeded.storage,
             foreign_store_dir,
-            &seeded.root,
+            &seeded_store.root,
             &owner,
         )
         .await
@@ -3051,14 +3068,12 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let (_tmp, ld) = temp_store_dir();
     // Peer A publishes a changeset; M pulls and applies it in cycle 1.
     let producer_db = open_test_db();
-    let storage = Arc::new(
-        cycle_test_store(
-            &producer_db,
-            &keypair,
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await,
-    );
+    let storage = cycle_test_store(
+        &producer_db,
+        &keypair,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let producer_device = storage
         .founder_device()
         .await
@@ -3138,7 +3153,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
 async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
+    let (db, storage, cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -3194,8 +3209,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     assert_eq!(prepared.audiences.blobs.len(), 1);
     assert_eq!(prepared.audiences.blobs[0].blob(), &prepared_blob);
     assert!(
-        storage
-            .storage()
+        cloud_storage
             .verify_blob_object(&prepared_blob)
             .await
             .is_err(),
@@ -3219,8 +3233,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         .await
         .expect("retry activates the exact row blob binding");
     assert_eq!(activated_blob, prepared_blob);
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&activated_blob)
         .await
         .expect("retry uploads and reads back the exact host-provided blob");
@@ -3233,9 +3246,10 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     let blob_decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
         .with_id_column("blob_id");
     let db = open_test_db_with_blob(blob_decl.clone());
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let fixture =
+        cycle_test_store_fixture(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     storage
         .retain_store_packages_for_assertion(&db, b"each-host-write-blob-facts")
         .await;
@@ -3307,8 +3321,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
         let package = coven_protocol::audience_package::AudiencePackage::parse(&package.value)
             .expect("parse exact audience package");
         for binding in package.blob_bindings() {
-            storage
-                .storage()
+            cloud_storage
                 .verify_blob_object(binding.blob())
                 .await
                 .expect("committed blob object exists exactly");
@@ -3336,7 +3349,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
     // The live cipher is generation 1; the cloud has committed generation 2.
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
+    let (db, storage, cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -3451,8 +3464,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .stored_blob_for_row("note_photos", "hponly")
         .await
         .expect("adoption activates the exact host-blob binding");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&activated)
         .await
         .expect("the activated host blob reads back exactly");
@@ -3486,7 +3498,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
+    let (db, storage, _cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheEager).await;
     db.database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -3630,7 +3642,7 @@ async fn ready_make_remote_provider_transport_is_offline() {
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
+    let (db, storage, cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     storage
         .retain_store_packages_for_assertion(&db, b"captured-changeset-blob-retry")
         .await;
@@ -3678,13 +3690,11 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     );
     let attempted_blobs = reject_second_blob.rejected_blobs();
     assert_eq!(attempted_blobs.len(), 2);
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&attempted_blobs[0])
         .await
         .expect("the first exact blob reached cloud before the second failed");
-    assert!(storage
-        .storage()
+    assert!(cloud_storage
         .verify_blob_object(&attempted_blobs[1])
         .await
         .is_err());
@@ -3727,13 +3737,11 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         .expect("second blob was attempted");
     assert_eq!(&activated_first, attempted_first);
     assert_eq!(&activated_second, attempted_second);
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&activated_first)
         .await
         .expect("the first exact blob remains readable after retry");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&activated_second)
         .await
         .expect("the second exact blob is readable after retry");
@@ -3743,7 +3751,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
+    let (db, storage, cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     storage
         .retain_store_packages_for_assertion(&db, b"already-uploaded-host-blob")
         .await;
@@ -3791,8 +3799,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .stored()
         .cloned()
         .expect("first publication installs an exact remote blob binding");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&published_blob)
         .await
         .expect("read back the first exact remote blob object");
@@ -3832,8 +3839,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         .cloned()
         .expect("re-emission retains an exact remote blob binding");
     assert_eq!(republished_blob, published_blob);
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&republished_blob)
         .await
         .expect("read back the re-emitted exact remote blob object");
@@ -3843,7 +3849,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
 async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
-    let (db, storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
+    let (db, storage, cloud_storage) = blob_cycle_store(&keypair, CacheFill::CacheLazy).await;
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     let device = storage
         .open_into(&db)
@@ -3954,8 +3960,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .stored_blob_for_row("note_photos", "lazyblob")
         .await
         .expect("retry activates the exact cache-lazy blob binding");
-    storage
-        .storage()
+    cloud_storage
         .verify_blob_object(&activated_blob)
         .await
         .expect("retry leaves the exact cache-lazy blob readable");
@@ -4261,9 +4266,8 @@ async fn snapshot_time_cadence_uses_the_signed_snapshot_timestamp() {
 async fn prepared_write_retry_writes_rfc3339_ack_timestamp() {
     let db = open_test_db();
     let keypair = UserKeypair::generate();
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     let (_tmp, ld) = temp_store_dir();
     storage
         .retain_store_packages_for_assertion(&db, b"prepared-retry-head-timestamp")
@@ -4324,9 +4328,10 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let fixture =
+        cycle_test_store_fixture(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
+    let storage = fixture.store;
+    let cloud_storage = fixture.storage;
     let device = storage.open_into(&db).await.expect("open exact test Store");
     let cycle_storage = Arc::new(CycleStorageInterceptor::pass_through(Arc::clone(&storage)));
     let planted = storage
@@ -4363,8 +4368,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .clone();
     assert!(!storage.local_store_package_exists(&db, 2).await);
 
-    storage
-        .storage()
+    cloud_storage
         .delete_blob_object(&planted)
         .await
         .expect("delete exact user-provided blob");
@@ -4435,9 +4439,8 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     let keypair = UserKeypair::generate();
     let (_tmp, ld) = temp_store_dir();
     let db = open_test_db();
-    let storage = Arc::new(
-        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await,
-    );
+    let storage =
+        cycle_test_store(&db, &keypair, crate::sync::test_helpers::test_cloud_home()).await;
     storage
         .retain_store_packages_for_assertion(&db, b"outgoing-preparation-retry")
         .await;
@@ -4560,14 +4563,12 @@ impl<'a> InterceptedCycle<'a> {
 async fn cycle_preserves_a_fully_acked_changeset_retained_for_replay() {
     let keypair = UserKeypair::generate();
     let db_m = open_test_db();
-    let storage = Arc::new(
-        cycle_test_store(
-            &db_m,
-            &keypair,
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await,
-    );
+    let storage = cycle_test_store(
+        &db_m,
+        &keypair,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let (_tmp, ld) = temp_store_dir();
 
     // Peer A's changeset 1 (a shareable note).
@@ -4804,14 +4805,12 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
 async fn member_device_does_not_create_a_snapshot() {
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
-    let storage = Arc::new(
-        cycle_test_store(
-            &owner_db,
-            &owner,
-            crate::sync::test_helpers::test_cloud_home(),
-        )
-        .await,
-    );
+    let storage = cycle_test_store(
+        &owner_db,
+        &owner,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
     let (_tmp, ld) = temp_store_dir();
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([42; 32]);
@@ -4940,6 +4939,7 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     let encryption = EncryptionService::from_key([43; 32]);
     invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
@@ -5023,6 +5023,7 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     let mut first =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
@@ -5069,6 +5070,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         owner,
         owner_db,
         storage,
+        cloud_storage,
         member,
     } = owner_and_member().await;
     let mut approval =
@@ -5094,7 +5096,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     {
         let store = crate::sync::store::Store::load(
             coven_database::StoreDatabase::new(&owner_db.database),
-            storage.storage(),
+            cloud_storage.clone(),
             store_dir.clone(),
             owner.clone(),
         )
@@ -5129,12 +5131,12 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     // publish into.
     position_held.notified().await;
     let drain_db = owner_db.clone();
-    let drain_storage = storage.clone();
+    let drain_cloud_storage = cloud_storage;
     let drain_store_dir = store_dir;
     let drain = tokio::spawn(async move {
         let store = crate::sync::store::Store::load(
             coven_database::StoreDatabase::new(&drain_db.database),
-            drain_storage.storage(),
+            drain_cloud_storage,
             drain_store_dir,
             owner.clone(),
         )
@@ -5198,6 +5200,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         owner,
         owner_db,
         storage,
+        cloud_storage,
         member,
     } = owner_and_member().await;
     let mut fixture =
@@ -5243,8 +5246,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
     );
     let prefix =
         coven_protocol::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
-    let prepared = storage
-        .storage()
+    let prepared = cloud_storage
         .prepare_protocol_object(
             &context,
             offer.attempt_slot.clone(),
@@ -5252,8 +5254,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
             attempt.to_bytes(),
         )
         .expect("prepare exact attempt object");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish exact attempt object");
@@ -5276,6 +5277,7 @@ async fn owner_rejects_invalid_access_activation_without_consuming_the_join_jour
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     let mut fixture =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &member).await;
@@ -5426,6 +5428,7 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
         owner,
         owner_db,
         storage,
+        cloud_storage,
         member,
     } = owner_and_member().await;
     let mut fixture =
@@ -5433,8 +5436,7 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
     let later_member = UserKeypair::generate();
     let later =
         SamePrincipalApprovalFixture::prepare(&owner_db, &storage, &owner, &later_member).await;
-    storage
-        .storage()
+    cloud_storage
         .delete_protocol_object(&later.approval.access_grant.activation.object)
         .await
         .expect("remove the commit body behind its authenticated head");
@@ -5452,6 +5454,7 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         owner,
         owner_db,
         storage,
+        cloud_storage,
         member,
     } = owner_and_member().await;
     let mut fixture =
@@ -5483,12 +5486,10 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         &owner_authority.registration().device_id.to_string(),
         next_sequence,
     );
-    let garbage = storage
-        .storage()
+    let garbage = cloud_storage
         .prepare_protocol_object(&context, next_slot, &prefix, b"not a signed head".to_vec())
         .expect("prepare unauthenticated next-head bytes");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&garbage)
         .await
         .expect("publish unauthenticated next-head bytes");
@@ -5505,6 +5506,7 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         owner,
         owner_db,
         storage,
+        cloud_storage,
         member,
     } = owner_and_member().await;
     let mut fixture =
@@ -5558,12 +5560,10 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         &owner_authority.registration().device_id.to_string(),
         next_sequence,
     );
-    let prepared = storage
-        .storage()
+    let prepared = cloud_storage
         .prepare_protocol_object(&context, next_slot, &prefix, malformed.to_bytes())
         .expect("prepare authenticated malformed head");
-    storage
-        .storage()
+    cloud_storage
         .create_protocol_object(&prepared)
         .await
         .expect("publish authenticated malformed head");
@@ -5582,6 +5582,7 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     let encryption = EncryptionService::from_key([44; 32]);
     invite_test_member(&storage, &owner_db, &owner, &member, &encryption).await;
@@ -5601,6 +5602,7 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     invite_test_member(
         &storage,
@@ -5627,6 +5629,7 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     invite_test_member(
         &storage,
@@ -5653,6 +5656,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     invite_test_member(
         &storage,
@@ -5761,6 +5765,7 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     invite_test_member(
         &storage,
@@ -5787,6 +5792,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         owner_db,
         storage,
         member,
+        ..
     } = owner_and_member().await;
     invite_test_member(
         &storage,

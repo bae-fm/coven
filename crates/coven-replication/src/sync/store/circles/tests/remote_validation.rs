@@ -3,8 +3,10 @@ use super::*;
 #[tokio::test]
 async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     let db = open_test_db();
-    let (store, _home, signer, journal) =
-        persist_merge_operation(&db, "circle-invented-access-refs").await;
+    let (fixture, _home, signer, journal) =
+        persist_merge_operation_fixture(&db, "circle-invented-access-refs").await;
+    let store = fixture.store;
+    let cloud_storage = fixture.storage;
     let device = store
         .bind_device(&db, &signer)
         .await
@@ -61,13 +63,11 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         )
         .await
         .expect("prepare invented access envelope path");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&leaf)
         .await
         .expect("publish invented access leaf path");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&envelope)
         .await
         .expect("publish invented access envelope path");
@@ -122,8 +122,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         )
         .await
         .expect("prepare re-signed Store commit");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish re-signed Store commit");
@@ -180,8 +179,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         commit.store_root_hash,
         ProtocolObjectDomain::StoreHead,
     );
-    let forged_head_object = store
-        .storage()
+    let forged_head_object = cloud_storage
         .prepare_protocol_object(
             &head_context,
             original_head_object.slot().clone(),
@@ -237,7 +235,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
 async fn remote_activation_rejects_active_access_for_a_nonmember() {
     let db = open_test_db();
     let founder = UserKeypair::generate();
-    let store = TestStore::create(
+    let fixture = TestStoreFixture::create(
         &db,
         "circle-active-access-nonmember",
         founder.clone(),
@@ -245,6 +243,8 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     )
     .await
     .expect("create exact Circle test Store");
+    let store = fixture.store;
+    let cloud_storage = fixture.storage;
     let device = store
         .bind_device(&db, &founder)
         .await
@@ -284,8 +284,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .await
         .expect("prepare exact promoted access objects");
     for object in prepared.values() {
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(object)
             .await
             .expect("publish exact promoted access object");
@@ -319,8 +318,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         )
         .await
         .expect("prepare promoted access Store commit");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish promoted access Store commit");
@@ -496,8 +494,10 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .expect("baseline exact Circle activation verifies remotely");
 
     let db = open_test_db();
-    let (store, _home, signer, founder_journal) =
-        persist_merge_operation(&db, "circle-remote-metadata-roster").await;
+    let (fixture, _home, signer, founder_journal) =
+        persist_merge_operation_fixture(&db, "circle-remote-metadata-roster").await;
+    let store = fixture.store;
+    let cloud_storage = fixture.storage;
     let device = store
         .bind_device(&db, &signer)
         .await
@@ -544,8 +544,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("prepare forged exact Circle activation objects");
     for object in prepared.values() {
-        store
-            .storage()
+        cloud_storage
             .create_protocol_object(object)
             .await
             .expect("publish forged exact Circle activation object");
@@ -578,8 +577,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         )
         .await
         .expect("prepare forged exact Store commit");
-    store
-        .storage()
+    cloud_storage
         .create_protocol_object(&commit_prepared)
         .await
         .expect("publish forged exact Store commit");

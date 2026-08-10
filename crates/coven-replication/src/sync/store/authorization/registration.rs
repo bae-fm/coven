@@ -33,7 +33,9 @@ pub enum StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_test_db, SyntheticStoreFixture, TestStore};
+    use crate::sync::test_helpers::{
+        open_test_db, SyntheticStoreFixture, TestStore, TestStoreFixture,
+    };
     use coven_protocol::store_commit::StoreBatchCommitRef;
     use coven_storage::CloudSyncObjectStorage;
 
@@ -101,7 +103,10 @@ mod tests {
         let db = open_test_db();
         let database = coven_database::StoreDatabase::new(&db.database);
         let initialized_db = open_test_db();
-        let store = TestStore::create(
+        let TestStoreFixture {
+            store: _,
+            storage: cloud_storage,
+        } = TestStoreFixture::create(
             &initialized_db,
             "registration-missing-root-storage",
             UserKeypair::generate(),
@@ -110,7 +115,7 @@ mod tests {
         .await
         .expect("create registration failure test Store");
 
-        let result = super::RegistrationOutbox::new(database, &*store.storage())
+        let result = super::RegistrationOutbox::new(database, &*cloud_storage)
             .drain()
             .await;
         assert!(
@@ -245,7 +250,10 @@ mod tests {
             let signer = UserKeypair::generate();
             let db = open_test_db();
             let home = crate::sync::test_helpers::test_cloud_home();
-            let store = TestStore::create(
+            let TestStoreFixture {
+                store,
+                storage: cloud_storage,
+            } = TestStoreFixture::create(
                 &db,
                 &format!("recovery-prefix-{failed_call}"),
                 signer.clone(),
@@ -291,8 +299,7 @@ mod tests {
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 Some(
-                    store
-                        .storage()
+                    cloud_storage
                         .read_prepared_protocol_slot(
                             &context,
                             &recovery_slot,
@@ -358,8 +365,7 @@ mod tests {
                     store.root.store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
-                let completed_node = store
-                    .storage()
+                let completed_node = cloud_storage
                     .read_prepared_protocol_slot(
                         &context,
                         &recovery_slot,

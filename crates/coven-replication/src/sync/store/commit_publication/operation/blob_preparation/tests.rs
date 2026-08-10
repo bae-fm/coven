@@ -131,7 +131,10 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
 #[tokio::test]
 async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let database = crate::sync::test_helpers::open_test_db();
-    let store = crate::sync::test_helpers::TestStore::create(
+    let crate::sync::test_helpers::TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = crate::sync::test_helpers::TestStoreFixture::create(
         &database,
         "shared-spool-test",
         coven_keys::keys::UserKeypair::generate(),
@@ -152,8 +155,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("load exact blob write authority");
     let authority = BlobWriteAuthority::new(authority.referenced_registration());
-    let protection = store
-        .storage()
+    let protection = cloud_storage
         .store_blob_protection()
         .expect("load Store blob protection");
     let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -190,8 +192,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("create exact spool stage");
     assert_eq!(
-        store
-            .storage()
+        cloud_storage
             .seal_blob_to_spool(
                 &locator,
                 &authority,
@@ -235,8 +236,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .prepare_partition_blob(
             &fact,
             coven_protocol::blob::locator::RemoteAudience::Store,
-            store
-                .storage()
+            cloud_storage
                 .store_blob_protection()
                 .expect("reload Store blob protection"),
             &authority,

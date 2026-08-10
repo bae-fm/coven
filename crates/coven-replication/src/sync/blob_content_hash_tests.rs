@@ -3,7 +3,7 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::sync::test_helpers::TestStore;
+use crate::sync::test_helpers::TestStoreFixture;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
@@ -34,7 +34,10 @@ async fn ephemeral_stage(
 async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let database = crate::sync::test_helpers::open_test_db();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let store = TestStore::create(
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = TestStoreFixture::create(
         &database,
         "blob-reference-substitution",
         coven_keys::keys::UserKeypair::generate(),
@@ -67,8 +70,7 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let directory = tempfile::tempdir().expect("create materialization directory");
     let destination = directory.path().join("real");
     let stage = ephemeral_stage(&destination).await;
-    let staged = store
-        .storage()
+    let staged = cloud_storage
         .stage_verified_blob_plaintext(&real_blob, BlobSpoolProtection::Opaque(protection()), stage)
         .await
         .expect("stage the referenced exact blob");
@@ -81,7 +83,10 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
 async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publication() {
     let database = crate::sync::test_helpers::open_test_db();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let store = TestStore::create(
+    let TestStoreFixture {
+        store,
+        storage: cloud_storage,
+    } = TestStoreFixture::create(
         &database,
         "blob-provider-rollback",
         coven_keys::keys::UserKeypair::generate(),
@@ -118,8 +123,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
     let destination = directory.path().join("current");
     let stage = ephemeral_stage(&destination).await;
     assert!(matches!(
-        store
-            .storage()
+        cloud_storage
             .stage_verified_blob_plaintext(
                 &current_blob,
                 BlobSpoolProtection::Opaque(protection()),
@@ -132,8 +136,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
 
     home.replace_exact_object(current_blob.object().slot(), current_stored);
     let stage = ephemeral_stage(&destination).await;
-    let staged = store
-        .storage()
+    let staged = cloud_storage
         .stage_verified_blob_plaintext(
             &current_blob,
             BlobSpoolProtection::Opaque(protection()),

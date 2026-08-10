@@ -24,6 +24,7 @@ use crate::blob::transition::LocalBlobTransitions;
 use crate::sync::test_helpers::{
     open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
+    TestStoreFixture,
 };
 use crate::sync::test_owner_graph::TestOwnerGraph;
 use coven_database::Migration;
@@ -107,8 +108,8 @@ async fn create_store(
     db: &SyntheticStoreFixture,
     signer: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
-) -> std::sync::Arc<TestStore> {
-    TestStore::create(db, "test-store", signer, home)
+) -> TestStoreFixture {
+    TestStoreFixture::create(db, "test-store", signer, home)
         .await
         .expect("create exact test Store for the test database")
 }
@@ -118,12 +119,16 @@ async fn create_store(
 async fn photo_transition_fixture() -> (
     SyntheticStoreFixture,
     std::sync::Arc<TestStore>,
+    std::sync::Arc<coven_storage::CloudSyncConnection>,
     tempfile::TempDir,
     StoreDir,
     TestOwnerGraph,
 ) {
     let db = open_test_db_with_blob(photo_decl());
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -131,7 +136,7 @@ async fn photo_transition_fixture() -> (
     .await;
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(StoreDatabase::new(&db.database), lib.clone());
-    (db, storage, tmp, lib, owners)
+    (db, storage, cloud_storage, tmp, lib, owners)
 }
 
 async fn photo_ref(db: &SyntheticStoreFixture, id: &str) -> RowBlobRef {
@@ -368,7 +373,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let kp_a = UserKeypair::generate();
     let db_a = open_test_db_with_blob(photo_decl());
     let store_database_a = StoreDatabase::new(&db_a.database);
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db_a,
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -475,7 +483,10 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         "B receives the release once its blobs are up and the gate flips",
     );
     let fetched = owners_b
-        .read_blob(Some(storage.storage()), &photo_ref(&db_b, "photoaaa").await)
+        .read_blob(
+            Some(cloud_storage.clone()),
+            &photo_ref(&db_b, "photoaaa").await,
+        )
         .await
         .expect("B fetches the CacheLazy blob");
     assert_eq!(fetched, bytes, "B reads the original photo from the cloud");
@@ -517,7 +528,7 @@ async fn pending_upload_state(db: &SyntheticStoreFixture, id: &str) -> (PathBuf,
 /// value, so the drained upload pins.
 #[tokio::test]
 async fn re_enqueue_updates_the_pending_upload_pin() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let bytes = b"PHOTO-repin".to_vec();
 
     owners
@@ -567,7 +578,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 /// removed) one it would otherwise retry forever.
 #[tokio::test]
 async fn re_enqueue_updates_the_pending_upload_source_path() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let bytes = b"PHOTO-relocate".to_vec();
     let user_dir = tmp.path().join("user");
 
@@ -622,7 +633,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
 
 #[tokio::test]
 async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
@@ -653,8 +664,8 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         "completion deleted the make_remote intent",
     );
     let remote = photo_ref(&db, "photoaaa").await;
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(
             remote
                 .stored()
@@ -672,8 +683,8 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         pending_deletes(&db).await.is_empty(),
         "a cancel racing after completion must not tombstone published blobs",
     );
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(
             remote
                 .stored()
@@ -692,7 +703,10 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let db_a = open_test_db_with_blob(photo_decl());
         let store_database_a = StoreDatabase::new(&db_a.database);
         let home = crate::sync::test_helpers::test_cloud_home();
-        let storage = create_store(&db_a, kp_a.clone(), home.clone()).await;
+        let TestStoreFixture {
+            store: storage,
+            storage: cloud_storage,
+        } = create_store(&db_a, kp_a.clone(), home.clone()).await;
         let kp_b = UserKeypair::generate();
         let db_b = open_test_db_with_blob(photo_decl());
         let (tmp_a, lib_a) = temp_store_dir();
@@ -742,7 +756,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let recorder = Arc::new(Recorder::default());
         let reads_before_make_local = home.exact_stream_read_count();
         Box::pin(owners_a.make_local(
-            storage.storage(),
+            cloud_storage.clone(),
             None,
             Some(recorder.clone()),
             "notes",
@@ -813,7 +827,10 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
         // A still reads the photo from its external file (no cloud copy needed).
         let read = owners_a
-            .read_blob(Some(storage.storage()), &photo_ref(&db_a, "photoaaa").await)
+            .read_blob(
+                Some(cloud_storage.clone()),
+                &photo_ref(&db_a, "photoaaa").await,
+            )
             .await
             .expect("A reads from its external file");
         assert_eq!(read, bytes, "A plays its own local file");
@@ -827,7 +844,10 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     let db = scoped_blob_transition_db();
     let store_database = StoreDatabase::new(&db.database);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(&db, UserKeypair::generate(), home.clone()).await;
     storage.open_into(&db).await.expect("open exact test Store");
     let (tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
@@ -858,7 +878,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
 
     let error = owners
         .make_local(
-            storage.storage(),
+            cloud_storage.clone(),
             None,
             Some(recorder.clone()),
             "notes",
@@ -921,7 +941,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
 
     owners
         .make_local(
-            storage.storage(),
+            cloud_storage.clone(),
             Some(routing_encryption),
             Some(recorder.clone()),
             "notes",
@@ -965,7 +985,10 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let db = scoped_blob_transition_db();
     let store_database = StoreDatabase::new(&db.database);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(&db, UserKeypair::generate(), home.clone()).await;
     let exact_creates_before = home.exact_create_count();
     storage.open_into(&db).await.expect("open exact test Store");
     let (tmp, lib) = temp_store_dir();
@@ -1114,7 +1137,10 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let db = scoped_blob_transition_db();
     let store_database = StoreDatabase::new(&db.database);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(&db, UserKeypair::generate(), home.clone()).await;
     let exact_creates_before = home.exact_create_count();
     storage.open_into(&db).await.expect("open exact test Store");
     let (_tmp, lib) = temp_store_dir();
@@ -1272,7 +1298,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let kp_a = UserKeypair::generate();
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let store_database_a = StoreDatabase::new(&db_a.database);
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db_a,
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1363,7 +1392,10 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert_eq!(
         owners_b
-            .read_blob(Some(storage.storage()), &cover_ref(&db_b, "coveraaa").await)
+            .read_blob(
+                Some(cloud_storage.clone()),
+                &cover_ref(&db_b, "coveraaa").await
+            )
             .await
             .expect("B reads the cover"),
         cover,
@@ -1376,7 +1408,15 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     owners_a
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect("make_local");
 
@@ -1435,7 +1475,10 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let store_database_a = StoreDatabase::new(&db_a.database);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db_a, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(&db_a, UserKeypair::generate(), home.clone()).await;
     let exact_creates_before = home.exact_create_count();
     let (_tmp_a, lib_a) = temp_store_dir();
     let owners_a = TestOwnerGraph::new(store_database_a, lib_a.clone());
@@ -1460,7 +1503,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
 
     let before = owners_a
         .read_blob(
-            Some(storage.storage()),
+            Some(cloud_storage.clone()),
             &cover_ref(&db_a, "coverhost").await,
         )
         .await
@@ -1529,7 +1572,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     let after = owners_a
         .read_blob(
-            Some(storage.storage()),
+            Some(cloud_storage.clone()),
             &cover_ref(&db_a, "coverhost").await,
         )
         .await
@@ -1548,7 +1591,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
     let store_database = StoreDatabase::new(&db.database);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(&db, UserKeypair::generate(), home.clone()).await;
     let (_tmp, lib) = temp_store_dir();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let pin_bytes = b"PINNED-COVER".to_vec();
@@ -1708,7 +1754,10 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 #[tokio::test]
 async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1762,7 +1811,10 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
 #[tokio::test]
 async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let db = open_test_db();
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1820,7 +1872,10 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
 async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let db = open_test_db();
     let store_database = StoreDatabase::new(&db.database);
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: _,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1872,7 +1927,10 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let kp_a = UserKeypair::generate();
     let kp_b = UserKeypair::generate();
     let db_a = remote_root_db(cover_decl());
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db_a,
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1947,7 +2005,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     );
     let got = owners_b
         .read_blob(
-            Some(storage.storage()),
+            Some(cloud_storage.clone()),
             &db_b
                 .database
                 .row_blob_ref("note_photos", "coverrrr")
@@ -1999,7 +2057,10 @@ async fn make_remote_rejects_remote_root() {
 #[tokio::test]
 async fn make_local_rejects_remote_root() {
     let db = remote_root_db(cover_decl());
-    let storage = create_store(
+    let TestStoreFixture {
+        store: _,
+        storage: cloud_storage,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -2026,7 +2087,7 @@ async fn make_local_rejects_remote_root() {
 
     let err = owners
         .make_local(
-            storage.storage(),
+            cloud_storage.clone(),
             None,
             None,
             "notes",
@@ -2207,7 +2268,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
 /// the cloud and fail deep in materialization with a misleading cloud-read error.
 #[tokio::test]
 async fn make_local_rejects_already_local_root() {
-    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let (db, _storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let bytes = b"already-local".to_vec();
 
     // A Local release (gate off) with its blob at a registered external file.
@@ -2227,7 +2288,15 @@ async fn make_local_rejects_already_local_root() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect_err("a root already Local has no make_local transition");
     assert!(
@@ -2259,7 +2328,7 @@ async fn make_local_rejects_already_local_root() {
 /// exact-deletes any object that already landed. The gate never flips.
 #[tokio::test]
 async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let user = tmp.path().join("user");
 
@@ -2297,8 +2366,8 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         "not flipped — photobbb never uploaded"
     );
     let uploaded = created_upload_blob(&db, "photoaaa").await;
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(&uploaded)
         .await
         .expect("photoaaa is in the cloud");
@@ -2336,8 +2405,8 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     );
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
     assert!(pending_deletes(&db).await.is_empty());
-    assert!(storage
-        .storage()
+    assert!(cloud_storage
+        .clone()
         .verify_blob_object(&uploaded)
         .await
         .is_err());
@@ -2353,7 +2422,10 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
 async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
     let db = open_test_db_with_blob(photo_decl().with_id_column("blob_id"));
     let store_database = StoreDatabase::new(&db.database);
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -2417,8 +2489,8 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         else {
             panic!("new make_remote journal is Pending");
         };
-        let protection = storage
-            .storage()
+        let protection = cloud_storage
+            .clone()
             .store_blob_protection()
             .expect("load blob protection");
         let locator = match &protection {
@@ -2454,18 +2526,18 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .stage_atomic_file(&spool)
             .await
             .expect("create shared-locator spool stage");
-        storage
-            .storage()
+        cloud_storage
+            .clone()
             .seal_blob_to_spool(&locator, &authority, protection, source_path, spool_stage)
             .await
             .expect("seal shared-locator blob");
-        let slot = storage
-            .storage()
+        let slot = cloud_storage
+            .clone()
             .allocate_blob_slot(&locator, &authority)
             .await
             .expect("allocate distinct exact blob slot");
-        let stored = storage
-            .storage()
+        let stored = cloud_storage
+            .clone()
             .prepare_blob_object(&locator, &authority, slot, &spool)
             .await
             .expect("prepare exact blob");
@@ -2478,8 +2550,8 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             )
             .await
             .expect("record Prepared exact handoff");
-        storage
-            .storage()
+        cloud_storage
+            .clone()
             .create_blob_object_from_file(
                 &stored,
                 &authority,
@@ -2526,8 +2598,8 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("inspect make_remote intent"));
     for stored in &created {
-        storage
-            .storage()
+        cloud_storage
+            .clone()
             .verify_blob_object(stored)
             .await
             .expect_err("each exact object is deleted");
@@ -2541,7 +2613,10 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
 async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     let db = open_test_db_with_blob(photo_decl());
     let home = crate::sync::test_helpers::test_cloud_home();
-    let storage = create_store(&db, UserKeypair::generate(), home.clone()).await;
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(&db, UserKeypair::generate(), home.clone()).await;
     let (tmp, lib) = temp_store_dir();
 
     let src = TestOwnerGraph::new(StoreDatabase::new(&db.database), lib.clone())
@@ -2587,8 +2662,8 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     assert_eq!(home.exact_delete_count(), deletes_before);
     assert_eq!(pending_uploads(&db).await, 1);
     let created = created_upload_blob(&db, "photoaaa").await;
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(&created)
         .await
         .expect("the exact created object is preserved with its journal");
@@ -2604,7 +2679,7 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 /// leaves the release Remote with nothing tombstoned.
 #[tokio::test]
 async fn cancel_make_local_before_commit_stays_remote() {
-    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"still-managed".to_vec();
 
@@ -2618,7 +2693,15 @@ async fn cancel_make_local_before_commit_stays_remote() {
     let (_cancel_tx, cancel) = watch::channel(true);
 
     let err = owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect_err("a cancelled make_local aborts");
     assert!(matches!(
@@ -2643,7 +2726,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
 /// stays Remote, the cloud blob is untouched, and no delete is queued.
 #[tokio::test]
 async fn make_local_dest_failure_stays_remote_no_tombstones() {
-    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"managed-bytes".to_vec();
 
@@ -2659,7 +2742,15 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect_err("the dest write fails");
     assert!(matches!(
@@ -2678,8 +2769,8 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
     );
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
-        storage
-            .storage()
+        cloud_storage
+            .clone()
             .verify_blob_object(
                 photo_ref(&db, "photoaaa")
                     .await
@@ -2696,7 +2787,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
 /// operation. The root remains Remote and the cloud blob remains authoritative.
 #[tokio::test]
 async fn make_local_commit_failure_removes_materialized_files() {
-    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"materialized-before-commit-failure".to_vec();
 
@@ -2724,7 +2815,15 @@ async fn make_local_commit_failure_removes_materialized_files() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let error = owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect_err("the gate update fails after materialization");
 
@@ -2743,8 +2842,8 @@ async fn make_local_commit_failure_removes_materialized_files() {
         "no external ownership is registered",
     );
     assert!(pending_deletes(&db).await.is_empty(), "no delete is queued");
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(
             photo_ref(&db, "photoaaa")
                 .await
@@ -2765,7 +2864,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
-    let (db, storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"managed-bytes".to_vec();
 
@@ -2781,7 +2880,15 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     let (_cancel_tx, cancel) = watch::channel(false);
 
     let err = owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect_err("a non-UTF-8 dest aborts");
     assert!(matches!(
@@ -2800,8 +2907,8 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     );
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
     assert!(
-        storage
-            .storage()
+        cloud_storage
+            .clone()
             .verify_blob_object(
                 photo_ref(&db, "photoaaa")
                     .await
@@ -2823,7 +2930,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 /// write once the remaining exact object lands.
 #[tokio::test]
 async fn make_remote_crash_before_flip_redrain_converges() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let user = tmp.path().join("user");
 
@@ -2931,7 +3038,10 @@ async fn make_remote_crash_before_flip_redrain_converges() {
 async fn make_local_abort_then_retry_converges() {
     let db = open_test_db_with_blob(photo_decl());
     let store_database = StoreDatabase::new(&db.database);
-    let storage = create_store(
+    let TestStoreFixture {
+        store: storage,
+        storage: cloud_storage,
+    } = create_store(
         &db,
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -2952,7 +3062,7 @@ async fn make_local_abort_then_retry_converges() {
     let (_cancel_tx, cancelled) = watch::channel(true);
     let err = owners
         .make_local(
-            storage.storage(),
+            cloud_storage.clone(),
             None,
             None,
             "notes",
@@ -2976,7 +3086,15 @@ async fn make_local_abort_then_retry_converges() {
     // cloud delete enqueued.
     let (_fresh_tx, fresh) = watch::channel(false);
     owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &fresh)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &fresh,
+        )
         .await
         .expect("retry make_local");
     assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
@@ -2993,7 +3111,7 @@ async fn make_local_abort_then_retry_converges() {
 /// reclaim the replacement.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
-    let (db, storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
     let store_database = StoreDatabase::new(&db.database);
     let bytes = b"round-trip-photo".to_vec();
 
@@ -3027,7 +3145,15 @@ async fn round_trip_make_remote_make_local_make_remote() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     owners
-        .make_local(storage.storage(), None, None, "notes", "n1", &dest, &cancel)
+        .make_local(
+            cloud_storage.clone(),
+            None,
+            None,
+            "notes",
+            "n1",
+            &dest,
+            &cancel,
+        )
         .await
         .expect("make_local");
     // The retract cycle writes the tombstone.
@@ -3084,8 +3210,8 @@ async fn round_trip_make_remote_make_local_make_remote() {
             .unwrap(),
         "the old exact object's tombstone remains valid",
     );
-    storage
-        .storage()
+    cloud_storage
+        .clone()
         .verify_blob_object(&second_remote)
         .await
         .expect("the replacement exact blob is in the cloud");
