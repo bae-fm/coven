@@ -1,9 +1,10 @@
 use super::{StoreRecordTransaction, StoreRecords};
+use crate::store::retained_replay::install_snapshot_replay_baseline_on;
 use crate::{
-    install_snapshot_replay_baseline_on, install_store_founder_state_on,
-    install_store_root_authority_on, validate_snapshot_object_owners_on, CircleRestoreSelection,
-    Database, DbError, ResolvedStoreDeviceState, StoreDatabase, StoreDeviceRegistrationRef,
-    SyncedTable, VerifiedSnapshotBootstrapInstall,
+    install_store_founder_state_on, install_store_root_authority_on,
+    validate_snapshot_object_owners_on, CircleRestoreSelection, Database, DbError,
+    ResolvedStoreDeviceState, StoreDatabase, StoreDeviceRegistrationRef, SyncedTable,
+    VerifiedSnapshotBootstrapInstall,
 };
 
 impl StoreRecords<'_> {

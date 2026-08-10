@@ -79,8 +79,8 @@ use coven_protocol::remote_object::{
     SharedLiveSetObjectDomain,
 };
 use coven_protocol::store_commit::{
-    ack_slot_prefix, CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef,
-    SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    ack_slot_prefix, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta,
+    StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolRoot,
     StoreSnapshotRef,
 };
@@ -250,10 +250,6 @@ pub use store::{select_author_exclusion_activation_locator, AuthorExclusionLocat
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
 pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use store_authority_records::DurableFounderMembershipJournal;
-pub(crate) use store_authority_records::{
-    ensure_founder_replay_baseline_on, install_generation_zero_replay_baseline_on,
-    install_snapshot_replay_baseline_on, load_generation_zero_replay_baseline_on,
-};
 pub(crate) use store_authority_records::{
     founder_graph_identity, install_store_root_authority_on, load_local_store_founder_graph_on,
     load_store_root_authority_on,

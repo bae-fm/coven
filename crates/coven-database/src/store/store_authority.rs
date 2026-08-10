@@ -5,6 +5,9 @@ use coven_protocol::store_commit::{
 };
 use rusqlite::OptionalExtension;
 
+use super::retained_replay::{
+    ensure_founder_replay_baseline_on, install_generation_zero_replay_baseline_on,
+};
 use super::*;
 
 impl StoreSession<'_> {

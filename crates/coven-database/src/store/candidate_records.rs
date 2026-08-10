@@ -135,7 +135,7 @@ pub fn delete_remote_objects_on(
     Ok(())
 }
 
-pub(crate) fn parse_prepared_merge_candidate_on(
+pub(super) fn parse_prepared_merge_candidate_on(
     records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
@@ -164,7 +164,7 @@ pub(super) fn prepared_merge_candidate_objects(
 /// Both objects arrive as their signed bytes plus the reference they are stored
 /// under; the upload representation is not needed to verify a candidate, only to
 /// create one, so it is not asked for.
-pub(crate) fn parse_prepared_merge_candidate_parts_on(
+pub(super) fn parse_prepared_merge_candidate_parts_on(
     records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     commit_bytes: &[u8],
@@ -232,7 +232,7 @@ pub fn blocked_merge_candidate_from_prepared(
     }
 }
 
-pub(crate) fn parse_prepared_merge_publication_on(
+pub(super) fn parse_prepared_merge_publication_on(
     records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
@@ -268,7 +268,7 @@ pub enum MergeCandidateHeadEvidence<'a> {
     Verified(&'a coven_protocol::remote_object::VerifiedCandidateHeadNonactivation),
 }
 
-pub(crate) fn author_exclusion_activation_for_candidate_on(
+pub(super) fn author_exclusion_activation_for_candidate_on(
     records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
@@ -337,7 +337,7 @@ pub fn select_author_exclusion_activation_locator(
     Ok(None)
 }
 
-pub(crate) fn load_author_exclusion_activation_locator_on(
+pub(super) fn load_author_exclusion_activation_locator_on(
     records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
@@ -418,7 +418,7 @@ pub fn blocked_merge_candidate_nonactivation(
     ))
 }
 
-pub(crate) fn validate_terminal_candidate_authority_on(
+pub(super) fn validate_terminal_candidate_authority_on(
     records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
@@ -437,7 +437,7 @@ pub(crate) fn validate_terminal_candidate_authority_on(
     validate_terminal_nonactivation_authority_on(records, retained, root, durable)
 }
 
-pub(crate) fn validate_terminal_nonactivation_authority_on(
+pub(super) fn validate_terminal_nonactivation_authority_on(
     records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
@@ -630,7 +630,7 @@ pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// proof yet or its proof is a non-terminal Merge-winner (whose head is cleaned
 /// by occupation, not terminal reconciliation). Shared by Merge cleanup and
 /// Circle-operation discard so both derive the authority identically.
-pub(crate) fn terminal_candidate_verification_on(
+pub(super) fn terminal_candidate_verification_on(
     records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,

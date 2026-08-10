@@ -77,7 +77,7 @@ mod store_database;
 mod store_device_state;
 mod store_records;
 pub use store_database::StoreDatabase;
-pub(crate) use store_records::{StoreRecordTransaction, StoreRecords};
+use store_records::{StoreRecordTransaction, StoreRecords};
 mod store_session;
 mod stream_activation_records;
 mod verified_store_authority;

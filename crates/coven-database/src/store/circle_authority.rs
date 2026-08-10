@@ -515,7 +515,7 @@ impl StoreDatabase {
     /// later epoch close resolves against the successor control that excludes them
     /// — never against a stale predecessor that still lists them active. A Circle
     /// with two uncovered controls is a forked lineage and fails loud.
-    pub(crate) fn head_circle_control_on(
+    pub(super) fn head_circle_control_on(
         records: StoreRecords<'_>,
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -574,7 +574,7 @@ impl StoreDatabase {
         Ok(head)
     }
 
-    pub(crate) fn verified_circle_activation_on(
+    pub(super) fn verified_circle_activation_on(
         records: StoreRecords<'_>,
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -607,7 +607,7 @@ impl StoreDatabase {
         .await
     }
 
-    pub(crate) fn verified_circle_control_covers_on(
+    pub(super) fn verified_circle_control_covers_on(
         records: StoreRecords<'_>,
         authority: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
