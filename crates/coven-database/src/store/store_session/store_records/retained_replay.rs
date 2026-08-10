@@ -329,7 +329,7 @@ impl StoreRecords<'_> {
         authority: crate::RetainedReplaySnapshotAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         authority.validate()?;
-        let image_bytes = crate::store::retained_replay::serialized_database(self.conn)?;
+        let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
         let baseline = crate::RetainedReplayBaseline {
             generation: crate::GENERATION_ZERO,
             exact_cut: authority.metadata.coverage.clone(),

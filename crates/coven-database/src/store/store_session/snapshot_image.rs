@@ -30,8 +30,6 @@ pub enum SnapshotBlobAudience {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotImageError {
-    #[error("VACUUM INTO failed: {0}")]
-    VacuumFailed(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("no synced tables registered; refusing to emit an all-cleared snapshot")]
@@ -144,33 +142,54 @@ impl SnapshotDatabaseImage {
             None
         };
 
-        let path_str = self
-            .path()
-            .to_str()
-            .expect("temp path should be valid UTF-8");
-        if let Err(error) = connection.execute("VACUUM INTO ?1", [path_str]) {
-            return self.finish(Err(SnapshotImageError::VacuumFailed(error.to_string())));
-        }
-        if let Err(error) = self.project(store_dir, root, tables, routing_key.as_ref(), audience) {
+        let source_image = match crate::connection_io::serialize_database_image(connection) {
+            Ok(image) => image,
+            Err(error) => {
+                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+            }
+        };
+        let mut snapshot = match crate::open_database_image(&source_image) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+            }
+        };
+        if let Err(error) = Self::project(
+            &mut snapshot,
+            store_dir,
+            root,
+            tables,
+            routing_key.as_ref(),
+            audience,
+        ) {
             return self.finish(Err(error));
         }
-        let blobs = match self.blob_facts(connection, tables) {
+        let blobs = match Self::blob_facts(connection, &snapshot, tables) {
             Ok(blobs) => blobs,
             Err(error) => return self.finish(Err(error)),
         };
         if matches!(audience, coven_protocol::circle::Audience::Circle(_)) {
-            if let Err(error) = self.strip_circle_transport_state() {
+            if let Err(error) = Self::strip_circle_transport_state(&mut snapshot) {
                 return self.finish(Err(error));
             }
         }
 
-        let plaintext_size = match std::fs::metadata(self.path()) {
+        let image = match crate::connection_io::serialize_database_image(&snapshot) {
+            Ok(image) => image,
+            Err(error) => {
+                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+            }
+        };
+        drop(snapshot);
+        let snapshot = self.write_new(&image)?;
+
+        let plaintext_size = match std::fs::metadata(snapshot.path()) {
             Ok(metadata) => metadata.len(),
-            Err(error) => return self.finish(Err(SnapshotImageError::Io(error))),
+            Err(error) => return snapshot.finish(Err(SnapshotImageError::Io(error))),
         };
         info!(plaintext_size, "created snapshot");
         Ok(CreatedSnapshot {
-            db_image: self,
+            db_image: snapshot,
             blobs,
         })
     }
@@ -273,130 +292,107 @@ impl SnapshotDatabaseImage {
     }
 
     fn project(
-        &self,
+        connection: &mut Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced: &[SyncedTable],
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         audience: &coven_protocol::circle::Audience,
     ) -> Result<(), SnapshotImageError> {
-        let connection = Connection::open(&self.path).map_err(|error| {
-            SnapshotImageError::Projection(format!("failed to open snapshot copy: {error}"))
-        })?;
-        let result = (|| {
-            let gates = crate::Gates::from_tables(&connection, synced)
+        let gates = crate::Gates::from_tables(connection, synced)
+            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        if gates.has_scoped_graph() && routing_key.is_none() {
+            return Err(SnapshotImageError::Projection(
+                "scoped snapshot projection requires a row-routing key".to_string(),
+            ));
+        }
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        transaction
+            .pragma_update(None, "defer_foreign_keys", "ON")
+            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        let coverage =
+            crate::store::materialized_commit_index::materialized_frontier_on(&transaction, None)
                 .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            if gates.has_scoped_graph() && routing_key.is_none() {
+        let cleared_materialization_tables = ["materialized_commits"];
+        for table in cleared_materialization_tables {
+            transaction
+                .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
+                .map_err(|error| {
+                    SnapshotImageError::Projection(format!("clear {table}: {error}"))
+                })?;
+        }
+        if matches!(audience, coven_protocol::circle::Audience::Store) {
+            let records =
+                crate::store::store_session::StoreTransaction::new(&transaction, store_dir);
+            let mut authority = super::VerifiedStoreAuthority::default();
+            records
+                .retain_snapshot_replay_inputs(&mut authority, root)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            records
+                .retain_snapshot_device_states(&mut authority, root, coverage)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        }
+        let preserved_non_synced_tables = match audience {
+            coven_protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
+            coven_protocol::circle::Audience::Circle(_) => CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES,
+            coven_protocol::circle::Audience::Local => {
                 return Err(SnapshotImageError::Projection(
-                    "scoped snapshot projection requires a row-routing key".to_string(),
+                    "Local rows cannot enter a snapshot".to_string(),
                 ));
             }
-            let transaction = connection
-                .unchecked_transaction()
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        };
+        for table in crate::user_table_names(connection)
+            .map_err(|error| SnapshotImageError::Projection(format!("list user tables: {error}")))?
+        {
+            if synced.iter().any(|synced| synced.name() == table)
+                || preserved_non_synced_tables.contains(&table.as_str())
+                || cleared_materialization_tables.contains(&table.as_str())
+            {
+                continue;
+            }
             transaction
-                .pragma_update(None, "defer_foreign_keys", "ON")
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            let coverage = crate::store::materialized_commit_index::materialized_frontier_on(
-                &transaction,
-                None,
-            )
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            let cleared_materialization_tables = ["materialized_commits"];
-            for table in cleared_materialization_tables {
-                transaction
-                    .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
-                    .map_err(|error| {
-                        SnapshotImageError::Projection(format!("clear {table}: {error}"))
-                    })?;
-            }
-            if matches!(audience, coven_protocol::circle::Audience::Store) {
-                let records =
-                    crate::store::store_session::StoreTransaction::new(&transaction, store_dir);
-                let mut authority = super::VerifiedStoreAuthority::default();
-                records
-                    .retain_snapshot_replay_inputs(&mut authority, root)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-                records
-                    .retain_snapshot_device_states(&mut authority, root, coverage)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            }
-            let preserved_non_synced_tables = match audience {
-                coven_protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
-                coven_protocol::circle::Audience::Circle(_) => {
-                    CIRCLE_IMAGE_PRESERVED_NON_SYNCED_TABLES
-                }
-                coven_protocol::circle::Audience::Local => {
-                    return Err(SnapshotImageError::Projection(
-                        "Local rows cannot enter a snapshot".to_string(),
-                    ));
-                }
-            };
-            for table in crate::user_table_names(&connection).map_err(|error| {
-                SnapshotImageError::Projection(format!("list user tables: {error}"))
-            })? {
-                if synced.iter().any(|synced| synced.name() == table)
-                    || preserved_non_synced_tables.contains(&table.as_str())
-                    || cleared_materialization_tables.contains(&table.as_str())
-                {
-                    continue;
-                }
-                transaction
-                    .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(&table)))
-                    .map_err(|error| {
-                        SnapshotImageError::Projection(format!("clear {table}: {error}"))
-                    })?;
-            }
-
-            match audience {
-                coven_protocol::circle::Audience::Store => {
-                    gates
-                        .delete_gated_false(&transaction)
-                        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
-                }
-                coven_protocol::circle::Audience::Circle(_) => {
-                    crate::retain_snapshot_audience_rows(&transaction, &gates, audience)
-                        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-                }
-                coven_protocol::circle::Audience::Local => {
-                    return Err(SnapshotImageError::Projection(
-                        "Local rows cannot enter a snapshot".to_string(),
-                    ));
-                }
-            }
-            if let Some(routing_key) = routing_key {
-                crate::prune_private_routes_without_rows(&transaction, &gates)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-                crate::validate_snapshot_routing_state(&transaction, &gates, routing_key, audience)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            }
-
-            scope_authenticated_blob_graph(&transaction, synced)?;
-            transaction
-                .commit()
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            if matches!(audience, coven_protocol::circle::Audience::Store) {
-                connection
-                    .execute_batch("VACUUM")
-                    .map_err(|error| SnapshotImageError::Projection(format!("vacuum: {error}")))?;
-            }
-            Ok(())
-        })();
-        match (result, connection.close()) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) => Err(error),
-            (Ok(()), Err((_, error))) => Err(SnapshotImageError::Projection(format!(
-                "failed to close snapshot copy: {error}"
-            ))),
+                .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(&table)))
+                .map_err(|error| {
+                    SnapshotImageError::Projection(format!("clear {table}: {error}"))
+                })?;
         }
+
+        match audience {
+            coven_protocol::circle::Audience::Store => gates
+                .delete_gated_false(&transaction)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
+            coven_protocol::circle::Audience::Circle(_) => {
+                crate::retain_snapshot_audience_rows(&transaction, &gates, audience)
+                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            }
+            coven_protocol::circle::Audience::Local => {
+                return Err(SnapshotImageError::Projection(
+                    "Local rows cannot enter a snapshot".to_string(),
+                ));
+            }
+        }
+        if let Some(routing_key) = routing_key {
+            crate::prune_private_routes_without_rows(&transaction, &gates)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            crate::validate_snapshot_routing_state(&transaction, &gates, routing_key, audience)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        }
+
+        scope_authenticated_blob_graph(&transaction, synced)?;
+        transaction
+            .commit()
+            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        if matches!(audience, coven_protocol::circle::Audience::Store) {
+            connection
+                .execute_batch("VACUUM")
+                .map_err(|error| SnapshotImageError::Projection(format!("vacuum: {error}")))?;
+        }
+        Ok(())
     }
 
-    fn strip_circle_transport_state(&self) -> Result<(), SnapshotImageError> {
-        let mut connection = Connection::open(&self.path).map_err(|error| {
-            SnapshotImageError::Projection(format!(
-                "open Circle snapshot transport projection: {error}"
-            ))
-        })?;
+    fn strip_circle_transport_state(connection: &mut Connection) -> Result<(), SnapshotImageError> {
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
@@ -426,11 +422,7 @@ impl SnapshotDatabaseImage {
                 "vacuum Circle snapshot transport projection: {error}"
             ))
         })?;
-        connection.close().map_err(|(_, error)| {
-            SnapshotImageError::Projection(format!(
-                "close Circle snapshot transport projection: {error}"
-            ))
-        })
+        Ok(())
     }
 
     pub fn install_blob_graph(
@@ -483,17 +475,14 @@ impl SnapshotDatabaseImage {
     }
 
     fn blob_facts(
-        &self,
         live: &Connection,
+        snapshot: &Connection,
         tables: &[SyncedTable],
     ) -> Result<Vec<SnapshotBlobFact>, SnapshotImageError> {
-        let snapshot = Connection::open(&self.path).map_err(|error| {
-            SnapshotImageError::Projection(format!("open scoped snapshot: {error}"))
-        })?;
-        let declarations = crate::BlobDecls::from_tables(&snapshot, tables)
+        let declarations = crate::BlobDecls::from_tables(snapshot, tables)
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
         let publications = declarations
-            .publication_blobs_in_db(&snapshot)
+            .publication_blobs_in_db(snapshot)
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
         let gates = crate::Gates::from_tables(live, tables)
             .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
@@ -528,7 +517,7 @@ impl SnapshotDatabaseImage {
                     None
                 };
             let previous = crate::previous_row_blob_for_write_on(
-                &snapshot,
+                snapshot,
                 &publication.table,
                 &publication.row_id,
                 &publication.row_stamp,

@@ -764,15 +764,8 @@ pub fn copy_table_with_conflicts(
     Ok(())
 }
 
-pub(super) fn serialized_database(connection: &Connection) -> Result<Vec<u8>, DbError> {
-    connection
-        .serialize(rusqlite::MAIN_DB)
-        .map(|bytes| bytes.to_vec())
-        .map_err(DbError::from)
-}
-
 pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
-    let source_bytes = serialized_database(source)?;
+    let source_bytes = crate::connection_io::serialize_database_image(source)?;
     let image = open_image(&source_bytes)?;
     image
         .pragma_update(None, "foreign_keys", "OFF")
@@ -810,7 +803,7 @@ pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u
             "generation-zero retained replay image violates foreign keys".to_string(),
         ));
     }
-    serialized_database(&image)
+    crate::connection_io::serialize_database_image(&image)
 }
 
 fn validate_replay_image_foreign_keys(image: &Connection) -> Result<(), DbError> {

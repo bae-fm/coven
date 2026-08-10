@@ -91,6 +91,13 @@ pub fn open_database_image(image: &[u8]) -> Result<Connection, DbError> {
     Ok(connection)
 }
 
+pub(crate) fn serialize_database_image(connection: &Connection) -> Result<Vec<u8>, DbError> {
+    connection
+        .serialize(rusqlite::MAIN_DB)
+        .map(|bytes| bytes.to_vec())
+        .map_err(DbError::from)
+}
+
 pub(crate) fn open_connection(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
     // WAL so a read-only connection in another process can read committed rows while

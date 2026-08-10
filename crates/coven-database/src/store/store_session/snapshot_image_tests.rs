@@ -31,7 +31,7 @@ fn staged_database_cleanup_preserves_the_operation_failure() {
     std::fs::create_dir(&path).expect("create cleanup obstruction");
 
     let error = staged
-        .finish::<()>(Err(SnapshotImageError::VacuumFailed(
+        .finish::<()>(Err(SnapshotImageError::Projection(
             "injected operation failure".to_string(),
         )))
         .expect_err("operation and cleanup failures must both surface");
@@ -46,7 +46,7 @@ fn staged_database_cleanup_preserves_the_operation_failure() {
             } if *failed_path == path
                 && matches!(
                     cause.as_ref(),
-                    SnapshotImageError::VacuumFailed(message)
+                    SnapshotImageError::Projection(message)
                         if message == "injected operation failure"
                 )
         ),
