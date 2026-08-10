@@ -21,6 +21,38 @@ pub enum BlockedWriteDiscard {
     RemoteResolutionRequired,
 }
 
+impl StoreSession<'_> {
+    fn block_write_if_unresolved(
+        &self,
+        write_id: &WriteId,
+        block: coven_protocol::write::WriteBlock,
+    ) -> Result<Option<WriteStatus>, DbError> {
+        let raw: String = self
+            .records
+            .conn
+            .query_row(
+                "SELECT status FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let current: WriteStatus = serde_json::from_str(&raw).map_err(|error| {
+            DbError::context(format!("write {write_id} status before blocking"), error)
+        })?;
+        match current {
+            WriteStatus::Resolved(_) => Ok(None),
+            WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => {
+                let blocked = WriteStatus::Blocked(block);
+                Database::set_write_status_on(self.records.conn, write_id, &blocked)?;
+                Ok(Some(blocked))
+            }
+            state @ (WriteStatus::LocalOnly | WriteStatus::Published(_)) => Err(DbError::Message(
+                format!("write {write_id} cannot become blocked from {state:?}"),
+            )),
+        }
+    }
+}
+
 impl StoreDatabase {
     #[doc(hidden)]
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
@@ -273,32 +305,7 @@ impl StoreDatabase {
         let notified_write_id = write_id.clone();
         let outcome = self
             .connection
-            .call_database(move |session| {
-                let conn = session.conn;
-                let raw: String = conn
-                    .query_row(
-                        "SELECT status FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let current: WriteStatus = serde_json::from_str(&raw).map_err(|error| {
-                    DbError::context(format!("write {write_id} status before blocking"), error)
-                })?;
-                match current {
-                    WriteStatus::Resolved(_) => Ok(None),
-                    WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => {
-                        let blocked = WriteStatus::Blocked(block);
-                        Database::set_write_status_on(conn, &write_id, &blocked)?;
-                        Ok(Some(blocked))
-                    }
-                    state @ (WriteStatus::LocalOnly | WriteStatus::Published(_)) => {
-                        Err(DbError::Message(format!(
-                            "write {write_id} cannot become blocked from {state:?}"
-                        )))
-                    }
-                }
-            })
+            .call_store(move |session| session.block_write_if_unresolved(&write_id, block))
             .await?;
         if let Some(status) = outcome {
             self.notify_write_status(notified_write_id, status);
