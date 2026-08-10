@@ -22,6 +22,43 @@ pub enum BlockedWriteDiscard {
 }
 
 impl StoreSession<'_> {
+    fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
+        let mut statement = self
+            .records
+            .conn
+            .prepare(
+                "SELECT write_id, status, affected_rows FROM store_writes
+                 WHERE status IN ('\"pending\"', '\"publishing\"')
+                    OR json_extract(status, '$.blocked') IS NOT NULL
+                 ORDER BY ordinal",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        rows.map(|row| {
+            let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
+            Ok(PendingWrite {
+                write_id: WriteId::from_generated(write_id),
+                status: serde_json::from_str(&status)
+                    .map_err(|error| DbError::context("pending write status", error))?,
+                affected_rows: serde_json::from_str(&affected_rows)
+                    .map_err(|error| DbError::context("pending affected rows", error))?,
+            })
+        })
+        .collect()
+    }
+
+    fn set_write_status(&self, write_id: &WriteId, status: &WriteStatus) -> Result<(), DbError> {
+        Database::set_write_status_on(self.records.conn, write_id, status)
+    }
+
     fn block_write_if_unresolved(
         &self,
         write_id: &WriteId,
@@ -51,43 +88,189 @@ impl StoreSession<'_> {
             )),
         }
     }
+
+    fn retry_blocked_write(
+        &mut self,
+        write_id: WriteId,
+    ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
+        let records = self.records;
+        let tx = records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let (raw_status, prepared): (String, Option<String>) = tx
+            .query_row(
+                "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let status: WriteStatus = serde_json::from_str(&raw_status)
+            .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
+        if !matches!(status, WriteStatus::Blocked(_)) {
+            return Err(DbError::Message(format!("write {write_id} is not blocked")));
+        }
+        if let Some(raw_prepared) = prepared.as_deref() {
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(raw_prepared).map_err(|error| {
+                    DbError::context(format!("blocked write {write_id} preparation"), error)
+                })?;
+            let candidate = parse_prepared_merge_candidate_on(
+                crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                self.verified_store_authority,
+                &prepared,
+            )?
+            .reference;
+            let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
+            if matches!(
+                remote,
+                RemoteObjectRecord::CandidateCommit(
+                    coven_protocol::remote_object::CandidateCommitRecord {
+                        state:
+                            coven_protocol::remote_object::CandidateCommitState::CleanupPending {
+                                proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                            }
+                            | coven_protocol::remote_object::CandidateCommitState::AbsentVerified {
+                                proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                            },
+                        ..
+                    }
+                )
+            ) {
+                return Err(DbError::Message(format!(
+                    "Merge write {write_id} has an irreversible winner and cannot be retried"
+                )));
+            }
+        }
+        let next = if prepared.is_some() {
+            WriteStatus::Publishing
+        } else {
+            WriteStatus::Pending
+        };
+        let next_json = serde_json::to_string(&next)
+            .map_err(|error| DbError::context("serialize retry status", error))?;
+        let updated = tx
+            .execute(
+                "UPDATE store_writes SET status = ?2
+                 WHERE write_id = ?1 AND json_extract(status, '$.blocked') IS NOT NULL",
+                rusqlite::params![write_id.as_str(), next_json],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "blocked write {write_id} changed during retry"
+            )));
+        }
+        let retried = vec![(write_id, next)];
+        tx.commit().map_err(DbError::from)?;
+        Ok(retried)
+    }
+
+    fn discard_blocked_write(&mut self, write_id: WriteId) -> Result<BlockedWriteDiscard, DbError> {
+        let session_records = self.records;
+        let tx = session_records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let (raw_status, target_ordinal): (String, i64) = tx
+            .query_row(
+                "SELECT status, ordinal FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let target_status: WriteStatus = serde_json::from_str(&raw_status)
+            .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
+        if !matches!(target_status, WriteStatus::Blocked(_)) {
+            return Err(DbError::Message(format!("write {write_id} is not blocked")));
+        }
+
+        let mut statement = tx
+            .prepare(
+                "SELECT write_id, status, changeset_hash FROM store_writes
+                 WHERE ordinal >= ?1
+                   AND status != '\"local_only\"'
+                   AND json_extract(status, '$.published') IS NULL
+                   AND json_extract(status, '$.resolved') IS NULL
+                 ORDER BY ordinal",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([target_ordinal], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut discarded = Vec::new();
+        for row in rows {
+            let (stored_id, raw_status, changeset_hash) = row.map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::context("discard write status", error))?;
+            if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(format!(
+                    "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
+                )));
+            }
+            discarded.push((
+                WriteId::from_generated(stored_id),
+                changeset_hash.parse::<coven_protocol::store_commit::ObjectHash>()?,
+            ));
+        }
+        drop(statement);
+        if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
+            return Err(DbError::Message(format!(
+                "blocked write {write_id} is absent from its unpublished suffix"
+            )));
+        }
+        for (discarded_id, _) in &discarded {
+            let cleanup = StoreDatabase::unpublished_write_cleanup_on(
+                crate::payload_spool::StoreRecordTransaction::new(&tx, session_records.store_dir),
+                self.verified_store_authority,
+                discarded_id,
+            )?;
+            if !StoreDatabase::unpublished_write_cleanup_complete_on(&tx, &cleanup)? {
+                return Ok(BlockedWriteDiscard::RemoteResolutionRequired);
+            }
+        }
+        let schema = Arc::new(crate::TableSchema::for_apply(
+            &tx,
+            self.synced_tables,
+            self.gates,
+        )?);
+        let records = crate::payload_spool::StoreRecords::new(&tx, session_records.store_dir);
+        for (_, changeset_hash) in discarded.iter().rev() {
+            let changeset = records.payload(*changeset_hash)?;
+            let inverse = StoreDatabase::invert_changeset(&changeset)?;
+            let inverse = crate::ValidatedChangeset::new(inverse, schema.clone())
+                .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
+            MergeMaterializationTransaction::new(&tx, session_records.store_dir)
+                .apply_changeset_strict(inverse)
+                .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
+        }
+        let discarded_ids: Vec<_> = discarded
+            .into_iter()
+            .map(|(write_id, _)| write_id)
+            .collect();
+        let resolution = WriteResolution::Discarded;
+        StoreDatabase::resolve_unpublished_writes_on(
+            crate::payload_spool::StoreRecordTransaction::new(&tx, session_records.store_dir),
+            self.verified_store_authority,
+            &discarded_ids,
+            &resolution,
+        )?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(BlockedWriteDiscard::Discarded(discarded_ids))
+    }
 }
 
 impl StoreDatabase {
     #[doc(hidden)]
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT write_id, status, affected_rows FROM store_writes
-                         WHERE status IN ('\"pending\"', '\"publishing\"')
-                            OR json_extract(status, '$.blocked') IS NOT NULL
-                         ORDER BY ordinal",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })
-                    .map_err(DbError::from)?;
-                rows.map(|row| {
-                    let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
-                    Ok(PendingWrite {
-                        write_id: WriteId::from_generated(write_id),
-                        status: serde_json::from_str(&status)
-                            .map_err(|error| DbError::context("pending write status", error))?,
-                        affected_rows: serde_json::from_str(&affected_rows)
-                            .map_err(|error| DbError::context("pending affected rows", error))?,
-                    })
-                })
-                .collect()
-            })
+            .call_store(|session| session.pending_writes())
             .await
     }
 
@@ -107,27 +290,22 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<tokio::sync::watch::Receiver<WriteStatus>, DbError> {
         let write_id = write_id.clone();
-        let statuses = self.write_statuses.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let raw: String = connection
-                    .query_row(
-                        "SELECT status FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let current: WriteStatus = serde_json::from_str(&raw)
-                    .map_err(|error| DbError::context(format!("write {write_id} status"), error))?;
-                let mut senders = statuses.lock().expect("write status mutex poisoned");
-                let sender = senders
-                    .entry(write_id)
-                    .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
-                sender.send_replace(current);
-                Ok(sender.subscribe())
+        let current = self
+            .connection
+            .call_store({
+                let write_id = write_id.clone();
+                move |session| session.write_status(&write_id)
             })
-            .await
+            .await?;
+        let mut senders = self
+            .write_statuses
+            .lock()
+            .expect("write status mutex poisoned");
+        let sender = senders
+            .entry(write_id)
+            .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
+        sender.send_replace(current);
+        Ok(sender.subscribe())
     }
 
     fn unpublished_write_cleanup_on(
@@ -286,11 +464,7 @@ impl StoreDatabase {
         let stored_id = write_id.clone();
         let stored_status = status.clone();
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                Database::set_write_status_on(conn, &stored_id, &stored_status)?;
-                Ok(())
-            })
+            .call_store(move |session| session.set_write_status(&stored_id, &stored_status))
             .await?;
         self.notify_write_status(write_id.clone(), status);
         Ok(())
@@ -321,81 +495,10 @@ impl StoreDatabase {
     #[doc(hidden)]
     pub async fn retry_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
         let write_id = write_id.clone();
-        let retried = self.connection.call_store(move |session| {
-            let records = session.records;
-            let verified_authority = &mut *session.verified_store_authority;
-            let conn = records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let (raw_status, prepared): (String, Option<String>) = tx
-                .query_row(
-                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(DbError::from)?;
-            let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
-            if !matches!(status, WriteStatus::Blocked(_)) {
-                return Err(DbError::Message(format!("write {write_id} is not blocked")));
-            }
-            let mut retried = Vec::new();
-            if let Some(raw_prepared) = prepared.as_deref() {
-                let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
-                    .map_err(|error| {
-                        DbError::context(format!("blocked write {write_id} preparation"), error)
-                    })?;
-                let candidate = parse_prepared_merge_candidate_on(
-                    crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
-                    verified_authority,
-                    &prepared,
-                )?
-                .reference;
-                let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
-                if matches!(
-                    remote,
-                    RemoteObjectRecord::CandidateCommit(
-                        coven_protocol::remote_object::CandidateCommitRecord {
-                            state:
-                                coven_protocol::remote_object::CandidateCommitState::CleanupPending {
-                                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                                }
-                                | coven_protocol::remote_object::CandidateCommitState::AbsentVerified {
-                                    proof: coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                                },
-                            ..
-                        }
-                    )
-                ) {
-                    return Err(DbError::Message(format!(
-                        "Merge write {write_id} has an irreversible winner and cannot be retried"
-                    )));
-                }
-            }
-            let next = if prepared.is_some() {
-                WriteStatus::Publishing
-            } else {
-                WriteStatus::Pending
-            };
-            let next_json = serde_json::to_string(&next).map_err(|error| {
-                DbError::context("serialize retry status", error)
-            })?;
-            let updated = tx
-                .execute(
-                    "UPDATE store_writes SET status = ?2
-                     WHERE write_id = ?1 AND json_extract(status, '$.blocked') IS NOT NULL",
-                    rusqlite::params![write_id.as_str(), next_json],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(format!(
-                    "blocked write {write_id} changed during retry"
-                )));
-            }
-            retried.push((write_id, next));
-            tx.commit().map_err(DbError::from)?;
-            Ok(retried)
-        })
-        .await?;
+        let retried = self
+            .connection
+            .call_store(move |session| session.retry_blocked_write(write_id))
+            .await?;
         let retried_ids = retried
             .iter()
             .map(|(write_id, _)| write_id.clone())
@@ -414,112 +517,10 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<BlockedWriteDiscard, DbError> {
         let write_id = write_id.clone();
-        let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates.clone();
-        let discarded_ids = self.connection.call_store(move |session| {
-            let session_records = session.records;
-            let verified_authority = &mut *session.verified_store_authority;
-            let conn = session_records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let (raw_status, target_ordinal): (String, i64) = tx
-                .query_row(
-                    "SELECT status, ordinal FROM store_writes WHERE write_id = ?1",
-                    [write_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(DbError::from)?;
-            let target_status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::context(format!("blocked write {write_id} status"), error))?;
-            if !matches!(target_status, WriteStatus::Blocked(_)) {
-                return Err(DbError::Message(format!("write {write_id} is not blocked")));
-            }
-
-            let mut statement = tx
-                .prepare(
-                    "SELECT write_id, status, changeset_hash FROM store_writes
-                     WHERE ordinal >= ?1
-                       AND status != '\"local_only\"'
-                       AND json_extract(status, '$.published') IS NULL
-                       AND json_extract(status, '$.resolved') IS NULL
-                     ORDER BY ordinal",
-                )
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([target_ordinal], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(DbError::from)?;
-            let mut discarded = Vec::new();
-            for row in rows {
-                let (stored_id, raw_status, changeset_hash) = row.map_err(DbError::from)?;
-                let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError::context("discard write status", error))?;
-                if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
-                    return Err(DbError::Message(format!(
-                        "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
-                    )));
-                }
-                discarded.push((
-                    WriteId::from_generated(stored_id),
-                    changeset_hash.parse::<coven_protocol::store_commit::ObjectHash>()?,
-                ));
-            }
-            drop(statement);
-            if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
-                return Err(DbError::Message(format!(
-                    "blocked write {write_id} is absent from its unpublished suffix"
-                )));
-            }
-            for (discarded_id, _) in &discarded {
-                let cleanup = Self::unpublished_write_cleanup_on(
-                    crate::payload_spool::StoreRecordTransaction::new(
-                        &tx,
-                        session_records.store_dir,
-                    ),
-                    verified_authority,
-                    discarded_id,
-                )?;
-                if !Self::unpublished_write_cleanup_complete_on(&tx, &cleanup)? {
-                    return Ok(BlockedWriteDiscard::RemoteResolutionRequired);
-                }
-            }
-            let schema = Arc::new(crate::TableSchema::for_apply(&tx, &synced_tables, &gates)?);
-            let records =
-                crate::payload_spool::StoreRecords::new(&tx, session_records.store_dir);
-            for (_, changeset_hash) in discarded.iter().rev() {
-                let changeset = records.payload(*changeset_hash)?;
-                let inverse = StoreDatabase::invert_changeset(&changeset)?;
-                let inverse = crate::ValidatedChangeset::new(
-                    inverse,
-                    schema.clone(),
-                )
-                .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
-                MergeMaterializationTransaction::new(&tx, session_records.store_dir)
-                    .apply_changeset_strict(inverse)
-                    .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
-            }
-            let discarded_ids: Vec<_> = discarded
-                .into_iter()
-                .map(|(write_id, _)| write_id)
-                .collect();
-            let resolution = WriteResolution::Discarded;
-            Self::resolve_unpublished_writes_on(
-                crate::payload_spool::StoreRecordTransaction::new(
-                    &tx,
-                    session_records.store_dir,
-                ),
-                verified_authority,
-                &discarded_ids,
-                &resolution,
-            )?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(BlockedWriteDiscard::Discarded(discarded_ids))
-        })
-        .await?;
+        let discarded_ids = self
+            .connection
+            .call_store(move |session| session.discard_blocked_write(write_id))
+            .await?;
         if let BlockedWriteDiscard::Discarded(discarded_ids) = &discarded_ids {
             let status = WriteStatus::Resolved(WriteResolution::Discarded);
             for discarded_id in discarded_ids {
