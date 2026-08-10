@@ -23,7 +23,7 @@ pub struct SqlReadContext<'connection> {
 }
 
 impl<'connection> SqlReadContext<'connection> {
-    pub fn new(connection: &'connection rusqlite::Connection) -> Self {
+    pub(crate) fn new(connection: &'connection rusqlite::Connection) -> Self {
         Self { connection }
     }
 
@@ -58,7 +58,7 @@ pub struct SqlContext<'context, 'connection> {
 }
 
 impl<'context, 'connection> SqlContext<'context, 'connection> {
-    pub fn new(
+    pub(crate) fn new(
         transaction: &'context rusqlite::Transaction<'connection>,
         stamper: UpdatedAtStamper,
         tables: &'context [SyncedTable],

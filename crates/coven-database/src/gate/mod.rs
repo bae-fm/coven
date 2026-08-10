@@ -70,20 +70,22 @@ mod ffi;
 mod model;
 mod outbound;
 
-pub use audience::{
+pub(crate) use audience::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
-    is_routing_table, live_row_audience, normalize_inbound_store_changeset, partition_outbound,
+    live_row_audience, normalize_inbound_store_changeset, partition_outbound,
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
-    store_audience_transitions, validate_scoped_foreign_key_audiences,
-    validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
-    RoutingChanges, StoreAudienceTransitions,
+    validate_scoped_foreign_key_audiences, validate_snapshot_routing_state,
+};
+pub use audience::{
+    is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
+    CirclePartitionControl, RoutingChanges, StoreAudienceTransitions,
 };
 pub use model::Gates;
 #[cfg(any(test, feature = "test-utils"))]
 pub use model::{from_tables_call_count, reset_from_tables_call_count};
 pub(crate) use outbound::attach_empty_clone;
-pub use outbound::query_truth;
+pub(crate) use outbound::query_truth;
 
 /// [`crate::table_columns`] with its `rusqlite::Error` adapted
 /// into the gate's error at the boundary.

@@ -73,7 +73,7 @@ impl IncomingTimestampPolicy {
 }
 
 impl TableSchema {
-    pub fn for_apply(
+    pub(crate) fn for_apply(
         conn: &Connection,
         synced_tables: &[SyncedTable],
         gates: &crate::Gates,
@@ -93,7 +93,10 @@ impl TableSchema {
     /// Build schema info by querying `PRAGMA table_info` for each synced table.
     /// A registered table that has no `_updated_at` column is a host integration
     /// error and surfaces as `Err`.
-    pub fn from_db(conn: &Connection, synced_tables: &[SyncedTable]) -> Result<Self, DbError> {
+    pub(crate) fn from_db(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+    ) -> Result<Self, DbError> {
         let mut updated_at_by_table = HashMap::new();
         let mut columns_by_table = HashMap::new();
 

@@ -6,7 +6,7 @@ use super::*;
 /// what a move obliges it to change before the write is partitioned for real —
 /// partitioning writes the routing rows the move implies, and doing that twice
 /// would leave the second pass with nothing to publish.
-pub fn audience_moves(
+pub(crate) fn audience_moves(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
@@ -38,7 +38,7 @@ pub fn audience_moves(
     Ok(moves)
 }
 
-pub fn partition_outbound(
+pub(crate) fn partition_outbound(
     conn: &Connection,
     changeset: &[u8],
     routing: &RoutingChanges,
@@ -181,7 +181,7 @@ pub fn partition_outbound(
     }
 }
 
-pub fn validate_scoped_foreign_key_audiences(
+pub(crate) fn validate_scoped_foreign_key_audiences(
     conn: &Connection,
     gates: &Gates,
 ) -> Result<(), GateError> {

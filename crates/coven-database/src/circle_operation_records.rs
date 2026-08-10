@@ -107,7 +107,7 @@ pub fn parse_circle_operation_row(
     Ok(journal)
 }
 
-pub fn circle_operation_uploaded_steps_on(
+pub(crate) fn circle_operation_uploaded_steps_on(
     conn: &Connection,
     operation_id: &str,
 ) -> Result<BTreeSet<String>, DbError> {
@@ -121,7 +121,7 @@ pub fn circle_operation_uploaded_steps_on(
     .map(BTreeSet::from_iter)
 }
 
-pub fn load_circle_operation_on(
+pub(crate) fn load_circle_operation_on(
     conn: &Connection,
     operation_id: &str,
 ) -> Result<Option<CircleOperationJournal>, DbError> {

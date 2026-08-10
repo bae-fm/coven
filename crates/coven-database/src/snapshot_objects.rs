@@ -94,7 +94,7 @@ pub fn validate_snapshot_image(
     }
 }
 
-pub fn validate_snapshot_blob_plans_on(
+pub(crate) fn validate_snapshot_blob_plans_on(
     conn: &Connection,
     gates: &Gates,
     synced_tables: &[SyncedTable],
@@ -169,7 +169,7 @@ pub fn validate_snapshot_blob_plans_on(
     Ok(())
 }
 
-pub fn persist_snapshot_image_on(
+pub(crate) fn persist_snapshot_image_on(
     conn: &Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
     image: &SnapshotImageRef,
@@ -215,7 +215,7 @@ pub(crate) fn validate_snapshot_object_owner_records_on(
     Ok(())
 }
 
-pub fn install_snapshot_blob_plan_on(
+pub(crate) fn install_snapshot_blob_plan_on(
     conn: &Connection,
     blob: &PreparedSnapshotBlob,
 ) -> Result<(), DbError> {
@@ -279,7 +279,7 @@ pub fn install_snapshot_blob_plan_on(
     Ok(())
 }
 
-pub fn install_snapshot_blob_plans_on(
+pub(crate) fn install_snapshot_blob_plans_on(
     conn: &Connection,
     blobs: &[PreparedSnapshotBlob],
 ) -> Result<(), DbError> {

@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn load_published_store_snapshot_on(
+pub(crate) fn load_published_store_snapshot_on(
     conn: &Connection,
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<PublishedStoreSnapshot>, DbError> {

@@ -3,7 +3,7 @@ use coven_protocol::store_commit::CircleAck;
 
 use super::*;
 
-pub fn verify_next_local_store_ack_on(
+pub(crate) fn verify_next_local_store_ack_on(
     conn: &Connection,
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
     bytes: &[u8],
@@ -94,7 +94,7 @@ pub fn store_snapshot_first_slot(
     }
 }
 
-pub fn load_published_store_ack_on(
+pub(crate) fn load_published_store_ack_on(
     conn: &Connection,
 ) -> Result<Option<PublishedStoreAck>, DbError> {
     conn.query_row(
@@ -122,7 +122,7 @@ pub fn load_published_store_ack_on(
     .transpose()
 }
 
-pub fn finish_outbound_store_ack_on(
+pub(crate) fn finish_outbound_store_ack_on(
     conn: &Connection,
     reference: &StoreAckRef,
     successor_slot: &coven_protocol::objects::ObjectSlot,

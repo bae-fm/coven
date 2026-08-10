@@ -44,7 +44,7 @@ pub(crate) fn scan_max_updated_at(
 
 /// Create a capture session and attach every synced table, so a journaled
 /// transaction records changes to exactly those tables.
-pub fn attach_session<'c>(
+pub(crate) fn attach_session<'c>(
     conn: &'c Connection,
     synced_tables: &[SyncedTable],
 ) -> Result<rusqlite::session::Session<'c>, DbError> {
@@ -64,7 +64,9 @@ pub fn attach_session<'c>(
 /// Drain a journal session's recorded changes into a changeset. The caller drops
 /// the session right after (it lives only for the span of one journaled
 /// transaction), so there is nothing to reset.
-pub fn capture_changeset(session: &mut rusqlite::session::Session<'_>) -> Result<Vec<u8>, DbError> {
+pub(crate) fn capture_changeset(
+    session: &mut rusqlite::session::Session<'_>,
+) -> Result<Vec<u8>, DbError> {
     let mut buf = Vec::new();
     session
         .changeset_strm(&mut buf)
@@ -72,7 +74,7 @@ pub fn capture_changeset(session: &mut rusqlite::session::Session<'_>) -> Result
         .map_err(DbError::from)
 }
 
-pub fn open_database_image(image: &[u8]) -> Result<Connection, DbError> {
+pub(crate) fn open_database_image(image: &[u8]) -> Result<Connection, DbError> {
     const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
     if image.len() < 20 || &image[..SQLITE_DATABASE_HEADER.len()] != SQLITE_DATABASE_HEADER {
         return Err(DbError::Message(

@@ -1,7 +1,7 @@
 use super::routing::*;
 use super::*;
 
-pub fn filter_inbound_circle_changeset(
+pub(crate) fn filter_inbound_circle_changeset(
     conn: &Connection,
     changeset: &[u8],
     circle_id: CircleId,
@@ -23,7 +23,7 @@ pub fn filter_inbound_circle_changeset(
     }
 }
 
-pub fn filter_inbound_store_rows(
+pub(crate) fn filter_inbound_store_rows(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
@@ -34,7 +34,7 @@ pub fn filter_inbound_store_rows(
     }
 }
 
-pub fn align_inbound_scoped_root_audiences(
+pub(crate) fn align_inbound_scoped_root_audiences(
     conn: &Connection,
     changeset: &[u8],
     package_audience: &Audience,
@@ -106,7 +106,7 @@ pub(crate) fn winning_store_audience(
     .transpose()
 }
 
-pub fn normalize_inbound_store_changeset(
+pub(crate) fn normalize_inbound_store_changeset(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,

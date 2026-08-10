@@ -211,7 +211,7 @@ impl InitialStoreMembershipAuthority {
         )
     }
 
-    pub fn load_on(conn: &Connection) -> Result<Self, DbError> {
+    pub(crate) fn load_on(conn: &Connection) -> Result<Self, DbError> {
         let mut statement = conn
             .prepare(
                 "SELECT value FROM protocol_state \
@@ -240,7 +240,7 @@ impl InitialStoreMembershipAuthority {
         Ok(Self { head_refs })
     }
 
-    pub fn install_on(&self, conn: &Connection) -> Result<(), DbError> {
+    pub(crate) fn install_on(&self, conn: &Connection) -> Result<(), DbError> {
         for reference in &self.head_refs {
             let key = Self::cursor_state_key(reference);
             if let Some(existing) = get_protocol_state_on(conn, &key)? {

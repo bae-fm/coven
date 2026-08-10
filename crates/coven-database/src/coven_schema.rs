@@ -875,7 +875,7 @@ impl DatabaseTestTable {
     }
 }
 
-pub fn live_coven_schema_manifest(
+pub(crate) fn live_coven_schema_manifest(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<CovenSchemaManifest> {
     let names = all_coven_table_names();
@@ -955,7 +955,7 @@ pub fn expected_coven_schema_manifest(
 /// sync-routing validation, inside the same open transaction. Idempotent (`IF
 /// NOT EXISTS`). STRICT: every column here is already TEXT/INTEGER/BLOB, so
 /// STRICT only forecloses a future column drifting off its declared affinity.
-pub fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
             conn.execute_batch(concat!(
@@ -976,7 +976,7 @@ pub fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 /// Create the audience mirror and private route map. A snapshot already carries
 /// these schemas, so creation is idempotent; the caller validates their exact
 /// shape before committing initialization.
-pub fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
             conn.execute_batch(concat!(
@@ -1012,7 +1012,7 @@ pub fn is_reserved_table_name(name: &str) -> bool {
 /// Every application and Coven table in the main schema, excluding SQLite's
 /// internal tables. Snapshot and retained-replay projections share this one
 /// enumeration so a new table cannot be omitted by one image path.
-pub fn user_table_names(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+pub(crate) fn user_table_names(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
     let tables = query_mapped_rows(
         conn,
         "SELECT name FROM main.sqlite_schema

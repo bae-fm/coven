@@ -12,7 +12,7 @@ use coven_protocol::synced_schema::{GateRole, RowIdentity, SyncedTable};
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
-pub enum SyncRoutingContractError {
+pub(crate) enum SyncRoutingContractError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
@@ -164,7 +164,7 @@ struct CanonicalUniqueKeyColumn {
 }
 
 impl SyncRoutingContract {
-    pub fn from_connection(
+    pub(crate) fn from_connection(
         conn: &rusqlite::Connection,
         declarations: &[SyncedTable],
     ) -> Result<Self, SyncRoutingContractError> {

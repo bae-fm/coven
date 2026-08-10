@@ -1,7 +1,7 @@
 use super::*;
 
 impl Database {
-    pub fn insert_make_remote_intent_on(
+    pub(crate) fn insert_make_remote_intent_on(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
@@ -28,7 +28,7 @@ impl Database {
         })
     }
 
-    pub fn make_remote_intent_state(
+    pub(crate) fn make_remote_intent_state(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
@@ -56,7 +56,7 @@ impl Database {
             .transpose()
     }
 
-    pub fn mark_make_remote_publishing_on(
+    pub(crate) fn mark_make_remote_publishing_on(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
@@ -77,7 +77,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn complete_make_remote_publication_on(
+    pub(crate) fn complete_make_remote_publication_on(
         conn: &Connection,
         write_id: &WriteId,
     ) -> Result<(), DbError> {
@@ -96,7 +96,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn make_remote_publication_root_on(
+    pub(crate) fn make_remote_publication_root_on(
         conn: &Connection,
         write_id: &WriteId,
     ) -> Result<Option<(String, String)>, DbError> {

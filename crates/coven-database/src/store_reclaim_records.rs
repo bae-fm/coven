@@ -24,7 +24,7 @@ pub fn parse_store_reclaim_operation(
     Ok(operation)
 }
 
-pub fn load_store_reclaim_operation_on(
+pub(crate) fn load_store_reclaim_operation_on(
     conn: &Connection,
     operation_id: ObjectHash,
 ) -> Result<Option<DurableStoreReclaimOperation>, DbError> {
@@ -39,7 +39,7 @@ pub fn load_store_reclaim_operation_on(
     .transpose()
 }
 
-pub fn insert_store_reclaim_operation_on(
+pub(crate) fn insert_store_reclaim_operation_on(
     conn: &Connection,
     operation: &DurableStoreReclaimOperation,
 ) -> Result<(), DbError> {
@@ -54,7 +54,7 @@ pub fn insert_store_reclaim_operation_on(
     .map_err(DbError::from)
 }
 
-pub fn update_store_reclaim_operation_on(
+pub(crate) fn update_store_reclaim_operation_on(
     conn: &Connection,
     expected: &DurableStoreReclaimOperation,
     next: &DurableStoreReclaimOperation,

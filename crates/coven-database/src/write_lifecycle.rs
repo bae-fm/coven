@@ -1,7 +1,7 @@
 use super::*;
 
 impl Database {
-    pub fn set_write_status_on(
+    pub(crate) fn set_write_status_on(
         conn: &Connection,
         write_id: &WriteId,
         status: &WriteStatus,

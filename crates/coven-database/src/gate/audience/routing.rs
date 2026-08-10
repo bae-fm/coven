@@ -18,7 +18,7 @@ pub(crate) fn captured_deleted_audiences(
     Ok(audiences)
 }
 
-pub fn capture_routing_changes(
+pub(crate) fn capture_routing_changes(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
@@ -447,7 +447,7 @@ pub(crate) fn compatible_parent_rows(
     Ok(parents)
 }
 
-pub fn live_row_audience(
+pub(crate) fn live_row_audience(
     conn: &Connection,
     gates: &Gates,
     table: &str,
@@ -512,7 +512,7 @@ pub fn live_row_audience(
     }
 }
 
-pub fn active_circle_control(
+pub(crate) fn active_circle_control(
     conn: &Connection,
     circle_id: CircleId,
 ) -> Result<CirclePartitionControl, GateError> {

@@ -187,7 +187,7 @@ pub enum MigrationError {
 /// metadata either commit together or roll back together. This function never
 /// begins or commits a transaction; returning an error requires its caller to
 /// roll back the enclosing transaction.
-pub fn run_migrations_in_transaction(
+pub(crate) fn run_migrations_in_transaction(
     conn: &Connection,
     migrations: &[Migration],
 ) -> Result<u32, MigrationError> {
@@ -248,7 +248,7 @@ fn validate_registered_migrations(
 /// read-only), so an on-disk version below this binary's top is left as-is: the
 /// reader reads the schema the writer left, and a writer that opens the same db
 /// migrates it forward.
-pub fn ensure_schema_supported(
+pub(crate) fn ensure_schema_supported(
     conn: &Connection,
     migrations: &[Migration],
 ) -> Result<u32, MigrationError> {

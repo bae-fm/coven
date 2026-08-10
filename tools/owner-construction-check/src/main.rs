@@ -880,6 +880,22 @@ fn main() {
                     } => eprintln!(
                         "{path}:{line}: {owner}::{method} accepts raw dependency {dependency}"
                     ),
+                    OwnerDependencyLeak::FreeReturn {
+                        path,
+                        line,
+                        function,
+                        dependency,
+                    } => eprintln!(
+                        "{path}:{line}: {function} returns raw dependency {dependency}"
+                    ),
+                    OwnerDependencyLeak::FreeParameter {
+                        path,
+                        line,
+                        function,
+                        dependency,
+                    } => eprintln!(
+                        "{path}:{line}: {function} accepts raw dependency {dependency}"
+                    ),
                 }
             }
             for violation in &result.service_returns {

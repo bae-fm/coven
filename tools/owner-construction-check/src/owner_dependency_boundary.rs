@@ -15,16 +15,18 @@ const INTERNAL_DEPENDENCY_TYPES: &[&str] = &[
     "Gates",
     "Hlc",
     "ProviderProbeStorage",
+    "Session",
     "StoreDir",
     "Transaction",
 ];
 
-const RAW_DATABASE_TYPES: &[&str] = &["Connection", "Transaction"];
+const RAW_DATABASE_TYPES: &[&str] = &["Connection", "Session", "Transaction"];
 const CLOSED_SESSION_TYPES: &[&str] = &["DatabaseSession", "StoreSession"];
 const ALWAYS_FORBIDDEN_RETURNS: &[&str] = &[
     "Connection",
     "DatabaseCore",
     "ProviderProbeStorage",
+    "Session",
     "Transaction",
 ];
 
@@ -48,6 +50,18 @@ pub(crate) enum OwnerDependencyLeak {
         line: usize,
         owner: String,
         method: String,
+        dependency: String,
+    },
+    FreeReturn {
+        path: String,
+        line: usize,
+        function: String,
+        dependency: String,
+    },
+    FreeParameter {
+        path: String,
+        line: usize,
+        function: String,
         dependency: String,
     },
 }
@@ -119,6 +133,7 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         .collect::<BTreeSet<_>>();
     let mut leaks = BTreeSet::new();
     collect_crate_root_session_fields(files, &internal_dependencies, &mut leaks);
+    collect_public_database_functions(files, &raw_database_types, &mut leaks);
     for method in methods {
         if !method.returns_owner {
             let retained = retained_dependencies
@@ -155,6 +170,157 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         }
     }
     leaks.into_iter().collect()
+}
+
+fn collect_public_database_functions(
+    files: &[RustFile],
+    raw_database_types: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    for file in files {
+        if is_test_source(&file.relative_path)
+            || !file.relative_path.starts_with("crates/coven-database/src/")
+        {
+            continue;
+        }
+        collect_public_database_functions_in_items(
+            &file.relative_path,
+            &file.syntax.items,
+            raw_database_types,
+            leaks,
+        );
+    }
+}
+
+fn collect_public_database_functions_in_items(
+    path: &str,
+    items: &[syn::Item],
+    raw_database_types: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function)
+                if !is_test_only(&function.attrs)
+                    && matches!(function.vis, syn::Visibility::Public(_)) =>
+            {
+                collect_public_database_signature(
+                    path,
+                    None,
+                    &function.sig,
+                    raw_database_types,
+                    leaks,
+                );
+            }
+            syn::Item::Impl(implementation) if !is_test_only(&implementation.attrs) => {
+                let Some(owner) = type_name(&implementation.self_ty) else {
+                    continue;
+                };
+                for item in &implementation.items {
+                    let syn::ImplItem::Fn(method) = item else {
+                        continue;
+                    };
+                    if is_test_only(&method.attrs)
+                        || !matches!(method.vis, syn::Visibility::Public(_))
+                    {
+                        continue;
+                    }
+                    collect_public_database_signature(
+                        path,
+                        Some(&owner),
+                        &method.sig,
+                        raw_database_types,
+                        leaks,
+                    );
+                }
+            }
+            syn::Item::Trait(trait_item)
+                if !is_test_only(&trait_item.attrs)
+                    && matches!(trait_item.vis, syn::Visibility::Public(_)) =>
+            {
+                let owner = trait_item.ident.to_string();
+                for item in &trait_item.items {
+                    let syn::TraitItem::Fn(method) = item else {
+                        continue;
+                    };
+                    if is_test_only(&method.attrs) {
+                        continue;
+                    }
+                    collect_public_database_signature(
+                        path,
+                        Some(&owner),
+                        &method.sig,
+                        raw_database_types,
+                        leaks,
+                    );
+                }
+            }
+            syn::Item::Mod(module) if !is_test_only(&module.attrs) => {
+                if let Some((_, items)) = &module.content {
+                    collect_public_database_functions_in_items(
+                        path,
+                        items,
+                        raw_database_types,
+                        leaks,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_public_database_signature(
+    path: &str,
+    owner: Option<&str>,
+    signature: &syn::Signature,
+    raw_database_types: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    let callable = signature.ident.to_string();
+    if let syn::ReturnType::Type(_, output) = &signature.output {
+        for dependency in type_names(output).intersection(raw_database_types) {
+            let leak = owner.map_or_else(
+                || OwnerDependencyLeak::FreeReturn {
+                    path: path.to_string(),
+                    line: signature.ident.span().start().line,
+                    function: callable.clone(),
+                    dependency: dependency.clone(),
+                },
+                |owner| OwnerDependencyLeak::Return {
+                    path: path.to_string(),
+                    line: signature.ident.span().start().line,
+                    owner: owner.to_string(),
+                    method: callable.clone(),
+                    dependency: dependency.clone(),
+                },
+            );
+            leaks.insert(leak);
+        }
+    }
+    for input in &signature.inputs {
+        let syn::FnArg::Typed(input) = input else {
+            continue;
+        };
+        for dependency in type_names(&input.ty).intersection(raw_database_types) {
+            let leak = owner.map_or_else(
+                || OwnerDependencyLeak::FreeParameter {
+                    path: path.to_string(),
+                    line: signature.ident.span().start().line,
+                    function: callable.clone(),
+                    dependency: dependency.clone(),
+                },
+                |owner| OwnerDependencyLeak::Parameter {
+                    path: path.to_string(),
+                    line: signature.ident.span().start().line,
+                    owner: owner.to_string(),
+                    method: callable.clone(),
+                    dependency: dependency.clone(),
+                },
+            );
+            leaks.insert(leak);
+        }
+    }
 }
 
 fn collect_crate_root_session_fields(
@@ -464,5 +630,55 @@ mod tests {
         );
 
         assert!(find_owner_dependency_leaks(&[file]).is_empty());
+    }
+
+    #[test]
+    fn public_free_functions_cannot_expose_raw_database_dependencies() {
+        let file = production_file(
+            r#"
+            struct Connection;
+            struct Transaction<'a>(&'a Connection);
+            pub fn open_image() -> Connection { todo!() }
+            pub fn persist_on(connection: &Connection) { todo!() }
+            fn private_leaf(connection: &Connection) { todo!() }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 2);
+    }
+
+    #[test]
+    fn public_database_methods_cannot_expose_raw_database_dependencies() {
+        let file = production_file(
+            r#"
+            struct Connection;
+            pub struct Gates;
+            impl Gates {
+                pub fn from_connection(connection: &Connection) -> Self { todo!() }
+                pub fn apply(&self, connection: &Connection) { todo!() }
+                fn private_leaf(&self, connection: &Connection) { todo!() }
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 2);
+    }
+
+    #[test]
+    fn public_database_traits_cannot_expose_raw_database_dependencies() {
+        let file = production_file(
+            r#"
+            struct Connection;
+            pub trait RawDatabaseWorkflow {
+                fn open_image() -> Connection;
+                fn persist_on(&self, connection: &Connection);
+            }
+            trait PrivateDatabaseWorkflow {
+                fn persist_on(&self, connection: &Connection);
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 2);
     }
 }

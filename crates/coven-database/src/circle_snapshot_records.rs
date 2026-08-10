@@ -6,7 +6,7 @@ use coven_protocol::store_commit::{
 
 use super::*;
 
-pub fn load_published_circle_snapshot_on(
+pub(crate) fn load_published_circle_snapshot_on(
     conn: &Connection,
     authority: &ReferencedStoreDeviceRegistration,
     circle_id: CircleId,

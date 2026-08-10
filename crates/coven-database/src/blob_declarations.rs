@@ -315,7 +315,10 @@ impl BlobDecls {
     /// [`Gates::from_tables`](crate::Gates::from_tables). A declared
     /// column absent from the table is a host error surfaced here, never a silent
     /// drop.
-    pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, BlobDeclError> {
+    pub(crate) fn from_tables(
+        conn: &Connection,
+        tables: &[SyncedTable],
+    ) -> Result<Self, BlobDeclError> {
         #[cfg(any(test, feature = "test-utils"))]
         FROM_TABLES_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -370,7 +373,7 @@ impl BlobDecls {
     /// TEMP triggers keep this runtime guard out of snapshots and use each
     /// declaration's resolved blob-id column rather than assuming the row primary
     /// key carries the blob id.
-    pub fn install_cleanup_guards(&self, conn: &Connection) -> Result<(), BlobDeclError> {
+    pub(crate) fn install_cleanup_guards(&self, conn: &Connection) -> Result<(), BlobDeclError> {
         for (table, blob) in &self.tables {
             let table_ident = quote_ident(table);
             let id_ident = quote_ident(&blob.id_col_name);
@@ -423,7 +426,7 @@ impl BlobDecls {
     /// Changesets omit unchanged columns, so the change identifies whether this
     /// write introduced a blob while the live transaction row supplies its full
     /// cloud path and size before a later write can repoint or delete it.
-    pub fn publication_blob_from_change(
+    pub(crate) fn publication_blob_from_change(
         &self,
         conn: &Connection,
         change: &RowChange,
@@ -464,7 +467,7 @@ impl BlobDecls {
         Ok(Some(publication))
     }
 
-    pub fn publication_blob_for_row(
+    pub(crate) fn publication_blob_for_row(
         &self,
         conn: &Connection,
         table: &str,
@@ -482,7 +485,7 @@ impl BlobDecls {
     }
 
     /// Every exact blob-bearing row version currently present in `conn`.
-    pub fn publication_blobs_in_db(
+    pub(crate) fn publication_blobs_in_db(
         &self,
         conn: &Connection,
     ) -> Result<Vec<PublicationBlob>, BlobDeclError> {
@@ -524,7 +527,7 @@ impl BlobDecls {
     /// read path (locality dispatch) and the make-Remote completion check use this, so
     /// a blob id that collides across namespaces always reads the right table's gate,
     /// never the first id match.
-    pub fn row_for_blob_in_namespace(
+    pub(crate) fn row_for_blob_in_namespace(
         &self,
         conn: &Connection,
         namespace: &str,
@@ -555,7 +558,7 @@ impl BlobDecls {
     /// Whether a live row still needs the logical-id-keyed local source for this
     /// blob. A row needs that source exactly when its current stamp has no installed
     /// remote locator binding.
-    pub fn local_copy_is_referenced(
+    pub(crate) fn local_copy_is_referenced(
         &self,
         conn: &Connection,
         namespace: &str,
@@ -590,7 +593,7 @@ impl BlobDecls {
     /// Whether any live row still carries this logical blob ID, independent of
     /// whether that row currently resolves to a local source or an exact remote
     /// locator.
-    pub fn blob_id_is_referenced(
+    pub(crate) fn blob_id_is_referenced(
         &self,
         conn: &Connection,
         namespace: &str,
@@ -614,7 +617,7 @@ impl BlobDecls {
     /// Whether a live row's current stamp still names one exact locator. A row
     /// that merely reuses the same logical blob id under another locator does not
     /// retain this locator's cache or pinned file.
-    pub fn exact_copy_is_referenced(
+    pub(crate) fn exact_copy_is_referenced(
         &self,
         conn: &Connection,
         namespace: &str,

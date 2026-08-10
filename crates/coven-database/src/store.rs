@@ -101,7 +101,7 @@ pub use merge_materialization_transaction::{
     IncomingTimestampPolicy, TableSchema, ValidatedChangeset, WinningRow,
 };
 pub use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
-pub use pull_replay::{
+pub(crate) use pull_replay::{
     install_circle_bootstrap_connection_on, install_circle_bootstrap_image_on,
     install_circle_bootstrap_remote_objects_on,
 };
@@ -109,10 +109,10 @@ pub use reclaim::journal::{
     DurableStoreReclaimObject, DurableStoreReclaimOperation, ReclaimCommitActivation,
     ReclaimedStorePackage, StoreReclaimCandidateLoss, StoreReclaimJournalError,
 };
+pub(crate) use retained_replay::copy_table_with_conflicts;
 pub use retained_replay::{
-    copy_table_with_conflicts, projection_table_names, RetainedReplayAuthority,
-    RetainedReplayBaseline, RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority,
-    GENERATION_ZERO,
+    projection_table_names, RetainedReplayAuthority, RetainedReplayBaseline,
+    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
 };
 pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{

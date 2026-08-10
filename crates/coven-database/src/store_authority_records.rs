@@ -444,7 +444,7 @@ pub(crate) fn validate_replay_authority_on(
     Ok(())
 }
 
-pub fn install_store_founder_state_on(
+pub(crate) fn install_store_founder_state_on(
     conn: &Connection,
     root: &coven_protocol::store_commit::StoreRootRef,
     founder_reference: &StoreDeviceRegistrationRef,

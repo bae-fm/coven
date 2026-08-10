@@ -218,7 +218,7 @@ pub(crate) fn validate_stored_row_binding_on(
     Ok(())
 }
 
-pub fn load_prepared_audience_objects_on(
+pub(crate) fn load_prepared_audience_objects_on(
     conn: &Connection,
     store_dir: &coven_foundation::store_dir::StoreDir,
     write_id: &WriteId,
@@ -315,7 +315,7 @@ pub(crate) fn load_activated_registration_on(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn previous_row_blob_for_write_on(
+pub(crate) fn previous_row_blob_for_write_on(
     conn: &Connection,
     table: &str,
     row_id: &str,

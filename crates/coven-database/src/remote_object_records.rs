@@ -20,7 +20,7 @@ pub fn candidate_graph_exact_objects(
 /// plaintext is filed under. Payload files are named for the digest of their
 /// own contents, so a record whose semantic hash is the digest of these bytes
 /// names these bytes.
-pub fn validate_remote_object_on(
+pub(crate) fn validate_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
     expected_object: &ExactObjectRef,
@@ -40,7 +40,7 @@ pub fn validate_remote_object_on(
     Ok(())
 }
 
-pub fn load_remote_object_on(
+pub(crate) fn load_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
 ) -> Result<RemoteObjectRecord, DbError> {
@@ -166,7 +166,7 @@ pub(crate) fn indexed_retained_replay_owners_on(
     Ok(owners)
 }
 
-pub fn index_retained_replay_owner_on(
+pub(crate) fn index_retained_replay_owner_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     owner: &RetainedReplayOwner,
@@ -211,7 +211,7 @@ pub fn index_retained_replay_owner_on(
     Ok(())
 }
 
-pub fn load_protocol_inert_object_on(
+pub(crate) fn load_protocol_inert_object_on(
     conn: &Connection,
     object_id: ObjectHash,
 ) -> Result<coven_protocol::remote_object::ProtocolInertObject, DbError> {
@@ -279,7 +279,7 @@ pub(crate) fn load_reclaimed_store_package_on(
     Ok(Some(reclaimed))
 }
 
-pub fn record_reclaimed_store_package_on(
+pub(crate) fn record_reclaimed_store_package_on(
     conn: &Connection,
     snapshot_root_hash: Option<ObjectHash>,
     reclaimed: &ReclaimedStorePackage,
@@ -465,7 +465,7 @@ pub(crate) fn delete_remote_object_on(
     Ok(removed == 1)
 }
 
-pub fn persist_exact_remote_object_on(
+pub(crate) fn persist_exact_remote_object_on(
     conn: &Connection,
     store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
@@ -537,7 +537,7 @@ fn ensure_remote_object_is_writable_on(
     Ok(())
 }
 
-pub fn persist_prepared_remote_object_on(
+pub(crate) fn persist_prepared_remote_object_on(
     conn: &Connection,
     store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
@@ -566,7 +566,7 @@ pub fn persist_prepared_remote_object_on(
     update_remote_object_on(conn, object_id, &merged)
 }
 
-pub fn update_remote_object_on(
+pub(crate) fn update_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
     remote: &RemoteObjectRecord,
@@ -595,7 +595,7 @@ pub fn update_remote_object_on(
     Ok(())
 }
 
-pub fn begin_remote_candidate_nonactivation_on(
+pub(crate) fn begin_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     nonactivation: coven_protocol::remote_object::CandidateNonactivation,
@@ -612,7 +612,7 @@ pub fn begin_remote_candidate_nonactivation_on(
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
 
-pub fn begin_remote_candidate_nonactivation_with_verified_head_on(
+pub(crate) fn begin_remote_candidate_nonactivation_with_verified_head_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     nonactivation: coven_protocol::remote_object::CandidateNonactivation,
@@ -633,7 +633,7 @@ pub fn begin_remote_candidate_nonactivation_with_verified_head_on(
     finish_remote_candidate_nonactivation_on(conn, object_id, remote, inert)
 }
 
-pub fn finish_remote_candidate_nonactivation_on(
+pub(crate) fn finish_remote_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     object_id: ObjectHash,
     remote: RemoteObjectRecord,
@@ -673,7 +673,7 @@ pub fn finish_remote_candidate_nonactivation_on(
     Ok(None)
 }
 
-pub fn replace_prepared_merge_head_remote_on(
+pub(crate) fn replace_prepared_merge_head_remote_on(
     conn: &Connection,
     store_dir: &StoreDir,
     current: &ExactObjectRef,
@@ -736,7 +736,7 @@ pub fn replace_prepared_merge_head_remote_on(
     persist_exact_remote_object_on(conn, store_dir, &winner_closed, "alternate Merge head")
 }
 
-pub fn mark_remote_object_uploaded_on(
+pub(crate) fn mark_remote_object_uploaded_on(
     conn: &Connection,
     expected: RemoteObjectRecord,
 ) -> Result<RemoteObjectRecord, DbError> {
@@ -837,7 +837,7 @@ pub fn mark_remote_object_uploaded_on(
     Ok(uploaded)
 }
 
-pub fn mark_reusable_retained_authority_uploaded_on(
+pub(crate) fn mark_reusable_retained_authority_uploaded_on(
     conn: &Connection,
     expected: RemoteObjectRecord,
 ) -> Result<RemoteObjectRecord, DbError> {
@@ -1090,7 +1090,7 @@ pub(crate) fn merge_prepared_remote_object(
     Ok(merged)
 }
 
-pub fn validate_prepared_package_on(
+pub(crate) fn validate_prepared_package_on(
     conn: &Connection,
     store_dir: &StoreDir,
     write_id: &WriteId,
@@ -1127,7 +1127,7 @@ pub fn validate_prepared_package_on(
     Ok(())
 }
 
-pub fn validate_prepared_blob_on(
+pub(crate) fn validate_prepared_blob_on(
     conn: &Connection,
     write_id: &WriteId,
     expected: &PreparedAudienceBlob,

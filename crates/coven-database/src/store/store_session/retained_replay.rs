@@ -721,7 +721,7 @@ fn open_image(image: &[u8]) -> Result<Connection, DbError> {
 /// unique key already exists in `target` is left untouched instead of failing —
 /// used when installing a Circle image onto a Store image that already carries the
 /// shared, deterministic audience-routing rows.
-pub fn copy_table_with_conflicts(
+pub(crate) fn copy_table_with_conflicts(
     source: &Connection,
     target: &Connection,
     table: &str,

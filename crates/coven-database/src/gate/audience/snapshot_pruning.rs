@@ -1,7 +1,7 @@
 use super::routing::*;
 use super::*;
 
-pub fn retain_snapshot_audience_rows(
+pub(crate) fn retain_snapshot_audience_rows(
     conn: &Connection,
     gates: &Gates,
     audience: &Audience,
@@ -92,7 +92,7 @@ pub(crate) fn circle_snapshot_retained_rows(
     Ok(retained)
 }
 
-pub fn validate_snapshot_routing_state(
+pub(crate) fn validate_snapshot_routing_state(
     conn: &Connection,
     gates: &Gates,
     routing_key: &RowRoutingKey,
@@ -258,7 +258,7 @@ pub fn validate_snapshot_routing_state(
     Ok(())
 }
 
-pub fn prune_private_routes_without_rows(
+pub(crate) fn prune_private_routes_without_rows(
     conn: &Connection,
     gates: &Gates,
 ) -> Result<(), GateError> {
@@ -304,7 +304,7 @@ pub fn prune_private_routes_without_rows(
     Ok(())
 }
 
-pub fn prune_ineligible_scoped_rows(
+pub(crate) fn prune_ineligible_scoped_rows(
     conn: &Connection,
     gates: &Gates,
     inactive_circles: &BTreeSet<CircleId>,

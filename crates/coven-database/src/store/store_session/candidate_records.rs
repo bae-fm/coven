@@ -31,7 +31,7 @@ pub struct CandidateCleanupObject {
 /// candidate's own commit must reach a cleanup target: it is uploaded before the
 /// head that decides the position, so a candidate that lost that position always
 /// leaves it behind.
-pub fn begin_candidate_nonactivation_targets_on(
+pub(crate) fn begin_candidate_nonactivation_targets_on(
     tx: &rusqlite::Transaction<'_>,
     candidate: &StoreBatchCommitRef,
     objects: &[ExactObjectRef],
@@ -69,7 +69,7 @@ pub fn begin_candidate_nonactivation_targets_on(
 /// Reading it again after each delete is what makes an interrupted cleanup
 /// resumable: every object has either a pending target or a completed cleanup,
 /// and anything else is a state this candidate never reached.
-pub fn candidate_cleanup_targets_on(
+pub(crate) fn candidate_cleanup_targets_on(
     conn: &Connection,
     candidate: &StoreBatchCommitRef,
     objects: &[ExactObjectRef],
@@ -101,7 +101,7 @@ pub fn candidate_cleanup_targets_on(
     Ok(cleanup)
 }
 
-pub fn require_candidate_cleanup_complete_on(
+pub(crate) fn require_candidate_cleanup_complete_on(
     conn: &Connection,
     candidate: &StoreBatchCommitRef,
     objects: &[ExactObjectRef],
@@ -114,7 +114,7 @@ pub fn require_candidate_cleanup_complete_on(
     }
 }
 
-pub fn delete_remote_objects_on(
+pub(crate) fn delete_remote_objects_on(
     tx: &rusqlite::Transaction<'_>,
     object_ids: impl IntoIterator<Item = ObjectHash>,
     context: &str,
@@ -516,7 +516,7 @@ pub(super) fn validate_terminal_nonactivation_authority_on(
     Ok(())
 }
 
-pub fn begin_merge_candidate_nonactivation_on(
+pub(crate) fn begin_merge_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -535,7 +535,7 @@ pub fn begin_merge_candidate_nonactivation_on(
     )
 }
 
-pub fn begin_merge_candidate_nonactivation_with_verified_head_on(
+pub(crate) fn begin_merge_candidate_nonactivation_with_verified_head_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -555,7 +555,7 @@ pub fn begin_merge_candidate_nonactivation_with_verified_head_on(
     )
 }
 
-pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
+pub(crate) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -684,7 +684,7 @@ pub(super) fn terminal_candidate_verification_on(
     }))
 }
 
-pub fn merge_candidate_cleanup_targets_on(
+pub(crate) fn merge_candidate_cleanup_targets_on(
     conn: &Connection,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
@@ -796,7 +796,7 @@ pub fn merge_candidate_cleanup_targets_on(
     Ok(targets)
 }
 
-pub fn finish_merge_retraction_cleanup_on(
+pub(crate) fn finish_merge_retraction_cleanup_on(
     tx: &rusqlite::Transaction<'_>,
     candidate: &PreparedMergeCandidate,
 ) -> Result<(), DbError> {
@@ -877,7 +877,7 @@ pub enum MergeCandidateHeadCleanup {
     ProtocolInert,
 }
 
-pub fn load_merge_candidate_head_cleanup_on(
+pub(crate) fn load_merge_candidate_head_cleanup_on(
     conn: &Connection,
     head: &ExactObjectRef,
     candidate: &StoreBatchCommitRef,
@@ -997,7 +997,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
     }
 }
 
-pub fn remove_cleaned_merge_authority_on(
+pub(crate) fn remove_cleaned_merge_authority_on(
     tx: &rusqlite::Transaction<'_>,
     authority: &PreparedMergeCandidate,
 ) -> Result<(), DbError> {
@@ -1029,7 +1029,7 @@ pub fn remove_cleaned_merge_authority_on(
     Ok(())
 }
 
-pub fn remove_cleaned_author_excluded_merge_authority_on(
+pub(crate) fn remove_cleaned_author_excluded_merge_authority_on(
     tx: &rusqlite::Transaction<'_>,
     authority: &PreparedMergeCandidate,
 ) -> Result<(), DbError> {

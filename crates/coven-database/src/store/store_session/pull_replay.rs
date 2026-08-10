@@ -11,7 +11,7 @@ use coven_protocol::synced_schema::SyncedTable;
 /// alongside the Store image, so the whole set commits or rolls back together.
 /// Foreign keys are deferred to that outer commit, matching the final
 /// foreign-key validation the install runs over the installed union.
-pub fn install_circle_bootstrap_image_on(
+pub(crate) fn install_circle_bootstrap_image_on(
     conn: &rusqlite::Connection,
     synced_tables: &[SyncedTable],
     activation_commit: &StoreBatchCommitRef,
@@ -29,7 +29,7 @@ pub fn install_circle_bootstrap_image_on(
     )
 }
 
-pub fn install_circle_bootstrap_connection_on(
+pub(crate) fn install_circle_bootstrap_connection_on(
     conn: &rusqlite::Connection,
     source: &rusqlite::Connection,
     synced_tables: &[SyncedTable],
@@ -147,7 +147,7 @@ pub fn install_circle_bootstrap_connection_on(
     Ok(())
 }
 
-pub fn install_circle_bootstrap_remote_objects_on(
+pub(crate) fn install_circle_bootstrap_remote_objects_on(
     conn: &rusqlite::Connection,
     activation_commit: &StoreBatchCommitRef,
     bootstrap: &VerifiedCircleImage,

@@ -5,7 +5,7 @@ pub struct CloudOutboxRecords<'connection> {
 }
 
 impl<'connection> CloudOutboxRecords<'connection> {
-    pub fn new(connection: &'connection Connection) -> Self {
+    pub(crate) fn new(connection: &'connection Connection) -> Self {
         Self { connection }
     }
 

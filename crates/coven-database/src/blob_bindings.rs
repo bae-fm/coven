@@ -104,7 +104,7 @@ pub(crate) fn install_pulled_merge_membership_activations_on(
 impl Database {
     // ---- Materialized Store commit ledger ----
 
-    pub fn install_pulled_blob_activations_on(
+    pub(crate) fn install_pulled_blob_activations_on(
         conn: &Connection,
         package: &AudiencePackage,
         owner: &StoreBatchCommitRef,
@@ -154,7 +154,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn row_blob_refs_for_root_on(
+    pub(crate) fn row_blob_refs_for_root_on(
         conn: &Connection,
         gates: &Gates,
         tables: &[SyncedTable],
@@ -181,7 +181,7 @@ impl Database {
             .collect()
     }
 
-    pub fn stored_blob_reference_state_on(
+    pub(crate) fn stored_blob_reference_state_on(
         conn: &Connection,
         gates: &Gates,
         tables: &[SyncedTable],
@@ -267,7 +267,7 @@ impl Database {
         })
     }
 
-    pub fn row_blob_ref_on(
+    pub(crate) fn row_blob_ref_on(
         conn: &Connection,
         gates: &Gates,
         table: &SyncedTable,

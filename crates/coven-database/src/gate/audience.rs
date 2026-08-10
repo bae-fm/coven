@@ -24,13 +24,16 @@ mod partitioning;
 mod routing;
 mod snapshot_pruning;
 
-pub use inbound::{
+pub use inbound::store_audience_transitions;
+pub(crate) use inbound::{
     align_inbound_scoped_root_audiences, filter_inbound_circle_changeset,
-    filter_inbound_store_rows, normalize_inbound_store_changeset, store_audience_transitions,
+    filter_inbound_store_rows, normalize_inbound_store_changeset,
 };
-pub use partitioning::{audience_moves, partition_outbound, validate_scoped_foreign_key_audiences};
-pub use routing::{active_circle_control, capture_routing_changes, live_row_audience};
-pub use snapshot_pruning::{
+pub(crate) use partitioning::{
+    audience_moves, partition_outbound, validate_scoped_foreign_key_audiences,
+};
+pub(crate) use routing::{active_circle_control, capture_routing_changes, live_row_audience};
+pub(crate) use snapshot_pruning::{
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
     validate_snapshot_routing_state,
 };
@@ -58,7 +61,7 @@ pub struct AudienceMove {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartitionedAudienceWrite {
+pub(crate) struct PartitionedAudienceWrite {
     pub partitions: Vec<AudiencePartition>,
     pub moves: Vec<AudienceMove>,
 }
@@ -101,7 +104,7 @@ pub struct StoreAudienceTransitions {
 }
 
 #[derive(Debug)]
-pub struct InboundStoreChangesets {
+pub(crate) struct InboundStoreChangesets {
     pub mirror: Vec<u8>,
     pub rows: Vec<u8>,
 }

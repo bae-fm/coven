@@ -1240,7 +1240,7 @@ pub(crate) fn row_id_for_column_value(
 /// The single terminal gate-truth reader: `resolve_root` uses it for a gated root,
 /// and the coven-owned transitions read a root's Local/Remote state through it so
 /// there is one definition of a root's locality.
-pub fn query_truth(
+pub(crate) fn query_truth(
     conn: &Connection,
     table: &str,
     column: &str,

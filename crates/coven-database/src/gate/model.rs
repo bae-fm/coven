@@ -577,7 +577,10 @@ impl Gates {
     /// schema (`PRAGMA table_info` for gate-column indices, `PRAGMA
     /// foreign_key_list` for FK edges).
     ///
-    pub fn from_tables(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
+    pub(crate) fn from_tables(
+        conn: &Connection,
+        tables: &[SyncedTable],
+    ) -> Result<Self, GateError> {
         #[cfg(any(test, feature = "test-utils"))]
         FROM_TABLES_CALLS.with(|calls| calls.set(calls.get() + 1));
 
@@ -600,7 +603,10 @@ impl Gates {
     /// itself kept *by* them — so only a real topological sort over the FK edges
     /// among the gated tables produces a valid order.
     ///
-    pub fn gated_tables_parent_first(&self, conn: &Connection) -> Result<Vec<String>, GateError> {
+    pub(crate) fn gated_tables_parent_first(
+        &self,
+        conn: &Connection,
+    ) -> Result<Vec<String>, GateError> {
         // Edge parent -> child means "parent must precede child". A table's FK to a
         // gated table makes that table its prerequisite (it points at the parent's
         // id), so the FK target is the parent of the edge and the referrer the child.
@@ -679,7 +685,7 @@ impl Gates {
     /// (never deleted), so deleting gated-false rows can never flip a kept row to
     /// not-kept. The final row set is therefore independent of deletion order.
     ///
-    pub fn delete_gated_false(&self, conn: &Connection) -> Result<(), GateError> {
+    pub(crate) fn delete_gated_false(&self, conn: &Connection) -> Result<(), GateError> {
         self.delete_gated_false_conn(conn)
     }
 
@@ -796,7 +802,12 @@ impl Gates {
     /// kept child) — a property of the live child tables, not of the ancestor
     /// row's own columns.
     ///
-    pub fn row_kept(&self, conn: &Connection, tbl: &str, id: &str) -> Result<bool, GateError> {
+    pub(crate) fn row_kept(
+        &self,
+        conn: &Connection,
+        tbl: &str,
+        id: &str,
+    ) -> Result<bool, GateError> {
         let keep = self.keep_clause(tbl)?;
         let sql = format!(
             "SELECT 1 FROM {t} WHERE {t}.{id_col} = ? AND ({keep})",
@@ -816,7 +827,7 @@ impl Gates {
     /// The blob-transition drain uses this to map a just-uploaded blob's row to the
     /// gated root a make_remote tracks: a `release_files` row resolves up to its
     /// `releases` root, whose `blob_make_remote_intents` row the completion check reads.
-    pub fn resolve_root_of(
+    pub(crate) fn resolve_root_of(
         &self,
         conn: &Connection,
         table: &str,
@@ -835,7 +846,7 @@ impl Gates {
     /// locality terminus (the row is ungated/unrooted) or a row along it is missing —
     /// an unresolvable locality the read path fails loud on rather than guessing a
     /// source.
-    pub fn root_kept_of(
+    pub(crate) fn root_kept_of(
         &self,
         conn: &Connection,
         table: &str,
@@ -854,7 +865,7 @@ impl Gates {
     ///
     /// `row_blob_refs_for_root_on` maps these rows to the blobs a transition
     /// uploads (make_remote) or materializes (make_local).
-    pub fn subtree_rows(
+    pub(crate) fn subtree_rows(
         &self,
         conn: &Connection,
         root_table: &str,

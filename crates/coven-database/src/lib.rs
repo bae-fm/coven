@@ -11,7 +11,7 @@
 pub(crate) use crate::blob_records::load_activated_registration_on;
 pub use crate::blob_records::remote_audience_to_db;
 pub(crate) use crate::circle_snapshot_records::load_outbound_circle_snapshot_on;
-pub use crate::circle_snapshot_records::load_published_circle_snapshot_on;
+pub(crate) use crate::circle_snapshot_records::load_published_circle_snapshot_on;
 pub use crate::cloud_outbox_records::{
     outbox_identity, row_to_outbox_entry, CloudOutboxRecords, OutboxIdentity,
 };
@@ -19,46 +19,52 @@ use crate::connection_io::open_connection;
 use crate::connection_io::open_connection_read_only;
 use crate::connection_io::scan_max_updated_at;
 use crate::connection_io::seed_from;
-pub use crate::local_state::{
+pub(crate) use crate::local_state::{
     delete_protocol_state_on, get_protocol_state_on, required_protocol_state_on,
     set_protocol_state_on,
 };
 use crate::local_store_identity::pin_host_device_id_on;
 use crate::local_store_identity::validate_host_device_id_on;
-pub use crate::remote_object_records::begin_remote_candidate_nonactivation_on;
-pub use crate::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
+pub(crate) use crate::remote_object_records::begin_remote_candidate_nonactivation_on;
+pub(crate) use crate::remote_object_records::begin_remote_candidate_nonactivation_with_verified_head_on;
 pub use crate::remote_object_records::candidate_graph_exact_objects;
-pub use crate::remote_object_records::finish_remote_candidate_nonactivation_on;
-pub use crate::remote_object_records::index_retained_replay_owner_on;
-pub use crate::remote_object_records::load_protocol_inert_object_on;
-pub use crate::remote_object_records::load_remote_object_on;
-pub use crate::remote_object_records::mark_remote_object_uploaded_on;
-pub use crate::remote_object_records::mark_reusable_retained_authority_uploaded_on;
-pub use crate::remote_object_records::persist_exact_remote_object_on;
-pub use crate::remote_object_records::persist_prepared_remote_object_on;
-pub use crate::remote_object_records::record_reclaimed_store_package_on;
+pub(crate) use crate::remote_object_records::finish_remote_candidate_nonactivation_on;
+pub(crate) use crate::remote_object_records::index_retained_replay_owner_on;
+pub(crate) use crate::remote_object_records::load_protocol_inert_object_on;
+pub(crate) use crate::remote_object_records::load_remote_object_on;
+pub(crate) use crate::remote_object_records::mark_remote_object_uploaded_on;
+pub(crate) use crate::remote_object_records::mark_reusable_retained_authority_uploaded_on;
+pub(crate) use crate::remote_object_records::persist_exact_remote_object_on;
+pub(crate) use crate::remote_object_records::persist_prepared_remote_object_on;
+pub(crate) use crate::remote_object_records::record_reclaimed_store_package_on;
 pub(crate) use crate::remote_object_records::reopen_remote_object_on;
-pub use crate::remote_object_records::replace_prepared_merge_head_remote_on;
-pub use crate::remote_object_records::update_remote_object_on;
-pub use crate::remote_object_records::{
+pub(crate) use crate::remote_object_records::replace_prepared_merge_head_remote_on;
+pub(crate) use crate::remote_object_records::update_remote_object_on;
+pub(crate) use crate::remote_object_records::{
     validate_prepared_blob_on, validate_prepared_package_on, validate_remote_object_on,
 };
 use crate::snapshot_objects::validate_snapshot_object_owners_on;
-pub use crate::snapshot_objects::{
+pub(crate) use crate::snapshot_objects::{
     install_snapshot_blob_plan_on, install_snapshot_blob_plans_on, persist_snapshot_image_on,
-    snapshot_generation_as_i64, validate_snapshot_author, validate_snapshot_blob_plans_on,
-    validate_snapshot_image, verify_snapshot_blob_spools,
+    validate_snapshot_blob_plans_on,
+};
+pub use crate::snapshot_objects::{
+    snapshot_generation_as_i64, validate_snapshot_author, validate_snapshot_image,
+    verify_snapshot_blob_spools,
 };
 pub(crate) use crate::snapshot_records::load_outbound_store_snapshot_on;
-pub use crate::snapshot_records::load_published_store_snapshot_on;
-pub use crate::store_ack_records::{
-    finish_outbound_store_ack_on, load_published_store_ack_on, store_snapshot_first_slot,
-    verify_next_local_store_ack_on,
+pub(crate) use crate::snapshot_records::load_published_store_snapshot_on;
+pub use crate::store_ack_records::store_snapshot_first_slot;
+pub(crate) use crate::store_ack_records::{
+    finish_outbound_store_ack_on, load_published_store_ack_on, verify_next_local_store_ack_on,
 };
-pub use crate::store_authority_records::install_store_founder_state_on;
-pub use crate::store_reclaim_records::{
+pub(crate) use crate::store_authority_records::install_store_founder_state_on;
+pub(crate) use crate::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
-    parse_store_reclaim_operation, store_reclaim_journal_error, update_store_reclaim_operation_on,
+    update_store_reclaim_operation_on,
+};
+pub use crate::store_reclaim_records::{
+    parse_store_reclaim_operation, store_reclaim_journal_error,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -103,12 +109,14 @@ mod cloud_outbox_records;
 mod connection_io;
 mod coven_schema;
 mod database_connection;
-pub use connection_io::{attach_session, capture_changeset, open_database_image};
+pub(crate) use connection_io::{attach_session, capture_changeset, open_database_image};
 #[cfg(test)]
 pub(crate) use coven_schema::all_table_names;
+pub(crate) use coven_schema::{
+    apply_coven_routing_schema, apply_coven_schema, live_coven_schema_manifest, user_table_names,
+};
 pub use coven_schema::{
-    apply_coven_routing_schema, apply_coven_schema, expected_coven_schema_manifest,
-    is_reserved_table_name, live_coven_schema_manifest, user_table_names, CovenSchemaManifest,
+    expected_coven_schema_manifest, is_reserved_table_name, CovenSchemaManifest,
 };
 mod circle_snapshot_records;
 mod database_open;
@@ -158,39 +166,42 @@ mod write_models;
 #[cfg(any(test, feature = "test-utils"))]
 pub use blob_declarations::{from_tables_call_count, reset_from_tables_call_count};
 pub use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
-pub use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
+pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
 pub use changeset::{value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset};
 pub use changeset_identity::ChangesetIdentityError;
 pub(crate) use circle_operation_records::{
     circle_operation_ids_in_phase_on, circle_operation_phase_json,
 };
-pub use circle_operation_records::{
-    circle_operation_uploaded_steps_on, load_circle_operation_on, parse_circle_operation_row,
-    PreparedCircleOperationRow,
+pub(crate) use circle_operation_records::{
+    circle_operation_uploaded_steps_on, load_circle_operation_on,
 };
+pub use circle_operation_records::{parse_circle_operation_row, PreparedCircleOperationRow};
 pub use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
 pub(crate) use database_connection::{DatabaseConnection, DatabaseCore};
 use database_open::CovenMetadataOpen;
 pub use database_runtime::Database;
 pub use external_blob_records::ExternalBlob;
 use external_blob_records::ExternalBlobRecords;
-pub use gate::query_truth;
-pub use gate::{
+pub(crate) use gate::query_truth;
+pub(crate) use gate::{
     active_circle_control, align_inbound_scoped_root_audiences, audience_moves,
     capture_routing_changes, filter_inbound_circle_changeset, filter_inbound_store_rows,
-    is_routing_table, live_row_audience, normalize_inbound_store_changeset, partition_outbound,
+    live_row_audience, normalize_inbound_store_changeset, partition_outbound,
     prune_ineligible_scoped_rows, prune_private_routes_without_rows, retain_snapshot_audience_rows,
-    store_audience_transitions, validate_scoped_foreign_key_audiences,
-    validate_snapshot_routing_state, AudienceMove, AudiencePartition, CirclePartitionControl,
-    GateError, Gates, RoutingChanges, StoreAudienceTransitions,
+    validate_scoped_foreign_key_audiences, validate_snapshot_routing_state,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use gate::{
     from_tables_call_count as gate_from_tables_call_count,
     reset_from_tables_call_count as reset_gate_from_tables_call_count,
 };
+pub use gate::{
+    is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
+    CirclePartitionControl, GateError, Gates, RoutingChanges, StoreAudienceTransitions,
+};
 pub(crate) use local_store_identity::local_activated_registration_ref_on;
-pub use migration::{ensure_schema_supported, run_migrations_in_transaction, supported_version};
+pub use migration::supported_version;
+pub(crate) use migration::{ensure_schema_supported, run_migrations_in_transaction};
 pub use migration::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use operation_models::{
     DurableCircleSnapshotPublication, DurableDeviceRegistration, DurableMembershipMutation,
@@ -207,9 +218,10 @@ pub use routing_contract::SyncRoutingContract;
 use schema_contract::validate_host_synced_tables;
 pub use schema_contract::DurablePreparedProtocolObject;
 pub use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+pub(crate) use schema_introspection::{create_table_sql, foreign_key_edges, table_columns};
 pub use schema_introspection::{
-    create_table_sql, foreign_key_edges, quote_ident, rewrite_create_into_schema, table_columns,
-    CreateTableSchemaError, ForeignKeyEdge, ForeignKeySchemaError,
+    quote_ident, rewrite_create_into_schema, CreateTableSchemaError, ForeignKeyEdge,
+    ForeignKeySchemaError,
 };
 pub use store::device_join_journal;
 pub use store::device_join_journal::DeviceJoinJournalError;
@@ -227,15 +239,18 @@ pub use store::{
     audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,
     StagedAudienceBlobRollback,
 };
-pub use store::{
+pub(crate) use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
-    install_circle_bootstrap_remote_objects_on, projection_table_names, BlobTransitionRoot,
-    BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot, DeviceJoinJournalStore,
-    DurableStoreReclaimObject, DurableStoreReclaimOperation, HostWriteBlobTransaction,
-    HostWriteError, HostWriteOperation, IncomingTimestampPolicy, LocalBlobCleanup,
-    MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation,
-    OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
-    PreparedCircleObjects, ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
+    install_circle_bootstrap_remote_objects_on,
+};
+pub use store::{
+    projection_table_names, BlobTransitionRoot, BlockedWriteDiscard, CandidateCleanupObject,
+    CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimObject,
+    DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
+    IncomingTimestampPolicy, LocalBlobCleanup, MaterializedLocalBlob,
+    MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation, OutboxUploadState,
+    OwnStreamAuthorship, OwnedVerifiedMergeMaterialization, PreparedCircleObjects,
+    ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotDatabaseImage,
@@ -543,7 +558,7 @@ impl DbError {
 /// It returns the SQLite failure as it happened, so every caller's `?` converts
 /// it into whatever error that caller already returns — one helper, no error
 /// vocabulary of its own.
-pub fn query_mapped_rows<T, P, F>(
+pub(crate) fn query_mapped_rows<T, P, F>(
     conn: &Connection,
     sql: &str,
     params: P,

@@ -17,7 +17,10 @@ pub enum CreateTableSchemaError {
 }
 
 /// `CREATE TABLE` text for `table` from `sqlite_master`.
-pub fn create_table_sql(conn: &Connection, table: &str) -> Result<String, CreateTableSchemaError> {
+pub(crate) fn create_table_sql(
+    conn: &Connection,
+    table: &str,
+) -> Result<String, CreateTableSchemaError> {
     let create = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?1",
@@ -147,7 +150,7 @@ fn parse_bare_identifier(sql: &str, start: usize) -> Option<(usize, usize, Strin
 /// Column names of `table`, in declared order, via `PRAGMA table_info`. The
 /// index of a name here is the index SQLite session changesets report for that
 /// column.
-pub fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+pub(crate) fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
     let sql = format!("PRAGMA table_info({})", quote_ident(table));
     let mut stmt = conn.prepare(&sql)?;
     let columns = stmt
@@ -199,7 +202,7 @@ struct ForeignKeyRow {
 /// Every outgoing foreign key on `child_table`, grouped by constraint and
 /// sorted by its complete parent/column/action shape. SQLite's constraint ids
 /// and PRAGMA listing order are deliberately discarded.
-pub fn foreign_key_edges(
+pub(crate) fn foreign_key_edges(
     conn: &Connection,
     child_table: &str,
 ) -> Result<Vec<ForeignKeyEdge>, ForeignKeySchemaError> {
