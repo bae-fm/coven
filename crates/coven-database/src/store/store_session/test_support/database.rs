@@ -143,6 +143,19 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn install_test_active_circles(
+        &self,
+        labels: Vec<String>,
+    ) -> Result<Vec<coven_protocol::circle::CircleId>, DbError> {
+        self.call_store(move |session| {
+            Ok(labels
+                .iter()
+                .map(|label| session.install_test_active_circle(label))
+                .collect())
+        })
+        .await
+    }
+
     pub async fn install_test_inactive_circle(
         &self,
         label: String,

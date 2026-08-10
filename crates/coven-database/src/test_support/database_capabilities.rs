@@ -286,4 +286,64 @@ impl Database {
         })
         .await
     }
+
+    pub async fn store_write_partitions_in_audience_order_for_test(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, Vec<u8>)>, DbError> {
+        self.test_sql(|database| database.store_write_partitions_in_audience_order())
+            .await
+    }
+
+    pub async fn first_store_write_partition_hash_for_test(
+        &self,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
+        self.test_sql(move |database| database.first_store_write_partition_hash(write_id.as_str()))
+            .await
+    }
+
+    pub async fn plant_control_on_local_partition_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| database.plant_control_on_the_local_partition())
+            .await
+    }
+
+    pub async fn store_write_row_for_test(
+        &self,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<(String, Vec<u8>), DbError> {
+        self.test_sql(move |database| database.store_write_row(write_id.as_str()))
+            .await
+    }
+
+    pub async fn row_and_private_routing_presence_for_test(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<(bool, bool, bool), DbError> {
+        let table = table.to_string();
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| database.row_and_private_routing_presence(&table, &row_id))
+            .await
+    }
+
+    pub async fn store_write_row_and_only_partition_for_test(
+        &self,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<((String, Vec<u8>), (String, Option<String>, Vec<u8>)), DbError> {
+        self.test_sql(move |database| {
+            Ok((
+                database.store_write_row(write_id.as_str())?,
+                database.only_store_write_partition(write_id.as_str())?,
+            ))
+        })
+        .await
+    }
+
+    pub async fn store_write_partition_changesets_for_test(
+        &self,
+        write_id: coven_protocol::write::WriteId,
+    ) -> Result<Vec<(String, Vec<u8>)>, DbError> {
+        self.test_sql(move |database| database.store_write_partition_changesets(write_id.as_str()))
+            .await
+    }
 }
