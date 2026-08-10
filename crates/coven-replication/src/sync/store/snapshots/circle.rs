@@ -11,7 +11,7 @@ use tracing::warn;
 
 use super::{coverage_dominates, SnapshotCut, SnapshotError};
 use crate::sync::store::circles::bootstrap_blobs::CircleBootstrapBlobVerification;
-use coven_database::{verify_circle_bootstrap_image, CreatedSnapshot};
+use coven_database::CreatedSnapshot;
 
 pub(crate) struct CircleSnapshotWriter<'operation, 'storage> {
     writer: &'operation mut super::AuthorizedWriterOperation<'storage>,
@@ -274,14 +274,16 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                     )
                     .await
                     .map_err(SnapshotError::Bucket)?;
-                verify_circle_bootstrap_image(
-                    &image_bytes,
-                    &coverage.bootstrap,
-                    circle_id,
-                    self.database.synced_tables(),
-                    routing_key,
-                )
-                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                let image_bytes = self
+                    .database
+                    .verify_circle_bootstrap_image(
+                        image_bytes,
+                        coverage.bootstrap.clone(),
+                        circle_id,
+                        routing_key.cloned(),
+                    )
+                    .await
+                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
                 let image =
                     coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
                         circle_id,
@@ -464,14 +466,16 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             )
             .await
             .map_err(SnapshotError::Bucket)?;
-        verify_circle_bootstrap_image(
-            &image_bytes,
-            &selected.bootstrap,
-            circle_id,
-            self.database.synced_tables(),
-            routing_key,
-        )
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        let image_bytes = self
+            .database
+            .verify_circle_bootstrap_image(
+                image_bytes,
+                selected.bootstrap.clone(),
+                circle_id,
+                routing_key.cloned(),
+            )
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
         let image = coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
             circle_id,
             selected.control.clone(),
@@ -515,7 +519,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .capture_circle_snapshot_cut(
                 self.root.clone(),
                 self.store_dir.as_ref().to_path_buf(),
-                self.database.synced_tables().to_vec(),
                 routing_encryption.clone(),
                 circle_id,
             )
@@ -529,7 +532,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: CommitFrontier,
     ) -> Result<SnapshotCut, coven_database::DbError> {
-        let tables = self.database.synced_tables().to_vec();
         let routing_encryption = routing_encryption.clone();
         let routing_key = coven_protocol::circle::derive_row_routing_key(
             &routing_encryption,
@@ -542,7 +544,6 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .capture_circle_snapshot_at_cutoff(
                 root,
                 self.store_dir.as_ref().to_path_buf(),
-                tables,
                 routing_encryption,
                 routing_key,
                 circle_id,
@@ -910,13 +911,15 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             self.root.store_root_hash,
         )
         .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
-        verify_circle_bootstrap_image(
-            &image,
-            &selected.bootstrap,
-            circle_id,
-            self.database.synced_tables(),
-            Some(&routing_key),
-        )?;
+        self.database
+            .verify_circle_bootstrap_image(
+                image,
+                selected.bootstrap.clone(),
+                circle_id,
+                Some(routing_key),
+            )
+            .await
+            .map(|_| ())?;
         Ok(())
     }
 

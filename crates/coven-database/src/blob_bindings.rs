@@ -430,9 +430,8 @@ impl Database {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
-        let table = table.to_string();
-        let row_id = row_id.to_string();
-        self.call_database(move |session| session.row_blob_ref(&table, &row_id))
+        crate::StoreDatabase::new(self)
+            .row_blob_ref(table, row_id)
             .await
     }
 }

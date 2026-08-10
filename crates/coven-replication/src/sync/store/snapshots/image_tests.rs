@@ -1,25 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use coven_database::StoreDatabase;
 use coven_database::SyntheticStoreFixture;
-use coven_database::{verify_circle_bootstrap_image, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::CommitFrontier;
 
+fn scoped_snapshot_tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new(
+            "documents",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .scoped_by("audience"),
+        SyncedTable::new(
+            "paragraphs",
+            coven_protocol::synced_schema::RowIdentity::IndependentUuid,
+        )
+        .inherits_audience_through("document_id"),
+    ]
+}
+
 fn open_scoped_snapshot_test_db() -> SyntheticStoreFixture {
     crate::sync::test_helpers::open_test_db_schema(
-        vec![
-            SyncedTable::new(
-                "documents",
-                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
-            )
-            .scoped_by("audience"),
-            SyncedTable::new(
-                "paragraphs",
-                coven_protocol::synced_schema::RowIdentity::IndependentUuid,
-            )
-            .inherits_audience_through("document_id"),
-        ],
+        scoped_snapshot_tables(),
         vec![Migration::sql(
             1,
             "scoped snapshot schema",
@@ -165,14 +169,10 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
         .expect("create Circle bootstrap routing image");
     let reference = circle_bootstrap_reference(&source, &image);
 
-    let error = verify_circle_bootstrap_image(
-        &image,
-        &reference,
-        circle_id,
-        source.database.synced_tables(),
-        None,
-    )
-    .expect_err("scoped Circle bootstrap verification must require its routing key");
+    let error = StoreDatabase::new(&source.database)
+        .verify_circle_bootstrap_image(image, reference, circle_id, None)
+        .await
+        .expect_err("scoped Circle bootstrap verification must require its routing key");
     assert!(
         error
             .to_string()
@@ -240,14 +240,10 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     });
     let reference = circle_bootstrap_reference(&source, &image);
 
-    let error = verify_circle_bootstrap_image(
-        &image,
-        &reference,
-        circle_id,
-        source.database.synced_tables(),
-        Some(&routing_key),
-    )
-    .expect_err("Circle bootstrap must reject a scoped Store row");
+    let error = StoreDatabase::new(&source.database)
+        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+        .await
+        .expect_err("Circle bootstrap must reject a scoped Store row");
     assert!(
         error
             .to_string()
@@ -341,14 +337,10 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     )
     .expect("derive unscoped-row routing key");
 
-    let error = verify_circle_bootstrap_image(
-        &image,
-        &reference,
-        circle_id,
-        source.database.synced_tables(),
-        Some(&routing_key),
-    )
-    .expect_err("Circle bootstrap must reject an unscoped synced row");
+    let error = StoreDatabase::new(&source.database)
+        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+        .await
+        .expect_err("Circle bootstrap must reject an unscoped synced row");
     assert!(
         error
             .to_string()
@@ -367,7 +359,6 @@ enum ScopedSnapshotImage {
 }
 
 struct PublishedScopedSnapshot {
-    source: SyntheticStoreFixture,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     membership: coven_protocol::membership::MembershipChain,
     _store_dir_temp: tempfile::TempDir,
@@ -475,7 +466,6 @@ impl PublishedScopedSnapshot {
 
         let (store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         Self {
-            source,
             store,
             membership,
             _store_dir_temp: store_dir_temp,
@@ -501,7 +491,7 @@ impl PublishedScopedSnapshot {
         bootstrap
             .install(
                 &self.store_dir,
-                self.source.database.synced_tables().to_vec(),
+                scoped_snapshot_tables(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
@@ -744,14 +734,10 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
             .store_root_hash,
     )
     .expect("derive Circle parent routing key");
-    verify_circle_bootstrap_image(
-        &image,
-        &reference,
-        circle_id,
-        source.database.synced_tables(),
-        Some(&routing_key),
-    )
-    .expect("verify Circle bootstrap with its required Store parent");
+    let image = StoreDatabase::new(&source.database)
+        .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
+        .await
+        .expect("verify Circle bootstrap with its required Store parent");
     let inspected = coven_database::DatabaseImageTest::from_bytes(&image)
         .expect("open inspected Circle parent snapshot");
     let rows = inspected

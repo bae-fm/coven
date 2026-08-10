@@ -615,7 +615,6 @@ impl StoreSession<'_> {
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
         temp_dir: &Path,
-        tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         audience: coven_protocol::circle::Audience,
     ) -> Result<
@@ -629,7 +628,13 @@ impl StoreSession<'_> {
         require_no_unpublished_store_writes(self.records.conn)?;
         let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
-                records.capture_snapshot(image, root, tables, routing_encryption, &audience)
+                records.capture_snapshot(
+                    image,
+                    root,
+                    self.synced_tables,
+                    routing_encryption,
+                    &audience,
+                )
             })
             .map_err(snapshot_image_db_error)?;
         let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
@@ -647,7 +652,6 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
         temp_dir: &Path,
-        tables: &[SyncedTable],
         routing_encryption: &coven_keys::encryption::EncryptionService,
         routing_key: &coven_protocol::circle::RowRoutingKey,
         circle_id: coven_protocol::circle::CircleId,
@@ -664,7 +668,7 @@ impl StoreSession<'_> {
                 root,
                 self.blob_decls,
                 self.gates,
-                tables,
+                self.synced_tables,
                 Some(routing_key),
                 &std::collections::BTreeSet::new(),
                 Some(cutoff),
@@ -683,7 +687,7 @@ impl StoreSession<'_> {
                 replay.capture_snapshot(
                     image,
                     root,
-                    tables,
+                    self.synced_tables,
                     Some(routing_encryption),
                     &coven_protocol::circle::Audience::Circle(circle_id),
                 )
@@ -719,7 +723,6 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
-        tables: Vec<SyncedTable>,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<
         (
@@ -732,7 +735,6 @@ impl StoreDatabase {
             session.capture_snapshot_cut(
                 &root,
                 &temp_dir,
-                &tables,
                 routing_encryption.as_ref(),
                 coven_protocol::circle::Audience::Store,
             )
@@ -744,7 +746,6 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
-        tables: Vec<SyncedTable>,
         routing_encryption: coven_keys::encryption::EncryptionService,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<
@@ -758,7 +759,6 @@ impl StoreDatabase {
             session.capture_snapshot_cut(
                 &root,
                 &temp_dir,
-                &tables,
                 Some(&routing_encryption),
                 coven_protocol::circle::Audience::Circle(circle_id),
             )
@@ -771,7 +771,6 @@ impl StoreDatabase {
         &self,
         root: coven_protocol::store_commit::StoreRootRef,
         temp_dir: PathBuf,
-        tables: Vec<SyncedTable>,
         routing_encryption: coven_keys::encryption::EncryptionService,
         routing_key: coven_protocol::circle::RowRoutingKey,
         circle_id: coven_protocol::circle::CircleId,
@@ -781,7 +780,6 @@ impl StoreDatabase {
             session.capture_circle_snapshot_at_cutoff(
                 &root,
                 &temp_dir,
-                &tables,
                 &routing_encryption,
                 &routing_key,
                 circle_id,
@@ -789,6 +787,27 @@ impl StoreDatabase {
             )
         })
         .await
+    }
+
+    pub async fn verify_circle_bootstrap_image(
+        &self,
+        image: Vec<u8>,
+        reference: coven_protocol::circle::CircleBootstrapRef,
+        circle_id: coven_protocol::circle::CircleId,
+        routing_key: Option<coven_protocol::circle::RowRoutingKey>,
+    ) -> Result<Vec<u8>, SnapshotImageError> {
+        self.call_store(move |session| {
+            let verification = verify_circle_bootstrap_image(
+                &image,
+                &reference,
+                circle_id,
+                session.synced_tables,
+                routing_key.as_ref(),
+            );
+            Ok(verification.map(|()| image))
+        })
+        .await
+        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -951,7 +970,7 @@ fn scope_authenticated_blob_graph(
     Ok(())
 }
 
-pub fn verify_circle_bootstrap_image(
+pub(super) fn verify_circle_bootstrap_image(
     image: &[u8],
     reference: &coven_protocol::circle::CircleBootstrapRef,
     circle_id: coven_protocol::circle::CircleId,
@@ -968,7 +987,7 @@ pub fn verify_circle_bootstrap_image(
     verify_circle_bootstrap_connection(&connection, reference, circle_id, tables, routing_key)
 }
 
-pub fn verify_circle_bootstrap_connection(
+pub(crate) fn verify_circle_bootstrap_connection(
     connection: &Connection,
     reference: &coven_protocol::circle::CircleBootstrapRef,
     circle_id: coven_protocol::circle::CircleId,

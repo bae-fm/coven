@@ -25,6 +25,26 @@ struct PreparedWriteTransfer {
 }
 
 impl StoreSession<'_> {
+    pub(crate) fn capture_test_changeset(&self, statements: &[String]) -> Result<Vec<u8>, DbError> {
+        let tables = self
+            .synced_tables
+            .iter()
+            .map(|table| table.name().to_string())
+            .collect::<Vec<_>>();
+        crate::DatabaseTestSql::for_store(self.records.conn, self.records.store_dir)
+            .capture_changeset(&tables, statements)
+    }
+
+    pub(crate) fn apply_test_changeset(&self, bytes: &[u8]) -> Result<crate::ApplyResult, DbError> {
+        crate::resolve_and_apply_changeset(
+            self.records.conn,
+            self.records.store_dir,
+            bytes,
+            self.synced_tables,
+            self.hlc.wall_now_ms(),
+        )
+    }
+
     fn export_prepared_write(&self, write_id: &WriteId) -> Result<PreparedWriteTransfer, DbError> {
         let connection = self.records.conn;
         let write = connection

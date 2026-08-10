@@ -111,10 +111,6 @@ impl DatabaseConnection {
             let mut session = DatabaseSession::new(
                 &core.conn,
                 #[cfg(any(test, feature = "test-utils"))]
-                &core.context.gates,
-                #[cfg(any(test, feature = "test-utils"))]
-                &core.context.synced_tables,
-                #[cfg(any(test, feature = "test-utils"))]
                 &core.context.store_dir,
             );
             operation(&mut session)
@@ -174,8 +170,26 @@ impl DatabaseConnection {
         self.context.sync_routing_hash
     }
 
-    pub(crate) fn store_synced_tables(&self) -> &[SyncedTable] {
-        &self.context.synced_tables
+    pub(crate) fn store_has_synced_tables(&self) -> bool {
+        !self.context.synced_tables.is_empty()
+    }
+
+    pub(crate) fn store_blob_transition_root(&self, table_name: &str) -> BlobTransitionRoot {
+        let Some(table) = self
+            .context
+            .synced_tables
+            .iter()
+            .find(|table| table.name() == table_name)
+        else {
+            return BlobTransitionRoot::NotGated;
+        };
+        if table.is_remote_root() {
+            BlobTransitionRoot::RemoteRoot
+        } else if table.gate_column().is_some() {
+            BlobTransitionRoot::Gated
+        } else {
+            BlobTransitionRoot::NotGated
+        }
     }
 
     pub(crate) fn store_transfer_limits(&self) -> coven_protocol::blob::TransferLimits {

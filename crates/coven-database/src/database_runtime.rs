@@ -63,8 +63,12 @@ impl Database {
         self.connection.store_sync_routing_hash()
     }
 
-    pub(crate) fn store_synced_tables(&self) -> &[SyncedTable] {
-        self.connection.store_synced_tables()
+    pub(crate) fn store_has_synced_tables(&self) -> bool {
+        self.connection.store_has_synced_tables()
+    }
+
+    pub(crate) fn store_blob_transition_root(&self, table_name: &str) -> BlobTransitionRoot {
+        self.connection.store_blob_transition_root(table_name)
     }
 
     pub(crate) fn store_transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
@@ -406,11 +410,6 @@ impl Database {
             migrations,
             CovenMetadataOpen::Detect,
         )
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn synced_tables(&self) -> &[SyncedTable] {
-        self.connection.store_synced_tables()
     }
 
     #[cfg(any(test, feature = "test-utils"))]

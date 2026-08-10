@@ -10,6 +10,13 @@ pub enum PostUpload {
     MadeRemote { root_table: String, root_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobTransitionRoot {
+    Gated,
+    RemoteRoot,
+    NotGated,
+}
+
 #[derive(Clone)]
 pub struct MaterializedLocalBlob {
     pub remote: RowBlobRef,
@@ -18,12 +25,24 @@ pub struct MaterializedLocalBlob {
 }
 
 impl StoreSession<'_> {
+    fn gated_root_gate_column(&self, root_table: &str) -> Result<&str, DbError> {
+        self.synced_tables
+            .iter()
+            .find(|table| table.name() == root_table)
+            .and_then(|table| table.gate_column())
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "blob locality transition root {root_table:?} has no boolean gate column"
+                ))
+            })
+    }
+
     fn gated_root_locality(
         &self,
         root_table: &str,
-        gate_column: &str,
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
+        let gate_column = self.gated_root_gate_column(root_table)?;
         crate::query_truth(self.records.conn, root_table, gate_column, root_id)
             .map_err(|error| DbError::Message(error.to_string()))
     }
@@ -32,12 +51,12 @@ impl StoreSession<'_> {
     fn begin_make_remote(
         &self,
         root_table: &str,
-        gate_column: &str,
         root_id: &str,
         pin: bool,
         created_at: &str,
         uploads: &[(RowBlobRef, std::path::PathBuf)],
     ) -> Result<Option<bool>, DbError> {
+        let gate_column = self.gated_root_gate_column(root_table)?;
         let transaction = self.records.conn.unchecked_transaction()?;
         let locality = crate::query_truth(&transaction, root_table, gate_column, root_id)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -196,12 +215,12 @@ impl StoreSession<'_> {
         &mut self,
         root_table: &str,
         root_id: &str,
-        gate_column: &str,
         stamp: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         materialized: &[MaterializedLocalBlob],
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), DbError> {
+        let gate_column = self.gated_root_gate_column(root_table)?.to_string();
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             self.records.conn,
             self.records.store_dir,
@@ -215,7 +234,7 @@ impl StoreSession<'_> {
         .execute_make_local(
             root_table.to_string(),
             root_id.to_string(),
-            gate_column.to_string(),
+            gate_column,
             stamp.to_string(),
             materialized.to_vec(),
         )
@@ -223,6 +242,7 @@ impl StoreSession<'_> {
     }
 
     fn cancel_make_remote(&self, root_table: &str, root_id: &str) -> Result<(), DbError> {
+        self.gated_root_gate_column(root_table)?;
         let transaction = self.records.conn.unchecked_transaction()?;
         match Database::make_remote_intent_state(&transaction, root_table, root_id)? {
             Some(MakeRemoteIntentState::Uploading) => {
@@ -267,39 +287,26 @@ impl StoreDatabase {
     pub async fn gated_root_locality(
         &self,
         root_table: &str,
-        gate_column: &str,
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
         let root_table = root_table.to_string();
-        let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
-        self.call_store(move |session| {
-            session.gated_root_locality(&root_table, &gate_column, &root_id)
-        })
-        .await
+        self.call_store(move |session| session.gated_root_locality(&root_table, &root_id))
+            .await
     }
 
     pub async fn begin_make_remote(
         &self,
         root_table: &str,
-        gate_column: &str,
         root_id: &str,
         pin: bool,
         created_at: String,
         uploads: Vec<(RowBlobRef, std::path::PathBuf)>,
     ) -> Result<Option<bool>, DbError> {
         let root_table = root_table.to_string();
-        let gate_column = gate_column.to_string();
         let root_id = root_id.to_string();
         self.call_store(move |session| {
-            session.begin_make_remote(
-                &root_table,
-                &gate_column,
-                &root_id,
-                pin,
-                &created_at,
-                &uploads,
-            )
+            session.begin_make_remote(&root_table, &root_id, pin, &created_at, &uploads)
         })
         .await
     }
@@ -366,20 +373,17 @@ impl StoreDatabase {
         &self,
         root_table: &str,
         root_id: &str,
-        gate_column: &str,
         stamp: String,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         materialized: Vec<MaterializedLocalBlob>,
     ) -> Result<(), DbError> {
         let root_table = root_table.to_string();
         let root_id = root_id.to_string();
-        let gate_column = gate_column.to_string();
         let write_id = self.new_store_write_id();
         self.call_store(move |session| {
             session.commit_make_local(
                 &root_table,
                 &root_id,
-                &gate_column,
                 &stamp,
                 routing_encryption.as_ref(),
                 &materialized,

@@ -278,21 +278,12 @@ trait TestStoreStorage: Sync {
     async fn sync_for_test(
         &self,
         db: &coven_database::SyntheticStoreFixture,
-        tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
         message: &str,
         keypair: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, String> {
-        let configured_tables: Vec<_> = db
-            .database
-            .synced_tables()
-            .iter()
-            .map(SyncedTable::name)
-            .collect();
-        let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
-        assert_eq!(configured_tables, supplied_tables);
         assert!(
             message.is_empty(),
             "Store commits carry no arbitrary message"
@@ -338,14 +329,13 @@ trait TestStoreStorage: Sync {
     async fn publish_test_cycle(
         &self,
         db: &coven_database::SyntheticStoreFixture,
-        tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
         keypair: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) {
         let result = self
-            .sync_for_test(db, tables, outgoing, local_seq, "", keypair, store_dir)
+            .sync_for_test(db, outgoing, local_seq, "", keypair, store_dir)
             .await
             .expect("sync");
         assert!(result.is_some(), "the captured rows publish a Store commit");
@@ -4473,15 +4463,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 
     let (_t1, ld1) = temp_store_dir();
     let result = storage
-        .sync_for_test(
-            &db1,
-            &test_synced_tables_with_blob(photo_decl()),
-            outgoing,
-            0,
-            "",
-            &keypair,
-            &ld1,
-        )
+        .sync_for_test(&db1, outgoing, 0, "", &keypair, &ld1)
         .await;
     let err = result.expect_err("missing blob blocks Store publication");
     assert!(
@@ -4522,7 +4504,6 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
 
     let bytes = b"COVER-BYTES";
     let db = open_test_db_with_blob(readable_photo_decl());
-    let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t, ld) = temp_store_dir();
     ld.store_local("p1cover", bytes).await;
     let rows = [
@@ -4539,7 +4520,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     ];
     let outgoing = db.database.capture_test_changeset(&rows).await;
     storage
-        .publish_test_cycle(&db, &tables, outgoing.clone(), 0, &keypair, &ld)
+        .publish_test_cycle(&db, outgoing.clone(), 0, &keypair, &ld)
         .await;
     let cover_key = db.row_blob_object_key("note_photos", "p1cover").await;
     assert_eq!(
@@ -4560,7 +4541,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
 
     // The row is re-emitted. The blob has no local bytes to upload — and needs none.
     let result = storage
-        .sync_for_test(&db, &tables, outgoing, 1, "", &keypair, &ld)
+        .sync_for_test(&db, outgoing, 1, "", &keypair, &ld)
         .await;
     assert!(
         result.is_ok(),
@@ -4619,15 +4600,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     .await;
 
     let result = storage
-        .sync_for_test(
-            &db1,
-            &test_synced_tables_with_blob(readable_photo_decl()),
-            outgoing,
-            0,
-            "",
-            &keypair,
-            &ld1,
-        )
+        .sync_for_test(&db1, outgoing, 0, "", &keypair, &ld1)
         .await
         .expect("sync");
     assert!(
@@ -4688,7 +4661,6 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
 
     let bytes = b"COVER-BYTES";
     let db = open_test_db_with_blob(readable_photo_decl());
-    let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t, ld) = temp_store_dir();
     ld.store_local("p1cover", bytes).await;
     // `n1/cover.jpg` names no blob: it would key p1cover today and its replacement
@@ -4710,7 +4682,7 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
         .await;
 
     let err = storage
-        .sync_for_test(&db, &tables, outgoing, 0, "", &keypair, &ld)
+        .sync_for_test(&db, outgoing, 0, "", &keypair, &ld)
         .await
         .expect_err("a cloud path that does not name its blob must fail the cycle");
 
@@ -4736,7 +4708,6 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
         let new_bytes = b"NEW-COVER-BYTES";
 
         let db1 = open_test_db_with_blob(readable_photo_decl());
-        let tables = test_synced_tables_with_blob(readable_photo_decl());
         let (_t1, ld1) = temp_store_dir();
         ld1.store_local("p1cover", old_bytes).await;
         let outgoing = db1
@@ -4755,7 +4726,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
             ])
             .await;
         storage
-            .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+            .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
             .await;
         let old_key = db1.row_blob_object_key("note_photos", "p1cover").await;
         assert_eq!(
@@ -4785,7 +4756,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
             )])
             .await;
         storage
-            .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+            .publish_test_cycle(&db1, outgoing, 1, &keypair, &ld1)
             .await;
         let new_key = db1.row_blob_object_key("note_photos", "p2cover").await;
 
@@ -4831,7 +4802,6 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
 async fn plain_scheme_two_replacements_write_two_objects() {
     tokio::spawn(async {
         let (home, keypair, storage) = plain_cloud_test_store();
-        let tables = test_synced_tables_with_blob(replaceable_photo_decl());
 
         let original = b"ORIGINAL-COVER";
         let from_a = b"COVER-FROM-A";
@@ -4857,7 +4827,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
             ])
             .await;
         storage
-            .publish_test_cycle(&db_a, &tables, outgoing, 0, &keypair, &ld_a)
+            .publish_test_cycle(&db_a, outgoing, 0, &keypair, &ld_a)
             .await;
 
         // Each replacement uses a fresh blob id and readable path.
@@ -4872,7 +4842,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
             )])
             .await;
         storage
-            .publish_test_cycle(&db_a, &tables, outgoing_a, 1, &keypair, &ld_a)
+            .publish_test_cycle(&db_a, outgoing_a, 1, &keypair, &ld_a)
             .await;
         let from_a_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
@@ -4887,7 +4857,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
             )])
             .await;
         storage
-            .publish_test_cycle(&db_a, &tables, outgoing_b, 2, &keypair, &ld_a)
+            .publish_test_cycle(&db_a, outgoing_b, 2, &keypair, &ld_a)
             .await;
         let from_b_key = db_a.row_blob_object_key("note_photos", "ph1").await;
 
@@ -4953,7 +4923,6 @@ async fn plain_scheme_two_replacements_write_two_objects() {
 #[tokio::test]
 async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     let (_home, keypair, storage) = plain_cloud_test_store();
-    let tables = test_synced_tables_with_blob(readable_photo_decl());
 
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
@@ -4977,7 +4946,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
         ])
         .await;
     storage
-        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
         .await;
 
     // Another blob is published while the laggard is away.
@@ -4994,7 +4963,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
         )])
         .await;
     storage
-        .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+        .publish_test_cycle(&db1, outgoing, 1, &keypair, &ld1)
         .await;
 
     // The laggard pulls from zero: it applies the pre-replacement changeset first, whose
@@ -5047,7 +5016,6 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A readable name with no blob id anywhere in it.
     let bytes = b"AUDIO-BYTES";
     let db1 = open_test_db_with_blob(write_once_photo_decl());
-    let tables = test_synced_tables_with_blob(write_once_photo_decl());
     let (_t1, ld1) = temp_store_dir();
     ld1.store_local("f1audio", bytes).await;
     let outgoing = db1
@@ -5066,7 +5034,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
         ])
         .await;
     storage
-        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
         .await;
     let audio_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
@@ -5109,7 +5077,6 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let second = b"SECOND-AUDIO-BYTES";
 
     let db = open_test_db_with_blob(write_once_photo_decl());
-    let tables = test_synced_tables_with_blob(write_once_photo_decl());
     let (_t, ld) = temp_store_dir();
     ld.store_local("f1audio", first).await;
     let outgoing = db
@@ -5128,7 +5095,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         ])
         .await;
     storage
-        .publish_test_cycle(&db, &tables, outgoing, 0, &keypair, &ld)
+        .publish_test_cycle(&db, outgoing, 0, &keypair, &ld)
         .await;
     let audio_key = db.row_blob_object_key("note_photos", "ph1").await;
 
@@ -5145,7 +5112,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         )])
         .await;
     let err = storage
-        .sync_for_test(&db, &tables, outgoing, 1, "", &keypair, &ld)
+        .sync_for_test(&db, outgoing, 1, "", &keypair, &ld)
         .await
         .expect_err("repointing a write-once row must fail the cycle");
 
@@ -5189,7 +5156,6 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         let new_bytes = b"NEW-COVER-BYTES";
 
         let db1 = open_test_db_with_blob(replaceable_photo_decl());
-        let tables = test_synced_tables_with_blob(replaceable_photo_decl());
         let ld1 = db1.store_dir.clone();
         ld1.store_local("p1cover", old_bytes).await;
         let outgoing = db1
@@ -5208,7 +5174,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             ])
             .await;
         storage
-            .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+            .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
             .await;
         let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
         assert_eq!(
@@ -5242,7 +5208,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             )])
             .await;
         storage
-            .publish_test_cycle(&db1, &tables, outgoing, 1, &keypair, &ld1)
+            .publish_test_cycle(&db1, outgoing, 1, &keypair, &ld1)
             .await;
         let new_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
@@ -5300,7 +5266,6 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     let new_bytes = b"NEW-COVER-BYTES";
 
     let db1 = open_test_db_with_blob(replaceable_photo_decl());
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
     ld1.store_local("p1cover", old_bytes).await;
     let outgoing = db1
@@ -5319,7 +5284,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         ])
         .await;
     storage
-        .publish_test_cycle(&db1, &tables, outgoing, 0, &keypair, &ld1)
+        .publish_test_cycle(&db1, outgoing, 0, &keypair, &ld1)
         .await;
     let old_key = db1.row_blob_object_key("note_photos", "ph1").await;
 
@@ -5336,7 +5301,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         )])
         .await;
     let err = storage
-        .sync_for_test(&db1, &tables, outgoing, 1, "", &keypair, &ld1)
+        .sync_for_test(&db1, outgoing, 1, "", &keypair, &ld1)
         .await
         .expect_err("a repointing that holds its cloud path must fail the cycle");
 
@@ -5397,15 +5362,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .await;
 
     let result = storage
-        .sync_for_test(
-            &db1,
-            &test_synced_tables_with_blob(decl()),
-            outgoing,
-            0,
-            "",
-            &keypair,
-            &ld1,
-        )
+        .sync_for_test(&db1, outgoing, 0, "", &keypair, &ld1)
         .await
         .expect("sync");
     assert!(
@@ -6866,15 +6823,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
     let reference = storage
-        .sync_for_test(
-            &member_db,
-            member_db.database.synced_tables(),
-            cs,
-            0,
-            "",
-            &member,
-            &member_store_dir,
-        )
+        .sync_for_test(&member_db, cs, 0, "", &member, &member_store_dir)
         .await
         .expect("publish member Store changeset")
         .expect("member Store changeset produces a commit");
@@ -7139,15 +7088,7 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
     let reference = storage
-        .sync_for_test(
-            &member_db,
-            member_db.database.synced_tables(),
-            cs,
-            0,
-            "",
-            &member,
-            &member_store_dir,
-        )
+        .sync_for_test(&member_db, cs, 0, "", &member, &member_store_dir)
         .await
         .expect("publish member Store changeset")
         .expect("member Store changeset produces a commit");
@@ -7232,7 +7173,6 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     let candidate = storage
         .sync_for_test(
             &member_db,
-            member_db.database.synced_tables(),
             member_changeset,
             0,
             "",
@@ -7272,7 +7212,6 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     storage
         .sync_for_test(
             &owner_db,
-            owner_db.database.synced_tables(),
             owner_changeset,
             owner_sequence,
             "",
@@ -7643,15 +7582,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .await;
     let (_publish_tmp, publish_store_dir) = temp_store_dir();
     let reference = storage
-        .sync_for_test(
-            &member_db,
-            member_db.database.synced_tables(),
-            cs,
-            0,
-            "",
-            &member,
-            &publish_store_dir,
-        )
+        .sync_for_test(&member_db, cs, 0, "", &member, &publish_store_dir)
         .await
         .expect("publish member Store changeset")
         .expect("member Store changeset produces a commit");
@@ -8025,7 +7956,6 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     .await
     .expect("create exact Store for dependency-order test");
     storage.sort_provider_listings();
-    let tables = test_synced_tables();
 
     let first = open_test_db();
     let second = open_test_db();
@@ -8062,7 +7992,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         ])
         .await;
     let inserted = storage
-        .sync_for_test(db_ins, &tables, insert, 0, "", &keypair, &ld_ins)
+        .sync_for_test(db_ins, insert, 0, "", &keypair, &ld_ins)
         .await
         .expect("publish inserter changeset");
     assert!(
@@ -8094,7 +8024,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         ])
         .await;
     let updated = storage
-        .sync_for_test(db_upd, &tables, update, 0, "", &keypair, &ld_upd)
+        .sync_for_test(db_upd, update, 0, "", &keypair, &ld_upd)
         .await
         .expect("publish updater changeset");
     assert!(

@@ -304,14 +304,16 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             &image_prefix,
         )
         .await?;
-        coven_database::verify_circle_bootstrap_image(
-            &image_bytes,
-            bootstrap,
-            leaf.circle_id,
-            self.database.synced_tables(),
-            routing_key,
-        )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let image_bytes = self
+            .database
+            .verify_circle_bootstrap_image(
+                image_bytes,
+                bootstrap.clone(),
+                leaf.circle_id,
+                routing_key.cloned(),
+            )
+            .await
+            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         for binding in &bootstrap.blobs {
             let coven_protocol::blob::RowBlobAuthority::Remote(
                 coven_protocol::audience_package::PackageAudience::Circle {

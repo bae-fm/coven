@@ -146,8 +146,7 @@ fn cache_budget_state_key(namespace: &str) -> String {
 
 pub use blob_outbox::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
 pub use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
-pub use blob_transitions::MaterializedLocalBlob;
-pub use blob_transitions::PostUpload;
+pub use blob_transitions::{BlobTransitionRoot, MaterializedLocalBlob, PostUpload};
 #[cfg(any(test, feature = "test-utils"))]
 pub use candidate_records::select_author_exclusion_activation_locator;
 pub use candidate_records::CandidateCleanupObject;
@@ -193,9 +192,10 @@ pub use retained_replay::{
     GENERATION_ZERO,
 };
 use snapshot_image::snapshot_image_db_error;
+pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{
-    verify_circle_bootstrap_connection, verify_circle_bootstrap_image, CreatedSnapshot,
-    SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
+    CreatedSnapshot, SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError,
+    SnapshotImageOperationError,
 };
 use store_device_state::apply_store_device_exclusion_freezes_on;
 #[cfg(any(test, feature = "test-utils"))]

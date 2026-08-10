@@ -47,7 +47,6 @@ use coven_database::DbError;
 use coven_database::StoreDatabase;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::{Provenance, RowBlobRef};
-use coven_protocol::synced_schema::SyncedTable;
 
 use coven_protocol::blob::BlobTransitionObserver;
 use std::path::PathBuf;
@@ -235,11 +234,8 @@ impl LocalBlobTransitions {
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
         let db = &self.database;
-        let tables = db.synced_tables().to_vec();
-        let gate_col = gated_root_gate_col(&tables, root_table)?;
-        let locality = db
-            .gated_root_locality(root_table, &gate_col, root_id)
-            .await?;
+        require_make_remote_root(db, root_table)?;
+        let locality = db.gated_root_locality(root_table, root_id).await?;
         match locality {
             Some(false) => {}
             Some(true) => {
@@ -309,7 +305,7 @@ impl LocalBlobTransitions {
 
         let created_at = db.stamp();
         let locality = db
-            .begin_make_remote(root_table, &gate_col, root_id, pin, created_at, uploads)
+            .begin_make_remote(root_table, root_id, pin, created_at, uploads)
             .await?;
         match locality {
             Some(false) => Ok(()),
@@ -329,7 +325,7 @@ impl LocalBlobTransitions {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        gated_root_gate_col(self.database.synced_tables(), root_table)?;
+        require_make_remote_root(&self.database, root_table)?;
         self.database
             .cancel_make_remote(root_table, root_id)
             .await
@@ -342,18 +338,12 @@ impl LocalBlobTransitions {
         root_id: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<PreparedMakeLocal, MakeLocalError> {
-        let tables = self.database.synced_tables().to_vec();
         self.database
             .validate_store_write_routing(routing_encryption)?;
-        if is_remote_root(&tables, root_table) {
-            return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
-        }
-        let gate_column = gate_column(&tables, root_table)
-            .ok_or_else(|| MakeLocalError::NotGated(root_table.to_string()))?
-            .to_string();
+        require_make_local_root(&self.database, root_table)?;
         match self
             .database
-            .gated_root_locality(root_table, &gate_column, root_id)
+            .gated_root_locality(root_table, root_id)
             .await?
         {
             Some(true) => {}
@@ -387,17 +377,13 @@ impl LocalBlobTransitions {
                 ));
             }
         }
-        Ok(PreparedMakeLocal {
-            gate_column,
-            references,
-        })
+        Ok(PreparedMakeLocal { references })
     }
 
     async fn commit_make_local(
         &self,
         root_table: &str,
         root_id: &str,
-        gate_column: &str,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         records: Vec<coven_database::MaterializedLocalBlob>,
     ) -> Result<(), DbError> {
@@ -405,7 +391,6 @@ impl LocalBlobTransitions {
             .commit_make_local(
                 root_table,
                 root_id,
-                gate_column,
                 self.database.stamp(),
                 routing_encryption,
                 records,
@@ -415,7 +400,6 @@ impl LocalBlobTransitions {
 }
 
 struct PreparedMakeLocal {
-    gate_column: String,
     references: Vec<RowBlobRef>,
 }
 
@@ -501,8 +485,7 @@ impl ConnectedBlobTransitions {
         // Any error after the first local copy is written must roll those files back, so
         // an aborted make_local leaves no partial materialization behind. The retained
         // materialization owns that cleanup obligation until the database commit succeeds.
-        let mut materialization =
-            MakeLocalMaterialization::new(self, root_table, root_id, prepared.gate_column);
+        let mut materialization = MakeLocalMaterialization::new(self, root_table, root_id);
         if let Err(error) = self
             .materialize_blobs(
                 root_table,
@@ -688,34 +671,34 @@ impl ConnectedBlobTransitions {
     }
 }
 
-/// The gate column of `root_table`, or `None` if it is not a gated root.
-fn gate_column<'a>(tables: &'a [SyncedTable], root_table: &str) -> Option<&'a str> {
-    tables
-        .iter()
-        .find(|t| t.name() == root_table)
-        .and_then(|t| t.gate_column())
-}
-
-fn is_remote_root(tables: &[SyncedTable], root_table: &str) -> bool {
-    tables
-        .iter()
-        .any(|t| t.name() == root_table && t.is_remote_root())
-}
-
-/// Validate that `root_table` is a coven-owned gated root (rejecting a remote root
-/// and a non-gated table) and return its gate column. The gate column names the row
-/// whose truth is the root's Local/Remote state —
-/// `LocalBlobTransitions::make_remote` reads it to refuse a root already Remote.
-fn gated_root_gate_col(
-    tables: &[SyncedTable],
+fn require_make_remote_root(
+    database: &StoreDatabase,
     root_table: &str,
-) -> Result<String, MakeRemoteError> {
-    if is_remote_root(tables, root_table) {
-        return Err(MakeRemoteError::RemoteRoot(root_table.to_string()));
+) -> Result<(), MakeRemoteError> {
+    match database.blob_transition_root(root_table) {
+        coven_database::BlobTransitionRoot::Gated => Ok(()),
+        coven_database::BlobTransitionRoot::RemoteRoot => {
+            Err(MakeRemoteError::RemoteRoot(root_table.to_string()))
+        }
+        coven_database::BlobTransitionRoot::NotGated => {
+            Err(MakeRemoteError::NotGated(root_table.to_string()))
+        }
     }
-    gate_column(tables, root_table)
-        .map(str::to_string)
-        .ok_or_else(|| MakeRemoteError::NotGated(root_table.to_string()))
+}
+
+fn require_make_local_root(
+    database: &StoreDatabase,
+    root_table: &str,
+) -> Result<(), MakeLocalError> {
+    match database.blob_transition_root(root_table) {
+        coven_database::BlobTransitionRoot::Gated => Ok(()),
+        coven_database::BlobTransitionRoot::RemoteRoot => {
+            Err(MakeLocalError::RemoteRoot(root_table.to_string()))
+        }
+        coven_database::BlobTransitionRoot::NotGated => {
+            Err(MakeLocalError::NotGated(root_table.to_string()))
+        }
+    }
 }
 
 // ===========================================================================
@@ -729,7 +712,6 @@ struct MakeLocalMaterialization<'operation> {
     transitions: &'operation ConnectedBlobTransitions,
     root_table: &'operation str,
     root_id: &'operation str,
-    gate_column: String,
     records: Vec<coven_database::MaterializedLocalBlob>,
     created_files: Vec<ExactPlaintextFile>,
 }
@@ -739,13 +721,11 @@ impl<'operation> MakeLocalMaterialization<'operation> {
         transitions: &'operation ConnectedBlobTransitions,
         root_table: &'operation str,
         root_id: &'operation str,
-        gate_column: String,
     ) -> Self {
         Self {
             transitions,
             root_table,
             root_id,
-            gate_column,
             records: Vec::new(),
             created_files: Vec::new(),
         }
@@ -779,7 +759,6 @@ impl<'operation> MakeLocalMaterialization<'operation> {
             .commit_make_local(
                 self.root_table,
                 self.root_id,
-                &self.gate_column,
                 self.transitions.routing_encryption.clone(),
                 records,
             )

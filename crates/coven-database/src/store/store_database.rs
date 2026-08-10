@@ -53,8 +53,12 @@ impl StoreDatabase {
         self.database.store_sync_routing_hash()
     }
 
-    pub fn synced_tables(&self) -> &[coven_protocol::synced_schema::SyncedTable] {
-        self.database.store_synced_tables()
+    pub fn has_synced_tables(&self) -> bool {
+        self.database.store_has_synced_tables()
+    }
+
+    pub fn blob_transition_root(&self, table_name: &str) -> crate::BlobTransitionRoot {
+        self.database.store_blob_transition_root(table_name)
     }
 
     pub fn transfer_limits(&self) -> coven_protocol::blob::TransferLimits {

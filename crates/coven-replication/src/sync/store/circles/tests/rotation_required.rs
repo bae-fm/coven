@@ -1044,10 +1044,7 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
         .expect("authorize the ordinary Store snapshot cut");
     let error = match authorized
         .snapshots()
-        .capture_snapshot_cut(
-            fixture.db.database.synced_tables().to_vec(),
-            Some(&EncryptionService::from_key([42; 32])),
-        )
+        .capture_snapshot_cut(Some(&EncryptionService::from_key([42; 32])))
         .await
     {
         Ok(_) => panic!("the ordinary Store snapshot cut still refuses unpublished writes"),
@@ -1265,7 +1262,7 @@ async fn publish_acknowledged_store_snapshot(
         .expect("authorize the Store snapshot");
     let cut = authorized
         .snapshots()
-        .capture_snapshot_cut(db.database.synced_tables().to_vec(), Some(routing))
+        .capture_snapshot_cut(Some(routing))
         .await
         .expect("capture the Store snapshot cut");
     let coverage = cut.coverage().clone();
@@ -1333,7 +1330,7 @@ async fn restore_store_snapshot<'a>(
         .expect("restore the Store snapshot")
         .install(
             &target.store_dir,
-            db.database.synced_tables().to_vec(),
+            circle_routing_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             device_id.to_string(),
@@ -1571,7 +1568,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
         .fail_circle_install_for_test()
         .install(
             &target.store_dir,
-            db.database.synced_tables().to_vec(),
+            circle_routing_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
             "crash-restore-device".to_string(),

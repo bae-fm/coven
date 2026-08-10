@@ -140,14 +140,14 @@ async fn photo_transition_fixture() -> (
 }
 
 async fn photo_ref(db: &SyntheticStoreFixture, id: &str) -> RowBlobRef {
-    db.database
+    coven_database::StoreDatabase::new(&db.database)
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact photo row blob reference")
 }
 
 async fn cover_ref(db: &SyntheticStoreFixture, id: &str) -> RowBlobRef {
-    db.database
+    coven_database::StoreDatabase::new(&db.database)
         .row_blob_ref("note_covers", id)
         .await
         .expect("load exact cover row blob reference")
@@ -494,8 +494,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
 /// The mutable upload facts attached to the exact pending Local row version.
 async fn pending_upload_state(db: &SyntheticStoreFixture, id: &str) -> (PathBuf, bool) {
-    let expected = db
-        .database
+    let expected = coven_database::StoreDatabase::new(&db.database)
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact pending upload row");

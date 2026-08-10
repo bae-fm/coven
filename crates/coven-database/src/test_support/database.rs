@@ -126,7 +126,9 @@ impl Database {
                      '0000000000001-0000-M', '2026-01-01')"
         ))
         .await;
-        let row = self.row_blob_ref("note_photos", "pending-blob").await?;
+        let row = crate::StoreDatabase::new(self)
+            .row_blob_ref("note_photos", "pending-blob")
+            .await?;
         let created_at = created_at.to_string();
         self.test_sql(move |database| {
             database.enqueue_blob_upload(
@@ -170,12 +172,7 @@ impl Database {
             .iter()
             .map(|statement| statement.to_string())
             .collect::<Vec<_>>();
-        let tables = self
-            .synced_tables()
-            .iter()
-            .map(|table| table.name().to_string())
-            .collect::<Vec<_>>();
-        self.test_sql(move |database| database.capture_changeset(&tables, &statements))
+        self.call_store(move |session| session.capture_test_changeset(&statements))
             .await
             .unwrap_or_else(|error| panic!("test changeset capture failed: {error}"))
     }
@@ -196,12 +193,8 @@ impl Database {
         bytes: &[u8],
     ) -> Result<crate::ApplyResult, DbError> {
         let bytes = bytes.to_vec();
-        let tables = self.synced_tables().to_vec();
-        let receiver_wall_ms = self.receive_wall_ms();
-        self.call_database(move |session| {
-            session.apply_test_changeset(&bytes, &tables, receiver_wall_ms)
-        })
-        .await
+        self.call_store(move |session| session.apply_test_changeset(&bytes))
+            .await
     }
 
     pub async fn try_apply_test_changeset(&self, bytes: &[u8]) -> Result<(), DbError> {

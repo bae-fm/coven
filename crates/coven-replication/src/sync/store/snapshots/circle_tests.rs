@@ -149,14 +149,16 @@ async fn circle_snapshot_authors_and_installs_as_a_bootstrap_image() {
         fixture.store_root_hash(),
     )
     .expect("derive Circle row routing key");
-    verify_circle_bootstrap_image(
-        &image,
-        &selected.bootstrap,
-        circle_id,
-        &crate::sync::test_helpers::test_synced_tables(),
-        Some(&routing_key),
-    )
-    .expect("Circle snapshot is installable as a bootstrap image");
+    fixture
+        .store_database
+        .verify_circle_bootstrap_image(
+            image,
+            selected.bootstrap.clone(),
+            circle_id,
+            Some(routing_key),
+        )
+        .await
+        .expect("Circle snapshot is installable as a bootstrap image");
 }
 
 #[tokio::test]

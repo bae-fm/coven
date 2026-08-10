@@ -161,8 +161,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
         bytes: &[u8],
     ) -> coven_protocol::blob::RowBlobRef {
         self.bind_for_row(table, id, namespace, bytes).await;
-        self.database
-            .database
+        coven_database::StoreDatabase::new(&self.database.database)
             .row_blob_ref(table, id)
             .await
             .expect("load exact row blob reference")

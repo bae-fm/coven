@@ -49,9 +49,20 @@ impl StoreSession<'_> {
 
     fn row_blob_ref(
         &self,
-        table: &coven_protocol::synced_schema::SyncedTable,
+        table_name: &str,
         row_id: &str,
     ) -> Result<coven_protocol::blob::RowBlobRef, DbError> {
+        let table = self
+            .synced_tables
+            .iter()
+            .find(|candidate| candidate.name() == table_name)
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table_name:?}")))?;
+        if table.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            )));
+        }
         Database::row_blob_ref_on(self.records.conn, self.gates, table, row_id)
     }
 
@@ -99,18 +110,7 @@ impl StoreDatabase {
         table: &str,
         row_id: &str,
     ) -> Result<coven_protocol::blob::RowBlobRef, DbError> {
-        let table = self
-            .synced_tables()
-            .iter()
-            .find(|candidate| candidate.name() == table)
-            .cloned()
-            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
-        if table.blob().is_none() {
-            return Err(DbError::Message(format!(
-                "synced table {:?} has no blob declaration",
-                table.name()
-            )));
-        }
+        let table = table.to_string();
         let row_id = row_id.to_string();
         self.call_store(move |session| session.row_blob_ref(&table, &row_id))
             .await

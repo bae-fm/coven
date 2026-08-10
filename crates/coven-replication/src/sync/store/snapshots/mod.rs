@@ -170,9 +170,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             info!("Snapshot policy triggered, creating snapshot");
         }
 
-        let snapshot = self
-            .capture_snapshot_cut(self.database.synced_tables().to_vec(), routing_encryption)
-            .await;
+        let snapshot = self.capture_snapshot_cut(routing_encryption).await;
         match snapshot {
             Ok(cut) => {
                 let meta = self
@@ -219,7 +217,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
 
     pub(crate) async fn capture_snapshot_cut(
         &self,
-        tables: Vec<coven_protocol::synced_schema::SyncedTable>,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<StoreSnapshotCut, coven_database::DbError> {
         let (snapshot, coverage) = self
@@ -227,7 +224,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .capture_store_snapshot_cut(
                 self.writer.store_root().clone(),
                 self.store_dir.as_ref().to_path_buf(),
-                tables,
                 routing_encryption.cloned(),
             )
             .await?;

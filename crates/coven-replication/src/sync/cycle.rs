@@ -506,7 +506,7 @@ impl PreparedSyncComponents {
         // empty set means a synced store would attach nothing, every changeset would
         // come out empty, and sync would silently become snapshot-only. Refuse loudly
         // instead of pretending to sync.
-        if database.synced_tables().is_empty() {
+        if !database.has_synced_tables() {
             return Err(InitSyncError::NoSyncedTables);
         }
         database

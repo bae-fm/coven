@@ -6,50 +6,20 @@ use super::*;
 pub(crate) struct DatabaseSession<'session> {
     conn: &'session Connection,
     #[cfg(any(test, feature = "test-utils"))]
-    gates: &'session Gates,
-    #[cfg(any(test, feature = "test-utils"))]
-    synced_tables: &'session [SyncedTable],
-    #[cfg(any(test, feature = "test-utils"))]
     store_dir: &'session coven_foundation::store_dir::StoreDir,
 }
 
 impl<'session> DatabaseSession<'session> {
     pub(crate) fn new(
         conn: &'session Connection,
-        #[cfg(any(test, feature = "test-utils"))] gates: &'session Gates,
-        #[cfg(any(test, feature = "test-utils"))] synced_tables: &'session [SyncedTable],
         #[cfg(any(test, feature = "test-utils"))]
         store_dir: &'session coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             conn,
             #[cfg(any(test, feature = "test-utils"))]
-            gates,
-            #[cfg(any(test, feature = "test-utils"))]
-            synced_tables,
-            #[cfg(any(test, feature = "test-utils"))]
             store_dir,
         }
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn row_blob_ref(
-        &self,
-        table_name: &str,
-        row_id: &str,
-    ) -> Result<RowBlobRef, DbError> {
-        let table = self
-            .synced_tables
-            .iter()
-            .find(|candidate| candidate.name() == table_name)
-            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table_name:?}")))?;
-        if table.blob().is_none() {
-            return Err(DbError::Message(format!(
-                "synced table {:?} has no blob declaration",
-                table.name()
-            )));
-        }
-        Database::row_blob_ref_on(self.conn, self.gates, table, row_id)
     }
 
     pub(crate) fn complete_device_join_from_pending(
@@ -157,22 +127,6 @@ impl<'session> DatabaseSession<'session> {
         F: for<'connection> FnOnce(DatabaseTestSql<'connection>) -> Result<R, DbError>,
     {
         operation(DatabaseTestSql::for_store(self.conn, self.store_dir))
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn apply_test_changeset(
-        &self,
-        bytes: &[u8],
-        tables: &[SyncedTable],
-        receiver_wall_ms: u64,
-    ) -> Result<crate::ApplyResult, DbError> {
-        crate::resolve_and_apply_changeset(
-            self.conn,
-            self.store_dir,
-            bytes,
-            tables,
-            receiver_wall_ms,
-        )
     }
 
     #[cfg(test)]

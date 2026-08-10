@@ -228,12 +228,12 @@ pub use store::{
 };
 pub use store::{
     copy_table_with_conflicts, install_circle_bootstrap_image_on,
-    install_circle_bootstrap_remote_objects_on, projection_table_names,
-    verify_circle_bootstrap_image, BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot,
-    DeviceJoinJournalStore, DurableStoreReclaimObject, DurableStoreReclaimOperation,
-    HostWriteBlobTransaction, HostWriteError, HostWriteOperation, IncomingTimestampPolicy,
-    LocalBlobCleanup, MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry,
-    OutboxOperation, OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
+    install_circle_bootstrap_remote_objects_on, projection_table_names, BlobTransitionRoot,
+    BlockedWriteDiscard, CandidateCleanupObject, CreatedSnapshot, DeviceJoinJournalStore,
+    DurableStoreReclaimObject, DurableStoreReclaimOperation, HostWriteBlobTransaction,
+    HostWriteError, HostWriteOperation, IncomingTimestampPolicy, LocalBlobCleanup,
+    MaterializedLocalBlob, MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation,
+    OutboxUploadState, OwnStreamAuthorship, OwnedVerifiedMergeMaterialization,
     PreparedCircleObjects, ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
