@@ -520,7 +520,123 @@ impl StoreSession<'_> {
         winner_head: StoreDeviceHeadRef,
         nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
     ) -> Result<WriteStatus, DbError> {
-        mark_merge_candidate_conflict_on(self, write_id, winner_commit, winner_head, nonactivations)
+        let records = self.records;
+        let verified_authority = &mut *self.verified_store_authority;
+        let conn = records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let (raw_status, raw_prepared): (String, String) = tx
+            .query_row(
+                "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let status: WriteStatus = serde_json::from_str(&raw_status)
+            .map_err(|error| DbError::context("Merge candidate status", error))?;
+        if !matches!(status, WriteStatus::Publishing) {
+            return Err(DbError::Message(format!(
+                "Merge candidate {write_id} is not publishing"
+            )));
+        }
+        let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+            .map_err(|error| DbError::context("prepared Merge candidate", error))?;
+        let tx_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let prepared_candidate =
+            parse_prepared_merge_candidate_on(tx_records, verified_authority, &prepared)?;
+        let publication =
+            parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
+        if winner_head.object.slot() != publication.head_object.slot()
+            || winner_head.object == publication.head_object
+        {
+            return Err(DbError::Message(
+                "Merge winner does not replace the prepared exact head slot".to_string(),
+            ));
+        }
+        if prepared_candidate.commit.write_id != write_id {
+            return Err(DbError::Message(
+                "prepared Merge graph differs from its write identity".to_string(),
+            ));
+        }
+        if matches!(&prepared, PreparedStoreWriteState::MergeAbandonment { .. }) {
+            let publication_nonactivation =
+                nonactivations.get(&publication.reference).ok_or_else(|| {
+                    DbError::Message(
+                        "Merge abandonment authority has no verified nonactivation".to_string(),
+                    )
+                })?;
+            begin_merge_candidate_nonactivation_on(
+                &tx,
+                &write_id,
+                &publication,
+                publication_nonactivation,
+                false,
+                &[],
+            )?;
+            if winner_commit != prepared_candidate.reference {
+                let candidate_nonactivation = nonactivations
+                    .get(&prepared_candidate.reference)
+                    .ok_or_else(|| {
+                        DbError::Message(
+                            "Merge abandonment candidate has no verified nonactivation".to_string(),
+                        )
+                    })?;
+                begin_merge_candidate_nonactivation_on(
+                    &tx,
+                    &write_id,
+                    &prepared_candidate,
+                    candidate_nonactivation,
+                    true,
+                    &[],
+                )?;
+            }
+            let mut lost_preparation = prepared.clone();
+            let PreparedStoreWriteState::MergeAbandonment { outcome, .. } = &mut lost_preparation
+            else {
+                unreachable!("matched Merge abandonment")
+            };
+            *outcome = MergeAbandonmentOutcome::Lost {
+                winner_commit: winner_commit.clone(),
+                winner_head: winner_head.clone(),
+            };
+            let lost_preparation = serde_json::to_string(&lost_preparation)
+                .map_err(|error| DbError::context("serialize lost Merge abandonment", error))?;
+            let updated = tx
+                .execute(
+                    "UPDATE store_writes SET prepared = ?2
+                     WHERE write_id = ?1 AND prepared = ?3",
+                    rusqlite::params![write_id.as_str(), lost_preparation, raw_prepared],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "Merge abandonment changed while recording its winner".to_string(),
+                ));
+            }
+        } else {
+            let candidate_nonactivation = nonactivations
+                .get(&prepared_candidate.reference)
+                .ok_or_else(|| {
+                    DbError::Message("Merge candidate has no verified nonactivation".to_string())
+                })?;
+            begin_merge_candidate_nonactivation_on(
+                &tx,
+                &write_id,
+                &prepared_candidate,
+                candidate_nonactivation,
+                true,
+                &[],
+            )?;
+        }
+        let blocked =
+            WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
+                reason: format!(
+                    "Merge successor slot is occupied by signed head {}",
+                    winner_head.head_hash
+                ),
+            });
+        Database::set_write_status_on(&tx, &write_id, &blocked)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(blocked)
     }
 }
 
@@ -620,129 +736,4 @@ impl StoreDatabase {
         self.notify_write_status(notified_write_id, blocked);
         Ok(())
     }
-}
-
-fn mark_merge_candidate_conflict_on(
-    session: &mut StoreSession<'_>,
-    write_id: WriteId,
-    winner_commit: StoreBatchCommitRef,
-    winner_head: StoreDeviceHeadRef,
-    nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
-) -> Result<WriteStatus, DbError> {
-    let records = session.records;
-    let verified_authority = &mut *session.verified_store_authority;
-    let conn = records.conn;
-    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let (raw_status, raw_prepared): (String, String) = tx
-        .query_row(
-            "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
-            [write_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(DbError::from)?;
-    let status: WriteStatus = serde_json::from_str(&raw_status)
-        .map_err(|error| DbError::context("Merge candidate status", error))?;
-    if !matches!(status, WriteStatus::Publishing) {
-        return Err(DbError::Message(format!(
-            "Merge candidate {write_id} is not publishing"
-        )));
-    }
-    let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
-        .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-    let tx_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
-    let prepared_candidate =
-        parse_prepared_merge_candidate_on(tx_records, verified_authority, &prepared)?;
-    let publication =
-        parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
-    if winner_head.object.slot() != publication.head_object.slot()
-        || winner_head.object == publication.head_object
-    {
-        return Err(DbError::Message(
-            "Merge winner does not replace the prepared exact head slot".to_string(),
-        ));
-    }
-    if prepared_candidate.commit.write_id != write_id {
-        return Err(DbError::Message(
-            "prepared Merge graph differs from its write identity".to_string(),
-        ));
-    }
-    if matches!(&prepared, PreparedStoreWriteState::MergeAbandonment { .. }) {
-        let publication_nonactivation =
-            nonactivations.get(&publication.reference).ok_or_else(|| {
-                DbError::Message(
-                    "Merge abandonment authority has no verified nonactivation".to_string(),
-                )
-            })?;
-        begin_merge_candidate_nonactivation_on(
-            &tx,
-            &write_id,
-            &publication,
-            publication_nonactivation,
-            false,
-            &[],
-        )?;
-        if winner_commit != prepared_candidate.reference {
-            let candidate_nonactivation = nonactivations
-                .get(&prepared_candidate.reference)
-                .ok_or_else(|| {
-                    DbError::Message(
-                        "Merge abandonment candidate has no verified nonactivation".to_string(),
-                    )
-                })?;
-            begin_merge_candidate_nonactivation_on(
-                &tx,
-                &write_id,
-                &prepared_candidate,
-                candidate_nonactivation,
-                true,
-                &[],
-            )?;
-        }
-        let mut lost_preparation = prepared.clone();
-        let PreparedStoreWriteState::MergeAbandonment { outcome, .. } = &mut lost_preparation
-        else {
-            unreachable!("matched Merge abandonment")
-        };
-        *outcome = MergeAbandonmentOutcome::Lost {
-            winner_commit: winner_commit.clone(),
-            winner_head: winner_head.clone(),
-        };
-        let lost_preparation = serde_json::to_string(&lost_preparation)
-            .map_err(|error| DbError::context("serialize lost Merge abandonment", error))?;
-        let updated = tx
-            .execute(
-                "UPDATE store_writes SET prepared = ?2
-                         WHERE write_id = ?1 AND prepared = ?3",
-                rusqlite::params![write_id.as_str(), lost_preparation, raw_prepared],
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
-            return Err(DbError::Message(
-                "Merge abandonment changed while recording its winner".to_string(),
-            ));
-        }
-    } else {
-        let candidate_nonactivation = nonactivations
-            .get(&prepared_candidate.reference)
-            .ok_or_else(|| {
-                DbError::Message("Merge candidate has no verified nonactivation".to_string())
-            })?;
-        begin_merge_candidate_nonactivation_on(
-            &tx,
-            &write_id,
-            &prepared_candidate,
-            candidate_nonactivation,
-            true,
-            &[],
-        )?;
-    }
-    let blocked = WriteStatus::Blocked(coven_protocol::write::WriteBlock::InvalidProtocolState {
-        reason: format!(
-            "Merge successor slot is occupied by signed head {}",
-            winner_head.head_hash
-        ),
-    });
-    Database::set_write_status_on(&tx, &write_id, &blocked)?;
-    tx.commit().map_err(DbError::from)?;
-    Ok(blocked)
 }
