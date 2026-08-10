@@ -355,7 +355,7 @@ async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() 
 
     let count = db
         .database
-        .test_sql(|database| database.published_blob_drop_intent_count(1, "covers", "shared-id"))
+        .published_blob_drop_intent_count_for_test(1, "covers", "shared-id")
         .await
         .expect("count exact drop intents");
     assert_eq!(count, 2);
@@ -864,7 +864,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         .await;
     let store_state_before = db
         .database
-        .test_sql(|database| database.scoped_store_state_counts())
+        .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
 
@@ -932,7 +932,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
     );
     assert_eq!(
         db.database
-            .test_sql(|database| database.scoped_store_state_counts())
+            .scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -1021,7 +1021,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
     let store_state_before = db
         .database
-        .test_sql(|database| database.scoped_store_state_counts())
+        .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
 
@@ -1078,7 +1078,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     assert_eq!(gate_stamp(&db, "n-user-scoped").await, stamp_before);
     assert_eq!(
         db.database
-            .test_sql(|database| database.scoped_store_state_counts())
+            .scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -1178,7 +1178,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
     let store_state_before = db
         .database
-        .test_sql(|database| database.scoped_store_state_counts())
+        .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
 
@@ -1231,7 +1231,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     );
     assert_eq!(
         db.database
-            .test_sql(|database| database.scoped_store_state_counts())
+            .scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -2630,9 +2630,14 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
     // Enqueue an upload with no intent to model impossible durable state directly.
     let row = photo_ref(&db, "photoaaa").await;
     db.database
-        .test_sql(move |database| {
-            database.enqueue_blob_upload("notes", "n1", &row, &src, true, "0000000001000-0000-A")
-        })
+        .enqueue_blob_upload_with_retention_for_test(
+            "notes",
+            "n1",
+            row,
+            src,
+            true,
+            "0000000001000-0000-A",
+        )
         .await
         .unwrap();
 
@@ -2794,18 +2799,7 @@ async fn make_local_commit_failure_removes_materialized_files() {
         .seed_remote_release(&storage, None, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes)
         .await;
     db.database
-        .test_sql(|connection| {
-            connection
-                .execute_batch(
-                    "CREATE TRIGGER reject_make_local_gate_update
-                 BEFORE UPDATE OF shared ON notes
-                 WHEN NEW.id = 'n1' AND NEW.shared = 0
-                 BEGIN
-                     SELECT RAISE(ABORT, 'forced make_local commit failure');
-                 END;",
-                )
-                .map_err(coven_database::DbError::from)
-        })
+        .install_make_local_commit_failure_for_test()
         .await
         .expect("install make_local commit failure");
 

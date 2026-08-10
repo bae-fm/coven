@@ -497,16 +497,14 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     let enqueue_row = row.clone();
     let enqueue_path = source_path.clone();
     db.database
-        .test_sql(move |database| {
-            database.enqueue_blob_upload(
-                "notes",
-                "note-upload-row",
-                &enqueue_row,
-                &enqueue_path,
-                false,
-                T0,
-            )
-        })
+        .enqueue_blob_upload_with_retention_for_test(
+            "notes",
+            "note-upload-row",
+            enqueue_row,
+            enqueue_path,
+            false,
+            T0,
+        )
         .await
         .expect("enqueue exact upload");
     let TestStoreFixture {
@@ -747,12 +745,9 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
                 // The later row carries an attempt count, so a *parseable* recent timestamp
                 // would hold it inside its backoff window. Its corruption must be found
                 // before the earlier healthy row produces a remote effect.
-                Box::pin(
-                    db.database
-                        .test_sql(|database| database.corrupt_delete_outbox_attempt_time(2)),
-                )
-                .await
-                .expect("corrupt last_attempt_at");
+                Box::pin(db.database.corrupt_delete_outbox_attempt_time_for_test(2))
+                    .await
+                    .expect("corrupt last_attempt_at");
 
                 let clock = FixedClock(at("2024-06-01T00:00:10Z"));
                 let pending_rotation = PendingRotation::none();

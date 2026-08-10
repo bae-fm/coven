@@ -763,6 +763,189 @@ impl Database {
             .await
     }
 
+    pub async fn circle_state_counts_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<(i64, i64, i64), DbError> {
+        self.test_sql(move |database| database.circle_state_counts(circle_id))
+            .await
+    }
+
+    pub async fn upload_outbox_attempt_for_test(
+        &self,
+        row_id: &str,
+    ) -> Result<Option<crate::OutboxAttempt>, DbError> {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| database.upload_outbox_attempt(&row_id))
+            .await
+    }
+
+    pub async fn corrupt_upload_outbox_attempt_time_for_test(
+        &self,
+        id: i64,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.corrupt_upload_outbox_attempt_time(id))
+            .await
+    }
+
+    pub async fn corrupt_delete_outbox_attempt_time_for_test(
+        &self,
+        id: i64,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.corrupt_delete_outbox_attempt_time(id))
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_blob_upload_with_retention_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        row: coven_protocol::blob::RowBlobRef,
+        source_path: std::path::PathBuf,
+        retain_pinned: bool,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        let created_at = created_at.to_string();
+        self.test_sql(move |database| {
+            database.enqueue_blob_upload(
+                &root_table,
+                &root_id,
+                &row,
+                &source_path,
+                retain_pinned,
+                &created_at,
+            )
+        })
+        .await
+    }
+
+    pub async fn roll_back_blob_upload_for_test(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        row: coven_protocol::blob::RowBlobRef,
+        source_path: std::path::PathBuf,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        let created_at = created_at.to_string();
+        self.test_sql(move |database| {
+            database.rolled_back_transaction(|transaction| {
+                transaction.enqueue_blob_upload(
+                    &root_table,
+                    &root_id,
+                    &row,
+                    &source_path,
+                    false,
+                    &created_at,
+                )
+            })
+        })
+        .await
+    }
+
+    pub async fn published_blob_drop_intent_count_for_test(
+        &self,
+        sequence: i64,
+        namespace: &str,
+        blob_id: &str,
+    ) -> Result<i64, DbError> {
+        let namespace = namespace.to_string();
+        let blob_id = blob_id.to_string();
+        self.test_sql(move |database| {
+            database.published_blob_drop_intent_count(sequence, &namespace, &blob_id)
+        })
+        .await
+    }
+
+    pub async fn scoped_store_state_counts_for_test(&self) -> Result<[i64; 4], DbError> {
+        self.test_sql(|database| database.scoped_store_state_counts())
+            .await
+    }
+
+    pub async fn install_make_local_commit_failure_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database
+                .execute_batch(
+                    "CREATE TRIGGER reject_make_local_gate_update
+                     BEFORE UPDATE OF shared ON notes
+                     WHEN NEW.id = 'n1' AND NEW.shared = 0
+                     BEGIN
+                         SELECT RAISE(ABORT, 'forced make_local commit failure');
+                     END;",
+                )
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn store_device_registration_activation_for_test(
+        &self,
+        device_id: &str,
+    ) -> Result<coven_protocol::store_commit::StoreDeviceRegistrationActivation, DbError> {
+        let device_id = device_id.to_string();
+        self.test_sql(move |database| database.store_device_registration_activation(&device_id))
+            .await
+    }
+
+    pub async fn latest_published_store_snapshot_for_test(
+        &self,
+    ) -> Result<(i64, Vec<u8>), DbError> {
+        self.test_sql(|database| database.latest_published_store_snapshot())
+            .await
+    }
+
+    pub async fn latest_published_store_snapshot_bytes_for_test(&self) -> Result<Vec<u8>, DbError> {
+        self.test_sql(|database| database.latest_published_store_snapshot_bytes())
+            .await
+    }
+
+    pub async fn materialized_commits_without_device_state_count_for_test(
+        &self,
+    ) -> Result<i64, DbError> {
+        self.test_sql(|database| database.materialized_commits_without_device_state_count())
+            .await
+    }
+
+    pub async fn store_device_state_snapshot_refs_for_test(
+        &self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        self.test_sql(|database| database.store_device_state_snapshot_refs())
+            .await
+    }
+
+    pub async fn restored_row_graph_counts_for_test(
+        &self,
+    ) -> Result<(i64, i64, i64, i64), DbError> {
+        self.test_sql(|database| {
+            Ok((
+                database.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                database.query_row(
+                    "SELECT COUNT(*) FROM note_photos WHERE id = 'photo1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                database.query_row(
+                    "SELECT COUNT(*) FROM note_photos AS photo
+                     JOIN notes AS note ON note.id = photo.note_id
+                     WHERE photo.id = 'photo1' AND note.id = 'n1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                database.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .await
+    }
+
     pub async fn test_sql<F, R>(&self, operation: F) -> Result<R, DbError>
     where
         F: for<'connection> FnOnce(DatabaseTestSql<'connection>) -> Result<R, DbError>

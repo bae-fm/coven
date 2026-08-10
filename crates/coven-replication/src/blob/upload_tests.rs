@@ -350,7 +350,7 @@ impl UploadFixture {
         let blob_id = blob_id.to_string();
         self.db
             .database
-            .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
+            .upload_outbox_attempt_for_test(&blob_id)
             .await
             .expect("read journal attempt")
             .expect("journal exists")
@@ -768,7 +768,7 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     fixture
         .db
         .database
-        .test_sql(move |database| database.corrupt_upload_outbox_attempt_time(entry_id))
+        .corrupt_upload_outbox_attempt_time_for_test(entry_id)
         .await
         .expect("corrupt last_attempt_at");
 
@@ -893,18 +893,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     fixture
         .db
         .database
-        .test_sql(move |database| {
-            database.rolled_back_transaction(|transaction| {
-                transaction.enqueue_blob_upload(
-                    "notes",
-                    ROOT_ID,
-                    &rollback_row,
-                    &rollback_path,
-                    false,
-                    T0,
-                )
-            })
-        })
+        .roll_back_blob_upload_for_test("notes", ROOT_ID, rollback_row, rollback_path, T0)
         .await
         .unwrap();
     assert!(coven_database::StoreDatabase::new(&fixture.db.database)
@@ -916,11 +905,14 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     fixture
         .db
         .database
-        .test_sql(move |database| {
-            database.transaction(|transaction| {
-                transaction.enqueue_blob_upload("notes", ROOT_ID, &row, &paths[0], false, T0)
-            })
-        })
+        .enqueue_blob_upload_with_retention_for_test(
+            "notes",
+            ROOT_ID,
+            row,
+            paths[0].clone(),
+            false,
+            T0,
+        )
         .await
         .unwrap();
     assert_eq!(

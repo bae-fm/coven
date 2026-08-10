@@ -1072,9 +1072,7 @@ impl OwnerRecoveryRestoreFixture {
             "restore pins the verified chain founder as the Store owner",
         );
         let activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation = restored
-            .test_sql(move |database| {
-                database.store_device_registration_activation(&store_device_id)
-            })
+            .store_device_registration_activation_for_test(&store_device_id)
             .await
             .expect("load config device activation");
         assert!(matches!(
@@ -1365,7 +1363,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         );
         let imported_snapshot = expected_latest_snapshot.expect("continued snapshot reference");
         let (successor_generation, successor_bytes) = db_b
-            .test_sql(|database| database.latest_published_store_snapshot())
+            .latest_published_store_snapshot_for_test()
             .await
             .expect("read continued snapshot stream");
         let successor: coven_protocol::store_commit::SnapshotMeta =
@@ -1616,13 +1614,13 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .expect("export exact activated continuation");
         let materialized_commits_without_device_state = db_owner
             .database
-            .test_sql(|database| database.materialized_commits_without_device_state_count())
+            .materialized_commits_without_device_state_count_for_test()
             .await
             .expect("verify source device-state snapshots");
         assert_eq!(materialized_commits_without_device_state, 0);
         let published_snapshot_bytes = db_owner
             .database
-            .test_sql(|database| database.latest_published_store_snapshot_bytes())
+            .latest_published_store_snapshot_bytes_for_test()
             .await
             .expect("read published snapshot metadata");
         let published_snapshot: coven_protocol::store_commit::SnapshotMeta =
@@ -1717,30 +1715,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("open restored database");
         let (restored_notes, restored_photos, restored_parent_links, foreign_key_violations) =
             restored
-                .test_sql(|conn| {
-                    Ok((
-                        conn.query_row("SELECT COUNT(*) FROM notes WHERE id = 'n1'", [], |row| {
-                            row.get::<_, i64>(0)
-                        })?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM note_photos WHERE id = 'photo1'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM note_photos AS photo
-                     JOIN notes AS note ON note.id = photo.note_id
-                     WHERE photo.id = 'photo1' AND note.id = 'n1'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM pragma_foreign_key_check",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )?,
-                    ))
-                })
+                .restored_row_graph_counts_for_test()
                 .await
                 .expect("inspect restored snapshot rows");
         assert_eq!(
@@ -1753,7 +1728,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             (1, 1, 1, 0)
         );
         let restored_device_snapshots = restored
-            .test_sql(|database| database.store_device_state_snapshot_refs())
+            .store_device_state_snapshot_refs_for_test()
             .await
             .expect("load restored device-state snapshots")
             .into_iter()

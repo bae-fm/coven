@@ -1712,7 +1712,7 @@ async fn create_circle_returns_after_merge_activation_is_materialized() {
 
         let counts = db
             .database
-            .test_sql(move |database| database.circle_state_counts(circle_id))
+            .circle_state_counts_for_test(circle_id)
             .await
             .expect("read activated circle state");
         assert_eq!(counts, (2, 2, 0));
