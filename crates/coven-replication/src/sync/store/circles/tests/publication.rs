@@ -114,25 +114,24 @@ async fn installed_document_row(
     row_id: &str,
 ) -> Result<(String, i64, String, String), DbError> {
     let row_id = row_id.to_string();
-    db.database
-        .test_sql(move |connection| {
-            connection
-                .query_row(
-                    "SELECT audience, size, hash, _updated_at
+    StoreDatabase::new(&db.database)
+        .read(move |sql| {
+            sql.query_row(
+                "SELECT audience, size, hash, _updated_at
                  FROM documents WHERE id = ?1",
-                    [&row_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )
-                .map_err(DbError::from)
+                [&row_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(DbError::from)
         })
-        .await
+        .await?
 }
 
 /// The Circle packages a commit carries that this device's own access applies.
@@ -963,19 +962,13 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         injected.to_string().contains("injected failure"),
         "{injected}"
     );
-    let partial_state = member_db
-        .database
-        .test_sql({
-            let blob_id = blob_id.to_string();
-            move |database| {
-                database.circle_bootstrap_failure_state(
-                    &blob_id,
-                    circle_id,
-                    &encoded_target_control,
-                    target_blob_object,
-                )
-            }
-        })
+    let partial_state = StoreDatabase::new(&member_db.database)
+        .circle_bootstrap_failure_state_for_test(
+            blob_id.to_string(),
+            circle_id,
+            encoded_target_control,
+            target_blob_object,
+        )
         .await
         .expect("inspect failed bootstrap transaction");
     assert_eq!(partial_state, (false, false, false, false));
@@ -991,16 +984,15 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{:?}",
         member_pull.held_positions
     );
-    let installed_ids = member_db
-        .database
-        .test_sql(|database| {
-            database
-                .query("SELECT id FROM documents ORDER BY id", [], |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(DbError::from)
+    let installed_ids = StoreDatabase::new(&member_db.database)
+        .read(|sql| {
+            sql.query("SELECT id FROM documents ORDER BY id", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(DbError::from)
         })
         .await
+        .expect("access installed recipient rows")
         .expect("list installed recipient rows");
     assert!(
         installed_ids.iter().any(|installed| installed == blob_id),
@@ -1444,12 +1436,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let candidate_base_path = candidate_base_temp.path().join("pre-close.sqlite3");
     let copied_path = candidate_base_path.clone();
     db.database
-        .test_sql(move |connection| {
-            connection
-                .execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
+        .vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
         .await
         .expect("copy pre-close Circle database");
     crate::sync::test_helpers::copy_payload_files(
@@ -1737,21 +1724,20 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response),
         )],
     ));
-    assert!(db
-        .database
-        .test_sql(|connection| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(
+    assert!(StoreDatabase::new(&db.database)
+        .read(|sql| {
+            sql.query_row(
+                "SELECT EXISTS(
                          SELECT 1 FROM documents
                          WHERE id = '00000000-0000-4000-8000-000000000001'
                      )",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)
         })
         .await
+        .expect("access accepted pre-cutoff Circle row after replay")
         .expect("read accepted pre-cutoff Circle row after replay"));
 
     _home.clear_exact_reads();
@@ -1942,18 +1928,8 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         &successor_bootstrap.coverage, cutoff,
         "the successor bootstrap covers exactly the accepted close cutoff"
     );
-    let retained_bootstrap = db
-        .database
-        .test_sql({
-            let control = successor.control.coord.clone();
-            move |database| {
-                let bootstraps = database.circle_bootstrap_replay_inputs()?;
-                Ok(bootstraps.into_iter().find_map(|(_, bootstrap)| {
-                    (bootstrap.circle_id() == circle_id && bootstrap.control() == &control)
-                        .then_some(bootstrap)
-                }))
-            }
-        })
+    let retained_bootstrap = StoreDatabase::new(&db.database)
+        .circle_bootstrap_replay_for_control_for_test(circle_id, successor.control.coord.clone())
         .await
         .expect("read retained successor bootstrap replay input")
         .expect("the device retains its successor bootstrap image");
@@ -4204,10 +4180,8 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
 
     // Forge an exclusions row directly — no verified outcome names this device.
     let circle_id = fixture.circle_id;
-    fixture
-        .silent_db
-        .database
-        .test_sql(move |database| database.forge_circle_close_exclusion(circle_id))
+    StoreDatabase::new(&fixture.silent_db.database)
+        .forge_circle_close_exclusion_for_test(circle_id)
         .await
         .expect("forge the exclusion row");
 

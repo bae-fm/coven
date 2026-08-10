@@ -275,6 +275,43 @@ impl StoreDatabase {
         .await
     }
 
+    pub async fn circle_bootstrap_failure_state_for_test(
+        &self,
+        blob_id: String,
+        circle_id: coven_protocol::circle::CircleId,
+        control: String,
+        remote_object_id: String,
+    ) -> Result<(bool, bool, bool, bool), DbError> {
+        self.call_store(move |session| {
+            session.circle_bootstrap_failure_state_for_test(
+                &blob_id,
+                circle_id,
+                &control,
+                remote_object_id,
+            )
+        })
+        .await
+    }
+
+    pub async fn circle_bootstrap_replay_for_control_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+        control: coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleImage>, DbError> {
+        self.call_store(move |session| {
+            session.circle_bootstrap_replay_for_control_for_test(circle_id, &control)
+        })
+        .await
+    }
+
+    pub async fn forge_circle_close_exclusion_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| session.forge_circle_close_exclusion_for_test(circle_id))
+            .await
+    }
+
     pub async fn transfer_prepared_write_to_for_test(
         &self,
         destination: &Self,

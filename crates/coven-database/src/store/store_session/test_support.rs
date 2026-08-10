@@ -761,6 +761,42 @@ impl StoreSession<'_> {
             .map_err(DbError::from)
     }
 
+    fn circle_bootstrap_failure_state_for_test(
+        &self,
+        blob_id: &str,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &str,
+        remote_object_id: String,
+    ) -> Result<(bool, bool, bool, bool), DbError> {
+        crate::DatabaseTestSql::new(self.conn).circle_bootstrap_failure_state(
+            blob_id,
+            circle_id,
+            control,
+            remote_object_id,
+        )
+    }
+
+    fn circle_bootstrap_replay_for_control_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleImage>, DbError> {
+        Ok(crate::DatabaseTestSql::for_store(self.conn, self.store_dir)
+            .circle_bootstrap_replay_inputs()?
+            .into_iter()
+            .find_map(|(_, bootstrap)| {
+                (bootstrap.circle_id() == circle_id && bootstrap.control() == control)
+                    .then_some(bootstrap)
+            }))
+    }
+
+    fn forge_circle_close_exclusion_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<(), DbError> {
+        crate::DatabaseTestSql::new(self.conn).forge_circle_close_exclusion(circle_id)
+    }
+
     fn tamper_author_exclusion_locator_for_test(
         &self,
         exclusion: StoreDeviceExclusionRef,
