@@ -43,8 +43,10 @@ impl StoreSession<'_> {
     > {
         let stream_id = stream_id.to_string();
         Ok((
-            StoreDatabase::latest_position_for_device_on(self.conn, &stream_id)?,
-            StoreDatabase::materialized_frontier_on(self.conn, None)?,
+            crate::store::materialized_commit_index::latest_position_for_device_on(
+                self.conn, &stream_id,
+            )?,
+            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
         ))
     }
 
@@ -52,7 +54,7 @@ impl StoreSession<'_> {
         &self,
         stream_id: &str,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        StoreDatabase::latest_position_for_device_on(self.conn, stream_id)
+        crate::store::materialized_commit_index::latest_position_for_device_on(self.conn, stream_id)
     }
 
     fn oldest_prepared_store_write(&mut self) -> Result<Option<PreparedStoreWriteCommit>, DbError> {

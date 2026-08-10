@@ -50,7 +50,7 @@ impl StoreSession<'_> {
             .to_vec();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
-            StoreDatabase::materialized_frontier_on(&tx, None)?,
+            crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?,
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let candidate_predecessors = materialization
@@ -292,7 +292,9 @@ impl StoreSession<'_> {
         let sequence = expected_ref.coord.sequence();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         if let Some(materialized) =
-            StoreDatabase::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+            crate::store::materialized_commit_index::materialized_commit_ref_on(
+                &tx, &stream_id, sequence,
+            )?
         {
             if materialized != expected_ref {
                 return Err(DbError::Message(format!(
@@ -367,13 +369,16 @@ impl StoreSession<'_> {
         )?;
         plan.membership.install_on(&tx)?;
 
-        let frontier = crate::StoreDatabase::materialized_frontier_on(&tx, None)?;
+        let frontier =
+            crate::store::materialized_commit_index::materialized_frontier_on(&tx, None)?;
         let mut represented = BTreeSet::new();
         for prepared in &plan.commits {
             let stream_id = prepared.reference.coord.stream_id.to_string();
             let sequence = prepared.reference.coord.sequence();
             if let Some(existing) =
-                crate::StoreDatabase::materialized_commit_ref_on(&tx, &stream_id, sequence)?
+                crate::store::materialized_commit_index::materialized_commit_ref_on(
+                    &tx, &stream_id, sequence,
+                )?
             {
                 if existing != prepared.reference {
                     return Err(DbError::Message(format!(
@@ -420,11 +425,13 @@ impl StoreSession<'_> {
                 continue;
             }
             let stream_id = prepared.reference.coord.stream_id.to_string();
-            if let Some(existing) = crate::StoreDatabase::materialized_commit_ref_on(
-                &tx,
-                &stream_id,
-                prepared.reference.coord.sequence(),
-            )? {
+            if let Some(existing) =
+                crate::store::materialized_commit_index::materialized_commit_ref_on(
+                    &tx,
+                    &stream_id,
+                    prepared.reference.coord.sequence(),
+                )?
+            {
                 if existing != prepared.reference {
                     return Err(DbError::Message(format!(
                         "device join bootstrap conflicts at {stream_id}/{}",

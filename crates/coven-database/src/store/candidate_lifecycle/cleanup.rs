@@ -273,7 +273,7 @@ impl StoreSession<'_> {
         rows.into_iter()
             .map(|(stream_id, sequence, encoded_ref)| {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-                let candidate = crate::StoreDatabase::parse_stored_commit_ref(
+                let candidate = crate::store::materialized_commit_index::parse_stored_commit_ref(
                     &stream_id,
                     sequence,
                     &encoded_ref,

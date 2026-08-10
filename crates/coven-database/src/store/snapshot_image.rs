@@ -297,8 +297,11 @@ impl SnapshotDatabaseImage {
             transaction
                 .pragma_update(None, "defer_foreign_keys", "ON")
                 .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            let coverage = StoreDatabase::materialized_frontier_on(&transaction, None)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            let coverage = crate::store::materialized_commit_index::materialized_frontier_on(
+                &transaction,
+                None,
+            )
+            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             let cleared_materialization_tables = ["materialized_commits"];
             for table in cleared_materialization_tables {
                 transaction
@@ -630,7 +633,7 @@ impl StoreSession<'_> {
             })
             .map_err(snapshot_image_db_error)?;
         let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            StoreDatabase::materialized_frontier_on(self.conn, None)?,
+            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
         )
         .map_err(|error| DbError::context("snapshot coverage", error))?;
         Ok((snapshot, coverage))

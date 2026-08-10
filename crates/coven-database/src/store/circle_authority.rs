@@ -585,7 +585,11 @@ impl StoreDatabase {
                 sequence,
             });
         };
-        let reference = Self::parse_stored_commit_ref(&stream_id, sequence, &stored_ref)?;
+        let reference = crate::store::materialized_commit_index::parse_stored_commit_ref(
+            &stream_id,
+            sequence,
+            &stored_ref,
+        )?;
         if reference.commit_hash.to_string() != commit_hash {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} activation index differs from its retained commit"

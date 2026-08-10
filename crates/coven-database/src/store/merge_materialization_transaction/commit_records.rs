@@ -265,10 +265,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         let existing = load_store_device_exclusion_freezes_on(self.transaction, root)?;
-        let frontier = StoreDatabase::materialized_frontier_on(self.transaction, None)?
-            .into_values()
-            .map(|reference| (reference.coord.stream_id, reference))
-            .collect::<BTreeMap<_, _>>();
+        let frontier = crate::store::materialized_commit_index::materialized_frontier_on(
+            self.transaction,
+            None,
+        )?
+        .into_values()
+        .map(|reference| (reference.coord.stream_id, reference))
+        .collect::<BTreeMap<_, _>>();
         let (_, state) =
             store_device_state_for_history_cut_on(self.transaction, &StoreHistoryCut(frontier))?;
         let mut retained = Vec::new();
@@ -574,7 +577,11 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         let predecessor = if commit.seq() == 1 {
             None
         } else if let Some(reference) =
-            crate::StoreDatabase::materialized_commit_ref_on(conn, &stream_id, commit.seq() - 1)?
+            crate::store::materialized_commit_index::materialized_commit_ref_on(
+                conn,
+                &stream_id,
+                commit.seq() - 1,
+            )?
         {
             Some(reference)
         } else {

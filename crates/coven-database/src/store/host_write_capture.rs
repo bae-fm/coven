@@ -723,10 +723,11 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 let local_stream_id = verified_authority
                     .local_merge_stream_id_on(crate::store::StoreRecords::new(&tx, store_dir))?;
                 let base = StoreWriteBase {
-                    dependencies: StoreDatabase::materialized_frontier_on(
-                        &tx,
-                        local_stream_id.as_deref(),
-                    )?,
+                    dependencies:
+                        crate::store::materialized_commit_index::materialized_frontier_on(
+                            &tx,
+                            local_stream_id.as_deref(),
+                        )?,
                 };
                 let status = crate::store::StoreRecordTransaction::new(&tx, store_dir)
                     .insert_store_write(

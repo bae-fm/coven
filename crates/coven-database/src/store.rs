@@ -31,6 +31,8 @@ mod materialization;
 pub mod materialization_models;
 mod materialized_commit_index;
 use activated_registration_records::record_activated_store_device_registrations_on;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use materialized_commit_index::materialized_frontier_on;
 mod membership_mutations;
 mod membership_rotation;
 mod merge_materialization_transaction;

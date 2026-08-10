@@ -1886,7 +1886,7 @@ impl DatabaseTestSql<'_> {
         std::collections::BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
         DbError,
     > {
-        crate::StoreDatabase::materialized_frontier_on(self.connection, None)
+        crate::store::materialized_frontier_on(self.connection, None)
     }
 
     pub fn load_retained_merge_replay_inputs(

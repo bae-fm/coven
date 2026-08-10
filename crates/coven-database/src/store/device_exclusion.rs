@@ -268,7 +268,7 @@ impl StoreSession<'_> {
             .candidate()
             .expect("candidate-prepared exclusion has a candidate");
         let stream = candidate.reference.coord.stream_id.to_string();
-        if crate::StoreDatabase::materialized_commit_ref_on(
+        if crate::store::materialized_commit_index::materialized_commit_ref_on(
             &tx,
             &stream,
             candidate.reference.coord.sequence(),

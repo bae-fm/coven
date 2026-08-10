@@ -223,7 +223,10 @@ impl StoreSession<'_> {
         }
         if let Some(position) = &continuation.latest_position {
             let stream_id = position.coord.stream_id.to_string();
-            let restored_position = StoreDatabase::latest_position_for_device_on(&tx, &stream_id)?;
+            let restored_position =
+                crate::store::materialized_commit_index::latest_position_for_device_on(
+                    &tx, &stream_id,
+                )?;
             if restored_position.as_ref() != Some(position) {
                 return Err(DbError::Message(
                     "continued device position is absent from restored history".into(),

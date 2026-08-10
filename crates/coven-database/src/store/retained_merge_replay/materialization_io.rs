@@ -380,7 +380,11 @@ impl StoreDatabase {
         let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
         let (stored_ref, input_hash) =
             records.retained_materialization_identity(&stream_id, sequence_sql)?;
-        let stored_ref = Self::parse_stored_commit_ref(&stream_id, *sequence, &stored_ref)?;
+        let stored_ref = crate::store::materialized_commit_index::parse_stored_commit_ref(
+            &stream_id,
+            *sequence,
+            &stored_ref,
+        )?;
         if &stored_ref != reference {
             return Err(DbError::Message(
                 "retained Merge materialization coordinate contains another commit".to_string(),
@@ -683,7 +687,11 @@ impl StoreDatabase {
         rows.into_iter()
             .map(|(stream_id, sequence, encoded_ref, input_hash)| {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-                let commit_ref = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                let commit_ref = crate::store::materialized_commit_index::parse_stored_commit_ref(
+                    &stream_id,
+                    sequence,
+                    &encoded_ref,
+                )?;
                 Self::load_retained_merge_materialization_on(
                     records,
                     root,

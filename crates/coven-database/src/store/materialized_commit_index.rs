@@ -16,7 +16,7 @@ use super::*;
 
 impl StoreSession<'_> {
     fn materialized_frontier(&mut self) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        StoreDatabase::materialized_frontier_on(self.conn, None)
+        materialized_frontier_on(self.conn, None)
     }
 
     fn retained_merge_replay_inputs(
@@ -50,7 +50,7 @@ impl StoreSession<'_> {
         rows.map(|row| {
             let (stream_id, sequence, encoded_ref) = row.map_err(DbError::from)?;
             let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-            StoreDatabase::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)
+            parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)
         })
         .collect()
     }
@@ -133,7 +133,7 @@ impl StoreSession<'_> {
         stream_id: String,
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        StoreDatabase::materialized_commit_ref_on(self.conn, &stream_id, sequence)
+        materialized_commit_ref_on(self.conn, &stream_id, sequence)
     }
 
     fn snapshot_coverage_frontier(&mut self) -> Result<CommitFrontier, DbError> {
@@ -154,7 +154,7 @@ impl StoreSession<'_> {
         for row in rows {
             let (device_id, seq, reference) = row.map_err(DbError::from)?;
             let seq = Database::sequence_from_sqlite(&device_id, seq)?;
-            let reference = StoreDatabase::parse_stored_commit_ref(&device_id, seq, &reference)?;
+            let reference = parse_stored_commit_ref(&device_id, seq, &reference)?;
             frontier.insert(device_id.clone(), reference);
         }
         CommitFrontier::from_refs(frontier)
@@ -424,209 +424,6 @@ impl StoreDatabase {
             .await
     }
 
-    pub fn materialized_frontier_on(
-        conn: &Connection,
-        exclude_device: Option<&str>,
-    ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        let mut frontier = BTreeMap::new();
-        let rows = query_mapped_rows(
-            conn,
-            "SELECT m.device_id, m.seq, m.commit_ref,
-                        m.retained_commit_ref, m.retained_input_hash \
-                 FROM materialized_commits m \
-                 JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
-                       GROUP BY device_id) latest \
-                   ON latest.device_id = m.device_id AND latest.seq = m.seq",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )?;
-        for row in rows {
-            let (device_id, seq, reference, retained_commit_ref, retained_input_hash) = row;
-            if exclude_device == Some(device_id.as_str()) {
-                continue;
-            }
-            let seq = Database::sequence_from_sqlite(&device_id, seq)?;
-            frontier.insert(
-                device_id.clone(),
-                Self::parse_materialized_commit_row_on(
-                    &device_id,
-                    seq,
-                    &reference,
-                    retained_commit_ref.as_deref(),
-                    retained_input_hash.as_deref(),
-                )?,
-            );
-        }
-
-        let rows = query_mapped_rows(
-            conn,
-            "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )?;
-        for (device_id, seq, reference) in rows {
-            if exclude_device == Some(device_id.as_str()) {
-                continue;
-            }
-            let seq = Database::sequence_from_sqlite(&device_id, seq)?;
-            let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
-            if frontier
-                .get(&device_id)
-                .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
-            {
-                frontier.insert(device_id, reference);
-            }
-        }
-        Ok(frontier)
-    }
-
-    pub fn parse_stored_commit_ref(
-        stream_id: &str,
-        sequence: u64,
-        encoded: &str,
-    ) -> Result<StoreBatchCommitRef, DbError> {
-        let reference: StoreBatchCommitRef = serde_json::from_str(encoded)
-            .map_err(|error| DbError::context("stored exact Store commit ref", error))?;
-        let coordinate_matches = reference.coord.stream_id.to_string() == stream_id
-            && reference.coord.sequence == sequence;
-        if !coordinate_matches {
-            return Err(DbError::Message(format!(
-                "stored exact Store commit ref differs from {stream_id}/{sequence}"
-            )));
-        }
-        Ok(reference)
-    }
-
-    pub fn parse_materialized_commit_row_on(
-        stream_id: &str,
-        sequence: u64,
-        encoded: &str,
-        retained_commit_ref: Option<&str>,
-        retained_input_hash: Option<&str>,
-    ) -> Result<StoreBatchCommitRef, DbError> {
-        let reference = Self::parse_stored_commit_ref(stream_id, sequence, encoded)?;
-        if retained_commit_ref != Some(encoded) {
-            return Err(DbError::Message(format!(
-                "materialized coordinate {stream_id}/{sequence} does not bind its exact retained commit"
-            )));
-        }
-        let input_hash = retained_input_hash.ok_or_else(|| {
-            DbError::Message(format!(
-                "materialized coordinate {stream_id}/{sequence} has no retained input hash"
-            ))
-        })?;
-        input_hash.parse::<coven_protocol::store_commit::ObjectHash>().map_err(
-            |error| {
-                DbError::context(format!("materialized coordinate {stream_id}/{sequence} retained input hash is invalid"), error)
-            },
-        )?;
-        Ok(reference)
-    }
-
-    pub fn materialized_commit_ref_on(
-        conn: &Connection,
-        stream_id: &str,
-        sequence: u64,
-    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        let seq = Database::sequence_to_sqlite(stream_id, sequence)?;
-        conn.query_row(
-            "SELECT commit_ref, retained_commit_ref, retained_input_hash
-             FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
-            (stream_id, seq),
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .map(|(encoded, retained_commit_ref, retained_input_hash)| {
-            Self::parse_materialized_commit_row_on(
-                stream_id,
-                sequence,
-                &encoded,
-                retained_commit_ref.as_deref(),
-                retained_input_hash.as_deref(),
-            )
-        })
-        .transpose()
-    }
-
-    pub fn latest_position_for_device_on(
-        conn: &Connection,
-        device_id: &str,
-    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        let materialized = conn
-            .query_row(
-                "SELECT seq, commit_ref, retained_commit_ref, retained_input_hash
-                 FROM materialized_commits
-                 WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
-                [device_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let coverage = conn
-            .query_row(
-                "SELECT seq, commit_ref FROM snapshot_coverage WHERE device_id = ?1",
-                [device_id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        let mut references = Vec::new();
-        if let Some((seq, reference, retained_commit_ref, retained_input_hash)) = materialized {
-            let seq = Database::sequence_from_sqlite(device_id, seq)?;
-            references.push(Self::parse_materialized_commit_row_on(
-                device_id,
-                seq,
-                &reference,
-                retained_commit_ref.as_deref(),
-                retained_input_hash.as_deref(),
-            )?);
-        }
-        if let Some((seq, reference)) = coverage {
-            let seq = Database::sequence_from_sqlite(device_id, seq)?;
-            references.push(Self::parse_stored_commit_ref(device_id, seq, &reference)?);
-        }
-        if references.len() == 2
-            && references[0].coord.sequence() == references[1].coord.sequence()
-            && references[0] != references[1]
-        {
-            return Err(DbError::Message(format!(
-                "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
-                references[0].coord.sequence()
-            )));
-        }
-        Ok(references
-            .into_iter()
-            .max_by_key(|reference| reference.coord.sequence()))
-    }
-
     pub async fn store_device_state_for_order(
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
@@ -738,4 +535,212 @@ impl StoreDatabase {
             .map(|registration| registration.value().clone())
             .collect())
     }
+}
+
+pub(crate) fn materialized_frontier_on(
+    conn: &Connection,
+    exclude_device: Option<&str>,
+) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
+    let mut frontier = BTreeMap::new();
+    let rows = query_mapped_rows(
+        conn,
+        "SELECT m.device_id, m.seq, m.commit_ref,
+                    m.retained_commit_ref, m.retained_input_hash \
+             FROM materialized_commits m \
+             JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
+                   GROUP BY device_id) latest \
+               ON latest.device_id = m.device_id AND latest.seq = m.seq",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        },
+    )?;
+    for row in rows {
+        let (device_id, seq, reference, retained_commit_ref, retained_input_hash) = row;
+        if exclude_device == Some(device_id.as_str()) {
+            continue;
+        }
+        let seq = Database::sequence_from_sqlite(&device_id, seq)?;
+        frontier.insert(
+            device_id.clone(),
+            parse_materialized_commit_row_on(
+                &device_id,
+                seq,
+                &reference,
+                retained_commit_ref.as_deref(),
+                retained_input_hash.as_deref(),
+            )?,
+        );
+    }
+
+    let rows = query_mapped_rows(
+        conn,
+        "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    for (device_id, seq, reference) in rows {
+        if exclude_device == Some(device_id.as_str()) {
+            continue;
+        }
+        let seq = Database::sequence_from_sqlite(&device_id, seq)?;
+        let reference = parse_stored_commit_ref(&device_id, seq, &reference)?;
+        if frontier
+            .get(&device_id)
+            .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
+        {
+            frontier.insert(device_id, reference);
+        }
+    }
+    Ok(frontier)
+}
+
+pub(crate) fn parse_stored_commit_ref(
+    stream_id: &str,
+    sequence: u64,
+    encoded: &str,
+) -> Result<StoreBatchCommitRef, DbError> {
+    let reference: StoreBatchCommitRef = serde_json::from_str(encoded)
+        .map_err(|error| DbError::context("stored exact Store commit ref", error))?;
+    let coordinate_matches =
+        reference.coord.stream_id.to_string() == stream_id && reference.coord.sequence == sequence;
+    if !coordinate_matches {
+        return Err(DbError::Message(format!(
+            "stored exact Store commit ref differs from {stream_id}/{sequence}"
+        )));
+    }
+    Ok(reference)
+}
+
+fn parse_materialized_commit_row_on(
+    stream_id: &str,
+    sequence: u64,
+    encoded: &str,
+    retained_commit_ref: Option<&str>,
+    retained_input_hash: Option<&str>,
+) -> Result<StoreBatchCommitRef, DbError> {
+    let reference = parse_stored_commit_ref(stream_id, sequence, encoded)?;
+    if retained_commit_ref != Some(encoded) {
+        return Err(DbError::Message(format!(
+            "materialized coordinate {stream_id}/{sequence} does not bind its exact retained commit"
+        )));
+    }
+    let input_hash = retained_input_hash.ok_or_else(|| {
+        DbError::Message(format!(
+            "materialized coordinate {stream_id}/{sequence} has no retained input hash"
+        ))
+    })?;
+    input_hash
+        .parse::<coven_protocol::store_commit::ObjectHash>()
+        .map_err(|error| {
+            DbError::context(
+                format!(
+                    "materialized coordinate {stream_id}/{sequence} retained input hash is invalid"
+                ),
+                error,
+            )
+        })?;
+    Ok(reference)
+}
+
+pub(crate) fn materialized_commit_ref_on(
+    conn: &Connection,
+    stream_id: &str,
+    sequence: u64,
+) -> Result<Option<StoreBatchCommitRef>, DbError> {
+    let seq = Database::sequence_to_sqlite(stream_id, sequence)?;
+    conn.query_row(
+        "SELECT commit_ref, retained_commit_ref, retained_input_hash
+         FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
+        (stream_id, seq),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(encoded, retained_commit_ref, retained_input_hash)| {
+        parse_materialized_commit_row_on(
+            stream_id,
+            sequence,
+            &encoded,
+            retained_commit_ref.as_deref(),
+            retained_input_hash.as_deref(),
+        )
+    })
+    .transpose()
+}
+
+pub(crate) fn latest_position_for_device_on(
+    conn: &Connection,
+    device_id: &str,
+) -> Result<Option<StoreBatchCommitRef>, DbError> {
+    let materialized = conn
+        .query_row(
+            "SELECT seq, commit_ref, retained_commit_ref, retained_input_hash
+             FROM materialized_commits
+             WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [device_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let coverage = conn
+        .query_row(
+            "SELECT seq, commit_ref FROM snapshot_coverage WHERE device_id = ?1",
+            [device_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let mut references = Vec::new();
+    if let Some((seq, reference, retained_commit_ref, retained_input_hash)) = materialized {
+        let seq = Database::sequence_from_sqlite(device_id, seq)?;
+        references.push(parse_materialized_commit_row_on(
+            device_id,
+            seq,
+            &reference,
+            retained_commit_ref.as_deref(),
+            retained_input_hash.as_deref(),
+        )?);
+    }
+    if let Some((seq, reference)) = coverage {
+        let seq = Database::sequence_from_sqlite(device_id, seq)?;
+        references.push(parse_stored_commit_ref(device_id, seq, &reference)?);
+    }
+    if references.len() == 2
+        && references[0].coord.sequence() == references[1].coord.sequence()
+        && references[0] != references[1]
+    {
+        return Err(DbError::Message(format!(
+            "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
+            references[0].coord.sequence()
+        )));
+    }
+    Ok(references
+        .into_iter()
+        .max_by_key(|reference| reference.coord.sequence()))
 }

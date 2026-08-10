@@ -302,8 +302,11 @@ impl RetainedReplayCache {
             .into_iter()
             .map(|(stream_id, sequence, encoded_ref, encoded_input_hash)| {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-                let commit_ref =
-                    StoreDatabase::parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)?;
+                let commit_ref = crate::store::materialized_commit_index::parse_stored_commit_ref(
+                    &stream_id,
+                    sequence,
+                    &encoded_ref,
+                )?;
                 Ok((stream_id, sequence, commit_ref, encoded_input_hash))
             })
             .collect::<Result<Vec<_>, DbError>>()?;

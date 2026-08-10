@@ -166,7 +166,10 @@ impl ReplayProjection {
         &self,
     ) -> Result<coven_protocol::store_commit::CommitFrontier, DbError> {
         coven_protocol::store_commit::CommitFrontier::from_refs(
-            StoreDatabase::materialized_frontier_on(&self.connection, None)?,
+            crate::store::materialized_commit_index::materialized_frontier_on(
+                &self.connection,
+                None,
+            )?,
         )
         .map_err(|error| DbError::Message(error.to_string()))
     }

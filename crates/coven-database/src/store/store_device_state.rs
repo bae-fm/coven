@@ -7,8 +7,6 @@ use coven_protocol::store_commit::{
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 
-use super::StoreDatabase;
-
 pub(crate) fn load_store_device_genesis_state_on(
     conn: &Connection,
 ) -> Result<ResolvedStoreDeviceState, DbError> {
@@ -224,8 +222,10 @@ pub(crate) fn apply_store_device_exclusion_freezes_on(
                     &reference.target,
                     coven_protocol::store_commit::StreamAnchorDomain::StoreAnnouncements,
                 );
-            let target =
-                StoreDatabase::latest_position_for_device_on(conn, &target_stream.to_string())?;
+            let target = crate::store::materialized_commit_index::latest_position_for_device_on(
+                conn,
+                &target_stream.to_string(),
+            )?;
             desired.push(StoreDeviceProposalAck {
                 proposal: reference.clone(),
                 target_cut: StoreHistoryCut(match target {

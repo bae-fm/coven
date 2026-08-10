@@ -182,10 +182,11 @@ impl<'store> StoreRecords<'store> {
     pub(super) fn current_store_device_state(
         self,
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-        let frontier = crate::StoreDatabase::materialized_frontier_on(self.conn, None)?
-            .into_values()
-            .map(|reference| (reference.coord.stream_id, reference))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let frontier =
+            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?
+                .into_values()
+                .map(|reference| (reference.coord.stream_id, reference))
+                .collect::<std::collections::BTreeMap<_, _>>();
         let (_, state) = super::store_device_state::store_device_state_for_history_cut_on(
             self.conn,
             &coven_protocol::store_commit::StoreHistoryCut(frontier),
@@ -216,7 +217,9 @@ impl<'store> StoreRecords<'store> {
         stream_id: &str,
         sequence: u64,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        crate::StoreDatabase::materialized_commit_ref_on(self.conn, stream_id, sequence)
+        crate::store::materialized_commit_index::materialized_commit_ref_on(
+            self.conn, stream_id, sequence,
+        )
     }
 
     pub(super) fn declared_store_device_state(

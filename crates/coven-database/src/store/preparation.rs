@@ -139,7 +139,10 @@ impl StoreSession<'_> {
             )));
         }
         let durable_predecessor =
-            StoreDatabase::latest_position_for_device_on(&tx, &stream_id.to_string())?;
+            crate::store::materialized_commit_index::latest_position_for_device_on(
+                &tx,
+                &stream_id.to_string(),
+            )?;
         let expected_seq = durable_predecessor
             .as_ref()
             .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
@@ -490,7 +493,10 @@ impl StoreSession<'_> {
             .verified_store_authority
             .local_merge_stream_id_on(crate::store::StoreRecords::new(&tx, self.store_dir))?;
         let base = StoreWriteBase {
-            dependencies: StoreDatabase::materialized_frontier_on(&tx, local_stream_id.as_deref())?,
+            dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
+                &tx,
+                local_stream_id.as_deref(),
+            )?,
         };
         let partitions = vec![crate::AudiencePartition {
             audience: coven_protocol::circle::Audience::Store,
