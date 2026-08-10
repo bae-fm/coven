@@ -116,7 +116,7 @@ impl StoreSession<'_> {
             &owner,
         )?;
         membership.install_on(&tx)?;
-        ensure_founder_replay_baseline_on(
+        let baseline = ensure_founder_replay_baseline_on(
             crate::store::StoreRecords::new(&tx, self.store_dir),
             self.schema_version,
             self.sync_routing_hash,
@@ -130,6 +130,8 @@ impl StoreSession<'_> {
             .commit_installed_root(root, root_value);
         self.verified_store_authority
             .commit_installed_registration(founder_reference, founder);
+        self.verified_store_authority
+            .commit_installed_retained_replay_baseline(baseline);
         Ok(())
     }
 
@@ -546,7 +548,7 @@ impl StoreSession<'_> {
             head_refs: vec![graph.membership.head_ref.clone()],
         }
         .install_on(&tx)?;
-        install_generation_zero_replay_baseline_on(
+        let baseline = install_generation_zero_replay_baseline_on(
             crate::store::StoreRecords::new(&tx, store_dir),
             schema_version,
             routing_hash,
@@ -558,6 +560,7 @@ impl StoreSession<'_> {
         tx.commit().map_err(DbError::from)?;
         verified_authority.commit_installed_root(root, root_value);
         verified_authority.commit_installed_registration(registration, graph.registration.value);
+        verified_authority.commit_installed_retained_replay_baseline(baseline);
         Ok(())
     }
 }

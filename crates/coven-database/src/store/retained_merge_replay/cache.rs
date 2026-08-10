@@ -71,6 +71,16 @@ enum RetainedCommitAuthorities<'a> {
 }
 
 impl RetainedReplayCache {
+    pub(super) fn commit_installed_baseline(&mut self, baseline: RetainedReplayBaseline) {
+        match &self.baseline {
+            Some(existing) => assert_eq!(
+                existing, &baseline,
+                "committed retained replay baseline conflicts with connection authority"
+            ),
+            None => self.baseline = Some(baseline),
+        }
+    }
+
     pub(super) fn baseline_on(
         &mut self,
         records: StoreRecords<'_>,

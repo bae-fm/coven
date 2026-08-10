@@ -185,6 +185,22 @@ impl VerifiedStoreAuthority {
         }
     }
 
+    pub(super) fn commit_installed_retained_replay_baseline(
+        &mut self,
+        baseline: RetainedReplayBaseline,
+    ) {
+        let baseline_root = match &baseline.authority {
+            RetainedReplayAuthority::Genesis(authority) => &authority.store_root,
+            RetainedReplayAuthority::StableSnapshot(authority) => &authority.store_root,
+        };
+        assert_eq!(
+            self.root_authority.as_ref().map(|(reference, _)| reference),
+            Some(baseline_root),
+            "committed retained replay baseline belongs to another Store root"
+        );
+        self.retained_replay.commit_installed_baseline(baseline);
+    }
+
     pub(super) fn prepared_merge_candidate_on(
         &mut self,
         records: crate::store::StoreRecords<'_>,

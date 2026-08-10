@@ -413,7 +413,7 @@ pub(crate) fn install_generation_zero_replay_baseline_on(
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
-) -> Result<(), DbError> {
+) -> Result<RetainedReplayBaseline, DbError> {
     if load_generation_zero_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before founder activation".to_string(),
@@ -429,7 +429,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplaySnapshotAuthority,
-) -> Result<(), DbError> {
+) -> Result<RetainedReplayBaseline, DbError> {
     if load_generation_zero_replay_baseline_on(records)?.is_some() {
         return Err(DbError::Message(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
@@ -443,7 +443,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
 pub(crate) fn insert_retained_replay_baseline_on(
     records: crate::store::StoreRecords<'_>,
     baseline: &RetainedReplayBaseline,
-) -> Result<(), DbError> {
+) -> Result<RetainedReplayBaseline, DbError> {
     records.validate_replay_authority(baseline)?;
     let authority_hash = records
         .install_payload(&baseline.canonical_authority_bytes()?)
@@ -457,7 +457,7 @@ pub(crate) fn insert_retained_replay_baseline_on(
             "installed retained replay baseline differs from its verified image".to_string(),
         ));
     }
-    Ok(())
+    Ok(installed)
 }
 
 pub(crate) fn ensure_founder_replay_baseline_on(
@@ -465,7 +465,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
-) -> Result<(), DbError> {
+) -> Result<RetainedReplayBaseline, DbError> {
     if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
@@ -482,7 +482,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
                 "retained replay baseline differs from the installed founder authority".to_string(),
             ));
         }
-        return Ok(());
+        return Ok(existing);
     }
     let accepted_history = records.accepted_history_count()?;
     if accepted_history != 0 {

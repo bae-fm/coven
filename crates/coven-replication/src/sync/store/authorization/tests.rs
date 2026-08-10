@@ -98,6 +98,27 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
 }
 
 #[tokio::test]
+async fn committed_owner_anchor_publishes_its_verified_replay_baseline() {
+    let db = open_test_db();
+    let signer = UserKeypair::generate();
+    let fixture = TestStore::create(
+        &db,
+        "retained-replay-authority",
+        signer.clone(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+
+    db.database.remove_retained_replay_baseline_for_test().await;
+
+    coven_database::StoreDatabase::new(&db.database)
+        .validated_store_owner(&fixture.root)
+        .await
+        .expect("use replay baseline verified during owner installation");
+}
+
+#[tokio::test]
 async fn failed_owner_recovery_materialization_does_not_publish_registration_authority() {
     let source = open_test_db();
     let owner = UserKeypair::generate();

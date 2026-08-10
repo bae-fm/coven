@@ -8,6 +8,17 @@ impl Database {
             .expect("remove exact Store root authority");
     }
 
+    pub async fn remove_retained_replay_baseline_for_test(&self) {
+        self.test_sql(|database| {
+            database
+                .execute("DELETE FROM retained_replay_baselines", [])
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("remove retained replay baseline");
+    }
+
     pub async fn tamper_retained_recovery_registration_for_test(
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
