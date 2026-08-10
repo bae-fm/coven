@@ -20,6 +20,7 @@ const INTERNAL_DEPENDENCY_TYPES: &[&str] = &[
 ];
 
 const RAW_DATABASE_TYPES: &[&str] = &["Connection", "Transaction"];
+const CLOSED_SESSION_TYPES: &[&str] = &["DatabaseSession", "StoreSession"];
 const ALWAYS_FORBIDDEN_RETURNS: &[&str] = &[
     "Connection",
     "DatabaseCore",
@@ -29,6 +30,12 @@ const ALWAYS_FORBIDDEN_RETURNS: &[&str] = &[
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum OwnerDependencyLeak {
+    CrateRootSessionField {
+        path: String,
+        line: usize,
+        session: String,
+        dependency: String,
+    },
     Return {
         path: String,
         line: usize,
@@ -111,6 +118,7 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         .map(|name| (*name).to_string())
         .collect::<BTreeSet<_>>();
     let mut leaks = BTreeSet::new();
+    collect_crate_root_session_fields(files, &internal_dependencies, &mut leaks);
     for method in methods {
         if !method.returns_owner {
             let retained = retained_dependencies
@@ -147,6 +155,40 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         }
     }
     leaks.into_iter().collect()
+}
+
+fn collect_crate_root_session_fields(
+    files: &[RustFile],
+    internal_dependencies: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    for file in files {
+        if is_test_source(&file.relative_path)
+            || !(file.relative_path.ends_with("/src/lib.rs")
+                || file.relative_path.ends_with("/src/main.rs"))
+        {
+            continue;
+        }
+        for item in &file.syntax.items {
+            let syn::Item::Struct(item) = item else {
+                continue;
+            };
+            let session = item.ident.to_string();
+            if is_test_only(&item.attrs) || !CLOSED_SESSION_TYPES.contains(&session.as_str()) {
+                continue;
+            }
+            for field in &item.fields {
+                for dependency in type_names(&field.ty).intersection(internal_dependencies) {
+                    leaks.insert(OwnerDependencyLeak::CrateRootSessionField {
+                        path: file.relative_path.clone(),
+                        line: item.ident.span().start().line,
+                        session: session.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+        }
+    }
 }
 
 fn collect_receiver_methods(files: &[RustFile]) -> Vec<ReceiverMethod> {
@@ -269,10 +311,30 @@ mod tests {
     use super::*;
 
     fn production_file(source: &str) -> RustFile {
+        production_file_at("crates/coven-database/src/fixture.rs", source)
+    }
+
+    fn production_file_at(relative_path: &str, source: &str) -> RustFile {
         RustFile {
-            relative_path: "crates/coven-database/src/fixture.rs".to_string(),
+            relative_path: relative_path.to_string(),
             syntax: syn::parse_file(source).expect("parse fixture"),
         }
+    }
+
+    #[test]
+    fn crate_root_session_cannot_retain_a_raw_database_dependency() {
+        let file = production_file_at(
+            "crates/coven-database/src/lib.rs",
+            r#"
+            struct Connection;
+            struct DatabaseSession<'a> { connection: &'a Connection }
+            impl DatabaseSession<'_> {
+                fn execute_domain_operation(&self) {}
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 1);
     }
 
     #[test]

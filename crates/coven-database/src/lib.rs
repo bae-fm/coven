@@ -110,6 +110,7 @@ pub use coven_schema::{
 mod circle_snapshot_records;
 mod database_open;
 mod database_runtime;
+mod database_session;
 mod external_blob_records;
 mod gate;
 mod local_state;
@@ -797,17 +798,6 @@ struct DatabaseCore {
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: coven_protocol::blob::TransferLimits,
-}
-
-/// One operation scoped to the connection thread's database-wide state.
-/// The connection remains private to the database implementation while leaf
-/// SQL functions borrow it during the operation.
-pub(crate) struct DatabaseSession<'session> {
-    conn: &'session Connection,
-    gates: &'session Gates,
-    synced_tables: &'session [SyncedTable],
-    #[cfg(any(test, feature = "test-utils"))]
-    store_dir: &'session coven_foundation::store_dir::StoreDir,
 }
 
 /// One Circle image selected against the restoring identity's re-resolved

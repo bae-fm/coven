@@ -1,4 +1,5 @@
 use super::*;
+use crate::database_session::DatabaseSession;
 use tracing::error;
 
 /// A cloneable handle to the thread that owns one SQLite connection. Every
@@ -35,13 +36,13 @@ impl DatabaseConnection {
         R: Send + 'static,
     {
         self.on_connection_thread(move |core| {
-            let mut session = DatabaseSession {
-                conn: &core.conn,
-                gates: &core.gates,
-                synced_tables: &core.synced_tables,
+            let mut session = DatabaseSession::new(
+                &core.conn,
+                &core.gates,
+                &core.synced_tables,
                 #[cfg(any(test, feature = "test-utils"))]
-                store_dir: &core.store_dir,
-            };
+                &core.store_dir,
+            );
             operation(&mut session)
         })
         .await
@@ -211,13 +212,7 @@ mod tests {
         let slow = tokio::spawn(async move {
             slow_db
                 .connection
-                .call_database(|session| {
-                    std::thread::sleep(Duration::from_millis(500));
-                    session
-                        .conn
-                        .query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
-                        .map_err(DbError::from)
-                })
+                .call_database(|session| session.select_one_after_delay(Duration::from_millis(500)))
                 .await
         });
 

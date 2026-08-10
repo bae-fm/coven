@@ -37,21 +37,6 @@ pub fn delete_protocol_state_on(conn: &Connection, key: &str) -> Result<usize, D
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl DatabaseSession<'_> {
-    fn protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
-        get_protocol_state_on(self.conn, key)
-    }
-
-    fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
-        set_protocol_state_on(self.conn, key, value)
-    }
-
-    fn delete_protocol_state(&self, key: &str) -> Result<(), DbError> {
-        delete_protocol_state_on(self.conn, key).map(|_| ())
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
 impl Database {
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();

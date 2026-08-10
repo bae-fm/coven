@@ -115,12 +115,12 @@ fn record_durable_intent(
     Ok(())
 }
 
-impl crate::DatabaseSession<'_> {
-    fn local_blob_cleanup_intents(&self) -> Result<Vec<(LocalBlobCleanupIntent, bool)>, DbError> {
-        let mut statement = self
-            .conn
-            .prepare(
-                "SELECT intent.namespace, intent.blob_id, intent.copy_identity, EXISTS (
+pub(crate) fn local_blob_cleanup_intents_on(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<(LocalBlobCleanupIntent, bool)>, DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT intent.namespace, intent.blob_id, intent.copy_identity, EXISTS (
                      SELECT 1 FROM store_write_blob_leases lease
                      WHERE lease.namespace = intent.namespace
                        AND lease.blob_id = intent.blob_id
@@ -130,45 +130,43 @@ impl crate::DatabaseSession<'_> {
                  ORDER BY namespace, blob_id,
                           CASE WHEN copy_identity = 'local' THEN 1 ELSE 0 END,
                           copy_identity",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    LocalBlobCleanupIntent::from_persisted(
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+        )
+        .map_err(DbError::from)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                LocalBlobCleanupIntent::from_persisted(
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
                     )
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-                        )
-                    })?,
-                    row.get::<_, bool>(3)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
-    }
+                })?,
+                row.get::<_, bool>(3)?,
+            ))
+        })
+        .map_err(DbError::from)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+}
 
-    fn complete_local_blob_cleanup(
-        &self,
-        namespace: &str,
-        blob_id: &str,
-        persisted_identity: &str,
-    ) -> Result<(), DbError> {
-        self.conn
-            .execute(
-                "DELETE FROM local_cleanup_intents
+pub(crate) fn complete_local_blob_cleanup_on(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    blob_id: &str,
+    persisted_identity: &str,
+) -> Result<(), DbError> {
+    conn.execute(
+        "DELETE FROM local_cleanup_intents
                  WHERE namespace = ?1 AND blob_id = ?2 AND copy_identity = ?3",
-                (namespace, blob_id, persisted_identity),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-    }
+        (namespace, blob_id, persisted_identity),
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
 }
 
 pub struct LocalBlobCleanup<'operation> {

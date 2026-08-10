@@ -18,6 +18,14 @@ mod circle_snapshot_publication;
 mod device_continuation;
 mod device_exclusion;
 mod device_join;
+pub(crate) use device_join::{
+    advance_device_join_on, begin_device_join_on, begin_device_join_replacement_terminal_on,
+    complete_device_join_from_pending_on, device_join_records_on,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use device_join::{
+    forget_device_join_on, forget_provider_administrator_device_joins_on,
+};
 mod device_join_challenges;
 pub mod device_join_journal;
 mod device_registration_journal;
@@ -26,6 +34,9 @@ mod host_sql_transaction;
 mod host_write_capture;
 mod host_write_operation;
 mod local_blob_cleanup;
+pub(crate) use local_blob_cleanup::{
+    complete_local_blob_cleanup_on, local_blob_cleanup_intents_on,
+};
 pub mod local_blob_cleanup_intents;
 mod materialization;
 pub mod materialization_models;

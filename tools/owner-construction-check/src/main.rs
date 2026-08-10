@@ -815,6 +815,14 @@ fn main() {
             }
             for violation in &result.owner_dependency_leaks {
                 match violation {
+                    OwnerDependencyLeak::CrateRootSessionField {
+                        path,
+                        line,
+                        session,
+                        dependency,
+                    } => eprintln!(
+                        "{path}:{line}: crate-root {session} exposes retained dependency {dependency} to every descendant module"
+                    ),
                     OwnerDependencyLeak::Return {
                         path,
                         line,

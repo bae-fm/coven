@@ -1,15 +1,6 @@
 use crate::{Database, DatabaseTestSql, DbError};
 use rusqlite::OptionalExtension;
 
-impl crate::DatabaseSession<'_> {
-    fn run_test_sql<F, R>(&self, operation: F) -> Result<R, DbError>
-    where
-        F: for<'connection> FnOnce(DatabaseTestSql<'connection>) -> Result<R, DbError>,
-    {
-        operation(DatabaseTestSql::for_store(self.conn, self.store_dir))
-    }
-}
-
 impl Database {
     pub async fn remove_store_protocol_root_for_test(&self) {
         self.test_sql(|database| database.remove_store_protocol_root())
