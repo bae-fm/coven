@@ -1,28 +1,28 @@
 use coven_foundation::store_dir::StoreDir;
-use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use coven_protocol::store_commit::ObjectHash;
-use coven_protocol::write::{AffectedRow, WriteId, WriteResolution, WriteStatus};
+use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::Connection;
-use tracing::warn;
 
-use super::candidate_records::{
-    load_merge_candidate_head_cleanup_on, parse_prepared_merge_candidate_on,
-    MergeCandidateHeadCleanup,
-};
 use super::payload_store::{
     read_payload_blocking, read_verified_payload_blocking, write_payload_blocking,
     PayloadStoreError,
 };
-use super::publication_state::PreparedStoreWriteState;
-use super::{StoreRecords, StoreTransaction};
-use crate::{
-    candidate_graph_exact_objects, is_routing_table, load_remote_object_on, AudiencePartition,
-    CirclePartitionControl, Database, DbError, StoreWriteBase, StoreWriteBlobFacts,
-};
+use super::StoreTransaction;
+use crate::{AudiencePartition, CirclePartitionControl, Database, DbError, StoreDatabase};
 
 mod circle_bootstrap;
 mod retained_replay;
 mod snapshot_install;
+
+/// One Store's row connection and matching payload storage.
+///
+/// Payload records may hold bytes in SQLite or name a file beside it, so record
+/// operations carry the connection and directory as one scoped value.
+#[derive(Clone, Copy)]
+pub(crate) struct StoreRecords<'store> {
+    conn: &'store Connection,
+    store_dir: &'store StoreDir,
+}
 
 impl<'store> StoreRecords<'store> {
     pub(super) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
@@ -218,400 +218,453 @@ impl<'store> StoreRecords<'store> {
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
         super::store_device_state::load_declared_store_device_state_on(self.conn, reference)
     }
-}
 
-struct UnpublishedWriteCleanup {
-    removable: Vec<ObjectHash>,
-    candidate: Option<coven_protocol::store_commit::StoreBatchCommitRef>,
-}
-
-impl<'store, 'connection> StoreTransaction<'store, 'connection> {
-    pub(super) fn new(
-        transaction: &'store rusqlite::Transaction<'connection>,
-        store_dir: &'store StoreDir,
-    ) -> Self {
-        Self {
-            transaction,
-            records: StoreRecords::new(transaction, store_dir),
+    pub(super) fn transaction<R>(
+        self,
+        operation: impl FnOnce(
+            StoreTransaction<'_, '_>,
+        ) -> Result<super::StoreTransactionOutcome<R>, DbError>,
+    ) -> Result<R, DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let outcome = operation(StoreTransaction::new(&transaction, self.store_dir));
+        match outcome {
+            Ok(super::StoreTransactionOutcome::Commit(value)) => {
+                transaction.commit().map_err(DbError::from)?;
+                Ok(value)
+            }
+            Ok(super::StoreTransactionOutcome::Rollback(value)) => {
+                transaction.rollback().map_err(DbError::from)?;
+                Ok(value)
+            }
+            Err(error) => Err(error),
         }
     }
 
-    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
-        self.records.install_payload(bytes)
+    pub(super) fn host_sql_read<F, R, E>(self, read: F) -> Result<Result<R, E>, DbError>
+    where
+        F: for<'connection> FnOnce(super::SqlReadContext<'connection>) -> Result<R, E>,
+    {
+        let authorization = super::host_sql_transaction::HostSqlAuthorization::begin(self.conn)?;
+        Ok(authorization.run(|| read(super::SqlReadContext::new(self.conn))))
     }
 
-    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        self.records.payload(hash)
+    pub(super) fn protocol_state(self, key: &str) -> Result<Option<String>, DbError> {
+        crate::get_protocol_state_on(self.conn, key)
     }
 
-    pub(crate) fn store_write_partitions(
-        self,
-        write_id: &str,
-    ) -> Result<crate::PreparedStoreWritePartitions, DbError> {
-        self.records.store_write_partitions(write_id)
+    pub(super) fn required_protocol_state(self, key: &str) -> Result<String, DbError> {
+        crate::required_protocol_state_on(self.conn, key)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn begin_blocked_merge_candidate_nonactivation(
-        self,
-        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        write_id: &WriteId,
-        candidate: &super::candidate_records::PreparedMergeCandidate,
-        nonactivation: &super::candidate_records::BlockedMergeCandidateNonactivation,
-        include_indexed_blobs: bool,
-        extra_objects: &[coven_protocol::objects::ExactObjectRef],
-    ) -> Result<(), DbError> {
-        if let super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
-            durable,
-            ..
-        } = nonactivation
-        {
-            super::candidate_records::validate_terminal_candidate_authority_on(
-                self.records,
-                retained,
-                root,
-                candidate,
-                durable,
-            )?;
-        }
-        match nonactivation {
-            super::candidate_records::BlockedMergeCandidateNonactivation::Merge(durable) => {
-                super::candidate_records::begin_merge_candidate_nonactivation_on(
-                    self.transaction,
-                    write_id,
-                    candidate,
-                    durable,
-                    include_indexed_blobs,
-                    extra_objects,
-                )
-            }
-            super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
-                durable,
-                head_nonactivation,
-            } => {
-                super::candidate_records::begin_merge_candidate_nonactivation_with_verified_head_on(
-                    self.transaction,
-                    write_id,
-                    candidate,
-                    durable,
-                    include_indexed_blobs,
-                    extra_objects,
-                    head_nonactivation,
-                )
-            }
-        }
+    pub(super) fn set_protocol_state(self, key: &str, value: &str) -> Result<(), DbError> {
+        crate::set_protocol_state_on(self.conn, key, value)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn advance_owner_promotion_journal(
-        self,
-        journal_key: String,
-        target_key: String,
-        previous_value: String,
-        next_value: String,
-        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
-    ) -> Result<(), DbError> {
-        super::owner_promotion::advance_owner_promotion_journal_on(
-            self.transaction,
-            self.records.store_dir,
-            journal_key,
-            target_key,
-            previous_value,
-            next_value,
-            remote_objects,
-        )
-    }
-
-    pub(super) fn replace_tables_from_projection(
-        self,
-        source: &super::ReplayProjection,
-        tables: &[String],
-    ) -> Result<(), DbError> {
-        super::replay_projection::replace_tables_from_projection_on(
-            source,
-            self.transaction,
-            tables,
-        )
-    }
-
-    pub(crate) fn insert_store_write(
-        self,
-        write_id: &WriteId,
-        partitions: &[AudiencePartition],
-        changeset_hash: ObjectHash,
-        base: &StoreWriteBase,
-        blob_facts: &StoreWriteBlobFacts,
-        rows_changed: u64,
-    ) -> Result<WriteStatus, DbError> {
-        let tx = self.records.conn;
-        let remote_partitions = partitions
-            .iter()
-            .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
-            .collect::<Vec<_>>();
-        let affected_rows = if remote_partitions.is_empty() {
-            if partitions.is_empty() && rows_changed == 0 {
-                warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
-                #[cfg(debug_assertions)]
-                warn!(
-                    "zero-change sql transaction backtrace:\n{}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-            }
-            Vec::new()
-        } else {
-            let mut affected = Vec::new();
-            for partition in &remote_partitions {
-                affected.extend(
-                    crate::walk_changeset(&partition.changeset)
-                        .map_err(|error| {
-                            DbError::Message(format!("read affected write rows: {error}"))
-                        })?
-                        .into_iter()
-                        .filter(|row| !is_routing_table(&row.table))
-                        .map(|row| {
-                            let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
-                                DbError::Message(format!(
-                                    "shared write row in {:?} has no primary key",
-                                    row.table
-                                ))
-                            })?;
-                            Ok(AffectedRow {
-                                table: row.table,
-                                primary_key,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, DbError>>()?,
-                );
-            }
-            affected.sort();
-            affected.dedup();
-            affected
-        };
-        let status = if remote_partitions.is_empty() {
-            WriteStatus::LocalOnly
-        } else {
-            WriteStatus::Pending
-        };
-        let base = serde_json::to_string(base)
-            .map_err(|error| DbError::context("serialize pending Store base", error))?;
-        let status_json = serde_json::to_string(&status)
-            .map_err(|error| DbError::context("serialize write status", error))?;
-        let affected_rows = serde_json::to_string(&affected_rows)
-            .map_err(|error| DbError::context("serialize affected rows", error))?;
-        let blob_facts_json = serde_json::to_string(blob_facts)
-            .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
-        tx.execute(
-            "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                write_id.as_str(),
-                status_json,
-                affected_rows,
-                changeset_hash.to_string(),
-                base,
-                blob_facts_json,
-            ],
-        )
-        .map_err(DbError::from)?;
-        let mut payloads = std::collections::BTreeSet::from([changeset_hash]);
-        for partition in partitions {
-            let audience = match partition.audience {
-                coven_protocol::circle::Audience::Store => "store".to_string(),
-                coven_protocol::circle::Audience::Local => "local".to_string(),
-                coven_protocol::circle::Audience::Circle(circle_id) => circle_id.to_string(),
-            };
-            let control = partition
-                .control
-                .as_ref()
-                .map(CirclePartitionControl::stored_json);
-            let partition_hash = self.install_payload(&partition.changeset)?;
-            payloads.insert(partition_hash);
-            tx.execute(
-                "INSERT INTO store_write_partitions
-                 (write_id, audience, control_coord, changeset_hash)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    write_id.as_str(),
-                    audience,
-                    control,
-                    partition_hash.to_string()
-                ],
-            )
-            .map_err(DbError::from)?;
-        }
-        crate::payload_store::set_payload_owner_claims_on(
-            tx,
-            &crate::payload_store::store_write_owner_key(write_id),
-            &payloads,
-        )?;
-        if status == WriteStatus::Pending {
-            for fact in &blob_facts.blobs {
-                if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
-                    continue;
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO store_write_blob_leases
-                     (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
-                    (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
-                )
-                .map_err(DbError::from)?;
-            }
-        }
-        Ok(status)
-    }
-
-    fn unpublished_write_cleanup(
-        self,
-        authority: &mut super::VerifiedStoreAuthority,
-        write_id: &WriteId,
-    ) -> Result<UnpublishedWriteCleanup, DbError> {
-        let tx = self.records.conn;
-        let raw_prepared: Option<String> = tx
+    pub(super) fn write_status(self, write_id: &WriteId) -> Result<WriteStatus, DbError> {
+        let raw: String = self
+            .conn
             .query_row(
-                "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                "SELECT status FROM store_writes WHERE write_id = ?1",
                 [write_id.as_str()],
                 |row| row.get(0),
             )
             .map_err(DbError::from)?;
-        let mut removable = Vec::new();
-        let mut candidate = None;
-        if let Some(raw_prepared) = raw_prepared.as_deref() {
-            let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
-                .map_err(|error| DbError::context("resolved prepared write", error))?;
-            let merge = parse_prepared_merge_candidate_on(self.records, authority, &prepared)?;
-            removable.push(remote_object_id(&merge.reference.object));
-            match load_merge_candidate_head_cleanup_on(tx, &merge.head_object, &merge.reference)? {
-                MergeCandidateHeadCleanup::Remote { .. } => {
-                    removable.push(remote_object_id(&merge.head_object))
-                }
-                MergeCandidateHeadCleanup::ProtocolInert => {}
-            }
-            removable.extend(
-                candidate_graph_exact_objects(&merge.commit)?
-                    .iter()
-                    .map(remote_object_id),
-            );
-            candidate = Some(merge.reference);
+        serde_json::from_str(&raw)
+            .map_err(|error| DbError::context(format!("write {write_id} status"), error))
+    }
+
+    pub(super) fn materialized_frontier(
+        self,
+    ) -> Result<
+        std::collections::BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
+        DbError,
+    > {
+        super::materialized_commit_index::materialized_frontier_on(self.conn, None)
+    }
+
+    pub(super) fn retained_merge_materialization_refs(
+        self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        let rows = crate::query_mapped_rows(
+            self.conn,
+            "SELECT device_id, seq, commit_ref
+             FROM retained_merge_materializations
+             ORDER BY device_id, seq",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        rows.into_iter()
+            .map(|(stream_id, sequence, encoded_ref)| {
+                let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
+                super::materialized_commit_index::parse_stored_commit_ref(
+                    &stream_id,
+                    sequence,
+                    &encoded_ref,
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn snapshot_coverage_frontier(
+        self,
+    ) -> Result<coven_protocol::store_commit::CommitFrontier, DbError> {
+        let rows = crate::query_mapped_rows(
+            self.conn,
+            "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        let mut frontier = std::collections::BTreeMap::new();
+        for (device_id, sequence, encoded_ref) in rows {
+            let sequence = Database::sequence_from_sqlite(&device_id, sequence)?;
+            let reference = super::materialized_commit_index::parse_stored_commit_ref(
+                &device_id,
+                sequence,
+                &encoded_ref,
+            )?;
+            frontier.insert(device_id, reference);
         }
-        let mut statement = tx
-            .prepare("SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1")
-            .map_err(DbError::from)?;
-        let indexed = statement
-            .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(DbError::from)?;
-        drop(statement);
-        for encoded in indexed {
-            removable.push(
-                encoded
+        coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
+            .map_err(|error| DbError::context("snapshot coverage frontier", error))
+    }
+
+    pub(super) fn store_device_state_for_history_cut(
+        self,
+        cut: &coven_protocol::store_commit::StoreHistoryCut,
+    ) -> Result<
+        (
+            coven_protocol::store_commit::StoreDeviceStateRef,
+            coven_protocol::store_commit::ResolvedStoreDeviceState,
+        ),
+        DbError,
+    > {
+        super::store_device_state::store_device_state_for_history_cut_on(self.conn, cut)
+    }
+
+    pub(super) fn store_device_exclusion_freezes(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceProposalAck>, DbError> {
+        Ok(
+            super::store_device_state::load_store_device_exclusion_freezes_on(self.conn, root)?
+                .into_values()
+                .collect(),
+        )
+    }
+
+    pub(super) fn activated_registration_references(
+        self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreDeviceRegistrationRef>, DbError> {
+        let rows = crate::query_mapped_rows(
+            self.conn,
+            "SELECT device_id, registration_hash, registration_object
+             FROM store_device_registration_activations ORDER BY device_id",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        rows.into_iter()
+            .map(|(device_id, registration_hash, object)| {
+                let device_id = device_id
                     .parse()
-                    .map_err(|error| DbError::context("resolved remote object id", error))?,
-            );
-        }
-        Ok(UnpublishedWriteCleanup {
-            removable,
-            candidate,
-        })
-    }
-
-    fn unpublished_write_cleanup_complete(
-        self,
-        cleanup: &UnpublishedWriteCleanup,
-    ) -> Result<bool, DbError> {
-        let Some(candidate) = &cleanup.candidate else {
-            return Ok(true);
-        };
-        for object_id in &cleanup.removable {
-            let remote = load_remote_object_on(self.records.conn, *object_id)?;
-            if !remote
-                .candidate_cleanup_complete(candidate)
+                    .map_err(|error| DbError::context("activated Store device id", error))?;
+                let registration_hash = registration_hash.parse().map_err(|error| {
+                    DbError::context("activated Store device registration hash", error)
+                })?;
+                let reference = serde_json::from_str::<
+                    coven_protocol::store_commit::StoreDeviceRegistrationRef,
+                >(&object)
                 .map_err(|error| {
-                    DbError::context(format!("validate candidate cleanup for {object_id}"), error)
-                })?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    pub(super) fn unpublished_write_cleanup_is_complete(
-        self,
-        authority: &mut super::VerifiedStoreAuthority,
-        write_id: &WriteId,
-    ) -> Result<bool, DbError> {
-        let cleanup = self.unpublished_write_cleanup(authority, write_id)?;
-        self.unpublished_write_cleanup_complete(&cleanup)
-    }
-
-    pub(super) fn resolve_unpublished_writes(
-        self,
-        authority: &mut super::VerifiedStoreAuthority,
-        write_ids: &[WriteId],
-        resolution: &WriteResolution,
-    ) -> Result<(), DbError> {
-        let tx = self.records.conn;
-        let status = WriteStatus::Resolved(resolution.clone());
-        for write_id in write_ids {
-            let cleanup = self.unpublished_write_cleanup(authority, write_id)?;
-            if !self.unpublished_write_cleanup_complete(&cleanup)? {
-                return Err(DbError::Message(format!(
-                    "candidate cleanup for write {write_id} is incomplete"
-                )));
-            }
-            tx.execute(
-                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-                [write_id.as_str()],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "DELETE FROM store_write_packages WHERE write_id = ?1",
-                [write_id.as_str()],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "DELETE FROM store_write_blobs WHERE write_id = ?1",
-                [write_id.as_str()],
-            )
-            .map_err(DbError::from)?;
-            for object_id in cleanup.removable {
-                let remote = load_remote_object_on(tx, object_id)?;
-                let absent = matches!(
-                    remote,
-                    RemoteObjectRecord::CandidateCommit(
-                        coven_protocol::remote_object::CandidateCommitRecord {
-                            state:
-                                coven_protocol::remote_object::CandidateCommitState::AbsentVerified { .. },
-                            ..
-                        }
-                    ) | RemoteObjectRecord::CandidateExclusive(
-                        coven_protocol::remote_object::CandidateObjectRecord {
-                            state:
-                                coven_protocol::remote_object::CandidateObjectState::AbsentVerified { .. },
-                            ..
-                        }
-                    ) | RemoteObjectRecord::RetainedAuthority(
-                        coven_protocol::remote_object::RetainedAuthorityRecord {
-                            state:
-                                coven_protocol::remote_object::RetainedAuthorityObjectState::UncreatedVerified { .. },
-                            ..
-                        }
-                    )
-                );
-                if absent {
-                    crate::remote_object_records::delete_remote_object_on(tx, object_id)?;
+                    DbError::context("activated Store device exact reference", error)
+                })?;
+                if reference.device_id != device_id
+                    || reference.registration_hash != registration_hash
+                {
+                    return Err(DbError::Message(
+                        "activated Store registration columns differ from its exact reference"
+                            .to_string(),
+                    ));
                 }
-            }
-            tx.execute(
-                "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
-                [write_id.as_str()],
+                Ok(reference)
+            })
+            .collect()
+    }
+
+    pub(super) fn activated_registration_authority(
+        self,
+        reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<String, DbError> {
+        self.conn
+            .query_row(
+                "SELECT activation_authority FROM store_device_registration_activations
+                 WHERE device_id = ?1 AND registration_hash = ?2",
+                (
+                    reference.device_id.to_string(),
+                    reference.registration_hash.to_string(),
+                ),
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+
+    pub(super) fn activated_registration_row_for_device(
+        self,
+        device_id: coven_protocol::store_commit::StoreDeviceId,
+    ) -> Result<Option<(String, String)>, DbError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT registration_object, activation_authority
+                 FROM store_device_registration_activations WHERE device_id = ?1",
+                [device_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
+    pub(super) fn registered_stream_activation(
+        self,
+        activation_id: coven_protocol::store_commit::StreamActivationId,
+    ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
+        use rusqlite::OptionalExtension;
+        let key = activation_id.as_hash().to_string();
+        let stored = self
+            .conn
+            .query_row(
+                "SELECT activation_id, author_stream_id, activation, activating_commit
+                 FROM stream_activations WHERE activation_id = ?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some((activation_id, author_stream_id, activation, activating_commit)) = stored else {
+            return Ok(None);
+        };
+        let activation_id = coven_protocol::store_commit::StreamActivationId::from_digest(
+            activation_id
+                .parse()
+                .map_err(|error| DbError::context("stored stream activation id", error))?,
+        );
+        let author_stream_id = author_stream_id
+            .parse()
+            .map_err(|error| DbError::Message(format!("stored author stream id: {error}")))?;
+        let activation = serde_json::from_slice(&activation)
+            .map_err(|error| DbError::context("stored stream activation descriptor", error))?;
+        let activating_commit = serde_json::from_str(&activating_commit)
+            .map_err(|error| DbError::context("stored stream activation commit ref", error))?;
+        coven_protocol::store_commit::RegisteredStreamActivation::from_stored(
+            activation_id,
+            author_stream_id,
+            activation,
+            activating_commit,
+        )
+        .map(Some)
+        .map_err(|error| DbError::Message(error.to_string()))
+    }
+
+    pub(super) fn stage_owner_recovery_publication(
+        self,
+        registration_hash: &str,
+        encoded: &str,
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO local_owner_recovery_publication
+                     (singleton, registration_hash, publication)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(singleton) DO NOTHING",
+                (registration_hash, encoded),
             )
             .map_err(DbError::from)?;
-            Database::set_write_status_on(tx, write_id, &status)?;
+        let stored: (String, String) = transaction
+            .query_row(
+                "SELECT registration_hash, publication
+                 FROM local_owner_recovery_publication WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        if stored != (registration_hash.to_string(), encoded.to_string()) {
+            return Err(DbError::Message(
+                "Owner recovery publication journal owns different exact objects".into(),
+            ));
         }
-        Ok(())
+        transaction.commit().map_err(DbError::from)
+    }
+
+    pub(super) fn owner_recovery_publication_row(
+        self,
+    ) -> Result<Option<(String, String)>, DbError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT registration_hash, publication
+                 FROM local_owner_recovery_publication WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
+    pub(super) fn begin_protocol_state(self, key: &str, value: &str) -> Result<String, DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        transaction
+            .execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                (key, value),
+            )
+            .map_err(DbError::from)?;
+        let actual = crate::required_protocol_state_on(&transaction, key)?;
+        transaction.commit().map_err(DbError::from)?;
+        Ok(actual)
+    }
+
+    pub(super) fn compare_exchange_protocol_state(
+        self,
+        key: &str,
+        previous: &str,
+        next: &str,
+    ) -> Result<bool, DbError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                (next, key, previous),
+            )
+            .map_err(DbError::from)?;
+        Ok(changed == 1)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn scoped_snapshot_counts(self) -> Result<(i64, i64, i64), DbError> {
+        self.conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM documents),
+                     (SELECT COUNT(*) FROM paragraphs),
+                     (SELECT COUNT(*) FROM _coven_row_routes)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn migrated_scoped_snapshot_facts(self) -> Result<(i64, i64, String), DbError> {
+        self.conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM documents),
+                     (SELECT COUNT(*) FROM _coven_row_routes),
+                     (SELECT ordinary FROM documents)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn circle_bootstrap_coverage_ref(
+        self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        super::retained_merge_replay::circle_bootstrap_coverage_ref_on(self.conn, circle_id)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn circle_control_activation_count(
+        self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<i64, DbError> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn generation_zero_replay_baseline(
+        self,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        StoreDatabase::generation_zero_replay_baseline_on(self)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn replace_generation_zero_replay_authority(
+        self,
+        authority_bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let authority_hash = super::payload_store::write_payload_blocking(
+            &transaction,
+            self.store_dir,
+            authority_bytes,
+        )
+        .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
+        transaction
+            .execute(
+                "UPDATE retained_replay_baselines SET authority_hash = ?1
+                 WHERE singleton = 1",
+                [authority_hash.to_string()],
+            )
+            .map_err(DbError::from)?;
+        let image_hash: String = transaction
+            .query_row(
+                "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        super::payload_store::set_payload_owner_claims_on(
+            &transaction,
+            super::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
+        )?;
+        transaction.commit().map_err(DbError::from)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn circle_bootstrap_replay_inputs(
+        self,
+    ) -> Result<
+        Vec<(
+            coven_protocol::store_commit::StoreBatchCommitRef,
+            coven_protocol::circle_activation::VerifiedCircleImage,
+        )>,
+        DbError,
+    > {
+        StoreDatabase::circle_bootstrap_replay_inputs_on(self)
     }
 }

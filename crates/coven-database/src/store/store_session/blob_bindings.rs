@@ -16,7 +16,7 @@ impl StoreSession<'_> {
                 crate::quote_ident(table.name()),
                 crate::quote_ident(&declaration.id_column),
             );
-            let mut statement = self.records.conn.prepare(&sql).map_err(DbError::from)?;
+            let mut statement = self.conn.prepare(&sql).map_err(DbError::from)?;
             let row_ids = statement
                 .query_map([], |row| row.get::<_, String>(0))
                 .map_err(DbError::from)?
@@ -25,10 +25,7 @@ impl StoreSession<'_> {
             drop(statement);
             for row_id in row_ids {
                 references.push(Database::row_blob_ref_on(
-                    self.records.conn,
-                    self.gates,
-                    table,
-                    &row_id,
+                    self.conn, self.gates, table, &row_id,
                 )?);
             }
         }
@@ -39,12 +36,7 @@ impl StoreSession<'_> {
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::StoredBlobReferenceState, DbError> {
-        Database::stored_blob_reference_state_on(
-            self.records.conn,
-            self.gates,
-            self.synced_tables,
-            stored,
-        )
+        Database::stored_blob_reference_state_on(self.conn, self.gates, self.synced_tables, stored)
     }
 
     fn row_blob_ref(
@@ -63,7 +55,7 @@ impl StoreSession<'_> {
                 table.name()
             )));
         }
-        Database::row_blob_ref_on(self.records.conn, self.gates, table, row_id)
+        Database::row_blob_ref_on(self.conn, self.gates, table, row_id)
     }
 
     fn row_blob_refs_for_root(
@@ -72,7 +64,7 @@ impl StoreSession<'_> {
         root_id: &str,
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, DbError> {
         Database::row_blob_refs_for_root_on(
-            self.records.conn,
+            self.conn,
             self.gates,
             self.synced_tables,
             root_table,
@@ -84,7 +76,7 @@ impl StoreSession<'_> {
         &self,
         reference: &coven_protocol::blob::RowBlobRef,
     ) -> Result<Option<ExternalBlob>, DbError> {
-        ExternalBlobRecords::new(self.records.conn).load(reference)
+        ExternalBlobRecords::new(self.conn).load(reference)
     }
 }
 

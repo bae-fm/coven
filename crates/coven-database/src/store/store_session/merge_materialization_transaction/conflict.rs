@@ -12,7 +12,7 @@
 //!
 //! This is row-level: the losing row is dropped whole. Column-level survival of
 //! concurrent edits to *different* columns of one row is handled upstream by the
-//! premerge in [`crate::MergeMaterializationTransaction::apply_changeset`], before the changeset reaches this arbiter — the
+//! premerge in [`super::MergeMaterializationTransaction::apply_changeset`], before the changeset reaches this arbiter — the
 //! arbiter only picks a winner for the collisions the premerge did not fold in.
 //!
 //! A member is trusted to author valid changesets, so this is robustness, not a

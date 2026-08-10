@@ -78,8 +78,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             .map_err(|error| DbError::Message(error.to_string()))?
             .frontier();
         let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
-        let merge_transaction =
-            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
+        let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
         let mut applied = merge_transaction.apply_prepared_merge_materialization(
             authority,
             blob_decls,
@@ -145,10 +144,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 || !retracted.is_empty()
             {
                 let replay = authority.replay_projection_on(
-                    crate::store::store_session::StoreTransaction::new(
-                        tx,
-                        self.store.records.store_dir,
-                    ),
+                    crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir),
                     blob_decls,
                     gates,
                     synced_tables,
@@ -175,11 +171,8 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                     tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                         .map_err(DbError::from)?;
                 }
-                crate::store::store_session::StoreTransaction::new(
-                    tx,
-                    self.store.records.store_dir,
-                )
-                .replace_tables_from_projection(&replay, &tables)?;
+                crate::store::store_session::StoreTransaction::new(tx, self.store.store_dir)
+                    .replace_tables_from_projection(&replay, &tables)?;
                 let violations: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
@@ -258,8 +251,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let reference = verified_commit.reference().clone();
         let tx = self.store.transaction;
         let authority = &mut *self.authority;
-        let store_transaction =
-            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
+        let store_transaction = MergeMaterializationTransaction::from_store(self.store);
         if let Some(object_ids) = operation_object_ids {
             store_transaction.activate_store_operation_remote_objects(&reference, &object_ids)?;
         }
@@ -343,7 +335,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             &[],
             None,
         )?;
-        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+        let retained = MergeMaterializationTransaction::from_store(self.store)
             .record_verified_merge_materialization(authority, materialization)?;
         authority.insert_verified(retained)?;
         Ok(())
@@ -469,7 +461,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 &[],
                 None,
             )?;
-            let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+            let retained = MergeMaterializationTransaction::from_store(self.store)
                 .record_verified_merge_materialization(authority, materialization)?;
             authority.insert_verified(retained)?;
         }
@@ -490,7 +482,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let registrations = vec![registration];
         let commit = verified_commit.value();
         super::record_activated_store_device_registrations_on(tx, commit, &registrations)?;
-        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+        let retained = MergeMaterializationTransaction::from_store(self.store)
             .record_materialized_merge_commit(
                 authority,
                 &root,

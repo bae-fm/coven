@@ -224,8 +224,6 @@ pub use schema_introspection::{
 pub use store::device_join_journal;
 pub use store::device_join_journal::DeviceJoinJournalError;
 pub(crate) use store::payload_store;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use store::MergeMaterializationTransaction;
 pub use store::PayloadStoreError;
 pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,

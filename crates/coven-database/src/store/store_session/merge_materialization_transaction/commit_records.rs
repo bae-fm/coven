@@ -133,7 +133,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         device_operations: &VerifiedStoreDeviceOperations,
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
         derive_materialized_store_device_state_on(
-            self.records,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             registrations,
             root,
             commit,

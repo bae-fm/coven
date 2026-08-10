@@ -25,7 +25,11 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         authority: &mut VerifiedStoreAuthority,
         candidate: &StoreBatchCommitRef,
     ) -> Result<PreparedMergeCandidate, DbError> {
-        StoreDatabase::load_merge_retraction_cleanup_on(self.records, authority, candidate)
+        StoreDatabase::load_merge_retraction_cleanup_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            authority,
+            candidate,
+        )
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -36,7 +40,7 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            self.records,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             root,
             registrations,
             reference,

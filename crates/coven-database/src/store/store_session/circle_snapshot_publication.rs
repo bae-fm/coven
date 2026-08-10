@@ -16,12 +16,7 @@ impl StoreSession<'_> {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_circle_snapshot_on(
-            self.records.conn,
-            self.records.store_dir,
-            &authority,
-            circle_id,
-        )
+        load_outbound_circle_snapshot_on(self.conn, self.store_dir, &authority, circle_id)
     }
 
     fn latest_local_circle_snapshot(
@@ -29,7 +24,7 @@ impl StoreSession<'_> {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleSnapshot>, DbError> {
         let authority = self.local_store_authority()?;
-        load_published_circle_snapshot_on(self.records.conn, &authority, circle_id)
+        load_published_circle_snapshot_on(self.conn, &authority, circle_id)
     }
 
     fn stage_circle_snapshot_publication(
@@ -41,23 +36,16 @@ impl StoreSession<'_> {
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<CircleSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let image_facts = crate::payload_store::write_payload_file_blocking(
-            &tx,
-            self.records.store_dir,
-            image.path(),
-        )
-        .map_err(|error| {
-            SnapshotImageError::Projection(format!("spool Circle snapshot image: {error}"))
-        });
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let image_facts =
+            crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
+                .map_err(|error| {
+                    SnapshotImageError::Projection(format!("spool Circle snapshot image: {error}"))
+                });
         let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             image_prepared.stored_bytes(),
         )
         .map_err(|error| DbError::context("spool prepared Circle snapshot image", error))?;
@@ -155,7 +143,7 @@ impl StoreSession<'_> {
             generation: meta.generation,
         };
         validate_snapshot_blob_plans_on(
-            self.records.conn,
+            self.conn,
             self.gates,
             self.synced_tables,
             &snapshot_owner,
@@ -197,11 +185,7 @@ impl StoreSession<'_> {
         accepted: CircleSnapshotRef,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let circle_id = {
             let bytes: Vec<u8> = tx
                 .query_row(
@@ -222,8 +206,10 @@ impl StoreSession<'_> {
             meta.circle_id
         };
         let outbound =
-            load_outbound_circle_snapshot_on(&tx, self.records.store_dir, &authority, circle_id)?
-                .ok_or_else(|| DbError::Message("outbound Circle snapshot is absent".to_string()))?;
+            load_outbound_circle_snapshot_on(&tx, self.store_dir, &authority, circle_id)?
+                .ok_or_else(|| {
+                    DbError::Message("outbound Circle snapshot is absent".to_string())
+                })?;
         if outbound.reference != accepted {
             return Err(DbError::Message(
                 "accepted Circle snapshot differs from the prepared exact object".to_string(),
@@ -236,7 +222,7 @@ impl StoreSession<'_> {
         };
         persist_snapshot_image_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &outbound.meta.value.bootstrap.image,
             snapshot_owner,
             "Circle snapshot image",

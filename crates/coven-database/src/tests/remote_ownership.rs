@@ -461,9 +461,16 @@ fn blob_bindings_install_only_for_exact_winning_row_stamps() {
         row_stamp: Some("0000000001000-0000-a".to_string()),
     }];
     assert_eq!(
-        MergeMaterializationTransaction::new(&tx, &store_dir)
-            .install_winning_blob_bindings(&gates, &tables, &package, &activation, &winning_rows,)
-            .expect("install winning binding"),
+        crate::store::test_install_winning_blob_bindings(
+            &tx,
+            &store_dir,
+            &gates,
+            &tables,
+            &package,
+            &activation,
+            &winning_rows,
+        )
+        .expect("install winning binding"),
         1
     );
     tx.commit().expect("commit");
@@ -543,9 +550,16 @@ fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
         row_id: "photo".to_string(),
         row_stamp: Some("0000000001000-0000-a".to_string()),
     }];
-    let error = MergeMaterializationTransaction::new(&tx, &store_dir)
-        .install_winning_blob_bindings(&gates, &tables, &package, &activation, &winning_rows)
-        .expect_err("mismatched locator must fail");
+    let error = crate::store::test_install_winning_blob_bindings(
+        &tx,
+        &store_dir,
+        &gates,
+        &tables,
+        &package,
+        &activation,
+        &winning_rows,
+    )
+    .expect_err("mismatched locator must fail");
     assert!(error
         .to_string()
         .contains("does not match winning row values"));

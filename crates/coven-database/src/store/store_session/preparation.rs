@@ -18,7 +18,7 @@ use rusqlite::OptionalExtension;
 
 impl StoreSession<'_> {
     fn table_schema_for_apply(&mut self) -> Result<crate::TableSchema, DbError> {
-        crate::TableSchema::for_apply(self.records.conn, self.synced_tables, self.gates)
+        crate::TableSchema::for_apply(self.conn, self.synced_tables, self.gates)
     }
 
     fn prepare_store_write_commit(&mut self, stage: StoreWritePreparation) -> Result<(), DbError> {
@@ -28,11 +28,7 @@ impl StoreSession<'_> {
                 "prepared Store write belongs to another verified Store root".to_string(),
             ));
         }
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let local_device_id = crate::required_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY)?;
         let registration_object: String = tx
             .query_row(
@@ -114,9 +110,8 @@ impl StoreSession<'_> {
                 stage.write_id
             )));
         }
-        let partitions =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
-                .store_write_partitions(stage.write_id.as_str())?;
+        let partitions = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
+            .store_write_partitions(stage.write_id.as_str())?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
             .map_err(|error| DbError::context(format!("write {} base", stage.write_id), error))?;
         let stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
@@ -173,7 +168,7 @@ impl StoreSession<'_> {
         for remote in &stage.remote_objects {
             crate::persist_prepared_remote_object_on(
                 &tx,
-                self.records.store_dir,
+                self.store_dir,
                 remote,
                 &commit_ref,
                 "candidate audience object",
@@ -185,12 +180,7 @@ impl StoreSession<'_> {
             stage.commit.prepared.stored_bytes(),
         )
         .map_err(|error| DbError::context("prepared candidate commit", error))?;
-        persist_exact_remote_object_on(
-            &tx,
-            self.records.store_dir,
-            &commit_remote,
-            "candidate commit",
-        )?;
+        persist_exact_remote_object_on(&tx, self.store_dir, &commit_remote, "candidate commit")?;
         let expected_partition_count = usize::from(partitions.store.is_some())
             .checked_add(partitions.circles.len())
             .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
@@ -267,7 +257,7 @@ impl StoreSession<'_> {
         debug_assert_eq!(indexed, object_ids);
         super::prepared_remote_objects::persist_prepared_audience_objects_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &stage.write_id,
             &stage.audiences.packages,
             &stage.audiences.blobs,
@@ -283,7 +273,7 @@ impl StoreSession<'_> {
             commit_ref.clone(),
         )
         .map_err(|error| DbError::context("prepared Store head", error))?;
-        persist_exact_remote_object_on(&tx, self.records.store_dir, &head_remote, "Store head")?;
+        persist_exact_remote_object_on(&tx, self.store_dir, &head_remote, "Store head")?;
 
         let prepared = PreparedStoreWriteState::Publication {
             commit: DurablePreparedProtocolObject::new(
@@ -324,11 +314,7 @@ impl StoreSession<'_> {
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
                 "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -359,7 +345,7 @@ impl StoreSession<'_> {
             ));
         };
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -431,7 +417,7 @@ impl StoreSession<'_> {
         .map_err(|error| DbError::context("Merge abandonment commit", error))?;
         persist_exact_remote_object_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &authority_commit,
             "Merge abandonment commit",
         )?;
@@ -448,7 +434,7 @@ impl StoreSession<'_> {
         .map_err(|error| DbError::context("Merge abandonment head", error))?;
         persist_exact_remote_object_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &authority_head,
             "Merge abandonment head",
         )?;
@@ -501,13 +487,9 @@ impl StoreSession<'_> {
         write_id: coven_protocol::write::WriteId,
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let local_stream_id =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
                 .local_merge_stream_id(self.verified_store_authority)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
@@ -526,8 +508,8 @@ impl StoreSession<'_> {
             self.blob_decls,
         )?;
         let changeset_hash =
-            crate::payload_store::write_payload_blocking(&tx, self.records.store_dir, &changeset)?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+            crate::payload_store::write_payload_blocking(&tx, self.store_dir, &changeset)?;
+        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .insert_store_write(
                 &write_id,
                 &partitions,

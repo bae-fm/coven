@@ -648,21 +648,30 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         self,
         authority: &mut VerifiedStoreAuthority,
     ) -> Result<VerifiedStoreAuthorityTransaction, DbError> {
-        authority.begin_transaction_on(self.records)
+        authority.begin_transaction_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn required_root_authority(
         self,
         authority: &mut VerifiedStoreAuthority,
     ) -> Result<StoreRootRef, DbError> {
-        authority.required_root_authority_on(self.records)
+        authority.required_root_authority_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn root_authority(
         self,
         authority: &mut VerifiedStoreAuthority,
     ) -> Result<Option<(StoreRootRef, StoreProtocolRoot)>, DbError> {
-        authority.root_authority_on(self.records)
+        authority.root_authority_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn activated_registration(
@@ -671,28 +680,41 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
-        authority.activated_registration_on(self.records, root, reference)
+        authority.activated_registration_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            root,
+            reference,
+        )
     }
 
     pub(super) fn local_merge_stream_id(
         self,
         authority: &mut VerifiedStoreAuthority,
     ) -> Result<Option<String>, DbError> {
-        authority.local_merge_stream_id_on(self.records)
+        authority.local_merge_stream_id_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn retained_replay_baseline(
         self,
         authority: &mut VerifiedStoreAuthority,
     ) -> Result<&RetainedReplayBaseline, DbError> {
-        authority.retained_replay_baseline_on(self.records)
+        authority.retained_replay_baseline_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn retained_replay_inputs(
         self,
         authority: &mut VerifiedStoreAuthorityTransaction,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        authority.replay_inputs_on(self.records)
+        authority.replay_inputs_on(crate::store::store_session::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))
     }
 
     pub(super) fn retained_materialization_by_ref(
@@ -700,7 +722,10 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         authority: &mut VerifiedStoreAuthorityTransaction,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        authority.retained_materialization_by_ref_on(self.records, reference)
+        authority.retained_materialization_by_ref_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            reference,
+        )
     }
 }
 

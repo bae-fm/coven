@@ -93,8 +93,7 @@ impl DatabaseTestTransaction<'_, '_> {
         store_dir: &coven_foundation::store_dir::StoreDir,
         activation: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<usize, DbError> {
-        crate::MergeMaterializationTransaction::new(self.transaction, store_dir)
-            .retire_circle_bootstrap_coverage(activation)
+        crate::store::test_retire_circle_bootstrap_coverage(self.transaction, store_dir, activation)
     }
 
     pub fn enqueue_blob_upload(

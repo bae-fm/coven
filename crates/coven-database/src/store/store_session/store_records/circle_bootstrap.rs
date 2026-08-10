@@ -108,7 +108,7 @@ impl StoreTransaction<'_, '_> {
         registrations: &mut dyn crate::store::verified_store_authority::VerifiedRegistrationLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        self.records
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
             .seed_stream_activation_index_from_retained(registrations, root)
     }
 
@@ -151,7 +151,7 @@ impl StoreTransaction<'_, '_> {
         bootstrap: &coven_protocol::circle_activation::VerifiedCircleImage,
         activation_control: &coven_protocol::circle::PreparedCircleControl,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.transaction;
         let circle_id = bootstrap.circle_id().to_string();
         let control_coord = serde_json::to_string(bootstrap.control())
             .map_err(|error| DbError::context("serialize Circle bootstrap control", error))?;
@@ -246,7 +246,7 @@ impl StoreTransaction<'_, '_> {
                     DbError::context("parse prior Circle bootstrap coverage", error)
                 })?;
             let prior_activation = StoreDatabase::verified_circle_activation_on(
-                self.records,
+                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 authority,
                 root,
                 bootstrap.circle_id(),
@@ -257,7 +257,10 @@ impl StoreTransaction<'_, '_> {
             })?;
             if !bootstrap.reference().coverage.covers(&prior_cut)
                 || !StoreDatabase::verified_circle_control_covers_on(
-                    self.records,
+                    crate::store::store_session::StoreRecords::new(
+                        self.transaction,
+                        self.store_dir,
+                    ),
                     authority,
                     root,
                     bootstrap.circle_id(),
@@ -303,7 +306,7 @@ impl StoreTransaction<'_, '_> {
         self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.transaction;
         let owner_key = circle_bootstrap_coverage_owner_key(circle_id);
         let image_hash = conn
             .query_row(
@@ -337,7 +340,7 @@ impl StoreTransaction<'_, '_> {
 
     pub(crate) fn clear_imported_circle_bootstrap_coverage(self) -> Result<(), DbError> {
         let circle_ids = crate::query_mapped_rows(
-            self.records.conn,
+            self.transaction,
             "SELECT circle_id FROM circle_bootstrap_coverage ORDER BY circle_id",
             [],
             |row| row.get::<_, String>(0),
@@ -347,7 +350,7 @@ impl StoreTransaction<'_, '_> {
                 .parse()
                 .map_err(|error| DbError::context("parse imported Circle bootstrap id", error))?;
             let owner_key = circle_bootstrap_coverage_owner_key(circle_id);
-            if !payload_owner_claims_on(self.records.conn, &owner_key)?.is_empty() {
+            if !payload_owner_claims_on(self.transaction, &owner_key)?.is_empty() {
                 return Err(DbError::Message(format!(
                     "imported Circle {circle_id} bootstrap unexpectedly carries local payload claims"
                 )));

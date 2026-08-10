@@ -33,8 +33,6 @@ use crate::blob_records::{
     validate_stored_row_binding_on,
 };
 use crate::local_blob_cleanup_intents::intents_from_changes as local_blob_cleanup_intents;
-use coven_foundation::store_dir::StoreDir;
-
 use crate::remote_object_records::validate_remote_object_on;
 use crate::ReclaimCommitActivation;
 use crate::{
@@ -172,13 +170,10 @@ pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub(crate) fn new(
-        transaction: &'transaction rusqlite::Transaction<'connection>,
-        store_dir: &'transaction StoreDir,
+    pub(crate) fn from_store(
+        store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
     ) -> Self {
-        Self {
-            store: crate::store::store_session::StoreTransaction::new(transaction, store_dir),
-        }
+        Self { store }
     }
 
     pub(crate) fn circle_current_state_is_deleted(
@@ -364,6 +359,65 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         }
         Ok(installed)
     }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_record_verified_circle_activations(
+    transaction: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
+) -> Result<(), DbError> {
+    MergeMaterializationTransaction::from_store(crate::store::store_session::StoreTransaction::new(
+        transaction,
+        store_dir,
+    ))
+    .record_verified_circle_activations(commit, activations)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_apply_changeset<B: AsRef<[u8]>>(
+    transaction: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    changeset: ValidatedChangeset<B>,
+    policy: IncomingTimestampPolicy,
+) -> Result<ApplyResult, DbError> {
+    MergeMaterializationTransaction::from_store(crate::store::store_session::StoreTransaction::new(
+        transaction,
+        store_dir,
+    ))
+    .apply_changeset(changeset, policy)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_retire_circle_bootstrap_coverage(
+    transaction: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    activation: &coven_protocol::store_commit::StoreBatchCommitRef,
+) -> Result<usize, DbError> {
+    MergeMaterializationTransaction::from_store(crate::store::store_session::StoreTransaction::new(
+        transaction,
+        store_dir,
+    ))
+    .retire_circle_bootstrap_coverage(activation)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn test_install_winning_blob_bindings(
+    transaction: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    gates: &crate::Gates,
+    synced_tables: &[SyncedTable],
+    package: &AudiencePackage,
+    activation: &BlobActivation,
+    winning_rows: &[WinningRow],
+) -> Result<usize, DbError> {
+    MergeMaterializationTransaction::from_store(crate::store::store_session::StoreTransaction::new(
+        transaction,
+        store_dir,
+    ))
+    .install_winning_blob_bindings(gates, synced_tables, package, activation, winning_rows)
 }
 
 #[cfg(test)]

@@ -303,7 +303,7 @@ impl<'store> PayloadWriter<'store> {
 
 impl<'store, 'connection> StoreTransaction<'store, 'connection> {
     pub(crate) fn payload_writer(self) -> PayloadWriter<'store> {
-        PayloadStore::new(self.transaction, self.records.store_dir).writer()
+        PayloadStore::new(self.transaction, self.store_dir).writer()
     }
 }
 
@@ -752,22 +752,18 @@ impl StoreDatabase {
 #[cfg(any(test, feature = "test-utils"))]
 impl super::StoreSession<'_> {
     fn owed_payload_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        payload_cleanup_hashes_on(self.records.conn)
+        payload_cleanup_hashes_on(self.conn)
     }
 
     fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
-        Ok(payload_owner_claims_on(self.records.conn, owner_key)?
+        Ok(payload_owner_claims_on(self.conn, owner_key)?
             .into_iter()
             .collect())
     }
 
     fn install_payload_for_test(&self, bytes: &[u8]) -> Result<ObjectHash, DbError> {
-        let transaction = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let hash = PayloadStore::new(&transaction, self.records.store_dir)
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let hash = PayloadStore::new(&transaction, self.store_dir)
             .install(bytes)
             .map_err(DbError::from)?;
         transaction.commit().map_err(DbError::from)?;
@@ -775,24 +771,25 @@ impl super::StoreSession<'_> {
     }
 
     fn payload_for_test(&self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
-        self.records.payload(hash).map_err(DbError::from)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .payload(hash)
+            .map_err(DbError::from)
     }
 
     fn has_payload_for_test(&self, hash: ObjectHash) -> Result<bool, DbError> {
-        Ok(PayloadStore::new(self.records.conn, self.records.store_dir)
+        Ok(PayloadStore::new(self.conn, self.store_dir)
             .stored(hash)
             .map_err(DbError::from)?
             .is_some())
     }
 
     fn corrupt_payload_for_test(&self, hash: ObjectHash, bytes: &[u8]) -> Result<(), DbError> {
-        match PayloadStore::new(self.records.conn, self.records.store_dir)
+        match PayloadStore::new(self.conn, self.store_dir)
             .stored(hash)
             .map_err(DbError::from)?
         {
             Some(StoredPayload::Inline(_)) => {
-                self.records
-                    .conn
+                self.conn
                     .execute(
                         "UPDATE payload_storage SET inline_bytes = ?2 WHERE payload_hash = ?1",
                         rusqlite::params![hash.to_string(), bytes],
@@ -800,7 +797,7 @@ impl super::StoreSession<'_> {
                     .map_err(DbError::from)?;
             }
             Some(StoredPayload::File { .. }) => {
-                std::fs::write(self.records.store_dir.payload_spool_path(hash), bytes)
+                std::fs::write(self.store_dir.payload_spool_path(hash), bytes)
                     .map_err(|error| DbError::context("corrupt test payload file", error))?;
             }
             None => {
@@ -813,13 +810,12 @@ impl super::StoreSession<'_> {
     }
 
     fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
-        match PayloadStore::new(self.records.conn, self.records.store_dir)
+        match PayloadStore::new(self.conn, self.store_dir)
             .stored(hash)
             .map_err(DbError::from)?
         {
             Some(StoredPayload::Inline(bytes)) => {
-                self.records
-                    .conn
+                self.conn
                     .execute(
                         "UPDATE payload_storage
                          SET storage = 'file', inline_bytes = NULL, file_size = ?2
@@ -827,7 +823,7 @@ impl super::StoreSession<'_> {
                         rusqlite::params![hash.to_string(), bytes.len() as i64],
                     )
                     .map_err(DbError::from)?;
-                match std::fs::remove_file(self.records.store_dir.payload_spool_path(hash)) {
+                match std::fs::remove_file(self.store_dir.payload_spool_path(hash)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => {
@@ -836,7 +832,7 @@ impl super::StoreSession<'_> {
                 }
             }
             Some(StoredPayload::File { .. }) => {
-                std::fs::remove_file(self.records.store_dir.payload_spool_path(hash))
+                std::fs::remove_file(self.store_dir.payload_spool_path(hash))
                     .map_err(|error| DbError::context("remove test payload file", error))?;
             }
             None => {

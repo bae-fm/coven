@@ -337,8 +337,8 @@ impl StoreSession<'_> {
         let verified_authority = &mut *self.verified_store_authority;
         let stamper = coven_protocol::hlc::UpdatedAtStamper::new(self.hlc.clone());
         let result = super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-            self.records.conn,
-            self.records.store_dir,
+            self.conn,
+            self.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,

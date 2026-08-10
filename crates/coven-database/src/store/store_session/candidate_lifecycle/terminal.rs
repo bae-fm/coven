@@ -7,9 +7,9 @@ impl StoreSession<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         write_id: &WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let (raw_status, raw_prepared): (String, Option<String>) = conn
             .query_row(
                 "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -92,7 +92,7 @@ impl StoreSession<'_> {
         head_nonactivation: coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
     ) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, Option<String>) = tx
             .query_row(
@@ -108,7 +108,7 @@ impl StoreSession<'_> {
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
             witness.validate().map_err(DbError::Message)?;
             if witness.original_position().commit() != &reference {
@@ -215,7 +215,7 @@ impl StoreSession<'_> {
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -234,7 +234,7 @@ impl StoreSession<'_> {
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let publication =
             store_transaction.prepared_merge_publication(verified_authority, &prepared)?;
         let root = store_transaction.required_root_authority(verified_authority)?;
@@ -258,7 +258,7 @@ impl StoreSession<'_> {
         }
         replace_prepared_merge_head_remote_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &publication.head_object,
             &winner,
             winner_prepared.reference(),

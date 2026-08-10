@@ -76,7 +76,6 @@ pub struct HostWriteBlobTransaction<'transaction, 'connection> {
 impl StoreSession<'_> {
     fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
         let stored = self
-            .records
             .conn
             .query_row(
                 "SELECT write_id, base, blob_facts FROM store_writes
@@ -105,7 +104,8 @@ impl StoreSession<'_> {
         let Some((write_id, base, blob_facts)) = stored else {
             return Ok(None);
         };
-        let partitions = self.records.store_write_partitions(&write_id)?;
+        let partitions = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .store_write_partitions(&write_id)?;
         Ok(Some(PreparedStoreWrite {
             write_id: WriteId::from_generated(write_id),
             partitions,
@@ -119,12 +119,11 @@ impl StoreSession<'_> {
 
 impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connection> {
     fn new(
-        transaction: &'transaction rusqlite::Transaction<'connection>,
-        store_dir: &'transaction coven_foundation::store_dir::StoreDir,
+        store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
         verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
     ) -> Self {
         Self {
-            store: crate::store::store_session::StoreTransaction::new(transaction, store_dir),
+            store,
             verified_authority,
         }
     }
@@ -948,8 +947,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let staged_files = match (moved_blob_exists, &blob_materialization) {
                 (false, _) => None,
                 (true, Some(AudienceBlobMoveMaterialization::Host(staging))) => {
-                    let mut blob_transaction =
-                        HostWriteBlobTransaction::new(&tx, store_dir, verified_authority);
+                    let mut blob_transaction = HostWriteBlobTransaction::new(
+                        crate::store::store_session::StoreTransaction::new(&tx, store_dir),
+                        verified_authority,
+                    );
                     Some(
                         staging
                             .stage_audience_move_blobs_on(

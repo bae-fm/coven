@@ -3,7 +3,7 @@ use crate::store::StoreSession;
 
 impl StoreSession<'_> {
     fn mark_candidate_cleanup_absent(&mut self, object: ExactObjectRef) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = remote_object_id(&object);
         let mut remote = load_remote_object_on(conn, object_id)?;
         if remote.cleanup_target() != Some(&object) {
@@ -21,9 +21,9 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Option<BlockedMergeCandidate>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let row: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -67,9 +67,9 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Option<PreparedMergeAbandonmentCandidates>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let raw_prepared: Option<String> = conn
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -123,7 +123,7 @@ impl StoreSession<'_> {
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         author_exclusion_activation_for_candidate_on(
             records,
             self.verified_store_authority,
@@ -140,7 +140,7 @@ impl StoreSession<'_> {
         nonactivation: BlockedMergeCandidateNonactivation,
     ) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -164,7 +164,7 @@ impl StoreSession<'_> {
             ));
         };
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate =
             store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
         store_transaction.begin_blocked_merge_candidate_nonactivation(
@@ -187,7 +187,7 @@ impl StoreSession<'_> {
         authority_nonactivation: BlockedMergeCandidateNonactivation,
     ) -> Result<WriteStatus, DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -224,7 +224,7 @@ impl StoreSession<'_> {
             ));
         }
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -289,9 +289,9 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<MergeAbandonmentState, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let raw_prepared: Option<String> = conn
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -336,7 +336,7 @@ impl StoreSession<'_> {
 
     fn resume_winning_merge_candidate(&mut self, write_id: WriteId) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -371,7 +371,7 @@ impl StoreSession<'_> {
             ));
         };
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -421,7 +421,7 @@ impl StoreSession<'_> {
 
     fn finish_lost_merge_abandonment(&mut self, write_id: WriteId) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -456,7 +456,7 @@ impl StoreSession<'_> {
             ));
         };
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -506,7 +506,7 @@ impl StoreSession<'_> {
         write_id: WriteId,
     ) -> Result<(), DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -541,7 +541,7 @@ impl StoreSession<'_> {
             ));
         };
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),

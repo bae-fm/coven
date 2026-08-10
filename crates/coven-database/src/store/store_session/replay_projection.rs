@@ -94,18 +94,20 @@ impl ReplayProjection {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let applied = MergeMaterializationTransaction::new(&transaction, &self.store_dir)
-            .apply_prepared_merge_materialization(
-                authority,
-                blob_decls,
-                gates,
-                synced_tables,
-                routing_key,
-                local_store_membership,
-                timestamp_policy,
-                Some(circle_bootstrap_cuts),
-                materialization,
-            )?;
+        let applied = MergeMaterializationTransaction::from_store(
+            crate::store::store_session::StoreTransaction::new(&transaction, &self.store_dir),
+        )
+        .apply_prepared_merge_materialization(
+            authority,
+            blob_decls,
+            gates,
+            synced_tables,
+            routing_key,
+            local_store_membership,
+            timestamp_policy,
+            Some(circle_bootstrap_cuts),
+            materialization,
+        )?;
         match applied.outcome {
             outcome @ coven_protocol::membership::ApplyOutcome::Applied(_) => {
                 transaction.commit().map_err(DbError::from)?;
@@ -144,8 +146,10 @@ impl ReplayProjection {
                         error,
                     )
                 })?;
-            let applied = MergeMaterializationTransaction::new(&transaction, &self.store_dir)
-                .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
+            let applied = MergeMaterializationTransaction::from_store(
+                crate::store::store_session::StoreTransaction::new(&transaction, &self.store_dir),
+            )
+            .apply_changeset(changeset, IncomingTimestampPolicy::LocallyAuthored)?;
             if applied.had_fk_violations || !applied.constraint_conflict_tables.is_empty() {
                 return Err(DbError::Message(format!(
                     "local replay write {} conflicts with accepted history",

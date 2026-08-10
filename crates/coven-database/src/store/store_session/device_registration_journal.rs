@@ -142,14 +142,13 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(records)?;
         record.require_installed_store_root(&root, subject)?;
         let expected = record.columns(subject)?;
         let existing: Option<PreparedLocalDeviceRegistrationRow> = self
-            .records
             .conn
             .query_row(
                 "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
@@ -176,7 +175,6 @@ impl StoreSession<'_> {
                 "local registration journal already owns different exact objects".to_string(),
             )),
             None => self
-                .records
                 .conn
                 .execute(
                     "INSERT INTO local_store_device_registration \
@@ -207,13 +205,9 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
@@ -335,13 +329,9 @@ impl StoreSession<'_> {
         activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
         subject: &str,
     ) -> Result<bool, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let objects = record.columns(subject)?;
@@ -495,9 +485,8 @@ impl StoreSession<'_> {
         &mut self,
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        let records = self.records;
-        self.records
-            .conn
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        self.conn
             .query_row(sql, [], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -587,11 +576,7 @@ impl StoreSession<'_> {
         initial_ack: StoreAckRef,
         initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration.value,
             registration.prepared.reference().clone(),

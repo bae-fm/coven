@@ -11,11 +11,7 @@ impl StoreSession<'_> {
         target_key: &str,
         value: &str,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         tx.execute(
             "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
             (journal_key, value),
@@ -43,14 +39,13 @@ impl StoreSession<'_> {
         journal_key: &str,
         value: &str,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
-        self.records
-            .conn
+        self.conn
             .execute(
                 "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
                 (journal_key, value),
             )
             .map_err(DbError::from)?;
-        let actual = crate::required_protocol_state_on(self.records.conn, journal_key)?;
+        let actual = crate::required_protocol_state_on(self.conn, journal_key)?;
         if actual != value {
             return Err(DbError::Message(
                 "Owner-promotion id is already bound to different candidate acceptance".to_string(),
@@ -67,12 +62,8 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .advance_owner_promotion_journal(
                 journal_key,
                 target_key,
@@ -92,18 +83,14 @@ impl StoreSession<'_> {
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let cleanup = super::candidate_records::begin_candidate_nonactivation_targets_on(
             &tx,
             &candidate,
             &objects,
             &nonactivation,
         )?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .advance_owner_promotion_journal(
                 journal_key,
                 target_key,
@@ -120,11 +107,7 @@ impl StoreSession<'_> {
         candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
         objects: &[coven_protocol::objects::ExactObjectRef],
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        super::candidate_records::candidate_cleanup_targets_on(
-            self.records.conn,
-            candidate,
-            objects,
-        )
+        super::candidate_records::candidate_cleanup_targets_on(self.conn, candidate, objects)
     }
 
     fn replace_failed_owner_promotion_journal(
@@ -135,11 +118,7 @@ impl StoreSession<'_> {
         previous_value: String,
         replacement_value: String,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",

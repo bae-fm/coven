@@ -13,7 +13,7 @@ impl StoreSession<'_> {
         &mut self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_store_snapshot_on(self.records.conn, self.records.store_dir, &authority)
+        load_outbound_store_snapshot_on(self.conn, self.store_dir, &authority)
     }
 
     fn stage_snapshot_publication(
@@ -25,23 +25,16 @@ impl StoreSession<'_> {
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let image_facts = crate::payload_store::write_payload_file_blocking(
-            &tx,
-            self.records.store_dir,
-            image.path(),
-        )
-        .map_err(|error| {
-            SnapshotImageError::Projection(format!("spool Store snapshot image: {error}"))
-        });
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let image_facts =
+            crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
+                .map_err(|error| {
+                    SnapshotImageError::Projection(format!("spool Store snapshot image: {error}"))
+                });
         let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             image_prepared.stored_bytes(),
         )
         .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
@@ -129,7 +122,7 @@ impl StoreSession<'_> {
             generation: meta.generation,
         };
         validate_snapshot_blob_plans_on(
-            self.records.conn,
+            self.conn,
             self.gates,
             self.synced_tables,
             &snapshot_owner,
@@ -167,17 +160,13 @@ impl StoreSession<'_> {
 
     fn latest_local_store_snapshot(&mut self) -> Result<Option<PublishedStoreSnapshot>, DbError> {
         let authority = self.local_store_authority()?;
-        load_published_store_snapshot_on(self.records.conn, &authority)
+        load_published_store_snapshot_on(self.conn, &authority)
     }
 
     fn complete_snapshot_publication(&mut self, accepted: StoreSnapshotRef) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let outbound = load_outbound_store_snapshot_on(&tx, self.records.store_dir, &authority)?
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let outbound = load_outbound_store_snapshot_on(&tx, self.store_dir, &authority)?
             .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
         if outbound.reference != accepted {
             return Err(DbError::Message(
@@ -191,7 +180,7 @@ impl StoreSession<'_> {
         };
         persist_snapshot_image_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &outbound.meta.value.image,
             snapshot_owner,
             "Store snapshot image",
@@ -236,7 +225,6 @@ impl StoreSession<'_> {
 
     fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
         let mut statement = self
-            .records
             .conn
             .prepare("SELECT path FROM snapshot_blob_spool_cleanup ORDER BY path")
             .map_err(DbError::from)?;
@@ -250,7 +238,6 @@ impl StoreSession<'_> {
 
     fn complete_snapshot_blob_spool_cleanup(&self, path: &str) -> Result<(), DbError> {
         let deleted = self
-            .records
             .conn
             .execute(
                 "DELETE FROM snapshot_blob_spool_cleanup WHERE path = ?1",

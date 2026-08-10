@@ -37,9 +37,8 @@ impl StoreSession<'_> {
         &mut self,
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let raw_prepared: String = self
-            .records
             .conn
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -58,7 +57,6 @@ impl StoreSession<'_> {
             .map(|object| (remote_object_id(object).to_string(), None))
             .collect::<Vec<_>>();
         let mut statement = self
-            .records
             .conn
             .prepare(
                 "SELECT remote_object_id, spool_path
@@ -81,11 +79,7 @@ impl StoreSession<'_> {
                     .parse()
                     .map_err(|error| DbError::context("prepared remote object id", error))?;
                 Ok(PreparedRemoteObject {
-                    closed: crate::reopen_remote_object_on(
-                        self.records.conn,
-                        self.records.store_dir,
-                        id,
-                    )?,
+                    closed: crate::reopen_remote_object_on(self.conn, self.store_dir, id)?,
                     spool_path: spool_path.map(PathBuf::from),
                 })
             })
@@ -96,11 +90,11 @@ impl StoreSession<'_> {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        mark_remote_object_uploaded_on(self.records.conn, expected)
+        mark_remote_object_uploaded_on(self.conn, expected)
     }
 
     fn uploaded_blob_spools(&self) -> Result<Vec<UploadedBlobSpool>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let mut statement = conn
             .prepare(
                 "SELECT write_id, remote_object_id, spool_path
@@ -138,7 +132,7 @@ impl StoreSession<'_> {
     }
 
     fn clear_uploaded_blob_spool(&self, spool: UploadedBlobSpool) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let remote = load_remote_object_on(conn, spool.remote_object_id)?;
         if !remote_object_is_uploaded(&remote) {
             return Err(DbError::Message(format!(
@@ -185,11 +179,11 @@ impl StoreSession<'_> {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
-        mark_reusable_retained_authority_uploaded_on(self.records.conn, expected)
+        mark_reusable_retained_authority_uploaded_on(self.conn, expected)
     }
 
     fn mark_candidate_commit_uploaded(&self, commit: StoreBatchCommitRef) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = remote_object_id(&commit.object);
         let current = load_remote_object_on(conn, object_id)?;
         if matches!(
@@ -223,7 +217,7 @@ impl StoreSession<'_> {
         &self,
         head: coven_protocol::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = remote_object_id(&head.object);
         let current = load_remote_object_on(conn, object_id)?;
         if !matches!(
@@ -250,7 +244,7 @@ impl StoreSession<'_> {
         &self,
         write_id: &WriteId,
     ) -> Result<PreparedAudienceObjects, DbError> {
-        load_prepared_audience_objects_on(self.records.conn, self.records.store_dir, write_id)
+        load_prepared_audience_objects_on(self.conn, self.store_dir, write_id)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -258,7 +252,7 @@ impl StoreSession<'_> {
         &self,
         object: ExactObjectRef,
     ) -> Result<Option<coven_protocol::remote_object::ProtocolInertObject>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = remote_object_id(&object);
         let exists: bool = conn
             .query_row(

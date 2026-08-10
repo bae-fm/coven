@@ -94,9 +94,16 @@ pub use materialization_models::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
     VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
 };
+#[cfg(test)]
+pub(crate) use merge_materialization_transaction::test_install_winning_blob_bindings;
 pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
 #[cfg(any(test, feature = "test-utils"))]
 pub use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use merge_materialization_transaction::{
+    test_apply_changeset, test_record_verified_circle_activations,
+    test_retire_circle_bootstrap_coverage,
+};
 pub use merge_materialization_transaction::{
     IncomingTimestampPolicy, TableSchema, ValidatedChangeset, WinningRow,
 };

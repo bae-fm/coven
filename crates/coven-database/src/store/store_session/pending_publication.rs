@@ -44,13 +44,9 @@ impl StoreSession<'_> {
         let stream_id = stream_id.to_string();
         Ok((
             crate::store::materialized_commit_index::latest_position_for_device_on(
-                self.records.conn,
-                &stream_id,
+                self.conn, &stream_id,
             )?,
-            crate::store::materialized_commit_index::materialized_frontier_on(
-                self.records.conn,
-                None,
-            )?,
+            crate::store::materialized_commit_index::materialized_frontier_on(self.conn, None)?,
         ))
     }
 
@@ -58,16 +54,12 @@ impl StoreSession<'_> {
         &self,
         stream_id: &str,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        crate::store::materialized_commit_index::latest_position_for_device_on(
-            self.records.conn,
-            stream_id,
-        )
+        crate::store::materialized_commit_index::latest_position_for_device_on(self.conn, stream_id)
     }
 
     fn oldest_prepared_store_write(&mut self) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let row = self
-            .records
             .conn
             .query_row(
                 "SELECT write_id, base, prepared FROM store_writes
@@ -108,7 +100,6 @@ impl StoreSession<'_> {
             }
             let registration_ref = &unverified_commit.author_registration;
             let stored_registration_ref: String = self
-                .records
                 .conn
                 .query_row(
                     "SELECT registration_object \
@@ -168,11 +159,8 @@ impl StoreSession<'_> {
                 ));
             }
             let partitions = records.store_write_partitions(write_id.as_str())?;
-            let audiences = load_prepared_audience_objects_on(
-                self.records.conn,
-                self.records.store_dir,
-                &write_id,
-            )?;
+            let audiences =
+                load_prepared_audience_objects_on(self.conn, self.store_dir, &write_id)?;
             let graph_commit = match graph_commit {
                 Some(graph_commit) => {
                     let candidate_head = match &prepared {

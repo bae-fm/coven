@@ -10,50 +10,27 @@ use coven_protocol::store_commit::{
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
 
-use super::store_device_state::{
-    load_declared_store_device_state_on, load_store_device_exclusion_freezes_on,
-    store_device_state_for_history_cut_on,
-};
 use super::*;
 
 impl StoreSession<'_> {
     fn materialized_frontier(&mut self) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
-        materialized_frontier_on(self.records.conn, None)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .materialized_frontier()
     }
 
     fn retained_merge_replay_inputs(
         &mut self,
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.verified_store_authority
-            .retained_replay_inputs_on(self.records, &root)
+        self.verified_store_authority.retained_replay_inputs_on(
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+            &root,
+        )
     }
 
     fn retained_merge_materialization_refs(&mut self) -> Result<Vec<StoreBatchCommitRef>, DbError> {
-        let mut statement = self
-            .records
-            .conn
-            .prepare(
-                "SELECT device_id, seq, commit_ref
-                 FROM retained_merge_materializations
-                 ORDER BY device_id, seq",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        rows.map(|row| {
-            let (stream_id, sequence, encoded_ref) = row.map_err(DbError::from)?;
-            let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;
-            parse_stored_commit_ref(&stream_id, sequence, &encoded_ref)
-        })
-        .collect()
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .retained_merge_materialization_refs()
     }
 
     fn retained_merge_replay_inputs_with_verified_commits(
@@ -62,7 +39,11 @@ impl StoreSession<'_> {
         verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.verified_store_authority
-            .retained_replay_inputs_with_verified_commits_on(self.records, &root, &verified)
+            .retained_replay_inputs_with_verified_commits_on(
+                crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+                &root,
+                &verified,
+            )
     }
 
     fn retained_merge_materialization(
@@ -71,7 +52,10 @@ impl StoreSession<'_> {
         reference: StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.verified_store_authority
-            .retained_replay_inputs_on(self.records, &root)?
+            .retained_replay_inputs_on(
+                crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+                &root,
+            )?
             .into_iter()
             .find(|materialization| materialization.commit_ref() == &reference)
             .ok_or_else(|| {
@@ -86,7 +70,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let retained = authority.retained_replay_inputs_on(records, &root)?;
         let by_reference = retained
@@ -127,47 +111,29 @@ impl StoreSession<'_> {
         stream_id: String,
         sequence: u64,
     ) -> Result<Option<StoreBatchCommitRef>, DbError> {
-        materialized_commit_ref_on(self.records.conn, &stream_id, sequence)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .materialized_commit_ref(&stream_id, sequence)
     }
 
     fn snapshot_coverage_frontier(&mut self) -> Result<CommitFrontier, DbError> {
-        let mut stmt = self
-            .records
-            .conn
-            .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
-            .map_err(DbError::from)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        let mut frontier = BTreeMap::new();
-        for row in rows {
-            let (device_id, seq, reference) = row.map_err(DbError::from)?;
-            let seq = Database::sequence_from_sqlite(&device_id, seq)?;
-            let reference = parse_stored_commit_ref(&device_id, seq, &reference)?;
-            frontier.insert(device_id.clone(), reference);
-        }
-        CommitFrontier::from_refs(frontier)
-            .map_err(|error| DbError::context("snapshot coverage frontier", error))
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .snapshot_coverage_frontier()
     }
 
     fn store_device_state_for_history_cut(
         &mut self,
         cut: StoreHistoryCut,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        store_device_state_for_history_cut_on(self.records.conn, &cut)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .store_device_state_for_history_cut(&cut)
     }
 
     fn resolved_store_device_state(
         &mut self,
         reference: StoreDeviceStateRef,
     ) -> Result<ResolvedStoreDeviceState, DbError> {
-        load_declared_store_device_state_on(self.records.conn, &reference)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .declared_store_device_state(&reference)
     }
 
     fn store_device_exclusion_freezes(&mut self) -> Result<Vec<StoreDeviceProposalAck>, DbError> {
@@ -177,17 +143,14 @@ impl StoreSession<'_> {
             .ok_or_else(|| {
                 DbError::Message("Store root is absent while loading exclusion freezes".to_string())
             })?;
-        Ok(
-            load_store_device_exclusion_freezes_on(self.records.conn, &root)?
-                .into_values()
-                .collect(),
-        )
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .store_device_exclusion_freezes(&root)
     }
 
     fn activated_store_device_registration_records(
         &mut self,
     ) -> Result<Vec<ReferencedStoreDeviceRegistration>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -195,53 +158,26 @@ impl StoreSession<'_> {
             .ok_or_else(|| {
                 DbError::Message("Store root is absent while loading activated devices".to_string())
             })?;
-        let mut statement = self
-            .records
-            .conn
-            .prepare(
-                "SELECT device_id, registration_hash, registration_object
-                 FROM store_device_registration_activations ORDER BY device_id",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        rows.map(|row| {
-            let (device_id, registration_hash, object) = row.map_err(DbError::from)?;
-            let device_id = device_id
-                .parse()
-                .map_err(|error| DbError::context("activated Store device id", error))?;
-            let registration_hash = registration_hash.parse().map_err(|error| {
-                DbError::context("activated Store device registration hash", error)
-            })?;
-            let reference: StoreDeviceRegistrationRef =
-                serde_json::from_str(&object).map_err(|error| {
-                    DbError::context("activated Store device exact reference", error)
-                })?;
-            if reference.device_id != device_id || reference.registration_hash != registration_hash
-            {
-                return Err(DbError::Message(
-                    "activated Store registration columns differ from its exact reference"
-                        .to_string(),
-                ));
-            }
-            let registration = self
-                .verified_store_authority
-                .activated_registration_on(records, &root, &reference)?;
-            ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(|error| {
-                DbError::context(
-                    format!("activated Store device registration {device_id} exact reference"),
-                    error,
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .activated_registration_references()?
+            .into_iter()
+            .map(|reference| {
+                let device_id = reference.device_id;
+                let registration = self
+                    .verified_store_authority
+                    .activated_registration_on(records, &root, &reference)?;
+                ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(
+                    |error| {
+                        DbError::context(
+                            format!(
+                                "activated Store device registration {device_id} exact reference"
+                            ),
+                            error,
+                        )
+                    },
                 )
             })
-        })
-        .collect::<Result<Vec<_>, DbError>>()
+            .collect::<Result<Vec<_>, DbError>>()
     }
 
     fn activated_store_device_registration(
@@ -257,7 +193,7 @@ impl StoreSession<'_> {
                 )
             })?;
         let registration = self.verified_store_authority.activated_registration_on(
-            self.records,
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
             &root,
             &reference,
         )?;
@@ -268,7 +204,8 @@ impl StoreSession<'_> {
     fn local_activated_registration_ref(
         &mut self,
     ) -> Result<Option<StoreDeviceRegistrationRef>, DbError> {
-        local_activated_registration_ref_on(self.records.conn)
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .local_activated_registration_ref()
     }
 
     fn activated_store_device_registration_with_authority(
@@ -276,23 +213,12 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let registration = self
             .verified_store_authority
             .activated_registration_on(records, &root, &reference)?;
-        let authority: String = self
-            .records
-            .conn
-            .query_row(
-                "SELECT activation_authority FROM store_device_registration_activations \
-                 WHERE device_id = ?1 AND registration_hash = ?2",
-                (
-                    reference.device_id.to_string(),
-                    reference.registration_hash.to_string(),
-                ),
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
+        let authority = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .activated_registration_authority(&reference)?;
         let authority = serde_json::from_str(&authority)
             .map_err(|error| DbError::context("activated Store registration authority", error))?;
         let registration = ReferencedStoreDeviceRegistration::verified(reference, registration)
@@ -305,7 +231,7 @@ impl StoreSession<'_> {
         &mut self,
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -315,17 +241,8 @@ impl StoreSession<'_> {
                     "Store root is absent while loading an activated device".to_string(),
                 )
             })?;
-        let stored: Option<(String, String)> = self
-            .records
-            .conn
-            .query_row(
-                "SELECT registration_object, activation_authority \
-                 FROM store_device_registration_activations WHERE device_id = ?1",
-                [device_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
+        let stored = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .activated_registration_row_for_device(device_id)?;
         let Some((reference, authority)) = stored else {
             return Ok(None);
         };

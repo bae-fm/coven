@@ -59,8 +59,13 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             .map_err(|error| DbError::context("prepared Store write status", error))?;
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Store write", error))?;
-        let exclusion_candidate =
-            state.prepared_merge_candidate_on(self.store.records, &prepared)?;
+        let exclusion_candidate = state.prepared_merge_candidate_on(
+            crate::store::store_session::StoreRecords::new(
+                self.store.transaction,
+                self.store.store_dir,
+            ),
+            &prepared,
+        )?;
         if store_transaction
             .author_exclusion_activation_for_candidate(
                 state,
@@ -134,14 +139,20 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         {
             let root = state.root().clone();
             let candidate = state.prepared_merge_candidate_parts_on(
-                self.store.records,
+                crate::store::store_session::StoreRecords::new(
+                    self.store.transaction,
+                    self.store.store_dir,
+                ),
                 candidate_commit.semantic_bytes(),
                 candidate_commit.prepared().reference(),
                 candidate_head.semantic_bytes(),
                 candidate_head.prepared().reference(),
             )?;
             let authority = state.prepared_merge_candidate_parts_on(
-                self.store.records,
+                crate::store::store_session::StoreRecords::new(
+                    self.store.transaction,
+                    self.store.store_dir,
+                ),
                 authority_commit.semantic_bytes(),
                 authority_commit.prepared().reference(),
                 authority_head.semantic_bytes(),
@@ -160,7 +171,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             }
             let registration = super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
                 state,
-                self.store.records,
+                crate::store::store_session::StoreRecords::new(self.store.transaction, self.store.store_dir),
                 &root,
                 &authority.commit.author_registration,
             )?;
@@ -200,18 +211,18 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 true,
                 &[],
             )?;
-            let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+            let retained = MergeMaterializationTransaction::from_store(self.store)
                 .record_materialized_merge_commit(
-                state,
-                &root,
-                &authority.commit,
-                &[],
-                &authority.head,
-                &authority.head_object,
-                authority_history_evidence,
-                &[],
-                None,
-            )?;
+                    state,
+                    &root,
+                    &authority.commit,
+                    &[],
+                    &authority.head,
+                    &authority.head_object,
+                    authority_history_evidence,
+                    &[],
+                    None,
+                )?;
             state.insert_verified(retained)?;
             let mut completed_preparation = prepared.clone();
             let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
@@ -272,7 +283,10 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let registration =
             super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
                 state,
-                self.store.records,
+                crate::store::store_session::StoreRecords::new(
+                    self.store.transaction,
+                    self.store.store_dir,
+                ),
                 &root,
                 &unverified.author_registration,
             )?;
@@ -325,8 +339,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 "prepared write {write_id} retains {remaining_spools} uploaded blob spool(s)"
             )));
         }
-        let audiences =
-            load_prepared_audience_objects_on(tx, self.store.records.store_dir, &write_id)?;
+        let audiences = load_prepared_audience_objects_on(tx, self.store.store_dir, &write_id)?;
         let retained_packages = audiences
             .packages
             .iter()
@@ -376,8 +389,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             coord: commit_ref.coord.clone(),
         };
         let apply_schema = crate::TableSchema::for_apply(tx, synced_tables, gates)?;
-        let store_transaction =
-            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
+        let store_transaction = MergeMaterializationTransaction::from_store(self.store);
         let cloud_outbox = CloudOutboxRecords::new(tx);
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
@@ -463,7 +475,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             [write_id.as_str()],
         )
         .map_err(DbError::from)?;
-        let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+        let retained = MergeMaterializationTransaction::from_store(self.store)
             .record_materialized_merge_commit(
                 state,
                 &root,
@@ -529,7 +541,7 @@ impl StoreSession<'_> {
         nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
     ) -> Result<WriteStatus, DbError> {
         let verified_authority = &mut *self.verified_store_authority;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, raw_prepared): (String, String) = tx
             .query_row(
@@ -548,7 +560,7 @@ impl StoreSession<'_> {
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         let prepared_candidate =
             store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
         let publication =

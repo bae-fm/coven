@@ -4,7 +4,6 @@ use coven_protocol::store_commit::{
     StoreBatchCommit, StoreCommitCoord, StoreDeviceRegistration,
     StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin, VerifiedStoreBatchCommit,
 };
-use rusqlite::OptionalExtension;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,7 +90,7 @@ impl StoreSession<'_> {
                 "Owner recovery publication requires created registration objects".into(),
             ));
         }
-        let records = self.records;
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(records)?;
@@ -238,48 +237,14 @@ impl StoreSession<'_> {
         let registration_hash = registration_hash.to_string();
         let encoded = serde_json::to_string(&durable)
             .map_err(|error| DbError::context("serialize Owner recovery publication", error))?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO local_owner_recovery_publication
-                 (singleton, registration_hash, publication)
-             VALUES (1, ?1, ?2)
-             ON CONFLICT(singleton) DO NOTHING",
-            (&registration_hash, &encoded),
-        )
-        .map_err(DbError::from)?;
-        let stored: (String, String) = tx
-            .query_row(
-                "SELECT registration_hash, publication
-                 FROM local_owner_recovery_publication WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
-        if stored != (registration_hash, encoded) {
-            return Err(DbError::Message(
-                "Owner recovery publication journal owns different exact objects".into(),
-            ));
-        }
-        tx.commit().map_err(DbError::from)?;
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .stage_owner_recovery_publication(&registration_hash, &encoded)?;
         Ok(verified)
     }
 
     fn owner_recovery_publication(&mut self) -> Result<Option<OwnerRecoveryPublication>, DbError> {
-        let stored: Option<(String, String)> = self
-            .records
-            .conn
-            .query_row(
-                "SELECT registration_hash, publication
-                 FROM local_owner_recovery_publication WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?;
+        let stored = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .owner_recovery_publication_row()?;
         stored
             .map(|(registration_hash, encoded)| {
                 let durable = serde_json::from_str(&encoded)

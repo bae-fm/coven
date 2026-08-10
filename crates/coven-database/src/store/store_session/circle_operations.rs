@@ -9,7 +9,7 @@ impl StoreSession<'_> {
     fn circle_operations(
         &self,
     ) -> Result<Vec<coven_protocol::circle::CircleOperationInfo>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let rows = crate::query_mapped_rows(
             conn,
             "SELECT operation_id, circle_id, prepared, phase
@@ -51,7 +51,7 @@ impl StoreSession<'_> {
         identity_pubkey: &str,
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::Circle>, DbError> {
-        Ok(circle_current_states_on(self.records.conn)?
+        Ok(circle_current_states_on(self.conn)?
             .into_iter()
             .map(|state| {
                 let (name, role) = state.display(identity_pubkey);
@@ -71,7 +71,7 @@ impl StoreSession<'_> {
         identity_pubkey: &str,
         store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleMemberInfo>, DbError> {
-        let state = circle_current_state_on(self.records.conn, circle_id)?
+        let state = circle_current_state_on(self.conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
         let Some((_current, access, roster, _metadata)) = state.active() else {
             return Err(DbError::Message(format!(
@@ -111,7 +111,7 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let state = circle_current_state_on(self.records.conn, circle_id)?
+        let state = circle_current_state_on(self.conn, circle_id)?
             .ok_or_else(|| DbError::Message(format!("Circle {circle_id} has no current state")))?;
         let authoring =
             authoring(&state).ok_or_else(|| DbError::Message(missing_authoring(circle_id)))?;
@@ -119,7 +119,7 @@ impl StoreSession<'_> {
             return Err(DbError::Message(foreign_identity(circle_id)));
         }
         let activated_commit = super::circle_authority::circle_activation_commit_ref_on(
-            self.records.conn,
+            self.conn,
             circle_id,
             &authoring.control.coord,
         )?
@@ -135,7 +135,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<Vec<coven_protocol::circle::CircleControlCoord>>, DbError> {
-        Ok(circle_current_state_on(self.records.conn, circle_id)?
+        Ok(circle_current_state_on(self.conn, circle_id)?
             .and_then(|state| state.conflict_branches()))
     }
 
@@ -143,8 +143,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
-        Ok(circle_current_state_on(self.records.conn, circle_id)?
-            .is_some_and(|state| state.is_deleted()))
+        Ok(circle_current_state_on(self.conn, circle_id)?.is_some_and(|state| state.is_deleted()))
     }
 
     fn current_circle_control(
@@ -152,7 +151,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
         Ok(
-            circle_current_state_on(self.records.conn, circle_id)?.and_then(|state| {
+            circle_current_state_on(self.conn, circle_id)?.and_then(|state| {
                 state
                     .authoring_state()
                     .map(|authoring| authoring.control.coord.clone())
@@ -163,7 +162,7 @@ impl StoreSession<'_> {
     fn closing_circle_controls(
         &self,
     ) -> Result<Vec<coven_protocol::circle::PreparedCircleControl>, DbError> {
-        Ok(circle_current_states_on(self.records.conn)?
+        Ok(circle_current_states_on(self.conn)?
             .into_iter()
             .filter_map(|state| state.closing_control().cloned())
             .collect())
@@ -174,14 +173,14 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         expected_control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<coven_protocol::circle_activation::CircleEpochAccess, DbError> {
-        circle_publication_context_on(self.records.conn, circle_id, expected_control)
+        circle_publication_context_on(self.conn, circle_id, expected_control)
     }
 
     fn current_circle_partition_control(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<crate::CirclePartitionControl, DbError> {
-        crate::active_circle_control(self.records.conn, circle_id)
+        crate::active_circle_control(self.conn, circle_id)
             .map_err(|error| DbError::Message(error.to_string()))
     }
 
@@ -190,7 +189,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Option<coven_protocol::circle::CirclePublicationBlocked>, DbError> {
-        let Some(state) = circle_current_state_on(self.records.conn, circle_id)? else {
+        let Some(state) = circle_current_state_on(self.conn, circle_id)? else {
             return Ok(None);
         };
         Ok(state
@@ -207,11 +206,7 @@ impl StoreSession<'_> {
         &self,
         exclusions: &[coven_protocol::circle_activation::LocalCircleExclusion],
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         for exclusion in exclusions {
             record_circle_close_exclusion_on(&tx, exclusion)?;
         }
@@ -225,7 +220,7 @@ impl StoreSession<'_> {
         active_store_members: &std::collections::BTreeSet<String>,
     ) -> Result<Vec<coven_protocol::circle::CircleInfo>, DbError> {
         let mut circles = Vec::new();
-        for state in circle_current_states_on(self.records.conn)? {
+        for state in circle_current_states_on(self.conn)? {
             let circle_id = state.circle_id();
             if state.is_deleted() {
                 circles.push(coven_protocol::circle::CircleInfo::Deleted { id: circle_id });

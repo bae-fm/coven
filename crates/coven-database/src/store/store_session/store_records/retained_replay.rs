@@ -356,7 +356,9 @@ impl StoreTransaction<'_, '_> {
     pub(crate) fn generation_zero_replay_baseline(
         self,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        StoreDatabase::generation_zero_replay_baseline_on(self.records)
+        StoreDatabase::generation_zero_replay_baseline_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+        )
     }
 
     pub(crate) fn replay_baseline_image_bytes(
@@ -364,24 +366,28 @@ impl StoreTransaction<'_, '_> {
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<Vec<u8>, DbError> {
         baseline
-            .image_bytes(self.records.conn, self.records.store_dir)
+            .image_bytes(self.transaction, self.store_dir)
             .map_err(|error| DbError::Message(error.to_string()))
     }
 
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        self.records.claimed_circle_bootstrap_coverage_refs()
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+            .claimed_circle_bootstrap_coverage_refs()
     }
 
     pub(crate) fn verified_payload(self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
-        self.records.verified_payload(hash).map_err(DbError::from)
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+            .verified_payload(hash)
+            .map_err(DbError::from)
     }
 
     pub(crate) fn retained_materialization_rows(
         self,
     ) -> Result<Vec<(String, i64, String, String)>, DbError> {
-        self.records.retained_materialization_rows()
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+            .retained_materialization_rows()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -395,7 +401,8 @@ impl StoreTransaction<'_, '_> {
         expected_input_hash: &str,
         verified: Option<&coven_protocol::store_commit::VerifiedStoreBatchCommit>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let records = self.records;
+        let records =
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir);
         match verified {
             Some(verified) => {
                 StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
@@ -422,7 +429,8 @@ impl StoreTransaction<'_, '_> {
     }
 
     pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
-        self.records.circle_replay_controls()
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+            .circle_replay_controls()
     }
 
     pub(crate) fn circle_activation_commit_ref(
@@ -430,7 +438,7 @@ impl StoreTransaction<'_, '_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        self.records
+        crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
             .circle_activation_commit_ref(circle_id, control)
     }
 
@@ -440,7 +448,7 @@ impl StoreTransaction<'_, '_> {
         retracted_writes: &BTreeSet<coven_protocol::write::WriteId>,
     ) -> Result<Vec<crate::MergeReplayWriteOverlay>, DbError> {
         StoreDatabase::load_merge_replay_write_overlays_on(
-            self.records,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             active_accepted_writes,
             retracted_writes,
         )
@@ -453,7 +461,7 @@ impl StoreTransaction<'_, '_> {
     ) -> Result<crate::MembershipAuthorityBytes, DbError> {
         let object_id = coven_protocol::remote_object::remote_object_id(object);
         let remote =
-            crate::load_remote_object_on(self.records.conn, object_id).map_err(|error| {
+            crate::load_remote_object_on(self.transaction, object_id).map_err(|error| {
                 DbError::context(
                     format!("load retained Merge membership {kind} {object_id} for replay"),
                     error,
@@ -477,8 +485,10 @@ impl StoreTransaction<'_, '_> {
             ))
         })?;
         Ok(crate::MembershipAuthorityBytes::new(
-            self.records.payload(semantic_hash)?,
-            self.records.payload(stored_hash)?,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+                .payload(semantic_hash)?,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir)
+                .payload(stored_hash)?,
         ))
     }
 
@@ -486,7 +496,7 @@ impl StoreTransaction<'_, '_> {
         self,
         image: &[u8],
     ) -> Result<crate::store::ReplayProjection, DbError> {
-        crate::store::ReplayProjection::from_image(image, self.records.store_dir.clone())
+        crate::store::ReplayProjection::from_image(image, self.store_dir.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -503,7 +513,9 @@ impl StoreTransaction<'_, '_> {
         include_local_write_overlays: bool,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<crate::store::ReplayProjection, DbError> {
-        let root = authority.required_root_authority_on(self.records)?;
+        let root = authority.required_root_authority_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+        )?;
         if &root != expected_root {
             return Err(DbError::Message(
                 "retained replay projection belongs to another Store root".to_string(),
@@ -574,7 +586,7 @@ impl StoreTransaction<'_, '_> {
         let input_hash = ObjectHash::digest(&canonical_input);
         let verified =
             StoreDatabase::open_retained_merge_materialization_input_with_verified_commit_on(
-                self.records,
+                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 root,
                 registrations,
                 materialization.commit_ref(),
@@ -637,7 +649,7 @@ impl StoreTransaction<'_, '_> {
             &replay_owner,
         )?;
         crate::store::retained_merge_replay::validate_retained_merge_pin_closure_on(
-            self.records.conn,
+            self.transaction,
             &input,
             &replay_owner,
         )?;
@@ -656,8 +668,11 @@ impl StoreTransaction<'_, '_> {
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
         let conn = self.transaction;
-        let required =
-            StoreDatabase::snapshot_required_retained_refs(self.records, authority, root)?;
+        let required = StoreDatabase::snapshot_required_retained_refs(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+            authority,
+            root,
+        )?;
         let mut retained = Vec::with_capacity(required.len());
         for encoded in required {
             let reference: coven_protocol::store_commit::StoreBatchCommitRef =
@@ -665,7 +680,7 @@ impl StoreTransaction<'_, '_> {
                     DbError::context("snapshot author exclusion activation commit", error)
                 })?;
             StoreDatabase::load_retained_merge_materialization_by_ref_on(
-                self.records,
+                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 root,
                 authority,
                 &reference,
@@ -743,7 +758,7 @@ impl StoreTransaction<'_, '_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         coverage: BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.transaction;
         let mut required = coverage.into_values().collect::<BTreeSet<_>>();
         let retained = crate::query_mapped_rows(
             conn,
@@ -757,7 +772,7 @@ impl StoreTransaction<'_, '_> {
                     DbError::context("snapshot retained device-state authority", error)
                 })?;
             let materialization = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-                self.records,
+                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 root,
                 authority,
                 &reference,

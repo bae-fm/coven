@@ -8,12 +8,8 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .seed_stream_activation_index_from_retained(self.verified_store_authority, root)?;
         let rows = query_mapped_rows(
             &tx,
@@ -56,7 +52,10 @@ impl StoreSession<'_> {
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let retained = self
             .verified_store_authority
-            .retained_materialization_by_ref_on(self.records, reference)?;
+            .retained_materialization_by_ref_on(
+                crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+                reference,
+            )?;
         if retained.root() != root {
             return Err(DbError::Message(
                 "retained Merge materialization belongs to another Store root".to_string(),
@@ -69,10 +68,13 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.verified_store_authority
-            .retained_replay_inputs_on(self.records, root)?;
-        self.verified_store_authority
-            .circle_replay_epoch_index_on(self.records)
+        self.verified_store_authority.retained_replay_inputs_on(
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+            root,
+        )?;
+        self.verified_store_authority.circle_replay_epoch_index_on(
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
+        )
     }
 }
 
@@ -252,6 +254,8 @@ impl crate::store::store_session::StoreTransaction<'_, '_> {
         )>,
         DbError,
     > {
-        StoreDatabase::circle_bootstrap_replay_inputs_on(self.records)
+        StoreDatabase::circle_bootstrap_replay_inputs_on(
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
+        )
     }
 }

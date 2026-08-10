@@ -35,7 +35,7 @@ impl StoreTransaction<'_, '_> {
         routing_hash: crate::ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.transaction;
         let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: install.store_root.value.descriptor.store_root_id(),
             store_root_hash: install.store_root.semantic_hash,
@@ -87,7 +87,7 @@ impl StoreTransaction<'_, '_> {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            self.records,
+            crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             schema_version,
             routing_hash,
             install.stability.clone(),
@@ -114,7 +114,7 @@ impl StoreTransaction<'_, '_> {
         let mut verified_authority = crate::store::VerifiedStoreAuthority::default();
         for selected in circle_installs {
             let activation = StoreDatabase::verified_circle_activation_on(
-                self.records,
+                crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
                 &mut verified_authority,
                 root,
                 selected.image.circle_id(),
@@ -127,7 +127,7 @@ impl StoreTransaction<'_, '_> {
                 ))
             })?;
             crate::install_circle_bootstrap_image_on(
-                self.records.conn,
+                self.transaction,
                 synced_tables,
                 &selected.activation_commit,
                 &selected.image,

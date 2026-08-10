@@ -188,7 +188,7 @@ impl StoreSession<'_> {
         operation: DurableStoreDeviceExclusionOperation,
         remotes: Vec<ClosedRemoteObject>,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
             if active.operation_id() != operation.operation_id() {
@@ -211,7 +211,7 @@ impl StoreSession<'_> {
         for remote in &remotes {
             persist_exact_remote_object_on(
                 &tx,
-                self.records.store_dir,
+                self.store_dir,
                 remote,
                 "Store-device exclusion candidate object",
             )?;
@@ -224,7 +224,7 @@ impl StoreSession<'_> {
     fn active_outbound_store_device_exclusion(
         &mut self,
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
-        load_active_store_device_exclusion_on(self.records.conn)
+        load_active_store_device_exclusion_on(self.conn)
     }
 
     fn replace_outbound_store_device_exclusion_candidate(
@@ -233,7 +233,7 @@ impl StoreSession<'_> {
         next: DurableStoreDeviceExclusionOperation,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         let next_candidate = next.candidate().expect("validated candidate state");
@@ -242,7 +242,7 @@ impl StoreSession<'_> {
                 let (winner, prepared) = next_candidate.publication();
                 replace_prepared_merge_head_remote_on(
                     &tx,
-                    self.records.store_dir,
+                    self.store_dir,
                     &current.object,
                     winner,
                     prepared,
@@ -261,7 +261,7 @@ impl StoreSession<'_> {
         expected: Box<DurableStoreDeviceExclusionOperation>,
         next: Box<DurableStoreDeviceExclusionOperation>,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, expected.as_ref(), next.as_ref())?;
         let candidate = expected
@@ -290,7 +290,7 @@ impl StoreSession<'_> {
         next: DurableStoreDeviceExclusionOperation,
         remotes: Vec<ClosedRemoteObject>,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         for remote in &remotes {
@@ -331,7 +331,7 @@ impl StoreSession<'_> {
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
         nonactivation: coven_protocol::remote_object::CandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         let authority_id = remote_object_id(expected.object().object());
@@ -380,7 +380,7 @@ impl StoreSession<'_> {
         replacement_remotes: Vec<ClosedRemoteObject>,
         nonactivation: coven_protocol::remote_object::CandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         for remote in replacement_remotes
@@ -389,7 +389,7 @@ impl StoreSession<'_> {
         {
             persist_exact_remote_object_on(
                 &tx,
-                self.records.store_dir,
+                self.store_dir,
                 remote,
                 "replacement Store-device exclusion candidate object",
             )?;
@@ -440,7 +440,7 @@ impl StoreSession<'_> {
         &mut self,
         expected: &DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let current =
             load_store_device_exclusion_on(conn, expected.operation_id())?.ok_or_else(|| {
                 DbError::Message("Store-device exclusion journal is absent".to_string())
@@ -480,7 +480,7 @@ impl StoreSession<'_> {
         else {
             unreachable!("validated replacement state")
         };
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         let commit_id = remote_object_id(&losing.candidate.reference.object);
@@ -547,7 +547,7 @@ impl StoreSession<'_> {
         else {
             unreachable!("validated nonactivating state")
         };
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         let commit_id = remote_object_id(&candidate.reference.object);
@@ -606,7 +606,7 @@ impl StoreSession<'_> {
         expected: ClosedRemoteObject,
         candidate: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = expected.object_id();
         let current = load_remote_object_on(conn, object_id)?;
         let (
@@ -647,7 +647,7 @@ impl StoreSession<'_> {
     fn outbound_store_device_exclusion_operations(
         &mut self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let mut statement = conn
             .prepare(
                 "SELECT operation_id, state

@@ -14,7 +14,6 @@ pub enum BlockedWriteDiscard {
 impl StoreSession<'_> {
     fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
         let mut statement = self
-            .records
             .conn
             .prepare(
                 "SELECT write_id, status, affected_rows FROM store_writes
@@ -46,7 +45,7 @@ impl StoreSession<'_> {
     }
 
     fn set_write_status(&self, write_id: &WriteId, status: &WriteStatus) -> Result<(), DbError> {
-        Database::set_write_status_on(self.records.conn, write_id, status)
+        Database::set_write_status_on(self.conn, write_id, status)
     }
 
     fn block_write_if_unresolved(
@@ -55,7 +54,6 @@ impl StoreSession<'_> {
         block: coven_protocol::write::WriteBlock,
     ) -> Result<Option<WriteStatus>, DbError> {
         let raw: String = self
-            .records
             .conn
             .query_row(
                 "SELECT status FROM store_writes WHERE write_id = ?1",
@@ -70,7 +68,7 @@ impl StoreSession<'_> {
             WriteStatus::Resolved(_) => Ok(None),
             WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => {
                 let blocked = WriteStatus::Blocked(block);
-                Database::set_write_status_on(self.records.conn, write_id, &blocked)?;
+                Database::set_write_status_on(self.conn, write_id, &blocked)?;
                 Ok(Some(blocked))
             }
             state @ (WriteStatus::LocalOnly | WriteStatus::Published(_)) => Err(DbError::Message(
@@ -83,11 +81,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, prepared): (String, Option<String>) = tx
             .query_row(
                 "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
@@ -105,10 +99,9 @@ impl StoreSession<'_> {
                 serde_json::from_str(raw_prepared).map_err(|error| {
                     DbError::context(format!("blocked write {write_id} preparation"), error)
                 })?;
-            let candidate =
-                crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
-                    .prepared_merge_candidate(self.verified_store_authority, &prepared)?
-                    .reference;
+            let candidate = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
+                .prepared_merge_candidate(self.verified_store_authority, &prepared)?
+                .reference;
             let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
             if matches!(
                 remote,
@@ -155,11 +148,7 @@ impl StoreSession<'_> {
     }
 
     fn discard_blocked_write(&mut self, write_id: WriteId) -> Result<BlockedWriteDiscard, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let (raw_status, target_ordinal): (String, i64) = tx
             .query_row(
                 "SELECT status, ordinal FROM store_writes WHERE write_id = ?1",
@@ -214,7 +203,7 @@ impl StoreSession<'_> {
             )));
         }
         for (discarded_id, _) in &discarded {
-            if !crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+            if !crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
                 .unpublished_write_cleanup_is_complete(
                     self.verified_store_authority,
                     discarded_id,
@@ -229,22 +218,24 @@ impl StoreSession<'_> {
             self.gates,
         )?);
         let store_transaction =
-            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
+            crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         for (_, changeset_hash) in discarded.iter().rev() {
             let changeset = store_transaction.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
             let inverse = crate::ValidatedChangeset::new(inverse, schema.clone())
                 .map_err(|error| DbError::context("invalid blocked-write inverse", error))?;
-            MergeMaterializationTransaction::new(&tx, self.records.store_dir)
-                .apply_changeset_strict(inverse)
-                .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
+            MergeMaterializationTransaction::from_store(
+                crate::store::store_session::StoreTransaction::new(&tx, self.store_dir),
+            )
+            .apply_changeset_strict(inverse)
+            .map_err(|error| DbError::context("reverse blocked-write suffix", error))?;
         }
         let discarded_ids: Vec<_> = discarded
             .into_iter()
             .map(|(write_id, _)| write_id)
             .collect();
         let resolution = WriteResolution::Discarded;
-        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .resolve_unpublished_writes(
                 self.verified_store_authority,
                 &discarded_ids,

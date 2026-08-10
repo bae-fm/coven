@@ -65,14 +65,10 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         persist_circle_operation_objects_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,
@@ -96,11 +92,7 @@ impl StoreSession<'_> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let discarded = load_circle_operation_on(&tx, &superseded)?.ok_or_else(|| {
             DbError::Message("superseded Circle operation is absent from its slot".to_string())
         })?;
@@ -123,7 +115,7 @@ impl StoreSession<'_> {
         }
         persist_circle_operation_objects_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,
@@ -138,7 +130,7 @@ impl StoreSession<'_> {
         &mut self,
         operation_id: String,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
-        load_circle_operation_on(self.records.conn, &operation_id)
+        load_circle_operation_on(self.conn, &operation_id)
     }
 
     fn circle_operation_step(
@@ -146,12 +138,11 @@ impl StoreSession<'_> {
         operation_id: String,
         step: String,
     ) -> Result<PreparedExactObject, DbError> {
-        let journal =
-            load_circle_operation_on(self.records.conn, &operation_id)?.ok_or_else(|| {
-                DbError::Message(format!(
-                    "Circle operation {operation_id} disappeared before opening step {step:?}"
-                ))
-            })?;
+        let journal = load_circle_operation_on(self.conn, &operation_id)?.ok_or_else(|| {
+            DbError::Message(format!(
+                "Circle operation {operation_id} disappeared before opening step {step:?}"
+            ))
+        })?;
         let object = journal
             .operation()
             .prepared_objects
@@ -161,10 +152,10 @@ impl StoreSession<'_> {
                     "Circle operation {operation_id} has no payload for step {step:?}"
                 ))
             })?;
-        let stored_bytes = self
-            .records
-            .payload(object.stored_hash())
-            .map_err(DbError::from)?;
+        let stored_bytes =
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+                .payload(object.stored_hash())
+                .map_err(DbError::from)?;
         PreparedExactObject::new(object.clone(), stored_bytes)
             .map_err(|error| DbError::context(format!("Circle operation step {step:?}"), error))
     }
@@ -172,7 +163,7 @@ impl StoreSession<'_> {
     fn oldest_pending_circle_operation(
         &mut self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let Some(operation_id) = circle_operation_ids_in_phase_on(conn, |progress| {
             matches!(
                 progress,
@@ -187,7 +178,7 @@ impl StoreSession<'_> {
     }
 
     fn waiting_circle_operations(&mut self) -> Result<Vec<CircleOperationJournal>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let waiting = circle_operation_ids_in_phase_on(conn, |progress| {
             matches!(progress, CircleOperationProgress::WaitingForCloseResponses)
         })?;
@@ -208,11 +199,7 @@ impl StoreSession<'_> {
         operation_id: String,
         step: String,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!(
                 "Circle operation {operation_id} disappeared before its upload step"
@@ -262,11 +249,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let durable =
             load_circle_operation_on(&tx, journal.operation_id.as_str())?.ok_or_else(|| {
                 DbError::Message(format!(
@@ -287,7 +270,7 @@ impl StoreSession<'_> {
         }
         persist_circle_operation_objects_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &remotes,
             &prepared_objects,
             &owner,
@@ -321,7 +304,6 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let updated = self
-            .records
             .conn
             .execute(
                 "UPDATE circle_operations SET prepared = ?3
@@ -343,11 +325,7 @@ impl StoreSession<'_> {
         operation_id: String,
         block: coven_protocol::circle::CircleOperationBlock,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
@@ -359,11 +337,7 @@ impl StoreSession<'_> {
     }
 
     fn unblock_circle_operation(&mut self, operation_id: String) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
@@ -420,7 +394,10 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let author =
             super::verified_store_authority::VerifiedRegistrationLookup::activated_registration_on(
                 authority,
-                self.store.records,
+                crate::store::store_session::StoreRecords::new(
+                    self.store.transaction,
+                    self.store.store_dir,
+                ),
                 &root,
                 &unverified_commit.author_registration,
             )?;
@@ -520,7 +497,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 &[],
                 None,
             )?;
-            let retained = MergeMaterializationTransaction::new(tx, self.store.records.store_dir)
+            let retained = MergeMaterializationTransaction::from_store(self.store)
                 .record_verified_merge_materialization(authority, materialization)?;
             (
                 commit,
@@ -553,8 +530,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         if let Some(head_object_id) = head_object_id {
             object_ids.push(head_object_id);
         }
-        let store_transaction =
-            MergeMaterializationTransaction::new(tx, self.store.records.store_dir);
+        let store_transaction = MergeMaterializationTransaction::from_store(self.store);
         store_transaction
             .activate_store_operation_remote_objects(&operation.commit_ref, &object_ids)?;
         store_transaction.record_verified_circle_activations(&commit, &[activation])?;

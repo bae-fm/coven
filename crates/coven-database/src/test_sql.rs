@@ -1932,8 +1932,12 @@ impl DatabaseTestSql<'_> {
             .connection
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::MergeMaterializationTransaction::new(&transaction, self.required_store_dir()?)
-            .record_verified_circle_activations(commit, activations)?;
+        crate::store::test_record_verified_circle_activations(
+            &transaction,
+            self.required_store_dir()?,
+            commit,
+            activations,
+        )?;
         transaction.commit().map_err(DbError::from)
     }
 
@@ -1967,16 +1971,12 @@ impl DatabaseTestSql<'_> {
         for changeset in changesets {
             let changeset = crate::ValidatedChangeset::new(changeset, schema.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            results.push(
-                crate::MergeMaterializationTransaction::new(
-                    &transaction,
-                    self.required_store_dir()?,
-                )
-                .apply_changeset(
-                    changeset,
-                    crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
-                )?,
-            );
+            results.push(crate::store::test_apply_changeset(
+                &transaction,
+                self.required_store_dir()?,
+                changeset,
+                crate::IncomingTimestampPolicy::Received { receiver_wall_ms },
+            )?);
         }
         let foreign_key_violations = transaction
             .query_row(

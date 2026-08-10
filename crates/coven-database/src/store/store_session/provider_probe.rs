@@ -10,7 +10,8 @@ impl StoreSession<'_> {
         &self,
         key: &str,
     ) -> Result<Option<ProviderProbeJournalRecord>, DbError> {
-        crate::get_protocol_state_on(self.records.conn, key)?
+        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .protocol_state(key)?
             .map(|value| {
                 serde_json::from_str(&value)
                     .map_err(|error| DbError::context("parse provider probe journal", error))
@@ -23,19 +24,8 @@ impl StoreSession<'_> {
         key: &str,
         value: &str,
     ) -> Result<ProviderProbeJournalRecord, DbError> {
-        let transaction = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-                (key, value),
-            )
-            .map_err(DbError::from)?;
-        let actual = crate::required_protocol_state_on(&transaction, key)?;
-        transaction.commit().map_err(DbError::from)?;
+        let actual = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .begin_protocol_state(key, value)?;
         serde_json::from_str(&actual)
             .map_err(|error| DbError::context("parse provider probe journal", error))
     }
@@ -46,15 +36,9 @@ impl StoreSession<'_> {
         previous: &str,
         next: &str,
     ) -> Result<(), DbError> {
-        let changed = self
-            .records
-            .conn
-            .execute(
-                "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                (next, key, previous),
-            )
-            .map_err(DbError::from)?;
-        if changed != 1 {
+        if !crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .compare_exchange_protocol_state(key, previous, next)?
+        {
             return Err(DbError::Message(
                 "provider probe journal advance lost its exact predecessor".to_string(),
             ));

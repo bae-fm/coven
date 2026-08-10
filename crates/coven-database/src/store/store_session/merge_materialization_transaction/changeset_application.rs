@@ -155,7 +155,10 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
     let changeset = ValidatedChangeset::new(bytes, schema)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let result = MergeMaterializationTransaction::new(&tx, store_dir).apply_changeset(
+    let result = MergeMaterializationTransaction::from_store(
+        crate::store::store_session::StoreTransaction::new(&tx, store_dir),
+    )
+    .apply_changeset(
         changeset,
         IncomingTimestampPolicy::Received { receiver_wall_ms },
     )?;

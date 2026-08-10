@@ -12,18 +12,8 @@ impl StoreSession<'_> {
         value: &str,
         prepared: &coven_protocol::provider::DeviceJoinChallengePublicationRecord,
     ) -> Result<coven_protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
-            (key, value),
-        )
-        .map_err(DbError::from)?;
-        let actual = crate::required_protocol_state_on(&tx, key)?;
-        tx.commit().map_err(DbError::from)?;
+        let actual = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+            .begin_protocol_state(key, value)?;
         let actual: coven_protocol::provider::DeviceJoinChallengePublicationRecord =
             serde_json::from_str(&actual).map_err(|error| {
                 DbError::context("parse device join challenge publication", error)
@@ -46,12 +36,9 @@ impl StoreSession<'_> {
             DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
         };
 
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let previous_json = crate::required_protocol_state_on(&tx, key)?;
+        let previous_json =
+            crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+                .required_protocol_state(key)?;
         let previous: DeviceJoinChallengePublicationRecord = serde_json::from_str(&previous_json)
             .map_err(|error| {
             DbError::context("parse device join challenge publication", error)
@@ -70,13 +57,9 @@ impl StoreSession<'_> {
                 let next_json = serde_json::to_string(&next).map_err(|error| {
                     DbError::context("serialize device join challenge publication", error)
                 })?;
-                let changed = tx
-                    .execute(
-                        "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
-                        (&next_json, key, &previous_json),
-                    )
-                    .map_err(DbError::from)?;
-                if changed != 1 {
+                if !crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
+                    .compare_exchange_protocol_state(key, &previous_json, &next_json)?
+                {
                     return Err(DbError::Message(
                         "device join challenge publication lost its exact predecessor".to_string(),
                     ));
@@ -91,7 +74,7 @@ impl StoreSession<'_> {
                 ));
             }
         }
-        tx.commit().map_err(DbError::from)
+        Ok(())
     }
 }
 

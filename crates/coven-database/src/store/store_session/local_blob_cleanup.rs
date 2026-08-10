@@ -240,7 +240,7 @@ impl StoreSession<'_> {
         &self,
         intent: &LocalBlobCleanupIntent,
     ) -> Result<(), DbError> {
-        record_obsolete_copy_intents_on(self.records.conn, self.blob_decls, intent)
+        record_obsolete_copy_intents_on(self.conn, self.blob_decls, intent)
     }
 }
 
