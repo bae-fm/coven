@@ -243,67 +243,45 @@ impl StoreSession<'_> {
         }
         transaction.commit().map_err(DbError::from)
     }
-}
 
-impl StoreDatabase {
-    pub async fn seed_local_release_rows_for_test(
+    fn seed_local_release_rows_for_test(
         &self,
         note_id: &str,
         photo_id: &str,
         cloud_path: &str,
-        bytes: &[u8],
-    ) {
-        let note_id = note_id.to_string();
-        let photo_id = photo_id.to_string();
-        let cloud_path = cloud_path.to_string();
-        let size = i64::try_from(bytes.len()).expect("test blob size fits SQLite");
-        let hash = coven_protocol::blob::content_hash(bytes);
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute(
-                        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
-                         VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
-                        rusqlite::params![note_id, 0_i64],
-                    )
-                    .map_err(DbError::from)?;
-                connection
-                    .execute(
-                        "INSERT INTO note_photos
-                         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
-                         VALUES (?1, ?2, 'image', ?3, ?4,
-                                 '0000000001000-0000-A', '2026-01-01', ?5)",
-                        rusqlite::params![photo_id, note_id, size, hash, cloud_path],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
-            })
-            .await
-            .expect("seed exact release rows");
+        size: i64,
+        hash: String,
+    ) -> Result<(), DbError> {
+        self.records
+            .conn
+            .execute(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
+                 VALUES (?1, 'Release', NULL, ?2, '0000000001000-0000-A', '2026-01-01')",
+                rusqlite::params![note_id, 0_i64],
+            )
+            .map_err(DbError::from)?;
+        self.records
+            .conn
+            .execute(
+                "INSERT INTO note_photos
+                 (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path)
+                 VALUES (?1, ?2, 'image', ?3, ?4,
+                         '0000000001000-0000-A', '2026-01-01', ?5)",
+                rusqlite::params![photo_id, note_id, size, hash, cloud_path],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
     }
 
-    pub async fn register_external_blob_for_test(
+    fn register_external_blob_for_test(
         &self,
-        table: &str,
-        row_id: &str,
+        reference: &coven_protocol::blob::RowBlobRef,
         path: &std::path::Path,
-    ) {
-        let reference = self
-            .row_blob_ref(table, row_id)
-            .await
-            .expect("load exact Local row blob reference");
-        let path = path.to_path_buf();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                crate::DatabaseTestSql::new(connection).register_external_blob(&reference, &path)
-            })
-            .await
-            .expect("register exact external blob reference");
+    ) -> Result<(), DbError> {
+        crate::DatabaseTestSql::new(self.records.conn).register_external_blob(reference, path)
     }
 
-    pub async fn enqueue_blob_upload_for_test(
+    fn enqueue_blob_upload_for_test(
         &self,
         root_table: &str,
         root_id: &str,
@@ -311,649 +289,472 @@ impl StoreDatabase {
         source_path: &std::path::Path,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let reference = reference.clone();
-        let root_table = root_table.to_string();
-        let root_id = root_id.to_string();
-        let source_path = source_path.to_path_buf();
-        let created_at = created_at.to_string();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                crate::DatabaseTestSql::new(connection).enqueue_blob_upload(
-                    &root_table,
-                    &root_id,
-                    &reference,
-                    &source_path,
-                    false,
-                    &created_at,
-                )
-            })
-            .await
+        crate::DatabaseTestSql::new(self.records.conn).enqueue_blob_upload(
+            root_table,
+            root_id,
+            reference,
+            source_path,
+            false,
+            created_at,
+        )
     }
 
-    pub async fn insert_fixture_position_for_test(&self, note_id: &str) -> Result<(), DbError> {
-        let note_id = note_id.to_string();
-        self.run_host_store_write_for_test(None, None, move |transaction| {
-            transaction
-                .execute(
-                    "INSERT INTO notes (id, title, shared, _updated_at, created_at)
-                     VALUES (?1, 'fixture position', 1,
-                             '0000000001000-0000-A', '2026-01-01')",
-                    [note_id],
-                )
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-        .await
-        .map(|_| ())
-    }
-
-    pub async fn run_host_store_write_for_test<R>(
-        &self,
+    fn run_host_store_write_for_test<R>(
+        &mut self,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
         blob_staging: Option<Box<dyn crate::AudienceBlobMoveStaging>>,
+        write_id: WriteId,
         operation: impl for<'transaction, 'connection> FnOnce(
-                crate::DatabaseTestTransaction<'transaction, 'connection>,
-            ) -> Result<R, DbError>
-            + Send
-            + 'static,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError>
-    where
-        R: Send + 'static,
-    {
-        let store_dir = self.store_dir.clone();
-        let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates.clone();
-        let blob_decls = self.blob_decls.clone();
-        let write_id = self.new_store_write_id();
-        self.connection
-            .call_store(move |session| {
-                let records = session.records;
-                let verified_authority = &mut *session.verified_store_authority;
-                super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
-                    records.conn,
-                    &store_dir,
-                    &synced_tables,
-                    &gates,
-                    &blob_decls,
-                    routing_encryption.as_ref(),
-                    blob_staging.as_deref(),
-                    verified_authority,
-                    write_id,
-                )?
-                .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
-            })
-            .await
+            crate::DatabaseTestTransaction<'transaction, 'connection>,
+        ) -> Result<R, DbError>,
+    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError> {
+        super::host_write_capture::CapturedStoreWriteTransaction::begin_host(
+            self.records.conn,
+            self.records.store_dir,
+            self.synced_tables,
+            self.gates,
+            self.blob_decls,
+            routing_encryption.as_ref(),
+            blob_staging.as_deref(),
+            self.verified_store_authority,
+            write_id,
+        )?
+        .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
     }
 
-    pub async fn run_prepared_blob_transition_write_for_test<R>(
-        &self,
+    fn run_prepared_blob_transition_write_for_test<R>(
+        &mut self,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+        write_id: WriteId,
         operation: impl for<'transaction, 'connection> FnOnce(
-                crate::DatabaseTestTransaction<'transaction, 'connection>,
-            ) -> Result<R, DbError>
-            + Send
-            + 'static,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError>
-    where
-        R: Send + 'static,
-    {
-        let store_dir = self.store_dir.clone();
-        let synced_tables = self.synced_tables().to_vec();
-        let gates = self.gates.clone();
-        let blob_decls = self.blob_decls.clone();
-        let write_id = self.new_store_write_id();
-        self.connection.call_store(move |session| {
-            let records = session.records;
-            let verified_authority = &mut *session.verified_store_authority;
-                super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-                    records.conn,
-                    &store_dir,
-                    &synced_tables,
-                    &gates,
-                    &blob_decls,
-                    routing_encryption.as_ref(),
-                    verified_authority,
-                    write_id,
-                )?
-                .execute(|transaction| {
-                    operation(crate::DatabaseTestTransaction::new(transaction))
-                })
-            })
-            .await
+            crate::DatabaseTestTransaction<'transaction, 'connection>,
+        ) -> Result<R, DbError>,
+    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError> {
+        super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
+            self.records.conn,
+            self.records.store_dir,
+            self.synced_tables,
+            self.gates,
+            self.blob_decls,
+            routing_encryption.as_ref(),
+            self.verified_store_authority,
+            write_id,
+        )?
+        .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
     }
 
-    pub async fn cleanup_intent_count_for_test(
+    fn cleanup_intent_count_for_test(
         &self,
         namespace: &str,
         blob_id: &str,
     ) -> Result<i64, DbError> {
-        let namespace = namespace.to_string();
-        let blob_id = blob_id.to_string();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM local_cleanup_intents
-                         WHERE namespace = ?1 AND blob_id = ?2",
-                        (&namespace, &blob_id),
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+        self.records
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM local_cleanup_intents
+                 WHERE namespace = ?1 AND blob_id = ?2",
+                (namespace, blob_id),
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn coven_table_exists_for_test(
+    fn coven_table_exists_for_test(
         &self,
         table: crate::DatabaseTestTable,
     ) -> Result<bool, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT EXISTS(
-                            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
-                         )",
-                        [table.0],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+        self.records
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                 )",
+                [table.0],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute_batch(
-                        "CREATE TRIGGER fail_store_write_journal
-                         BEFORE INSERT ON store_writes
-                         BEGIN
-                           SELECT RAISE(ABORT, 'injected Store write journal failure');
-                         END;",
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+    fn install_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.records
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER fail_store_write_journal
+                 BEFORE INSERT ON store_writes
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Store write journal failure');
+                 END;",
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .execute_batch("DROP TRIGGER fail_store_write_journal")
-                    .map_err(DbError::from)
-            })
-            .await
+    fn remove_store_write_failure_trigger_for_test(&self) -> Result<(), DbError> {
+        self.records
+            .conn
+            .execute_batch("DROP TRIGGER fail_store_write_journal")
+            .map_err(DbError::from)
     }
 
-    pub async fn write_blob_facts_for_test(&self, write_id: WriteId) -> Result<String, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+    fn write_blob_facts_for_test(&self, write_id: &WriteId) -> Result<String, DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT blob_facts FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn install_test_active_circle(
+    fn install_test_active_circle(&self, label: &str) -> coven_protocol::circle::CircleId {
+        let database = crate::DatabaseTestSql::new(self.records.conn);
+        let (circle_id, _) = database.install_test_active_circle(label);
+        circle_id
+    }
+
+    fn insert_write_status_for_test(
         &self,
-        label: String,
-    ) -> Result<coven_protocol::circle::CircleId, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let database = crate::DatabaseTestSql::new(connection);
-                let (circle_id, _) = database.install_test_active_circle(&label);
-                Ok(circle_id)
-            })
-            .await
-    }
-
-    pub async fn insert_write_status_for_test(
-        &self,
-        write_id: WriteId,
-        status: coven_protocol::write::WriteStatus,
+        write_id: &WriteId,
+        status: &str,
+        base: &str,
     ) -> Result<(), DbError> {
-        let base = serde_json::json!({ "dependencies": {} }).to_string();
-        let status = serde_json::to_string(&status)
-            .map_err(|error| DbError::context("serialize write status", error))?;
-        let changeset_hash = crate::payload_spool::write_payload_blocking(&self.store_dir, b"")?;
-        let owner_key = crate::payload_spool::store_write_owner_key(&write_id);
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                transaction
-                    .execute(
-                        r#"INSERT INTO store_writes
-                         (write_id, status, affected_rows, changeset_hash, base, blob_facts)
-                         VALUES (?1, ?2, '[]', ?3, ?4, '{"blobs":[]}')"#,
-                        (write_id.as_str(), status, changeset_hash.to_string(), base),
-                    )
-                    .map_err(DbError::from)?;
-                crate::payload_spool::set_payload_owner_claims_on(
-                    &transaction,
-                    &owner_key,
-                    &BTreeSet::from([changeset_hash]),
-                )?;
-                transaction.commit().map_err(DbError::from)
-            })
-            .await
+        let changeset_hash = self.records.install_payload(b"")?;
+        let owner_key = crate::payload_spool::store_write_owner_key(write_id);
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                r#"INSERT INTO store_writes
+                 (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+                 VALUES (?1, ?2, '[]', ?3, ?4, '{"blobs":[]}')"#,
+                (write_id.as_str(), status, changeset_hash.to_string(), base),
+            )
+            .map_err(DbError::from)?;
+        crate::payload_spool::set_payload_owner_claims_on(
+            &transaction,
+            &owner_key,
+            &BTreeSet::from([changeset_hash]),
+        )?;
+        transaction.commit().map_err(DbError::from)
     }
 
-    pub async fn delete_write_for_test(&self, write_id: WriteId) -> Result<(), DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                crate::payload_spool::release_payload_owner_on(
-                    &transaction,
-                    &crate::payload_spool::store_write_owner_key(&write_id),
-                )?;
-                transaction
-                    .execute(
-                        "DELETE FROM store_writes WHERE write_id = ?1",
-                        [write_id.as_str()],
-                    )
-                    .map_err(DbError::from)?;
-                transaction.commit().map_err(DbError::from)
-            })
-            .await
+    fn delete_write_for_test(&self, write_id: &WriteId) -> Result<(), DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        crate::payload_spool::release_payload_owner_on(
+            &transaction,
+            &crate::payload_spool::store_write_owner_key(write_id),
+        )?;
+        transaction
+            .execute(
+                "DELETE FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+        transaction.commit().map_err(DbError::from)
     }
 
-    pub fn arm_test_pause(
-        &self,
-        point: crate::DatabaseTestPoint,
-    ) -> (
-        std::sync::Arc<tokio::sync::Notify>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ) {
-        self.test_access.arm(point)
+    fn store_write_partition_for_test(&self, write_id: &WriteId) -> Result<Vec<u8>, DbError> {
+        let encoded: String = self
+            .records
+            .conn
+            .query_row(
+                "SELECT changeset_hash FROM store_write_partitions
+                 WHERE write_id = ?1 AND audience = 'store'",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let hash = encoded
+            .parse()
+            .map_err(|error| DbError::context("parse captured changeset hash", error))?;
+        Ok(self.records.payload(hash)?)
     }
 
-    pub async fn store_write_partition_for_test(
-        &self,
-        write_id: &WriteId,
-    ) -> Result<Vec<u8>, DbError> {
-        let write_id = write_id.clone();
-        let store_dir = self.store_dir.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let encoded: String = connection
-                    .query_row(
-                        "SELECT changeset_hash FROM store_write_partitions
-                         WHERE write_id = ?1 AND audience = 'store'",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                let hash = encoded
-                    .parse()
-                    .map_err(|error| DbError::context("parse captured changeset hash", error))?;
-                crate::payload_spool::StoreRecords::new(connection, &store_dir)
-                    .payload(hash)
-                    .map_err(DbError::from)
-            })
-            .await
+    fn write_blob_lease_count_for_test(&self, write_id: &WriteId) -> Result<i64, DbError> {
+        self.records
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM store_write_blob_leases WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn write_blob_lease_count_for_test(
-        &self,
-        write_id: &WriteId,
-    ) -> Result<i64, DbError> {
-        let write_id = write_id.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM store_write_blob_leases WHERE write_id = ?1",
-                        [write_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+    fn latest_materialized_commit_coordinate_for_test(&self) -> Result<(String, u64), DbError> {
+        let (device_id, sequence): (String, i64) = self
+            .records
+            .conn
+            .query_row(
+                "SELECT device_id, seq
+                 FROM materialized_commits
+                 ORDER BY seq DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        let sequence = u64::try_from(sequence).map_err(|error| {
+            DbError::context(
+                format!("materialized commit sequence {sequence} is invalid"),
+                error,
+            )
+        })?;
+        Ok((device_id, sequence))
     }
 
-    pub async fn latest_materialized_commit_coordinate_for_test(
-        &self,
-    ) -> Result<(String, u64), DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let (device_id, sequence): (String, i64) = connection
-                    .query_row(
-                        "SELECT device_id, seq
-                         FROM materialized_commits
-                         ORDER BY seq DESC
-                         LIMIT 1",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(DbError::from)?;
-                let sequence = u64::try_from(sequence).map_err(|error| {
-                    DbError::context(
-                        format!("materialized commit sequence {sequence} is invalid"),
-                        error,
-                    )
-                })?;
-                Ok((device_id, sequence))
-            })
-            .await
-    }
-
-    pub async fn compare_circle_bootstrap_replay_with_missing_coverage_for_test(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        routing_key: coven_protocol::circle::RowRoutingKey,
-        historical_id: String,
-        late_id: String,
+    fn compare_circle_bootstrap_replay_with_missing_coverage_for_test(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        routing_key: &coven_protocol::circle::RowRoutingKey,
+        historical_id: &str,
+        late_id: &str,
     ) -> Result<(i64, i64, i64, i64), DbError> {
-        let store_dir = self.store_dir.clone();
-        let blob_decls = self.blob_decls.clone();
-        let gates = self.gates.clone();
-        let tables = self.synced_tables().to_vec();
-        self.connection
-            .call_store(move |session| {
-                let records = session.records;
-                let authority = &mut *session.verified_store_authority;
-                let transaction = records
-                    .conn
-                    .unchecked_transaction()
-                    .map_err(DbError::from)?;
-                let retained = authority.replay_projection_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
-                    &root,
-                    &blob_decls,
-                    &gates,
-                    &tables,
-                    Some(&routing_key),
-                    &BTreeSet::new(),
-                    None,
-                    false,
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
-                let retained_count = retained.document_count(&historical_id)?;
-                let retained_late_count = retained.document_count(&late_id)?;
-                transaction
-                    .execute("DELETE FROM circle_bootstrap_coverage", [])
-                    .map_err(DbError::from)?;
-                let sabotaged = authority.replay_projection_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
-                    &root,
-                    &blob_decls,
-                    &gates,
-                    &tables,
-                    Some(&routing_key),
-                    &BTreeSet::new(),
-                    None,
-                    false,
-                    coven_protocol::membership::LocalStoreMembership::Current,
-                )?;
-                let sabotaged_count = sabotaged.document_count(&historical_id)?;
-                let sabotaged_late_count = sabotaged.document_count(&late_id)?;
-                transaction.rollback().map_err(DbError::from)?;
-                Ok((
-                    retained_count,
-                    retained_late_count,
-                    sabotaged_count,
-                    sabotaged_late_count,
-                ))
-            })
-            .await
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let retained = self.verified_store_authority.replay_projection_on(
+            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.records.store_dir),
+            root,
+            self.blob_decls,
+            self.gates,
+            self.synced_tables,
+            Some(routing_key),
+            &BTreeSet::new(),
+            None,
+            false,
+            coven_protocol::membership::LocalStoreMembership::Current,
+        )?;
+        let retained_count = retained.document_count(historical_id)?;
+        let retained_late_count = retained.document_count(late_id)?;
+        transaction
+            .execute("DELETE FROM circle_bootstrap_coverage", [])
+            .map_err(DbError::from)?;
+        let sabotaged = self.verified_store_authority.replay_projection_on(
+            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.records.store_dir),
+            root,
+            self.blob_decls,
+            self.gates,
+            self.synced_tables,
+            Some(routing_key),
+            &BTreeSet::new(),
+            None,
+            false,
+            coven_protocol::membership::LocalStoreMembership::Current,
+        )?;
+        let sabotaged_count = sabotaged.document_count(historical_id)?;
+        let sabotaged_late_count = sabotaged.document_count(late_id)?;
+        transaction.rollback().map_err(DbError::from)?;
+        Ok((
+            retained_count,
+            retained_late_count,
+            sabotaged_count,
+            sabotaged_late_count,
+        ))
     }
 
-    pub async fn circle_bootstrap_coverage_count_for_test(
+    fn circle_bootstrap_coverage_count_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                        [circle_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+        self.records
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn reject_missing_circle_bootstrap_payload_claim_for_test(
+    fn reject_missing_circle_bootstrap_payload_claim_for_test(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<String, DbError> {
-        let store_dir = self.store_dir.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                transaction
-                    .execute(
-                        "DELETE FROM payload_spool_owners WHERE owner_key = ?1",
-                        [crate::payload_spool::circle_bootstrap_coverage_owner_key(
-                            circle_id,
-                        )],
-                    )
-                    .map_err(DbError::from)?;
-                let error = StoreDatabase::circle_bootstrap_replay_inputs_on(
-                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
-                )
-                .expect_err("Circle bootstrap replay must require its payload claim");
-                transaction.rollback().map_err(DbError::from)?;
-                Ok(error.to_string())
-            })
-            .await
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "DELETE FROM payload_spool_owners WHERE owner_key = ?1",
+                [crate::payload_spool::circle_bootstrap_coverage_owner_key(
+                    circle_id,
+                )],
+            )
+            .map_err(DbError::from)?;
+        let error = StoreDatabase::circle_bootstrap_replay_inputs_on(
+            crate::payload_spool::StoreRecords::new(&transaction, self.records.store_dir),
+        )
+        .expect_err("Circle bootstrap replay must require its payload claim");
+        transaction.rollback().map_err(DbError::from)?;
+        Ok(error.to_string())
     }
 
-    pub async fn reject_changed_circle_bootstrap_image_hash_for_test(
-        &self,
+    fn reject_changed_circle_bootstrap_image_hash_for_test(
+        &mut self,
         circle_id: coven_protocol::circle::CircleId,
-        root: coven_protocol::store_commit::StoreRootRef,
+        root: &coven_protocol::store_commit::StoreRootRef,
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<String, DbError> {
-        let store_dir = self.store_dir.clone();
-        let activation_commit = activation_commit.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                transaction
-                    .execute(
-                        "UPDATE circle_bootstrap_coverage
-                         SET image_hash = ?2
-                         WHERE circle_id = ?1",
-                        rusqlite::params![
-                            circle_id.to_string(),
-                            ObjectHash::digest(b"corrupt Circle bootstrap image hash").to_string(),
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-                    crate::payload_spool::StoreRecords::new(&transaction, &store_dir),
-                    &root,
-                    session.verified_store_authority,
-                    &activation_commit,
-                )?;
-                let error = StoreDatabase::record_circle_bootstrap_coverage_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&transaction, &store_dir),
-                    session.verified_store_authority,
-                    &root,
-                    &activation_commit,
-                    retained.circle_activations(),
-                )
-                .expect_err("changed image hash must conflict with its exact reference");
-                transaction.rollback().map_err(DbError::from)?;
-                Ok(error.to_string())
-            })
-            .await
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        transaction
+            .execute(
+                "UPDATE circle_bootstrap_coverage
+                 SET image_hash = ?2
+                 WHERE circle_id = ?1",
+                rusqlite::params![
+                    circle_id.to_string(),
+                    ObjectHash::digest(b"corrupt Circle bootstrap image hash").to_string(),
+                ],
+            )
+            .map_err(DbError::from)?;
+        let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+            crate::payload_spool::StoreRecords::new(&transaction, self.records.store_dir),
+            root,
+            self.verified_store_authority,
+            activation_commit,
+        )?;
+        let error = StoreDatabase::record_circle_bootstrap_coverage_on(
+            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.records.store_dir),
+            self.verified_store_authority,
+            root,
+            activation_commit,
+            retained.circle_activations(),
+        )
+        .expect_err("changed image hash must conflict with its exact reference");
+        transaction.rollback().map_err(DbError::from)?;
+        Ok(error.to_string())
     }
 
-    pub async fn transfer_prepared_write_to_for_test(
+    fn author_exclusion_activation_evidence_for_test(
         &self,
-        destination: &Self,
-        write_id: &WriteId,
-    ) -> Result<(), DbError> {
-        let source_write_id = write_id.clone();
-        let transfer = self
-            .connection
-            .call_store(move |session| session.export_prepared_write(&source_write_id))
-            .await?;
-
-        let destination_write_id = write_id.clone();
-        destination
-            .connection
-            .call_store(move |session| {
-                session.import_prepared_write(&destination_write_id, transfer)
-            })
-            .await
-    }
-
-    pub async fn author_exclusion_activation_evidence_for_test(
-        &self,
-        exclusion: &StoreDeviceExclusionRef,
+        exclusion: &str,
     ) -> Result<(String, String), DbError> {
-        let exclusion = serde_json::to_string(exclusion)
-            .map_err(|error| DbError::context("serialize exclusion ref", error))?;
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                connection
-                    .query_row(
-                        "SELECT accepted_cut, activation_head
-                         FROM store_author_exclusion_activations
-                         WHERE exclusion_ref = ?1",
-                        [&exclusion],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .map_err(DbError::from)
-            })
-            .await
+        self.records
+            .conn
+            .query_row(
+                "SELECT accepted_cut, activation_head
+                 FROM store_author_exclusion_activations
+                 WHERE exclusion_ref = ?1",
+                [exclusion],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)
     }
 
-    pub async fn tamper_author_exclusion_locator_for_test(
+    fn tamper_author_exclusion_locator_for_test(
         &self,
-        exclusion: &StoreDeviceExclusionRef,
+        exclusion: StoreDeviceExclusionRef,
         candidate: &StoreBatchCommitRef,
         tamper: AuthorExclusionLocatorTamper,
     ) -> Result<(), DbError> {
-        let exclusion = exclusion.clone();
-        let candidate = candidate.clone();
-        self.connection
-            .call_store(move |session| {
-                let connection = session.records.conn;
-                let exact = serde_json::to_string(&exclusion).map_err(|error| {
-                    DbError::context("serialize exact exclusion reference", error)
+        let connection = self.records.conn;
+        let exact = serde_json::to_string(&exclusion)
+            .map_err(|error| DbError::context("serialize exact exclusion reference", error))?;
+        let affected = match tamper {
+            AuthorExclusionLocatorTamper::Missing => connection.execute(
+                "DELETE FROM store_author_exclusion_activations
+                 WHERE exclusion_ref = ?1",
+                [&exact],
+            ),
+            AuthorExclusionLocatorTamper::ExclusionReference => {
+                let mut wrong = exclusion;
+                wrong.outcome_hash = ObjectHash::digest(b"wrong exclusion reference");
+                let wrong = serde_json::to_string(&wrong).map_err(|error| {
+                    DbError::context("serialize wrong exclusion reference", error)
                 })?;
-                let affected = match tamper {
-                    AuthorExclusionLocatorTamper::Missing => connection.execute(
-                        "DELETE FROM store_author_exclusion_activations
+                connection.execute(
+                    "UPDATE store_author_exclusion_activations
+                     SET exclusion_ref = ?1 WHERE exclusion_ref = ?2",
+                    (&wrong, &exact),
+                )
+            }
+            AuthorExclusionLocatorTamper::AcceptedCut => {
+                let cut: String = connection
+                    .query_row(
+                        "SELECT accepted_cut
+                         FROM store_author_exclusion_activations
                          WHERE exclusion_ref = ?1",
                         [&exact],
-                    ),
-                    AuthorExclusionLocatorTamper::ExclusionReference => {
-                        let mut wrong = exclusion;
-                        wrong.outcome_hash = ObjectHash::digest(b"wrong exclusion reference");
-                        let wrong = serde_json::to_string(&wrong).map_err(|error| {
-                            DbError::context("serialize wrong exclusion reference", error)
-                        })?;
-                        connection.execute(
-                            "UPDATE store_author_exclusion_activations
-                             SET exclusion_ref = ?1 WHERE exclusion_ref = ?2",
-                            (&wrong, &exact),
-                        )
-                    }
-                    AuthorExclusionLocatorTamper::AcceptedCut => {
-                        let cut: String = connection
-                            .query_row(
-                                "SELECT accepted_cut
-                                 FROM store_author_exclusion_activations
-                                 WHERE exclusion_ref = ?1",
-                                [&exact],
-                                |row| row.get(0),
-                            )
-                            .map_err(DbError::from)?;
-                        let mut cut: std::collections::BTreeMap<
-                            coven_protocol::causal_grants::AuthorStreamId,
-                            StoreBatchCommitRef,
-                        > = serde_json::from_str(&cut).map_err(|error| {
-                            DbError::context("parse exclusion accepted cut", error)
-                        })?;
-                        cut.insert(
-                            coven_protocol::causal_grants::AuthorStreamId::from_digest(
-                                ObjectHash::digest(b"wrong exclusion accepted-cut stream"),
-                            ),
-                            candidate.clone(),
-                        );
-                        let wrong = serde_json::to_string(&cut).map_err(|error| {
-                            DbError::context("serialize wrong exclusion accepted cut", error)
-                        })?;
-                        connection.execute(
-                            "UPDATE store_author_exclusion_activations
-                             SET accepted_cut = ?1 WHERE exclusion_ref = ?2",
-                            (&wrong, &exact),
-                        )
-                    }
-                    AuthorExclusionLocatorTamper::ActivationCommit => {
-                        let wrong = serde_json::to_string(&candidate).map_err(|error| {
-                            DbError::context("serialize wrong exclusion activation commit", error)
-                        })?;
-                        connection.execute(
-                            "UPDATE store_author_exclusion_activations
-                             SET activation_commit = ?1 WHERE exclusion_ref = ?2",
-                            (&wrong, &exact),
-                        )
-                    }
-                    AuthorExclusionLocatorTamper::ActivationHead => {
-                        let head: String = connection
-                            .query_row(
-                                "SELECT activation_head
-                                 FROM store_author_exclusion_activations
-                                 WHERE exclusion_ref = ?1",
-                                [&exact],
-                                |row| row.get(0),
-                            )
-                            .map_err(DbError::from)?;
-                        let mut head: StoreDeviceHeadRef =
-                            serde_json::from_str(&head).map_err(|error| {
-                                DbError::context("parse exclusion activation head", error)
-                            })?;
-                        head.head_hash = ObjectHash::digest(b"wrong exclusion activation head");
-                        let wrong = serde_json::to_string(&head).map_err(|error| {
-                            DbError::context("serialize wrong exclusion activation head", error)
-                        })?;
-                        connection.execute(
-                            "UPDATE store_author_exclusion_activations
-                             SET activation_head = ?1 WHERE exclusion_ref = ?2",
-                            (&wrong, &exact),
-                        )
-                    }
-                }
-                .map_err(DbError::from)?;
-                if affected != 1 {
-                    return Err(DbError::Message(format!(
-                        "locator tamper {tamper:?} changed {affected} rows"
-                    )));
-                }
-                Ok(())
-            })
-            .await
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let mut cut: std::collections::BTreeMap<
+                    coven_protocol::causal_grants::AuthorStreamId,
+                    StoreBatchCommitRef,
+                > = serde_json::from_str(&cut)
+                    .map_err(|error| DbError::context("parse exclusion accepted cut", error))?;
+                cut.insert(
+                    coven_protocol::causal_grants::AuthorStreamId::from_digest(ObjectHash::digest(
+                        b"wrong exclusion accepted-cut stream",
+                    )),
+                    candidate.clone(),
+                );
+                let wrong = serde_json::to_string(&cut).map_err(|error| {
+                    DbError::context("serialize wrong exclusion accepted cut", error)
+                })?;
+                connection.execute(
+                    "UPDATE store_author_exclusion_activations
+                     SET accepted_cut = ?1 WHERE exclusion_ref = ?2",
+                    (&wrong, &exact),
+                )
+            }
+            AuthorExclusionLocatorTamper::ActivationCommit => {
+                let wrong = serde_json::to_string(candidate).map_err(|error| {
+                    DbError::context("serialize wrong exclusion activation commit", error)
+                })?;
+                connection.execute(
+                    "UPDATE store_author_exclusion_activations
+                     SET activation_commit = ?1 WHERE exclusion_ref = ?2",
+                    (&wrong, &exact),
+                )
+            }
+            AuthorExclusionLocatorTamper::ActivationHead => {
+                let head: String = connection
+                    .query_row(
+                        "SELECT activation_head
+                         FROM store_author_exclusion_activations
+                         WHERE exclusion_ref = ?1",
+                        [&exact],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let mut head: StoreDeviceHeadRef = serde_json::from_str(&head)
+                    .map_err(|error| DbError::context("parse exclusion activation head", error))?;
+                head.head_hash = ObjectHash::digest(b"wrong exclusion activation head");
+                let wrong = serde_json::to_string(&head).map_err(|error| {
+                    DbError::context("serialize wrong exclusion activation head", error)
+                })?;
+                connection.execute(
+                    "UPDATE store_author_exclusion_activations
+                     SET activation_head = ?1 WHERE exclusion_ref = ?2",
+                    (&wrong, &exact),
+                )
+            }
+        }
+        .map_err(DbError::from)?;
+        if affected != 1 {
+            return Err(DbError::Message(format!(
+                "locator tamper {tamper:?} changed {affected} rows"
+            )));
+        }
+        Ok(())
     }
 }
+
+mod database;
