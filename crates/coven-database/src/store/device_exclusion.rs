@@ -4,13 +4,14 @@ use std::pin::Pin;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::*;
+use crate::store::StoreSession;
 use crate::{mark_remote_object_uploaded_on, update_remote_object_on};
 use coven_protocol::device_exclusion_journal::{
     DurableStoreDeviceExclusionObject, DurableStoreDeviceExclusionOperation,
     StoreDeviceExclusionCompletion, StoreDeviceExclusionJournalError,
 };
 use coven_protocol::remote_object::{
-    remote_object_id, RemoteObjectRecord, RetainedAuthorityObjectState,
+    remote_object_id, ClosedRemoteObject, RemoteObjectRecord, RetainedAuthorityObjectState,
 };
 use coven_protocol::store_commit::ObjectHash;
 
@@ -181,6 +182,499 @@ pub(crate) fn update_store_device_exclusion_on(
     Ok(())
 }
 
+impl StoreSession<'_> {
+    fn begin_outbound_store_device_exclusion(
+        &mut self,
+        operation: DurableStoreDeviceExclusionOperation,
+        remotes: Vec<ClosedRemoteObject>,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let records = self.records;
+        let conn = records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
+            if active.operation_id() != operation.operation_id() {
+                return Err(DbError::Message(format!(
+                    "Store-device exclusion operation {} remains active",
+                    active.operation_id()
+                )));
+            }
+            return Ok(active);
+        }
+        let operation_id = operation.operation_id();
+        if let Some(existing) = load_store_device_exclusion_on(&tx, operation_id)? {
+            if existing != operation || !existing.is_completed() {
+                return Err(DbError::Message(format!(
+                    "Store-device exclusion operation {operation_id} already has different durable state"
+                )));
+            }
+            return Ok(existing);
+        }
+        for remote in &remotes {
+            persist_exact_remote_object_on(
+                &tx,
+                records.store_dir,
+                remote,
+                "Store-device exclusion candidate object",
+            )?;
+        }
+        insert_store_device_exclusion_on(&tx, &operation, true)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(operation)
+    }
+
+    fn active_outbound_store_device_exclusion(
+        &mut self,
+    ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
+        load_active_store_device_exclusion_on(self.records.conn)
+    }
+
+    fn replace_outbound_store_device_exclusion_candidate(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let records = self.records;
+        let conn = records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        let next_candidate = next.candidate().expect("validated candidate state");
+        match (candidate.head_ref(), next_candidate.head_ref()) {
+            (current, replacement) if current != replacement => {
+                let (winner, prepared) = next_candidate.publication();
+                replace_prepared_merge_head_remote_on(
+                    &tx,
+                    records.store_dir,
+                    &current.object,
+                    winner,
+                    prepared,
+                    &candidate.reference,
+                )?;
+            }
+            _ => {}
+        }
+        update_store_device_exclusion_on(&tx, &expected, &next, true)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn complete_outbound_store_device_exclusion_activation(
+        &mut self,
+        expected: Box<DurableStoreDeviceExclusionOperation>,
+        next: Box<DurableStoreDeviceExclusionOperation>,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, expected.as_ref(), next.as_ref())?;
+        let candidate = expected
+            .candidate()
+            .expect("candidate-prepared exclusion has a candidate");
+        let stream = candidate.reference.coord.stream_id.to_string();
+        if crate::StoreDatabase::materialized_commit_ref_on(
+            &tx,
+            &stream,
+            candidate.reference.coord.sequence(),
+        )? != Some(candidate.reference.clone())
+        {
+            return Err(DbError::Message(
+                "Store-device exclusion completion is not materialized at its exact position"
+                    .to_string(),
+            ));
+        }
+        update_store_device_exclusion_on(&tx, expected.as_ref(), next.as_ref(), false)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(*next)
+    }
+
+    fn complete_outbound_store_device_exclusion_slot_loss(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+        remotes: Vec<ClosedRemoteObject>,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        for remote in &remotes {
+            let object_id = remote.object_id();
+            let current = load_remote_object_on(&tx, object_id)?;
+            let unuploaded = matches!(
+                &current,
+                RemoteObjectRecord::CandidateCommit(record)
+                    if matches!(record.state, coven_protocol::remote_object::CandidateCommitState::Prepared)
+            ) || matches!(
+                &current,
+                RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        record.state,
+                        coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { .. }
+                    )
+            );
+            if current != **remote || !unuploaded {
+                return Err(DbError::Message(format!(
+                    "outcome-slot loss cannot discard uploaded exclusion object {object_id}"
+                )));
+            }
+            if !crate::remote_object_records::delete_remote_object_on(&tx, object_id)? {
+                return Err(DbError::Message(format!(
+                    "unuploaded exclusion object {object_id} disappeared during slot resolution"
+                )));
+            }
+        }
+        update_store_device_exclusion_on(&tx, &expected, &next, false)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn begin_outbound_store_device_exclusion_nonactivation(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+        candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        let authority_id = remote_object_id(expected.object().object());
+        if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
+            .is_some()
+        {
+            return Err(DbError::Message(
+                "uploaded exclusion authority became a deletion target".to_string(),
+            ));
+        }
+        let head = candidate.head_ref();
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&head.object),
+            nonactivation.clone(),
+        )?
+        .is_some()
+        {
+            return Err(DbError::Message(
+                "Store-device exclusion activation head became a deletion target".to_string(),
+            ));
+        }
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&candidate.reference.object),
+            nonactivation,
+        )?
+        .is_none()
+        {
+            return Err(DbError::Message(
+                "losing Store-device exclusion commit has no deletion target".to_string(),
+            ));
+        }
+        update_store_device_exclusion_on(&tx, &expected, &next, true)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn begin_outbound_store_device_exclusion_replacement(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+        replacement_candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        losing_candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        authority_id: ObjectHash,
+        replacement_remotes: Vec<ClosedRemoteObject>,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let records = self.records;
+        let conn = records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        for remote in replacement_remotes
+            .iter()
+            .filter(|remote| remote.object_id() != authority_id)
+        {
+            persist_exact_remote_object_on(
+                &tx,
+                records.store_dir,
+                remote,
+                "replacement Store-device exclusion candidate object",
+            )?;
+        }
+        let mut authority = load_remote_object_on(&tx, authority_id)?;
+        authority
+            .add_retained_authority_candidate(replacement_candidate.reference.clone())
+            .map_err(|error| {
+                DbError::context("attach replacement exclusion candidate authority", error)
+            })?;
+        update_remote_object_on(&tx, authority_id, &authority)?;
+        if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
+            .is_some()
+        {
+            return Err(DbError::Message(
+                "reusable exclusion outcome became a deletion target".to_string(),
+            ));
+        }
+        let head = losing_candidate.head_ref();
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&head.object),
+            nonactivation.clone(),
+        )?
+        .is_some()
+        {
+            return Err(DbError::Message(
+                "losing exclusion activation head became a deletion target".to_string(),
+            ));
+        }
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&losing_candidate.reference.object),
+            nonactivation,
+        )?
+        .is_none()
+        {
+            return Err(DbError::Message(
+                "losing exclusion candidate has no exact deletion target".to_string(),
+            ));
+        }
+        update_store_device_exclusion_on(&tx, &expected, &next, true)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn nonactivating_store_device_exclusion_cleanup_targets(
+        &mut self,
+        expected: &DurableStoreDeviceExclusionOperation,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        let conn = self.records.conn;
+        let current =
+            load_store_device_exclusion_on(conn, expected.operation_id())?.ok_or_else(|| {
+                DbError::Message("Store-device exclusion journal is absent".to_string())
+            })?;
+        if current != *expected {
+            return Err(DbError::Message(
+                "Store-device exclusion is not awaiting candidate cleanup".to_string(),
+            ));
+        }
+        let candidate = match &current {
+            DurableStoreDeviceExclusionOperation::CandidateNonactivating { candidate, .. } => {
+                candidate
+            }
+            DurableStoreDeviceExclusionOperation::ReplacingCandidate { losing, .. } => {
+                &losing.candidate
+            }
+            _ => {
+                return Err(DbError::Message(
+                    "Store-device exclusion is not awaiting candidate cleanup".to_string(),
+                ));
+            }
+        };
+        super::candidate_records::candidate_cleanup_targets_on(
+            conn,
+            &candidate.reference,
+            std::slice::from_ref(&candidate.reference.object),
+        )
+    }
+
+    fn complete_store_device_exclusion_replacement_cleanup(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let DurableStoreDeviceExclusionOperation::ReplacingCandidate { object, losing, .. } =
+            &expected
+        else {
+            unreachable!("validated replacement state")
+        };
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        let commit_id = remote_object_id(&losing.candidate.reference.object);
+        let head = losing.candidate.head_ref();
+        let head_id = remote_object_id(&head.object);
+        super::candidate_records::require_candidate_cleanup_complete_on(
+            &tx,
+            &losing.candidate.reference,
+            &[
+                losing.candidate.reference.object.clone(),
+                object.object().clone(),
+                head.object.clone(),
+            ],
+            "replaced exclusion cleanup is incomplete",
+        )?;
+        let commit = load_remote_object_on(&tx, commit_id)?;
+        if commit
+            .candidate_nonactivation_proof(&losing.candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(&losing.proof)
+        {
+            return Err(DbError::Message(
+                "replaced exclusion commit lacks complete nonactivation evidence".to_string(),
+            ));
+        }
+        let authority = load_remote_object_on(&tx, remote_object_id(object.object()))?;
+        if authority
+            .candidate_nonactivation_proof(&losing.candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(&losing.proof)
+        {
+            return Err(DbError::Message(
+                "reusable exclusion outcome lacks its former candidate proof".to_string(),
+            ));
+        }
+        let mut removable = vec![commit_id];
+        let remote = load_remote_object_on(&tx, head_id)?;
+        if remote
+            .candidate_nonactivation_proof(&losing.candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(&losing.proof)
+        {
+            return Err(DbError::Message(
+                "replaced exclusion head lacks complete nonactivation evidence".to_string(),
+            ));
+        }
+        removable.push(head_id);
+        super::candidate_records::delete_remote_objects_on(&tx, removable, "replaced exclusion")?;
+        update_store_device_exclusion_on(&tx, &expected, &next, true)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn complete_nonactivating_store_device_exclusion(
+        &mut self,
+        expected: DurableStoreDeviceExclusionOperation,
+        next: DurableStoreDeviceExclusionOperation,
+    ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
+        let DurableStoreDeviceExclusionOperation::CandidateNonactivating {
+            object,
+            candidate,
+            proof,
+        } = &expected
+        else {
+            unreachable!("validated nonactivating state")
+        };
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
+        let commit_id = remote_object_id(&candidate.reference.object);
+        let head = candidate.head_ref();
+        let head_id = remote_object_id(&head.object);
+        super::candidate_records::require_candidate_cleanup_complete_on(
+            &tx,
+            &candidate.reference,
+            &[candidate.reference.object.clone(), head.object.clone()],
+            "nonactivating exclusion cleanup is incomplete",
+        )?;
+        let commit = load_remote_object_on(&tx, commit_id)?;
+        if commit
+            .candidate_nonactivation_proof(&candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(proof)
+        {
+            return Err(DbError::Message(
+                "losing exclusion commit lacks complete exact nonactivation evidence".to_string(),
+            ));
+        }
+        let inert = load_protocol_inert_object_on(&tx, remote_object_id(object.object()))?;
+        if inert
+            .candidate_nonactivation_proof(&candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(proof)
+        {
+            return Err(DbError::Message(
+                "protocol-inert exclusion object lacks its candidate proof".to_string(),
+            ));
+        }
+        let mut removable = vec![commit_id];
+        let head_remote = load_remote_object_on(&tx, head_id)?;
+        if head_remote
+            .candidate_nonactivation_proof(&candidate.reference)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            != Some(proof)
+        {
+            return Err(DbError::Message(
+                "losing exclusion head lacks complete nonactivation evidence".to_string(),
+            ));
+        }
+        removable.push(head_id);
+        super::candidate_records::delete_remote_objects_on(
+            &tx,
+            removable,
+            "nonactivating exclusion",
+        )?;
+        update_store_device_exclusion_on(&tx, &expected, &next, false)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn mark_store_device_exclusion_authority_uploaded(
+        &mut self,
+        expected: ClosedRemoteObject,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        let conn = self.records.conn;
+        let object_id = expected.object_id();
+        let current = load_remote_object_on(conn, object_id)?;
+        let (
+            RemoteObjectRecord::RetainedAuthority(expected_record),
+            RemoteObjectRecord::RetainedAuthority(current_record),
+        ) = (expected.record(), &current)
+        else {
+            return Err(DbError::Message(
+                "Store-device exclusion authority is not retained authority".to_string(),
+            ));
+        };
+        if expected_record.identity != current_record.identity
+            || expected_record.payloads != current_record.payloads
+        {
+            return Err(DbError::Message(
+                "Store-device exclusion authority changed before upload completion".to_string(),
+            ));
+        }
+        match &current_record.state {
+            RetainedAuthorityObjectState::Prepared { ownership }
+                if ownership.pending.contains(&candidate) =>
+            {
+                mark_remote_object_uploaded_on(conn, current)?;
+            }
+            RetainedAuthorityObjectState::UploadedVerified { ownership }
+                if ownership.pending.contains(&candidate) => {}
+            _ => {
+                return Err(DbError::Message(
+                    "Store-device exclusion authority does not belong to its current candidate"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn outbound_store_device_exclusion_operations(
+        &mut self,
+    ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
+        let conn = self.records.conn;
+        let mut statement = conn
+            .prepare(
+                "SELECT operation_id, state
+                 FROM outbound_store_device_exclusion
+                 ORDER BY operation_id",
+            )
+            .map_err(DbError::from)?;
+        let operations = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .map(|row| {
+                let (raw_id, raw) = row.map_err(DbError::from)?;
+                let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
+                    DbError::context("Store-device exclusion operation id", error)
+                })?;
+                parse_store_device_exclusion_operation(operation_id, &raw)
+            })
+            .collect();
+        operations
+    }
+}
+
 impl StoreDatabase {
     pub async fn begin_outbound_store_device_exclusion(
         &self,
@@ -201,39 +695,8 @@ impl StoreDatabase {
         let remotes = operation
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
-        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
-                if active.operation_id() != operation.operation_id() {
-                    return Err(DbError::Message(format!(
-                        "Store-device exclusion operation {} remains active",
-                        active.operation_id()
-                    )));
-                }
-                return Ok(active);
-            }
-            let operation_id = operation.operation_id();
-            if let Some(existing) = load_store_device_exclusion_on(&tx, operation_id)? {
-                if existing != operation || !existing.is_completed() {
-                    return Err(DbError::Message(format!(
-                        "Store-device exclusion operation {operation_id} already has different durable state"
-                    )));
-                }
-                return Ok(existing);
-            }
-            for remote in &remotes {
-                persist_exact_remote_object_on(
-                    &tx,
-                    &store_dir,
-                    remote,
-                    "Store-device exclusion candidate object",
-                )?;
-            }
-            insert_store_device_exclusion_on(&tx, &operation, true)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(operation)
+            session.begin_outbound_store_device_exclusion(operation, remotes)
         }))
         .await
     }
@@ -243,7 +706,7 @@ impl StoreDatabase {
     ) -> Result<Option<DurableStoreDeviceExclusionOperation>, DbError> {
         Box::pin(
             self.connection
-                .call_store(|session| load_active_store_device_exclusion_on(session.records.conn)),
+                .call_store(|session| session.active_outbound_store_device_exclusion()),
         )
         .await
     }
@@ -272,29 +735,8 @@ impl StoreDatabase {
                     .to_string(),
             ));
         }
-        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            let next_candidate = next.candidate().expect("validated candidate state");
-            match (candidate.head_ref(), next_candidate.head_ref()) {
-                (current, replacement) if current != replacement => {
-                    let (winner, prepared) = next_candidate.publication();
-                    replace_prepared_merge_head_remote_on(
-                        &tx,
-                        &store_dir,
-                        &current.object,
-                        winner,
-                        prepared,
-                        &candidate.reference,
-                    )?;
-                }
-                _ => {}
-            }
-            update_store_device_exclusion_on(&tx, &expected, &next, true)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            session.replace_outbound_store_device_exclusion_candidate(expected, next, candidate)
         }))
         .await
     }
@@ -324,31 +766,7 @@ impl StoreDatabase {
             let expected = Box::new(expected);
             let next = Box::new(next);
             Box::pin(self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                require_store_device_exclusion_transition_on(
-                    &tx,
-                    expected.as_ref(),
-                    next.as_ref(),
-                )?;
-                let candidate = expected
-                    .candidate()
-                    .expect("candidate-prepared exclusion has a candidate");
-                let stream = candidate.reference.coord.stream_id.to_string();
-                if crate::StoreDatabase::materialized_commit_ref_on(
-                    &tx,
-                    &stream,
-                    candidate.reference.coord.sequence(),
-                )? != Some(candidate.reference.clone())
-                {
-                    return Err(DbError::Message(
-                    "Store-device exclusion completion is not materialized at its exact position"
-                        .to_string(),
-                ));
-                }
-                update_store_device_exclusion_on(&tx, expected.as_ref(), next.as_ref(), false)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(*next)
+                session.complete_outbound_store_device_exclusion_activation(expected, next)
             }))
             .await
         })
@@ -371,38 +789,7 @@ impl StoreDatabase {
             .remote_objects()
             .map_err(store_device_exclusion_journal_error)?;
         Box::pin(self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            for remote in &remotes {
-                let object_id = remote.object_id();
-                let current = load_remote_object_on(&tx, object_id)?;
-                let unuploaded = matches!(
-                    &current,
-                    RemoteObjectRecord::CandidateCommit(record)
-                        if matches!(record.state, coven_protocol::remote_object::CandidateCommitState::Prepared)
-                ) || matches!(
-                    &current,
-                    RemoteObjectRecord::RetainedAuthority(record)
-                        if matches!(
-                            record.state,
-                            coven_protocol::remote_object::RetainedAuthorityObjectState::Prepared { .. }
-                        )
-                );
-                if current != **remote || !unuploaded {
-                    return Err(DbError::Message(format!(
-                        "outcome-slot loss cannot discard uploaded exclusion object {object_id}"
-                    )));
-                }
-                if !crate::remote_object_records::delete_remote_object_on(&tx, object_id)? {
-                    return Err(DbError::Message(format!(
-                        "unuploaded exclusion object {object_id} disappeared during slot resolution"
-                    )));
-                }
-            }
-            update_store_device_exclusion_on(&tx, &expected, &next, false)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            session.complete_outbound_store_device_exclusion_slot_loss(expected, next, remotes)
         }))
         .await
     }
@@ -435,43 +822,12 @@ impl StoreDatabase {
             ));
         }
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            let authority_id = remote_object_id(expected.object().object());
-            if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
-                .is_some()
-            {
-                return Err(DbError::Message(
-                    "uploaded exclusion authority became a deletion target".to_string(),
-                ));
-            }
-            let head = candidate.head_ref();
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&head.object),
-                nonactivation.clone(),
-            )?
-            .is_some()
-            {
-                return Err(DbError::Message(
-                    "Store-device exclusion activation head became a deletion target".to_string(),
-                ));
-            }
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&candidate.reference.object),
+            session.begin_outbound_store_device_exclusion_nonactivation(
+                expected,
+                next,
+                candidate,
                 nonactivation,
-            )?
-            .is_none()
-            {
-                return Err(DbError::Message(
-                    "losing Store-device exclusion commit has no deletion target".to_string(),
-                ));
-            }
-            update_store_device_exclusion_on(&tx, &expected, &next, true)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            )
         }))
         .await
     }
@@ -520,62 +876,16 @@ impl StoreDatabase {
         }
         .remote_objects()
         .map_err(store_device_exclusion_journal_error)?;
-        let store_dir = self.store_dir.clone();
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            for remote in replacement_remotes
-                .iter()
-                .filter(|remote| remote.object_id() != authority_id)
-            {
-                persist_exact_remote_object_on(
-                    &tx,
-                    &store_dir,
-                    remote,
-                    "replacement Store-device exclusion candidate object",
-                )?;
-            }
-            let mut authority = load_remote_object_on(&tx, authority_id)?;
-            authority
-                .add_retained_authority_candidate(replacement_candidate.reference.clone())
-                .map_err(|error| {
-                    DbError::context("attach replacement exclusion candidate authority", error)
-                })?;
-            update_remote_object_on(&tx, authority_id, &authority)?;
-            if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
-                .is_some()
-            {
-                return Err(DbError::Message(
-                    "reusable exclusion outcome became a deletion target".to_string(),
-                ));
-            }
-            let head = losing_candidate.head_ref();
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&head.object),
-                nonactivation.clone(),
-            )?
-            .is_some()
-            {
-                return Err(DbError::Message(
-                    "losing exclusion activation head became a deletion target".to_string(),
-                ));
-            }
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&losing_candidate.reference.object),
+            session.begin_outbound_store_device_exclusion_replacement(
+                expected,
+                next,
+                replacement_candidate,
+                losing_candidate,
+                authority_id,
+                replacement_remotes,
                 nonactivation,
-            )?
-            .is_none()
-            {
-                return Err(DbError::Message(
-                    "losing exclusion candidate has no exact deletion target".to_string(),
-                ));
-            }
-            update_store_device_exclusion_on(&tx, &expected, &next, true)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            )
         }))
         .await
     }
@@ -585,34 +895,7 @@ impl StoreDatabase {
         expected: DurableStoreDeviceExclusionOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let current = load_store_device_exclusion_on(conn, expected.operation_id())?
-                .ok_or_else(|| {
-                    DbError::Message("Store-device exclusion journal is absent".to_string())
-                })?;
-            if current != expected {
-                return Err(DbError::Message(
-                    "Store-device exclusion is not awaiting candidate cleanup".to_string(),
-                ));
-            }
-            let candidate = match &current {
-                DurableStoreDeviceExclusionOperation::CandidateNonactivating {
-                    candidate, ..
-                } => candidate,
-                DurableStoreDeviceExclusionOperation::ReplacingCandidate { losing, .. } => {
-                    &losing.candidate
-                }
-                _ => {
-                    return Err(DbError::Message(
-                        "Store-device exclusion is not awaiting candidate cleanup".to_string(),
-                    ));
-                }
-            };
-            super::candidate_records::candidate_cleanup_targets_on(
-                conn,
-                &candidate.reference,
-                std::slice::from_ref(&candidate.reference.object),
-            )
+            session.nonactivating_store_device_exclusion_cleanup_targets(&expected)
         }))
         .await
     }
@@ -624,7 +907,7 @@ impl StoreDatabase {
         let DurableStoreDeviceExclusionOperation::ReplacingCandidate {
             object,
             candidate,
-            losing,
+            losing: _,
         } = expected.clone()
         else {
             return Err(DbError::Message(
@@ -638,62 +921,7 @@ impl StoreDatabase {
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            let commit_id = remote_object_id(&losing.candidate.reference.object);
-            let head = losing.candidate.head_ref();
-            let head_id = remote_object_id(&head.object);
-            super::candidate_records::require_candidate_cleanup_complete_on(
-                &tx,
-                &losing.candidate.reference,
-                &[
-                    losing.candidate.reference.object.clone(),
-                    object.object().clone(),
-                    head.object.clone(),
-                ],
-                "replaced exclusion cleanup is incomplete",
-            )?;
-            let commit = load_remote_object_on(&tx, commit_id)?;
-            if commit
-                .candidate_nonactivation_proof(&losing.candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&losing.proof)
-            {
-                return Err(DbError::Message(
-                    "replaced exclusion commit lacks complete nonactivation evidence".to_string(),
-                ));
-            }
-            let authority = load_remote_object_on(&tx, remote_object_id(object.object()))?;
-            if authority
-                .candidate_nonactivation_proof(&losing.candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&losing.proof)
-            {
-                return Err(DbError::Message(
-                    "reusable exclusion outcome lacks its former candidate proof".to_string(),
-                ));
-            }
-            let mut removable = vec![commit_id];
-            let remote = load_remote_object_on(&tx, head_id)?;
-            if remote
-                .candidate_nonactivation_proof(&losing.candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&losing.proof)
-            {
-                return Err(DbError::Message(
-                    "replaced exclusion head lacks complete nonactivation evidence".to_string(),
-                ));
-            }
-            removable.push(head_id);
-            super::candidate_records::delete_remote_objects_on(
-                &tx,
-                removable,
-                "replaced exclusion",
-            )?;
-            update_store_device_exclusion_on(&tx, &expected, &next, true)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            session.complete_store_device_exclusion_replacement_cleanup(expected, next)
         }))
         .await
     }
@@ -722,59 +950,7 @@ impl StoreDatabase {
         next.validate()
             .map_err(store_device_exclusion_journal_error)?;
         Box::pin(self.connection.call_store(move |session| {
-            let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
-            let commit_id = remote_object_id(&candidate.reference.object);
-            let head = candidate.head_ref();
-            let head_id = remote_object_id(&head.object);
-            super::candidate_records::require_candidate_cleanup_complete_on(
-                &tx,
-                &candidate.reference,
-                &[candidate.reference.object.clone(), head.object.clone()],
-                "nonactivating exclusion cleanup is incomplete",
-            )?;
-            let commit = load_remote_object_on(&tx, commit_id)?;
-            if commit
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&proof)
-            {
-                return Err(DbError::Message(
-                    "losing exclusion commit lacks complete exact nonactivation evidence"
-                        .to_string(),
-                ));
-            }
-            let inert = load_protocol_inert_object_on(&tx, remote_object_id(object.object()))?;
-            if inert
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&proof)
-            {
-                return Err(DbError::Message(
-                    "protocol-inert exclusion object lacks its candidate proof".to_string(),
-                ));
-            }
-            let mut removable = vec![commit_id];
-            let head_remote = load_remote_object_on(&tx, head_id)?;
-            if head_remote
-                .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
-                != Some(&proof)
-            {
-                return Err(DbError::Message(
-                    "losing exclusion head lacks complete nonactivation evidence".to_string(),
-                ));
-            }
-            removable.push(head_id);
-            super::candidate_records::delete_remote_objects_on(
-                &tx,
-                removable,
-                "nonactivating exclusion",
-            )?;
-            update_store_device_exclusion_on(&tx, &expected, &next, false)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
+            session.complete_nonactivating_store_device_exclusion(expected, next)
         }))
         .await
     }
@@ -795,43 +971,9 @@ impl StoreDatabase {
             })?
             .reference
             .clone();
-        self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-                let object_id = expected.object_id();
-                let current = load_remote_object_on(conn, object_id)?;
-                let (
-                    RemoteObjectRecord::RetainedAuthority(expected_record),
-                    RemoteObjectRecord::RetainedAuthority(current_record),
-                ) = (expected.record(), &current)
-                else {
-                    return Err(DbError::Message(
-                        "Store-device exclusion authority is not retained authority".to_string(),
-                    ));
-                };
-                if expected_record.identity != current_record.identity
-                    || expected_record.payloads != current_record.payloads
-                {
-                    return Err(DbError::Message(
-                        "Store-device exclusion authority changed before upload completion"
-                            .to_string(),
-                    ));
-                }
-                match &current_record.state {
-                    RetainedAuthorityObjectState::Prepared { ownership }
-                        if ownership.pending.contains(&candidate) =>
-                    {
-                        mark_remote_object_uploaded_on(conn, current)?;
-                    }
-                    RetainedAuthorityObjectState::UploadedVerified { ownership }
-                        if ownership.pending.contains(&candidate) => {}
-                    _ => {
-                        return Err(DbError::Message(
-                            "Store-device exclusion authority does not belong to its current candidate"
-                                .to_string(),
-                        ));
-                    }
-                }
-                Ok(())
+        self.connection
+            .call_store(move |session| {
+                session.mark_store_device_exclusion_authority_uploaded(expected, candidate)
             })
             .await
     }
@@ -840,30 +982,10 @@ impl StoreDatabase {
     pub async fn outbound_store_device_exclusion_operations(
         &self,
     ) -> Result<Vec<DurableStoreDeviceExclusionOperation>, DbError> {
-        Box::pin(self.connection.call_store(|session| {
-            let conn = session.records.conn;
-            let mut statement = conn
-                .prepare(
-                    "SELECT operation_id, state
-                     FROM outbound_store_device_exclusion
-                     ORDER BY operation_id",
-                )
-                .map_err(DbError::from)?;
-            let operations = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(DbError::from)?
-                .map(|row| {
-                    let (raw_id, raw) = row.map_err(DbError::from)?;
-                    let operation_id = raw_id.parse::<ObjectHash>().map_err(|error| {
-                        DbError::context("Store-device exclusion operation id", error)
-                    })?;
-                    parse_store_device_exclusion_operation(operation_id, &raw)
-                })
-                .collect();
-            operations
-        }))
+        Box::pin(
+            self.connection
+                .call_store(|session| session.outbound_store_device_exclusion_operations()),
+        )
         .await
     }
 }
