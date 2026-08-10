@@ -37,6 +37,7 @@ pub mod payload_spool;
 mod pending_publication;
 mod preparation;
 mod prepared_remote_objects;
+pub(crate) use prepared_remote_objects::persist_prepared_audience_objects_on;
 mod provider_probe;
 mod publication;
 pub mod publication_state;

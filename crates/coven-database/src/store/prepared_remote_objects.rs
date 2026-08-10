@@ -82,7 +82,7 @@ impl StoreSession<'_> {
                     .parse()
                     .map_err(|error| DbError::context("prepared remote object id", error))?;
                 Ok(PreparedRemoteObject {
-                    closed: crate::reopen_remote_object_on(records, id)?,
+                    closed: crate::reopen_remote_object_on(records.conn, records.store_dir, id)?,
                     spool_path: spool_path.map(PathBuf::from),
                 })
             })
@@ -273,95 +273,6 @@ impl StoreSession<'_> {
 }
 
 impl StoreDatabase {
-    pub(crate) fn persist_prepared_audience_objects_on(
-        records: crate::payload_spool::StoreRecords<'_>,
-        write_id: &WriteId,
-        packages: &[PreparedAudiencePackage],
-        blobs: &[PreparedAudienceBlob],
-    ) -> Result<(), DbError> {
-        let conn = records.conn;
-        let store_dir = records.store_dir;
-        let package_audiences = packages
-            .iter()
-            .map(|prepared| {
-                if prepared.package().write_id() != write_id {
-                    return Err(DbError::Message(format!(
-                        "prepared audience package write {} differs from journal write {write_id}",
-                        prepared.package().write_id()
-                    )));
-                }
-                Ok(prepared.package().audience().remote_audience())
-            })
-            .collect::<Result<std::collections::BTreeSet<_>, DbError>>()?;
-        if package_audiences.len() != packages.len() {
-            return Err(DbError::Message(format!(
-                "write {write_id} has duplicate prepared package audiences"
-            )));
-        }
-        for prepared in packages {
-            let audience = prepared.package().audience().remote_audience();
-            validate_remote_object_on(
-                conn,
-                prepared.remote_object_id(),
-                prepared.object(),
-                prepared.semantic_bytes(),
-            )?;
-            conn.execute(
-                "INSERT INTO store_write_packages
-                 (write_id, audience, remote_object_id)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(write_id, audience) DO NOTHING",
-                rusqlite::params![
-                    write_id.as_str(),
-                    remote_audience_to_db(&audience),
-                    prepared.remote_object_id().to_string(),
-                ],
-            )
-            .map_err(DbError::from)?;
-            validate_prepared_package_on(conn, store_dir, write_id, prepared)?;
-        }
-        for prepared in blobs {
-            if !package_audiences.contains(prepared.audience()) {
-                return Err(DbError::Message(format!(
-                    "write {write_id} has a prepared blob for {:?} without that audience's package",
-                    prepared.audience()
-                )));
-            }
-            let locator = prepared.blob().locator();
-            validate_remote_object_on(
-                conn,
-                prepared.remote_object_id(),
-                prepared.blob().object(),
-                &locator.to_bytes(),
-            )?;
-            let locator_hash = locator.locator_hash();
-            let spool_path = prepared
-                .spool_path()
-                .map(|path| {
-                    path.to_str().map(str::to_string).ok_or_else(|| {
-                        DbError::Message("prepared blob spool path is not UTF-8".to_string())
-                    })
-                })
-                .transpose()?;
-            conn.execute(
-                "INSERT INTO store_write_blobs
-                 (write_id, audience, locator_hash, remote_object_id, spool_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(write_id, audience, remote_object_id) DO NOTHING",
-                rusqlite::params![
-                    write_id.as_str(),
-                    remote_audience_to_db(prepared.audience()),
-                    locator_hash.to_string(),
-                    prepared.remote_object_id().to_string(),
-                    spool_path,
-                ],
-            )
-            .map_err(DbError::from)?;
-            validate_prepared_blob_on(conn, write_id, prepared)?;
-        }
-        Ok(())
-    }
-
     pub async fn prepared_remote_objects(
         &self,
         write_id: &WriteId,
@@ -478,6 +389,94 @@ impl StoreDatabase {
             .call_store(move |session| session.protocol_inert_object(object))
             .await
     }
+}
+
+pub(crate) fn persist_prepared_audience_objects_on(
+    conn: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    write_id: &WriteId,
+    packages: &[PreparedAudiencePackage],
+    blobs: &[PreparedAudienceBlob],
+) -> Result<(), DbError> {
+    let package_audiences = packages
+        .iter()
+        .map(|prepared| {
+            if prepared.package().write_id() != write_id {
+                return Err(DbError::Message(format!(
+                    "prepared audience package write {} differs from journal write {write_id}",
+                    prepared.package().write_id()
+                )));
+            }
+            Ok(prepared.package().audience().remote_audience())
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, DbError>>()?;
+    if package_audiences.len() != packages.len() {
+        return Err(DbError::Message(format!(
+            "write {write_id} has duplicate prepared package audiences"
+        )));
+    }
+    for prepared in packages {
+        let audience = prepared.package().audience().remote_audience();
+        validate_remote_object_on(
+            conn,
+            prepared.remote_object_id(),
+            prepared.object(),
+            prepared.semantic_bytes(),
+        )?;
+        conn.execute(
+            "INSERT INTO store_write_packages
+             (write_id, audience, remote_object_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(write_id, audience) DO NOTHING",
+            rusqlite::params![
+                write_id.as_str(),
+                remote_audience_to_db(&audience),
+                prepared.remote_object_id().to_string(),
+            ],
+        )
+        .map_err(DbError::from)?;
+        validate_prepared_package_on(conn, store_dir, write_id, prepared)?;
+    }
+    for prepared in blobs {
+        if !package_audiences.contains(prepared.audience()) {
+            return Err(DbError::Message(format!(
+                "write {write_id} has a prepared blob for {:?} without that audience's package",
+                prepared.audience()
+            )));
+        }
+        let locator = prepared.blob().locator();
+        validate_remote_object_on(
+            conn,
+            prepared.remote_object_id(),
+            prepared.blob().object(),
+            &locator.to_bytes(),
+        )?;
+        let locator_hash = locator.locator_hash();
+        let spool_path = prepared
+            .spool_path()
+            .map(|path| {
+                path.to_str().map(str::to_string).ok_or_else(|| {
+                    DbError::Message("prepared blob spool path is not UTF-8".to_string())
+                })
+            })
+            .transpose()?;
+        conn.execute(
+            "INSERT INTO store_write_blobs
+             (write_id, audience, locator_hash, remote_object_id, spool_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(write_id, audience, remote_object_id) DO NOTHING",
+            rusqlite::params![
+                write_id.as_str(),
+                remote_audience_to_db(prepared.audience()),
+                locator_hash.to_string(),
+                prepared.remote_object_id().to_string(),
+                spool_path,
+            ],
+        )
+        .map_err(DbError::from)?;
+        validate_prepared_blob_on(conn, write_id, prepared)?;
+    }
+    Ok(())
 }
 
 fn remote_object_is_uploaded(remote: &RemoteObjectRecord) -> bool {

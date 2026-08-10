@@ -79,8 +79,9 @@ impl DatabaseTestTransaction<'_, '_> {
         packages: &[crate::PreparedAudiencePackage],
         blobs: &[crate::PreparedAudienceBlob],
     ) -> Result<(), DbError> {
-        crate::StoreDatabase::persist_prepared_audience_objects_on(
-            crate::payload_spool::StoreRecords::new(self.transaction, store_dir),
+        crate::store::persist_prepared_audience_objects_on(
+            self.transaction,
+            store_dir,
             write_id,
             packages,
             blobs,

@@ -90,14 +90,14 @@ pub fn load_remote_object_on(
 /// object need both halves, and reading them here keeps "the row's claims and
 /// the bytes agree" a single check rather than a per-caller convention.
 pub(crate) fn reopen_remote_object_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    conn: &Connection,
+    store_dir: &StoreDir,
     object_id: ObjectHash,
 ) -> Result<coven_protocol::remote_object::ClosedRemoteObject, DbError> {
-    let remote = load_remote_object_on(records.conn, object_id)?;
+    let remote = load_remote_object_on(conn, object_id)?;
     let mut payloads = std::collections::BTreeMap::new();
     for hash in remote.payload_claims() {
-        let bytes = records
-            .payload(hash)
+        let bytes = crate::payload_spool::read_payload_blocking(store_dir, hash)
             .map_err(|error| DbError::Message(error.to_string()))?;
         payloads.insert(hash, bytes);
     }

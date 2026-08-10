@@ -57,10 +57,10 @@ pub fn load_published_store_snapshot_on(
 }
 
 pub(crate) fn load_outbound_store_snapshot_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
 ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-    let conn = records.conn;
     conn.query_row(
         "SELECT snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs \
          FROM outbound_store_snapshot WHERE singleton = 1",
@@ -87,16 +87,18 @@ pub(crate) fn load_outbound_store_snapshot_on(
                 })?;
             let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
                 .map_err(|error| DbError::context("outbound Store snapshot image ref", error))?;
-            let image_bytes = records
-                .payload(image_reference.image_hash)
-                .map_err(|error| DbError::context("outbound Store snapshot image", error))?;
+            let image_bytes =
+                crate::payload_spool::read_payload_blocking(store_dir, image_reference.image_hash)
+                    .map_err(|error| DbError::context("outbound Store snapshot image", error))?;
             let image_prepared = PreparedExactObject::new(
                 image_reference.object.clone(),
-                records
-                    .payload(image_reference.object.stored_hash())
-                    .map_err(|error| {
-                        DbError::context("outbound prepared Store snapshot image", error)
-                    })?,
+                crate::payload_spool::read_payload_blocking(
+                    store_dir,
+                    image_reference.object.stored_hash(),
+                )
+                .map_err(|error| {
+                    DbError::context("outbound prepared Store snapshot image", error)
+                })?,
             )
             .map_err(|error| DbError::context("outbound prepared Store snapshot image", error))?;
             let blobs: Vec<PreparedSnapshotBlob> =

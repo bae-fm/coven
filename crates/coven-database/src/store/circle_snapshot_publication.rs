@@ -16,7 +16,12 @@ impl StoreSession<'_> {
         circle_id: CircleId,
     ) -> Result<Option<DurableCircleSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_circle_snapshot_on(self.records, &authority, circle_id)
+        load_outbound_circle_snapshot_on(
+            self.records.conn,
+            self.records.store_dir,
+            &authority,
+            circle_id,
+        )
     }
 
     fn latest_local_circle_snapshot(
@@ -212,12 +217,9 @@ impl StoreSession<'_> {
                 .map_err(|error| DbError::context("accepted Circle snapshot metadata", error))?;
             meta.circle_id
         };
-        let outbound = load_outbound_circle_snapshot_on(
-            crate::payload_spool::StoreRecords::new(&tx, self.records.store_dir),
-            &authority,
-            circle_id,
-        )?
-        .ok_or_else(|| DbError::Message("outbound Circle snapshot is absent".to_string()))?;
+        let outbound =
+            load_outbound_circle_snapshot_on(&tx, self.records.store_dir, &authority, circle_id)?
+                .ok_or_else(|| DbError::Message("outbound Circle snapshot is absent".to_string()))?;
         if outbound.reference != accepted {
             return Err(DbError::Message(
                 "accepted Circle snapshot differs from the prepared exact object".to_string(),

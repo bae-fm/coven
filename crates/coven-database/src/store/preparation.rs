@@ -259,8 +259,9 @@ impl StoreSession<'_> {
                 .map(crate::PreparedAudienceBlob::remote_object_id),
         );
         debug_assert_eq!(indexed, object_ids);
-        StoreDatabase::persist_prepared_audience_objects_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+        super::prepared_remote_objects::persist_prepared_audience_objects_on(
+            &tx,
+            records.store_dir,
             &stage.write_id,
             &stage.audiences.packages,
             &stage.audiences.blobs,

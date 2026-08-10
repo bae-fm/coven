@@ -13,7 +13,7 @@ impl StoreSession<'_> {
         &mut self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
         let authority = self.local_store_authority()?;
-        load_outbound_store_snapshot_on(self.records, &authority)
+        load_outbound_store_snapshot_on(self.records.conn, self.records.store_dir, &authority)
     }
 
     fn stage_snapshot_publication(
@@ -173,11 +173,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let outbound = load_outbound_store_snapshot_on(
-            crate::payload_spool::StoreRecords::new(&tx, self.records.store_dir),
-            &authority,
-        )?
-        .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
+        let outbound = load_outbound_store_snapshot_on(&tx, self.records.store_dir, &authority)?
+            .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
         if outbound.reference != accepted {
             return Err(DbError::Message(
                 "accepted Store snapshot differs from the prepared exact object".to_string(),
