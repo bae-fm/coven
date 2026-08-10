@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use rusqlite::OptionalExtension;
 
 use super::{StoreRecords, StoreTransaction};
-use crate::payload_spool::{
+use crate::payload_store::{
     circle_bootstrap_coverage_owner_key, payload_owner_claims_on, release_payload_owner_on,
     set_payload_owner_claims_on,
 };

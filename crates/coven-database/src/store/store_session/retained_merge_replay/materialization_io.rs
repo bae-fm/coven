@@ -2,21 +2,15 @@ use super::*;
 use crate::store::retained_replay::load_generation_zero_replay_baseline_on;
 use crate::store::store_session::StoreRecords;
 
-/// The plaintext one record names, read from the spool.
-///
-/// The file is named for the digest of its own contents and the record's
-/// identity fixed that digest when it was built, so a read of this device's own
-/// durable state hands the bytes back as they are — the same trust the rows
-/// beside them get. Verification belongs where untrusted bytes arrive and where
-/// bytes leave for a remote, not on a local read.
-fn spooled_semantic_payload(
+/// The plaintext one record names in the payload store.
+fn stored_semantic_payload(
     records: StoreRecords<'_>,
     remote: &coven_protocol::remote_object::RemoteObjectRecord,
 ) -> Result<Vec<u8>, DbError> {
     let coven_protocol::remote_object::SemanticPayload::Spooled(hash) = remote.semantic_payload()
     else {
         return Err(DbError::Message(format!(
-            "remote object {} names no spooled plaintext",
+            "remote object {} names no stored plaintext",
             remote.object_id()
         )));
     };
@@ -237,11 +231,11 @@ impl StoreDatabase {
         if let Some(objects) = &input.membership_objects {
             let entry_remote = records.remote_object(remote_object_id(&objects.entry().object))?;
             let entry: MembershipEntry =
-                serde_json::from_slice(&spooled_semantic_payload(records, &entry_remote)?)
+                serde_json::from_slice(&stored_semantic_payload(records, &entry_remote)?)
                     .map_err(|error| DbError::context("retained membership entry", error))?;
             let head_remote = records.remote_object(remote_object_id(&objects.head().object))?;
             let head_value: AuthorHead =
-                serde_json::from_slice(&spooled_semantic_payload(records, &head_remote)?)
+                serde_json::from_slice(&stored_semantic_payload(records, &head_remote)?)
                     .map_err(|error| DbError::context("retained membership head", error))?;
             let verified_objects = VerifiedMergeMembershipObjects::verify(
                 &commit,
@@ -258,7 +252,7 @@ impl StoreDatabase {
             if let Some(reference) = objects.resolution() {
                 let remote = records.remote_object(remote_object_id(&reference.object))?;
                 let resolution: coven_protocol::membership::StoreMembershipConflictResolution =
-                    serde_json::from_slice(&spooled_semantic_payload(records, &remote)?).map_err(
+                    serde_json::from_slice(&stored_semantic_payload(records, &remote)?).map_err(
                         |error| DbError::context("retained membership resolution", error),
                     )?;
                 if !resolution.verify_signature()

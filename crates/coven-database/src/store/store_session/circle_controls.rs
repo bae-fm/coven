@@ -42,8 +42,9 @@ fn persist_circle_operation_objects_on(
         if !installed.insert(expected) {
             continue;
         }
-        let actual = crate::payload_spool::write_payload_blocking(store_dir, object.stored_bytes())
-            .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
+        let actual =
+            crate::payload_store::write_payload_blocking(conn, store_dir, object.stored_bytes())
+                .map_err(|error| DbError::context(format!("install {domain} payload"), error))?;
         if actual != expected {
             return Err(DbError::Message(format!(
                 "{domain} payload installed as {actual}, referenced as {expected}"
@@ -815,9 +816,9 @@ pub(crate) fn claim_operation_payloads_on(
     operation_id: &CircleOperationId,
     operation: &coven_protocol::circle_journal::PreparedCircleOperation,
 ) -> Result<(), DbError> {
-    crate::payload_spool::set_payload_owner_claims_on(
+    crate::payload_store::set_payload_owner_claims_on(
         conn,
-        &crate::payload_spool::circle_operation_owner_key(operation_id.as_str()),
+        &crate::payload_store::circle_operation_owner_key(operation_id.as_str()),
         &operation
             .prepared_objects
             .values()
@@ -834,9 +835,9 @@ pub(crate) fn release_operation_payloads_on(
     conn: &Connection,
     operation_id: &CircleOperationId,
 ) -> Result<(), DbError> {
-    crate::payload_spool::release_payload_owner_on(
+    crate::payload_store::release_payload_owner_on(
         conn,
-        &crate::payload_spool::circle_operation_owner_key(operation_id.as_str()),
+        &crate::payload_store::circle_operation_owner_key(operation_id.as_str()),
     )
 }
 

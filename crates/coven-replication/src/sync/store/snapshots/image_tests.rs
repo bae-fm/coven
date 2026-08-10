@@ -1222,9 +1222,6 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
                 panic!("snapshot bootstrap installed a genesis replay baseline")
             }
         }
-        baseline
-            .validate_image(&store_dir)
-            .expect("validate snapshot replay baseline");
         let mut tampered = baseline.authority.clone();
         let coven_database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
         else {

@@ -199,17 +199,14 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
             panic!("Store creation installed a snapshot replay baseline")
         }
     }
-    baseline
-        .validate_image(&db.store_dir)
-        .expect("validate replay image");
 }
 
-/// The baseline's database image and authority are payload files its row names,
-/// not columns it carries: the row claims both hashes, the files hold exactly
-/// those bytes, and a baseline whose image file is gone fails to load instead of
+/// The baseline's database image and authority are payloads its row names: the
+/// row claims both hashes, the payload store holds exactly those bytes, and a
+/// baseline whose image bytes are gone fails to load instead of
 /// producing an image from anywhere else.
 #[tokio::test]
-async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
+async fn generation_zero_replay_baseline_names_its_owned_payloads() {
     let db = open_test_db();
     TestStore::create(
         &db,
@@ -220,7 +217,6 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
     .await
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db.database);
-    let store_dir = db.store_dir.clone();
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -231,26 +227,33 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
     let authority_hash = coven_protocol::store_commit::ObjectHash::digest(&authority_bytes);
 
     let claimed = database
-        .payload_owner_claims(coven_database::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY)
+        .retained_replay_payload_claims_for_test()
         .await
         .expect("read baseline payload claims");
     let mut expected = vec![baseline.image_hash, authority_hash];
     expected.sort();
     assert_eq!(claimed, expected);
 
-    let image_path = store_dir.payload_spool_path(baseline.image_hash);
-    let image_bytes = std::fs::read(&image_path).expect("read image payload");
+    let image_bytes = database
+        .payload_for_test(baseline.image_hash)
+        .await
+        .expect("read image payload");
     assert_eq!(
         coven_protocol::store_commit::ObjectHash::digest(&image_bytes),
         baseline.image_hash
     );
     assert_eq!(
-        std::fs::read(store_dir.payload_spool_path(authority_hash))
+        database
+            .payload_for_test(authority_hash)
+            .await
             .expect("read authority payload"),
         authority_bytes
     );
 
-    std::fs::remove_file(&image_path).expect("remove image payload");
+    database
+        .remove_payload_bytes_for_test(baseline.image_hash)
+        .await
+        .expect("remove image payload");
     let error = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -260,7 +263,10 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
         "{error}"
     );
 
-    std::fs::write(&image_path, &image_bytes).expect("restore image payload");
+    database
+        .install_payload_for_test(image_bytes)
+        .await
+        .expect("restore image payload");
     database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -269,7 +275,7 @@ async fn generation_zero_replay_baseline_names_its_payloads_in_the_spool() {
 
 /// Replacing the baseline's authority replaces its claim set, and the flow that
 /// drops the last claim on the superseded payload pays for it before returning:
-/// the old authority file is gone, the image the row still names is not.
+/// the old authority payload is gone, the image the row still names is not.
 #[tokio::test]
 async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     let db = open_test_db();
@@ -282,7 +288,6 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     .await
     .expect("create Store");
     let database = coven_database::StoreDatabase::new(&db.database);
-    let store_dir = db.store_dir.clone();
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -292,24 +297,27 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
             .canonical_authority_bytes()
             .expect("canonical authority bytes"),
     );
-    assert!(store_dir.payload_spool_path(superseded).is_file());
+    assert!(database
+        .has_payload_for_test(superseded)
+        .await
+        .expect("check superseded authority payload"));
 
     database
         .replace_generation_zero_replay_authority_for_test(b"{\"kind\":\"other\"}".to_vec())
         .await
         .expect("replace retained replay authority");
 
-    assert!(
-        !store_dir.payload_spool_path(superseded).exists(),
-        "the superseded authority payload outlived the last row naming it"
-    );
-    assert!(
-        store_dir.payload_spool_path(baseline.image_hash).is_file(),
-        "the image the row still names must survive its authority being replaced"
-    );
+    assert!(!database
+        .has_payload_for_test(superseded)
+        .await
+        .expect("check removed authority payload"));
+    assert!(database
+        .has_payload_for_test(baseline.image_hash)
+        .await
+        .expect("check retained image payload"));
     assert_eq!(
         database
-            .owed_payload_spool_cleanup()
+            .owed_payload_cleanup()
             .await
             .expect("read owed payload cleanup"),
         Vec::new()

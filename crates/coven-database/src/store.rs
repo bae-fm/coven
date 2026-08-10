@@ -2,6 +2,7 @@ mod activated_registration_records;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use circle_operations::circle_current_state_on;
 use circle_operations::circle_publication_context_on;
+pub(crate) use store_session::payload_store;
 #[cfg(any(test, feature = "test-utils"))]
 use store_session::test_support;
 use store_session::{
@@ -11,7 +12,7 @@ use store_session::{
     retained_replay, snapshot_image, stream_activation_records, verified_store_authority,
     write_lifecycle,
 };
-pub use store_session::{candidate_records, payload_spool, reclaim};
+pub use store_session::{candidate_records, payload_store::PayloadStoreError, reclaim};
 mod device_join;
 pub(crate) use device_join::{
     advance_device_join_on, begin_device_join_on, begin_device_join_replacement_terminal_on,

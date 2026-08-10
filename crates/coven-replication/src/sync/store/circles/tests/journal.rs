@@ -23,7 +23,10 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
 
     for hash in &hashes {
         assert!(
-            !db.store_dir.payload_spool_path(*hash).exists(),
+            !StoreDatabase::new(&db.database)
+                .has_payload_for_test(*hash)
+                .await
+                .expect("check uninstalled prepared payload"),
             "preparation installed payload {hash} without a durable owner"
         );
     }
@@ -34,9 +37,7 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
         .await
         .expect("persist Circle operation");
     let claims = StoreDatabase::new(&db.database)
-        .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
-            operation_id.as_str(),
-        ))
+        .circle_operation_payload_claims_for_test(&operation_id)
         .await
         .expect("read Circle operation payload claims")
         .into_iter()

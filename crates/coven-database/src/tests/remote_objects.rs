@@ -27,7 +27,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
         &[],
     )
     .expect("open database");
-    let empty_changeset_hash = crate::payload_spool::write_payload_blocking(&store_dir, b"")
+    let empty_changeset_hash = StoreDatabase::new(&db)
+        .install_payload_for_test(Vec::new())
+        .await
         .expect("install empty captured changeset");
     let write_id = WriteId::from_generated("write-1".to_string());
     let stored_write_id = write_id.clone();
@@ -50,7 +52,7 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
                 )
                 .map_err(DbError::from)?;
             transaction.set_payload_owner_claims(
-                &crate::payload_spool::store_write_owner_key(&stored_write_id),
+                &crate::payload_store::store_write_owner_key(&stored_write_id),
                 &std::collections::BTreeSet::from([empty_changeset_hash]),
             )
         })
@@ -277,7 +279,9 @@ async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
     // The row names its payloads; the package reload reads them back out of the
     // spool, so they have to be installed the way a real persist installs them.
     for bytes in [&semantic_for_spool, &stored_package] {
-        crate::payload_spool::write_payload_blocking(&store_dir, bytes)
+        StoreDatabase::new(&db)
+            .install_payload_for_test(bytes.to_vec())
+            .await
             .expect("install package payload");
     }
     let persisted_write_id = write_id.clone();

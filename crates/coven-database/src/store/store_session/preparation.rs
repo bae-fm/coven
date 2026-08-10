@@ -526,7 +526,7 @@ impl StoreSession<'_> {
             self.blob_decls,
         )?;
         let changeset_hash =
-            crate::payload_spool::write_payload_blocking(self.records.store_dir, &changeset)?;
+            crate::payload_store::write_payload_blocking(&tx, self.records.store_dir, &changeset)?;
         crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .insert_store_write(
                 &write_id,

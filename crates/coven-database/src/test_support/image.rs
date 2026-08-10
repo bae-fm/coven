@@ -51,6 +51,18 @@ impl DatabaseImageTest {
         crate::apply_coven_schema(&self.connection).map_err(DbError::from)
     }
 
+    pub fn payload(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+        encoded_hash: String,
+    ) -> Result<Vec<u8>, DbError> {
+        let hash = encoded_hash
+            .parse()
+            .map_err(|error| DbError::context("parse image payload hash", error))?;
+        crate::payload_store::read_payload_blocking(&self.connection, store_dir, hash)
+            .map_err(DbError::from)
+    }
+
     pub fn scoped_routing_id(&self, table: &str, row_id: &str) -> String {
         crate::DatabaseTestSql::new(&self.connection)
             .row_routing_id([7; 32], table, row_id)

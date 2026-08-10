@@ -58,7 +58,7 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         "substituted-metadata-object".to_string(),
     )
     .expect("construct alternate provider object slot");
-    // Only the slot moves: the same bytes are already spooled under the same
+    // Only the slot moves: the same bytes are already stored under the same
     // hash, so publication finds them and rejects the object on its slot alone.
     let substituted = coven_protocol::objects::ExactObjectRef::new(
         substituted_slot,
@@ -454,7 +454,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         )
         .await
         .expect("prepare forged control head");
-    spool_substituted_object(&db.store_dir, &prepared_head).await;
+    install_substituted_object(&db, &prepared_head).await;
     journal.operation_mut().prepared_objects.insert(
         "control-head".to_string(),
         prepared_head.reference().clone(),
@@ -620,10 +620,7 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .expect("the operation carries its sealed roster entry");
     assert_eq!(entry_reference, &entry_object);
     store
-        .publish_exact_protocol_object(
-            entry_reference,
-            spooled_bytes(&db.store_dir, entry_reference).await,
-        )
+        .publish_exact_protocol_object(entry_reference, stored_bytes(&db, entry_reference).await)
         .await
         .expect("publish the founder roster entry");
     let entry_plaintext = cloud_storage

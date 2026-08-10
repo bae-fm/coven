@@ -83,10 +83,7 @@ fn inspect_database<R>(
 }
 
 fn payload_bytes(store_dir: &StoreDir, encoded_hash: String) -> Result<Vec<u8>, crate::DbError> {
-    let hash = encoded_hash
-        .parse()
-        .map_err(|error| crate::DbError::context("parse captured payload hash", error))?;
-    crate::payload_spool::read_payload_blocking(store_dir, hash).map_err(crate::DbError::from)
+    crate::DatabaseImageTest::open(&store_dir.db_path())?.payload(store_dir, encoded_hash)
 }
 
 fn audience_partitions(

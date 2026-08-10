@@ -9,9 +9,9 @@ use super::candidate_records::{
     load_merge_candidate_head_cleanup_on, parse_prepared_merge_candidate_on,
     MergeCandidateHeadCleanup,
 };
-use super::payload_spool::{
+use super::payload_store::{
     read_payload_blocking, read_verified_payload_blocking, write_payload_blocking,
-    PayloadSpoolError,
+    PayloadStoreError,
 };
 use super::publication_state::PreparedStoreWriteState;
 use super::{StoreRecords, StoreTransaction};
@@ -29,16 +29,16 @@ impl<'store> StoreRecords<'store> {
         Self { conn, store_dir }
     }
 
-    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
-        read_payload_blocking(self.store_dir, hash)
+    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
+        read_payload_blocking(self.conn, self.store_dir, hash)
     }
 
-    pub(crate) fn verified_payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
-        read_verified_payload_blocking(self.store_dir, hash)
+    pub(crate) fn verified_payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
+        read_verified_payload_blocking(self.conn, self.store_dir, hash)
     }
 
-    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
-        write_payload_blocking(self.store_dir, bytes)
+    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
+        write_payload_blocking(self.conn, self.store_dir, bytes)
     }
 
     pub(crate) fn store_write_partitions(
@@ -236,11 +236,11 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         }
     }
 
-    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
+    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
         self.records.install_payload(bytes)
     }
 
-    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
+    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
         self.records.payload(hash)
     }
 
@@ -441,9 +441,9 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             )
             .map_err(DbError::from)?;
         }
-        crate::payload_spool::set_payload_owner_claims_on(
+        crate::payload_store::set_payload_owner_claims_on(
             tx,
-            &crate::payload_spool::store_write_owner_key(write_id),
+            &crate::payload_store::store_write_owner_key(write_id),
             &payloads,
         )?;
         if status == WriteStatus::Pending {

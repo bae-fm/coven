@@ -125,12 +125,12 @@ impl StoreSession<'_> {
                 .map_err(DbError::from)?;
             rows
         };
-        let mut owner_keys = vec![crate::payload_spool::store_write_owner_key(write_id)];
+        let mut owner_keys = vec![crate::payload_store::store_write_owner_key(write_id)];
         for (object_id, _) in &remotes {
             let object_id = object_id
                 .parse()
                 .map_err(|error| DbError::context("parse transferred remote object id", error))?;
-            owner_keys.push(crate::payload_spool::remote_object_owner_key(object_id));
+            owner_keys.push(crate::payload_store::remote_object_owner_key(object_id));
         }
         let mut payload_claims = Vec::new();
         let mut payload_hashes = BTreeSet::new();
@@ -138,7 +138,7 @@ impl StoreSession<'_> {
             let claims = {
                 let mut statement = connection
                     .prepare(
-                        "SELECT payload_hash FROM payload_spool_owners
+                        "SELECT payload_hash FROM payload_owners
                          WHERE owner_key = ?1 ORDER BY payload_hash",
                     )
                     .map_err(DbError::from)?;
@@ -178,19 +178,23 @@ impl StoreSession<'_> {
         write_id: &WriteId,
         transfer: PreparedWriteTransfer,
     ) -> Result<(), DbError> {
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         for (expected_hash, bytes) in &transfer.payloads {
-            let actual_hash = self.records.install_payload(bytes)?;
+            let actual_hash = crate::payload_store::write_payload_blocking(
+                &transaction,
+                self.records.store_dir,
+                bytes,
+            )?;
             if actual_hash != *expected_hash {
                 return Err(DbError::Message(format!(
                     "transferred payload expected {expected_hash} but stored as {actual_hash}"
                 )));
             }
         }
-        let transaction = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
         for (object_id, state) in transfer.remotes {
             let imported = transaction
                 .execute(
@@ -259,7 +263,7 @@ impl StoreSession<'_> {
                 .map_err(DbError::from)?;
         }
         for (owner_key, claims) in transfer.payload_claims {
-            crate::payload_spool::set_payload_owner_claims_on(&transaction, &owner_key, &claims)?;
+            crate::payload_store::set_payload_owner_claims_on(&transaction, &owner_key, &claims)?;
         }
         transaction.commit().map_err(DbError::from)
     }
@@ -438,13 +442,17 @@ impl StoreSession<'_> {
         status: &str,
         base: &str,
     ) -> Result<(), DbError> {
-        let changeset_hash = self.records.install_payload(b"")?;
-        let owner_key = crate::payload_spool::store_write_owner_key(write_id);
         let transaction = self
             .records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
+        let changeset_hash = crate::payload_store::write_payload_blocking(
+            &transaction,
+            self.records.store_dir,
+            b"",
+        )?;
+        let owner_key = crate::payload_store::store_write_owner_key(write_id);
         transaction
             .execute(
                 r#"INSERT INTO store_writes
@@ -453,7 +461,7 @@ impl StoreSession<'_> {
                 (write_id.as_str(), status, changeset_hash.to_string(), base),
             )
             .map_err(DbError::from)?;
-        crate::payload_spool::set_payload_owner_claims_on(
+        crate::payload_store::set_payload_owner_claims_on(
             &transaction,
             &owner_key,
             &BTreeSet::from([changeset_hash]),
@@ -467,9 +475,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::payload_spool::release_payload_owner_on(
+        crate::payload_store::release_payload_owner_on(
             &transaction,
-            &crate::payload_spool::store_write_owner_key(write_id),
+            &crate::payload_store::store_write_owner_key(write_id),
         )?;
         transaction
             .execute(
@@ -615,8 +623,8 @@ impl StoreSession<'_> {
             .map_err(DbError::from)?;
         transaction
             .execute(
-                "DELETE FROM payload_spool_owners WHERE owner_key = ?1",
-                [crate::payload_spool::circle_bootstrap_coverage_owner_key(
+                "DELETE FROM payload_owners WHERE owner_key = ?1",
+                [crate::payload_store::circle_bootstrap_coverage_owner_key(
                     circle_id,
                 )],
             )

@@ -25,23 +25,27 @@ impl StoreSession<'_> {
         blobs: Vec<PreparedSnapshotBlob>,
     ) -> Result<StoreSnapshotRef, DbError> {
         let authority = self.local_store_authority()?;
-        let image_facts =
-            crate::payload_spool::write_payload_file_blocking(self.records.store_dir, image.path())
-                .map_err(|error| {
-                    SnapshotImageError::Projection(format!("spool Store snapshot image: {error}"))
-                });
-        let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
-        let image_prepared_hash = crate::payload_spool::write_payload_blocking(
-            self.records.store_dir,
-            image_prepared.stored_bytes(),
-        )
-        .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
-        let image_prepared_size = image_prepared.stored_bytes().len() as u64;
         let tx = self
             .records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
+        let image_facts = crate::payload_store::write_payload_file_blocking(
+            &tx,
+            self.records.store_dir,
+            image.path(),
+        )
+        .map_err(|error| {
+            SnapshotImageError::Projection(format!("spool Store snapshot image: {error}"))
+        });
+        let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
+        let image_prepared_hash = crate::payload_store::write_payload_blocking(
+            &tx,
+            self.records.store_dir,
+            image_prepared.stored_bytes(),
+        )
+        .map_err(|error| DbError::context("spool prepared Store snapshot image", error))?;
+        let image_prepared_size = image_prepared.stored_bytes().len() as u64;
         let registration_ref = authority.reference();
         let registration = authority.value();
         validate_snapshot_author(&meta.author_registration, registration_ref, "Store")?;
@@ -152,9 +156,9 @@ impl StoreSession<'_> {
             ],
         )
         .map_err(DbError::from)?;
-        crate::payload_spool::set_payload_owner_claims_on(
+        crate::payload_store::set_payload_owner_claims_on(
             &tx,
-            crate::payload_spool::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
+            crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
             &BTreeSet::from([image_hash, image_prepared_hash]),
         )?;
         tx.commit().map_err(DbError::from)?;
@@ -206,9 +210,9 @@ impl StoreSession<'_> {
                 "outbound snapshot ownership row is absent or changed".to_string(),
             ));
         }
-        crate::payload_spool::release_payload_owner_on(
+        crate::payload_store::release_payload_owner_on(
             &tx,
-            crate::payload_spool::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
+            crate::payload_store::OUTBOUND_STORE_SNAPSHOT_OWNER_KEY,
         )?;
         let accepted_generation =
             snapshot_generation_as_i64(accepted.generation, "Store snapshot")?;

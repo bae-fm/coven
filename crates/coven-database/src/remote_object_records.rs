@@ -84,9 +84,9 @@ pub fn load_remote_object_on(
     Ok(remote)
 }
 
-/// Load one record together with the payload files it claims.
+/// Load one record together with the payloads it claims.
 ///
-/// The row and the files are one record; the flows that upload or re-encrypt an
+/// The row and the stored bytes are one record; flows that upload or re-encrypt an
 /// object need both halves, and reading them here keeps "the row's claims and
 /// the bytes agree" a single check rather than a per-caller convention.
 pub(crate) fn reopen_remote_object_on(
@@ -97,7 +97,7 @@ pub(crate) fn reopen_remote_object_on(
     let remote = load_remote_object_on(conn, object_id)?;
     let mut payloads = std::collections::BTreeMap::new();
     for hash in remote.payload_claims() {
-        let bytes = crate::payload_spool::read_payload_blocking(store_dir, hash)
+        let bytes = crate::payload_store::read_payload_blocking(conn, store_dir, hash)
             .map_err(|error| DbError::Message(error.to_string()))?;
         payloads.insert(hash, bytes);
     }
@@ -415,48 +415,46 @@ pub fn record_reclaimed_store_package_on(
     Ok(())
 }
 
-/// Install one record's payload files and record its claim on them, in the
+/// Install one record's payloads and record its claim on them, in the
 /// transaction that writes the row naming them.
 ///
-/// The files land before the row commits and the claim commits with the row, so
-/// a row that exists names files that exist, and a transaction that rolls back
-/// leaves content-named files no row points at. Writing them here rather than in
-/// each producing flow keeps that a fact of one function instead of a convention
-/// ten flows have to honour.
+/// The bytes land before the row commits and the claim commits with the row, so
+/// a row that exists names storage that exists. Installing them here keeps that
+/// a fact of one function instead of a per-caller convention.
 fn install_record_payloads_on(
     conn: &Connection,
     store_dir: &StoreDir,
     closed: &ClosedRemoteObject,
 ) -> Result<(), DbError> {
     for (hash, bytes) in closed.payload_bytes() {
-        let written = crate::payload_spool::write_payload_blocking(store_dir, bytes)
+        let written = crate::payload_store::write_payload_blocking(conn, store_dir, bytes)
             .map_err(|error| DbError::Message(error.to_string()))?;
         if written != *hash {
             return Err(DbError::Message(format!(
-                "remote object payload spooled under {written}, named as {hash}"
+                "remote object payload stored under {written}, named as {hash}"
             )));
         }
     }
-    crate::payload_spool::set_payload_owner_claims_on(
+    crate::payload_store::set_payload_owner_claims_on(
         conn,
-        &crate::payload_spool::remote_object_owner_key(closed.record().object_id()),
+        &crate::payload_store::remote_object_owner_key(closed.record().object_id()),
         &closed.payload_bytes().keys().copied().collect(),
     )
 }
 
-/// Let go of the payload files one remote object claimed, and remove its row.
+/// Let go of the payloads one remote object claimed, and remove its row.
 ///
 /// Every deletion of a `remote_objects` row goes through here, so a payload no
 /// row names any more is owed its deletion by the same commit. Never used
 /// against a projected snapshot copy: those rows describe another device's
-/// spool, and deleting them must not touch this one's.
+/// payload storage, and deleting them must not touch this one's.
 pub(crate) fn delete_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
 ) -> Result<bool, DbError> {
-    crate::payload_spool::release_payload_owner_on(
+    crate::payload_store::release_payload_owner_on(
         conn,
-        &crate::payload_spool::remote_object_owner_key(object_id),
+        &crate::payload_store::remote_object_owner_key(object_id),
     )?;
     let removed = conn
         .execute(
@@ -1112,6 +1110,7 @@ pub fn validate_prepared_package_on(
         .parse()
         .map_err(|error| DbError::context("stored prepared remote object id is invalid", error))?;
     let actual = PreparedAudiencePackage::from_remote(
+        conn,
         store_dir,
         load_remote_object_on(conn, remote_object_id)?,
     )?;

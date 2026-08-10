@@ -617,7 +617,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
 
 /// A member addition carries the Circle's whole database image, which is as
 /// large as the Circle's data. The operation row names that image; the bytes
-/// are in the payload spool. So the row is smaller than the single object it
+/// are in the payload store. So the row is smaller than the single object it
 /// names — which it cannot be if it is carrying that object's bytes — and it is
 /// written once rather than rewritten with them at every upload step.
 #[tokio::test]
@@ -1452,7 +1452,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         })
         .await
         .expect("copy pre-close Circle database");
-    crate::sync::test_helpers::copy_payload_spool(
+    crate::sync::test_helpers::copy_payload_files(
         &db.store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(candidate_base_temp.path()),
     );
@@ -1981,7 +1981,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
 }
 
 #[tokio::test]
-async fn uploaded_circle_steps_reopen_the_local_spool_after_restart_before_activation() {
+async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activation() {
     for corrupt in [false, true] {
         let temp = tempfile::tempdir().expect("create database directory");
         let path = temp.path().join(if corrupt {
@@ -2012,13 +2012,21 @@ async fn uploaded_circle_steps_reopen_the_local_spool_after_restart_before_activ
             .prepared_objects
             .get("metadata")
             .expect("operation carries exact metadata object");
-        let payload_path = db.store_dir.payload_spool_path(metadata.stored_hash());
+        let database = coven_database::StoreDatabase::new(&db.database);
         let exact_reads = _home.exact_reads().len();
         if corrupt {
-            std::fs::write(&payload_path, b"corrupt metadata bytes")
+            database
+                .corrupt_payload_for_test(
+                    metadata.stored_hash(),
+                    b"corrupt metadata bytes".to_vec(),
+                )
+                .await
                 .expect("corrupt retained Circle payload");
         } else {
-            std::fs::remove_file(&payload_path).expect("remove retained Circle payload");
+            database
+                .remove_payload_bytes_for_test(metadata.stored_hash())
+                .await
+                .expect("remove retained Circle payload");
         }
         std::thread::spawn(move || drop(db))
             .join()
@@ -2031,7 +2039,7 @@ async fn uploaded_circle_steps_reopen_the_local_spool_after_restart_before_activ
             .expect("bind Circle test Store")
             .resume_circle_operations()
             .await
-            .expect_err("durable upload marker must not bypass local spool verification");
+            .expect_err("durable upload marker must not bypass local payload verification");
         assert!(
             _home.exact_reads()[exact_reads..]
                 .iter()

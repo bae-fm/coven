@@ -37,12 +37,25 @@ impl DatabaseTestSql<'_> {
         }
     }
 
-    fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
+    pub fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
         let store_dir = self.required_store_dir()?;
         let hash = encoded_hash
             .parse()
             .map_err(|error| DbError::context("parse test payload hash", error))?;
-        crate::payload_spool::read_payload_blocking(store_dir, hash).map_err(DbError::from)
+        crate::payload_store::read_payload_blocking(self.connection, store_dir, hash)
+            .map_err(DbError::from)
+    }
+
+    pub fn install_payload(&self, bytes: &[u8]) -> Result<coven_protocol::ObjectHash, DbError> {
+        let store_dir = self.required_store_dir()?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let hash = crate::payload_store::write_payload_blocking(&transaction, store_dir, bytes)
+            .map_err(DbError::from)?;
+        transaction.commit().map_err(DbError::from)?;
+        Ok(hash)
     }
 
     fn required_store_dir(&self) -> Result<&coven_foundation::store_dir::StoreDir, DbError> {
@@ -81,16 +94,16 @@ impl DatabaseTestSql<'_> {
     }
 
     pub fn pay_owed_payload_deletions(&self) -> Result<(), DbError> {
-        crate::payload_spool::pay_owed_payload_deletions_on(
+        crate::payload_store::pay_owed_payload_deletions_on(
             self.connection,
             self.required_store_dir()?,
         )
     }
 
-    pub fn payload_spool_cleanup_hashes(
+    pub fn payload_cleanup_hashes(
         &self,
     ) -> Result<Vec<coven_protocol::store_commit::ObjectHash>, DbError> {
-        crate::payload_spool::payload_spool_cleanup_hashes_on(self.connection)
+        crate::payload_store::payload_cleanup_hashes_on(self.connection)
     }
 
     pub fn set_payload_owner_claims(
@@ -98,7 +111,7 @@ impl DatabaseTestSql<'_> {
         owner_key: &str,
         payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
     ) -> Result<(), DbError> {
-        crate::payload_spool::set_payload_owner_claims_on(self.connection, owner_key, payloads)
+        crate::payload_store::set_payload_owner_claims_on(self.connection, owner_key, payloads)
     }
 
     pub fn record_obsolete_copy_intents(
@@ -114,12 +127,17 @@ impl DatabaseTestSql<'_> {
         remote: &coven_protocol::remote_object::ClosedRemoteObject,
         subject: &str,
     ) -> Result<(), DbError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
         crate::persist_exact_remote_object_on(
-            self.connection,
+            &transaction,
             self.required_store_dir()?,
             remote,
             subject,
-        )
+        )?;
+        transaction.commit().map_err(DbError::from)
     }
 
     pub fn load_remote_object(

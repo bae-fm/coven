@@ -73,6 +73,7 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
         ("outbound_membership_mutation", "progress_bytes".to_string()),
         ("outbound_store_snapshot", "meta_bytes".to_string()),
         ("published_store_snapshot", "meta_bytes".to_string()),
+        ("payload_storage", "inline_bytes".to_string()),
         ("outbound_circle_snapshot", "meta_bytes".to_string()),
         ("published_circle_snapshot", "meta_bytes".to_string()),
         ("outbound_store_acks", "ack_bytes".to_string()),
@@ -359,7 +360,7 @@ fn circle_operation_journal_stores_each_part_where_it_changes() {
 }
 
 #[test]
-fn snapshot_and_write_journals_name_payload_files_instead_of_carrying_bytes() {
+fn snapshot_and_write_journals_name_payloads_instead_of_carrying_bytes() {
     let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
     apply_coven_schema(&conn).expect("apply coven schema");
     let columns = |table: &str| {

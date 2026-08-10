@@ -258,8 +258,9 @@ const REPLAY_TABLES: &[(&str, ReplayTableDisposition)] = &[
         ReplayTableDisposition::Preserve,
     ),
     ("outbound_store_snapshot", ReplayTableDisposition::Preserve),
-    ("payload_spool_cleanup", ReplayTableDisposition::Preserve),
-    ("payload_spool_owners", ReplayTableDisposition::Preserve),
+    ("payload_cleanup", ReplayTableDisposition::Preserve),
+    ("payload_owners", ReplayTableDisposition::Preserve),
+    ("payload_storage", ReplayTableDisposition::Preserve),
     (
         "protocol_inert_objects",
         ReplayTableDisposition::ExactTransition,
@@ -526,10 +527,9 @@ fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommit
 /// The database image a replay starts from, and the authority that says which
 /// history it covers.
 ///
-/// The image itself is a payload file — `image_hash` names it in the spool, as
-/// `authority_hash` on the row names the authority's canonical bytes. The row
-/// holds the facts; a multi-megabyte database image inside a SQLite column is
-/// the shape this campaign takes out.
+/// `image_hash` names the image in the payload store, as `authority_hash` on the
+/// row names the authority's canonical bytes. The row holds the facts without
+/// carrying a database image in its own columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetainedReplayBaseline {
     pub generation: u64,
@@ -550,14 +550,16 @@ impl RetainedReplayBaseline {
     /// writable connection from these bytes inside the replay capability.
     pub(super) fn image_bytes(
         &self,
+        conn: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<Vec<u8>, DbError> {
-        crate::payload_spool::read_payload_blocking(store_dir, self.image_hash)
+        crate::payload_store::read_payload_blocking(conn, store_dir, self.image_hash)
             .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))
     }
 
-    pub fn validate_image(
+    pub(crate) fn validate_image(
         &self,
+        conn: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
         if self.generation != GENERATION_ZERO {
@@ -565,7 +567,7 @@ impl RetainedReplayBaseline {
                 "generation-zero retained replay baseline metadata is inconsistent".to_string(),
             ));
         }
-        let image = open_image(&self.image_bytes(store_dir)?)?;
+        let image = open_image(&self.image_bytes(conn, store_dir)?)?;
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {

@@ -71,9 +71,7 @@ async fn successful_cycle_projects_durable_blocked_state() {
         .expect("remove blocked projection fixture");
     assert!(
         database
-            .payload_owner_claims(&coven_database::payload_spool::store_write_owner_key(
-                &write_id
-            ))
+            .store_write_payload_claims_for_test(&write_id)
             .await
             .expect("read deleted write payload claims")
             .is_empty(),

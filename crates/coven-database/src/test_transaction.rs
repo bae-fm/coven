@@ -55,7 +55,7 @@ impl DatabaseTestTransaction<'_, '_> {
         owner_key: &str,
         payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
     ) -> Result<(), DbError> {
-        crate::payload_spool::set_payload_owner_claims_on(self.transaction, owner_key, payloads)
+        crate::payload_store::set_payload_owner_claims_on(self.transaction, owner_key, payloads)
     }
 
     pub fn insert_store_reclaim_operation(

@@ -283,9 +283,9 @@ impl StoreRecords<'_> {
                 ],
             )
             .map_err(DbError::from)?;
-        crate::payload_spool::set_payload_owner_claims_on(
+        crate::payload_store::set_payload_owner_claims_on(
             self.conn,
-            crate::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            crate::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
             &BTreeSet::from([baseline.image_hash, authority_hash]),
         )
     }
@@ -318,7 +318,7 @@ impl StoreRecords<'_> {
             })?,
             authority: crate::RetainedReplayAuthority::Genesis(authority),
         };
-        baseline.validate_image(self.store_dir)?;
+        baseline.validate_image(self.conn, self.store_dir)?;
         Ok(baseline)
     }
 
@@ -340,7 +340,7 @@ impl StoreRecords<'_> {
             })?,
             authority: crate::RetainedReplayAuthority::StableSnapshot(authority),
         };
-        baseline.validate_image(self.store_dir)?;
+        baseline.validate_image(self.conn, self.store_dir)?;
         Ok(baseline)
     }
 
@@ -348,7 +348,7 @@ impl StoreRecords<'_> {
         self,
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<(), DbError> {
-        baseline.validate_image(self.store_dir)
+        baseline.validate_image(self.conn, self.store_dir)
     }
 }
 
@@ -364,7 +364,7 @@ impl StoreTransaction<'_, '_> {
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<Vec<u8>, DbError> {
         baseline
-            .image_bytes(self.records.store_dir)
+            .image_bytes(self.records.conn, self.records.store_dir)
             .map_err(|error| DbError::Message(error.to_string()))
     }
 
@@ -468,12 +468,12 @@ impl StoreTransaction<'_, '_> {
             remote.semantic_payload()
         else {
             return Err(DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} names no spooled plaintext"
+                "retained Merge membership {kind} {object_id} names no stored plaintext"
             )));
         };
         let stored_hash = remote.stored_payload().ok_or_else(|| {
             DbError::Message(format!(
-                "retained Merge membership {kind} {object_id} names no spooled ciphertext"
+                "retained Merge membership {kind} {object_id} names no stored ciphertext"
             ))
         })?;
         Ok(crate::MembershipAuthorityBytes::new(

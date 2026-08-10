@@ -18,7 +18,8 @@ pub struct PreparedAudiencePackage {
 impl PreparedAudiencePackage {
     /// The prepared package one remote object names, read back from the payload
     /// spool the record's identity files it under.
-    pub fn from_remote(
+    pub(crate) fn from_remote(
+        conn: &rusqlite::Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
         remote: RemoteObjectRecord,
     ) -> Result<Self, DbError> {
@@ -51,14 +52,14 @@ impl PreparedAudiencePackage {
             remote.semantic_payload()
         else {
             return Err(DbError::Message(
-                "prepared package remote object names no spooled plaintext".to_string(),
+                "prepared package remote object names no stored plaintext".to_string(),
             ));
         };
         let stored_hash = remote.stored_payload().ok_or_else(|| {
             DbError::Message("prepared package remote object uploads no ciphertext".to_string())
         })?;
         let read = |hash| {
-            crate::payload_spool::read_payload_blocking(store_dir, hash)
+            crate::payload_store::read_payload_blocking(conn, store_dir, hash)
                 .map_err(|error| DbError::Message(error.to_string()))
         };
         let semantic_bytes = read(semantic_hash)?;
@@ -200,7 +201,7 @@ pub struct PreparedAudienceObjects {
 }
 
 pub struct PreparedRemoteObject {
-    /// The record awaiting upload, with the payload files its row names read
+    /// The record awaiting upload, with the payloads its row names read
     /// back beside it: the upload reads the ciphertext from here.
     pub closed: coven_protocol::remote_object::ClosedRemoteObject,
     pub spool_path: Option<PathBuf>,

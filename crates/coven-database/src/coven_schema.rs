@@ -350,28 +350,49 @@ macro_rules! coven_tables {
     path TEXT PRIMARY KEY
 "
         );
-        // A payload file the owning row no longer needs. The row keys the file
-        // by its content hash and the store directory turns that into a path,
-        // so the obligation is recorded as the hash: a store directory that
-        // moves would leave a recorded path naming nothing.
+        // Content-addressed payload bytes owned by bookkeeping rows. Protocol
+        // values stay in SQLite; large and streamed values name a file in the
+        // payload file area. `storage` is the authoritative dispatch tag, so a
+        // reader never probes both representations.
         $visit!(
-            payload_spool_cleanup,
+            payload_storage,
             "
-    payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64)
+    payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64),
+    storage TEXT NOT NULL CHECK (storage IN ('inline', 'file')),
+    inline_bytes BLOB,
+    file_size INTEGER,
+    CHECK (
+        (storage = 'inline' AND inline_bytes IS NOT NULL AND file_size IS NULL
+         AND length(inline_bytes) <= 65536)
+        OR
+        (storage = 'file' AND inline_bytes IS NULL AND file_size IS NOT NULL
+         AND file_size >= 0)
+    )
 "
         );
-        // One owner's claim on one payload file. Two rows can name the same
+        // Payload storage the owning row no longer needs. The obligation names
+        // the content hash so the catalog can dispatch to inline bytes or the
+        // matching file without recording a movable filesystem path.
+        $visit!(
+            payload_cleanup,
+            "
+    payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64)
+        REFERENCES payload_storage(payload_hash)
+"
+        );
+        // One owner's claim on one payload. Two rows can name the same
         // payload — a Circle operation and the remote object it prepared both
         // need the bytes — so a payload is deleted when its last claim goes,
         // not when any one owner is done with it. `owner_key` names the row
         // holding the claim ('circle-operation:<id>', 'remote-object:<id>'),
         // so an orphan is traceable to the flow that leaked it.
         $visit!(
-            payload_spool_owners,
+            payload_owners,
             "
     payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
     owner_key TEXT NOT NULL CHECK (length(owner_key) > 0),
-    PRIMARY KEY (payload_hash, owner_key)
+    PRIMARY KEY (payload_hash, owner_key),
+    FOREIGN KEY (payload_hash) REFERENCES payload_storage(payload_hash)
 "
         );
         $visit!(

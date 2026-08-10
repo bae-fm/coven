@@ -2278,7 +2278,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
     // the metadata upload is interrupted before its bytes land. The publication is
     // left durable and pending with no completed snapshot; the cycle logs the
     // failure and continues. The next run resumes it and completes it exactly once,
-    // reopening the retained image spool while its upload marker skips publication.
+    // reopening the retained image payload while its upload marker skips publication.
     {
         let fixture = RotationFixture::build("snapshot-resume-image-meta").await;
         let circle_id = fixture.circle_id;

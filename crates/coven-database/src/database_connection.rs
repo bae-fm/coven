@@ -149,7 +149,7 @@ impl DatabaseConnection {
                 );
                 operation(&mut session)
             };
-            let cleanup = crate::payload_spool::pay_owed_payload_deletions_on(
+            let cleanup = crate::payload_store::pay_owed_payload_deletions_on(
                 &core.conn,
                 &core.context.store_dir,
             );

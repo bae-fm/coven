@@ -312,7 +312,7 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
     let image_hash = pending.meta.value.image.image_hash;
     let stored_hash = pending.image.prepared.reference().stored_hash();
     let claims = store_database(&db)
-        .payload_owner_claims("outbound-store-snapshot")
+        .outbound_store_snapshot_payload_claims_for_test()
         .await
         .expect("read staged snapshot payload claims");
     assert_eq!(
@@ -324,7 +324,10 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
             .collect::<Vec<_>>()
     );
     for hash in [image_hash, stored_hash] {
-        assert!(db.store_dir.payload_spool_path(hash).is_file());
+        assert!(store_database(&db)
+            .has_payload_for_test(hash)
+            .await
+            .expect("check staged snapshot payload storage"));
     }
     assert!(home
         .get(pending.image.prepared.reference().slot().logical_key())
@@ -340,12 +343,15 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
         .expect("snapshot remained pending");
     assert_eq!(completed.snapshot_hash(), pending.reference.snapshot_hash);
     assert!(store_database(&db)
-        .payload_owner_claims("outbound-store-snapshot")
+        .outbound_store_snapshot_payload_claims_for_test()
         .await
         .expect("read completed snapshot payload claims")
         .is_empty());
     for hash in [image_hash, stored_hash] {
-        assert!(!db.store_dir.payload_spool_path(hash).exists());
+        assert!(!store_database(&db)
+            .has_payload_for_test(hash)
+            .await
+            .expect("check completed snapshot payload storage"));
     }
 }
 

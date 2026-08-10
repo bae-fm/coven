@@ -51,7 +51,7 @@ fn merge_retraction_requires_the_exact_transitive_dependent_closure() {
 #[tokio::test]
 async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     let database = crate::synthetic_store::open_test_db();
-    let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
+    let store_dir = database.store_dir.clone();
     let activation = StoreBatchCommitRef {
         coord: StoreCommitCoord {
             stream_id: coven_protocol::causal_grants::AuthorStreamId::from_bytes([23; 32]),
@@ -65,9 +65,8 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     database
         .database
         .test_sql(move |connection| {
-            let store_dir = store_dir;
             let image = b"Circle bootstrap retraction image";
-            let image_hash = crate::payload_spool::write_payload_blocking(&store_dir, image)?;
+            let image_hash = connection.install_payload(image)?;
             let circle_id = coven_protocol::circle::CircleId::from_bytes([1; 16]);
             connection
                 .execute(
@@ -86,7 +85,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
                 )
                 .map_err(DbError::from)?;
             connection.set_payload_owner_claims(
-                &crate::payload_spool::circle_bootstrap_coverage_owner_key(circle_id),
+                &crate::payload_store::circle_bootstrap_coverage_owner_key(circle_id),
                 &BTreeSet::from([image_hash]),
             )?;
             connection.rolled_back_transaction(|transaction| {
@@ -114,8 +113,8 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
             assert_eq!(retained, 1);
             let claims: i64 = connection
                 .query_row(
-                    "SELECT COUNT(*) FROM payload_spool_owners WHERE owner_key = ?1",
-                    [crate::payload_spool::circle_bootstrap_coverage_owner_key(
+                    "SELECT COUNT(*) FROM payload_owners WHERE owner_key = ?1",
+                    [crate::payload_store::circle_bootstrap_coverage_owner_key(
                         circle_id,
                     )],
                     |row| row.get(0),
@@ -140,10 +139,10 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
             let (claims, cleanup): (i64, i64) = connection
                 .query_row(
                     "SELECT
-                         (SELECT COUNT(*) FROM payload_spool_owners WHERE owner_key = ?1),
-                         (SELECT COUNT(*) FROM payload_spool_cleanup WHERE payload_hash = ?2)",
+                         (SELECT COUNT(*) FROM payload_owners WHERE owner_key = ?1),
+                         (SELECT COUNT(*) FROM payload_cleanup WHERE payload_hash = ?2)",
                     rusqlite::params![
-                        crate::payload_spool::circle_bootstrap_coverage_owner_key(circle_id),
+                        crate::payload_store::circle_bootstrap_coverage_owner_key(circle_id),
                         image_hash.to_string(),
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?)),

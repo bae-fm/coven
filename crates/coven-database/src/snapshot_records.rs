@@ -87,12 +87,16 @@ pub(crate) fn load_outbound_store_snapshot_on(
                 })?;
             let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
                 .map_err(|error| DbError::context("outbound Store snapshot image ref", error))?;
-            let image_bytes =
-                crate::payload_spool::read_payload_blocking(store_dir, image_reference.image_hash)
-                    .map_err(|error| DbError::context("outbound Store snapshot image", error))?;
+            let image_bytes = crate::payload_store::read_payload_blocking(
+                conn,
+                store_dir,
+                image_reference.image_hash,
+            )
+            .map_err(|error| DbError::context("outbound Store snapshot image", error))?;
             let image_prepared = PreparedExactObject::new(
                 image_reference.object.clone(),
-                crate::payload_spool::read_payload_blocking(
+                crate::payload_store::read_payload_blocking(
+                    conn,
                     store_dir,
                     image_reference.object.stored_hash(),
                 )

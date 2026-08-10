@@ -31,7 +31,7 @@ pub(crate) mod membership_rotation;
 pub(crate) mod merge_materialization_transaction;
 pub(crate) mod owner_promotion;
 pub(crate) mod owner_recovery_publication;
-pub mod payload_spool;
+pub(crate) mod payload_store;
 pub(crate) mod pending_publication;
 pub(crate) mod preparation;
 pub(crate) mod prepared_remote_objects;
@@ -53,11 +53,10 @@ pub(crate) mod test_support;
 pub(crate) mod verified_store_authority;
 pub(crate) mod write_lifecycle;
 
-/// One Store's row connection and matching payload directory.
+/// One Store's row connection and matching payload storage.
 ///
-/// A record whose bytes live in the spool is half a row and half a file, so
-/// record operations carry both halves as one scoped value. Operations that
-/// touch rows alone continue to take the connection in their private SQL leaf.
+/// Payload records may hold bytes in SQLite or name a file beside it, so record
+/// operations carry the connection and directory as one scoped value.
 #[derive(Clone, Copy)]
 pub(crate) struct StoreRecords<'store> {
     conn: &'store rusqlite::Connection,
@@ -431,16 +430,17 @@ impl<'session> StoreSession<'session> {
         &self,
         authority_bytes: &[u8],
     ) -> Result<(), DbError> {
-        let authority_hash =
-            payload_spool::write_payload_blocking(self.records.store_dir, authority_bytes)
-                .map_err(|error| {
-                    DbError::Message(format!("install retained replay authority: {error}"))
-                })?;
         let transaction = self
             .records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
+        let authority_hash = payload_store::write_payload_blocking(
+            &transaction,
+            self.records.store_dir,
+            authority_bytes,
+        )
+        .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
         transaction
             .execute(
                 "UPDATE retained_replay_baselines SET authority_hash = ?1
@@ -455,9 +455,9 @@ impl<'session> StoreSession<'session> {
                 |row| row.get(0),
             )
             .map_err(DbError::from)?;
-        payload_spool::set_payload_owner_claims_on(
+        payload_store::set_payload_owner_claims_on(
             &transaction,
-            payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
             &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
         )?;
         transaction.commit().map_err(DbError::from)

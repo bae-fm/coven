@@ -166,7 +166,9 @@ async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
         .test_sql(move |database| database.first_store_write_partition_hash(write_id.as_str()))
         .await
         .expect("read partition payload hash");
-    std::fs::remove_file(reopened.store_dir.payload_spool_path(hash))
+    database
+        .remove_payload_bytes_for_test(hash)
+        .await
         .expect("remove partition payload");
 
     let error = match database.prepare_store_write().await {

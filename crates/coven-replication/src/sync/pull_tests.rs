@@ -2225,7 +2225,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         })
         .await
         .expect("copy the locally-authored retained input");
-    crate::sync::test_helpers::copy_payload_spool(
+    crate::sync::test_helpers::copy_payload_files(
         &source.store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(target_dir.path()),
     );

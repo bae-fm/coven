@@ -95,61 +95,54 @@ async fn persist_merge_operation_fixture(
     (fixture, home, signer, prepared.journal)
 }
 
-/// The bytes an operation's object was stored under when its row was inserted.
-///
-/// The operation names its objects; the spool beside the device's database is
-/// where their bytes are, so a test that wants the bytes reads them the same
-/// way publication does.
-async fn spooled_bytes(
-    store_dir: &coven_foundation::store_dir::StoreDir,
-    object: &ExactObjectRef,
-) -> Vec<u8> {
-    coven_database::payload_spool::PayloadSpool::new(store_dir)
-        .read(object.stored_hash())
+/// The bytes an operation's durable row owns for one exact object.
+async fn stored_bytes(db: &SyntheticStoreFixture, object: &ExactObjectRef) -> Vec<u8> {
+    StoreDatabase::new(&db.database)
+        .payload_for_test(object.stored_hash())
         .await
-        .expect("read a prepared Circle object from the payload spool")
+        .expect("read a prepared Circle object's payload")
 }
 
 /// Publish every object an operation names from the bytes its durable row owns.
 async fn publish_prepared_objects(
     store: &TestStore,
-    store_dir: &coven_foundation::store_dir::StoreDir,
+    db: &SyntheticStoreFixture,
     journal: &CircleOperationJournal,
 ) {
     for object in journal.operation().prepared_objects.values() {
         store
-            .publish_exact_protocol_object(object, spooled_bytes(store_dir, object).await)
+            .publish_exact_protocol_object(object, stored_bytes(db, object).await)
             .await
             .expect("publish a prepared Circle object");
     }
 }
 
-/// Which of an operation's objects still have a payload file in the spool.
-async fn spooled_objects(
-    store_dir: &coven_foundation::store_dir::StoreDir,
+/// Which of an operation's objects still have storage owned by the database.
+async fn stored_objects(
+    db: &SyntheticStoreFixture,
     journal: &CircleOperationJournal,
 ) -> Vec<String> {
-    let spool = coven_database::payload_spool::PayloadSpool::new(store_dir);
+    let database = StoreDatabase::new(&db.database);
     let mut present = Vec::new();
     for (step, object) in &journal.operation().prepared_objects {
-        if spool.read(object.stored_hash()).await.is_ok() {
+        if database
+            .has_payload_for_test(object.stored_hash())
+            .await
+            .expect("check prepared Circle object storage")
+        {
             present.push(step.clone());
         }
     }
     present
 }
 
-/// Put a substituted object's bytes where preparation would have put them, so
-/// the publication path finds bytes under the reference a test has just
-/// written into an operation.
-async fn spool_substituted_object(
-    store_dir: &coven_foundation::store_dir::StoreDir,
-    prepared: &PreparedExactObject,
-) {
-    coven_database::payload_spool::PayloadSpool::new(store_dir)
-        .write(prepared.stored_bytes())
+/// Install a substituted object's bytes before a test gives its reference to a
+/// durable operation.
+async fn install_substituted_object(db: &SyntheticStoreFixture, prepared: &PreparedExactObject) {
+    StoreDatabase::new(&db.database)
+        .install_payload_for_test(prepared.stored_bytes().to_vec())
         .await
-        .expect("spool a substituted Circle object");
+        .expect("install a substituted Circle object");
 }
 
 fn promote_store_member_access_without_adding_to_circle_roster(

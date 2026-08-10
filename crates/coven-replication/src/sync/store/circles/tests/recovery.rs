@@ -744,7 +744,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
 }
 
-/// An operation's object bytes live in the payload spool, claimed by the
+/// An operation's object bytes live in the payload store, claimed by the
 /// operation row while it exists. Activation drops that row, so the operation's
 /// claim goes with it — and a payload is deleted exactly when no other row
 /// still names it. The objects activation keeps as `remote_objects` rows keep
@@ -754,7 +754,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_intact() {
     let db = open_test_db();
     let (store, _home, signer, activating) =
-        persist_merge_operation(&db, "circle-spool-activation").await;
+        persist_merge_operation(&db, "circle-payload-activation").await;
     let pending = store
         .bind_device(&db, &signer)
         .await
@@ -779,7 +779,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(
-        spooled_objects(&db.store_dir, &activating).await,
+        stored_objects(&db, &activating).await,
         prepared_steps,
         "operation insertion stores every object the operation names"
     );
@@ -791,7 +791,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
 
     assert_eq!(
         coven_database::StoreDatabase::new(&db.database)
-            .owed_payload_spool_cleanup()
+            .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
         Vec::new(),
@@ -799,15 +799,13 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
     );
     assert_eq!(
         coven_database::StoreDatabase::new(&db.database)
-            .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
-                &activating.operation_id.to_string()
-            ))
+            .circle_operation_payload_claims_for_test(&activating.operation_id)
             .await
             .expect("read the activated operation's payload claims"),
         Vec::new(),
         "activation drops the operation's own claim on every payload it prepared"
     );
-    let surviving = spooled_objects(&db.store_dir, &activating).await;
+    let surviving = stored_objects(&db, &activating).await;
     let mut kept_a_row = false;
     for (step, object) in &activating.operation().prepared_objects {
         let row_exists = db
@@ -824,10 +822,10 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
     }
     assert!(
         kept_a_row && surviving.len() < activating.operation().prepared_objects.len(),
-        "activation must both keep some objects and let the rest of the spool go"
+        "activation must both keep some objects and release the rest"
     );
     assert_eq!(
-        spooled_objects(&db.store_dir, &pending).await,
+        stored_objects(&db, &pending).await,
         pending
             .operation()
             .prepared_objects
@@ -844,7 +842,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
 /// row still names.
 #[tokio::test]
 async fn discard_releases_its_payload_claims() {
-    let revoked = RevokedOperation::prepare("circle-spool-discard").await;
+    let revoked = RevokedOperation::prepare("circle-payload-discard").await;
     let journal = coven_database::StoreDatabase::new(&revoked.db.database)
         .circle_operation(&revoked.operation_id)
         .await
@@ -856,10 +854,8 @@ async fn discard_releases_its_payload_claims() {
         .await
         .expect("bind Circle test Store");
     assert!(
-        !spooled_objects(&revoked.db.store_dir, &journal)
-            .await
-            .is_empty(),
-        "the operation's payloads are spooled before it is discarded"
+        !stored_objects(&revoked.db, &journal).await.is_empty(),
+        "the operation owns payloads before it is discarded"
     );
     device
         .resume_circle_operations()
@@ -880,7 +876,7 @@ async fn discard_releases_its_payload_claims() {
 
     assert_eq!(
         coven_database::StoreDatabase::new(&revoked.db.database)
-            .owed_payload_spool_cleanup()
+            .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
         Vec::new(),
@@ -888,15 +884,13 @@ async fn discard_releases_its_payload_claims() {
     );
     assert_eq!(
         coven_database::StoreDatabase::new(&revoked.db.database)
-            .payload_owner_claims(&coven_database::payload_spool::circle_operation_owner_key(
-                &revoked.operation_id.to_string()
-            ))
+            .circle_operation_payload_claims_for_test(&revoked.operation_id)
             .await
             .expect("read the discarded operation's payload claims"),
         Vec::new(),
         "discard drops the operation's own claim on every payload it prepared"
     );
-    let surviving = spooled_objects(&revoked.db.store_dir, &journal).await;
+    let surviving = stored_objects(&revoked.db, &journal).await;
     for (step, object) in &journal.operation().prepared_objects {
         let row_exists = revoked
             .db
@@ -912,6 +906,6 @@ async fn discard_releases_its_payload_claims() {
     }
     assert!(
         surviving.len() < journal.operation().prepared_objects.len(),
-        "discard must let the spool of every object it removed go"
+        "discard must release every object payload it removed"
     );
 }

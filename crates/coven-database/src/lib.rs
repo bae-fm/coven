@@ -213,9 +213,10 @@ pub use schema_introspection::{
 };
 pub use store::device_join_journal;
 pub use store::device_join_journal::DeviceJoinJournalError;
-pub use store::payload_spool;
+pub(crate) use store::payload_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use store::MergeMaterializationTransaction;
+pub use store::PayloadStoreError;
 pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
@@ -454,7 +455,7 @@ pub enum DbError {
     #[error("{0}")]
     SnapshotImage(#[from] crate::store::SnapshotImageError),
     #[error("{0}")]
-    PayloadSpool(#[from] crate::payload_spool::PayloadSpoolError),
+    PayloadStore(#[from] PayloadStoreError),
     #[error("{operation}; payload cleanup failed: {cleanup}")]
     PayloadCleanupFailed {
         operation: Box<DbError>,

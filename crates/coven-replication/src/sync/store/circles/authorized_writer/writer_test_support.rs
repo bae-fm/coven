@@ -126,13 +126,11 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             ),
             head.to_bytes(),
         )?;
-        // The replacement objects have to reach the spool the same way
-        // preparation puts them there, or the publisher would find no bytes
-        // under the references this journal now carries.
-        let spool = coven_database::payload_spool::PayloadSpool::new(self.store_dir);
+        // The replacement objects must be installed before the journal takes
+        // ownership of their references.
         for object in [&commit_prepared, &head_prepared] {
-            spool
-                .write(object.stored_bytes())
+            self.database
+                .install_payload_for_test(object.stored_bytes().to_vec())
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
         }

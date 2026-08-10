@@ -94,18 +94,27 @@ impl MasterKeyCustody for TestCustody {
     }
 }
 
-/// Copy the payload files one store directory holds into another.
+/// Copy the file-backed payloads one store directory holds into another.
 ///
 /// A store is a directory, not a file: rows name payload files beside the
 /// database, so a test that copies the database with `VACUUM INTO` and opens the
 /// copy has to bring those files along, exactly as a device carries its whole
 /// store directory rather than one file out of it.
-pub fn copy_payload_spool(
+pub fn copy_payload_files(
     from: &coven_foundation::store_dir::StoreDir,
     to: &coven_foundation::store_dir::StoreDir,
 ) {
     let source = from.payload_spool_dir();
     let destination = to.payload_spool_dir();
+    match std::fs::metadata(&source) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => panic!("payload file path is not a directory: {}", source.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!(
+            "inspect payload file directory {}: {error}",
+            source.display()
+        ),
+    }
     std::fs::create_dir_all(&destination).expect("create the copied payload spool directory");
     for entry in std::fs::read_dir(&source).expect("read the payload spool being copied") {
         let entry = entry.expect("payload spool entry");

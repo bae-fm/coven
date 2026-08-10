@@ -258,7 +258,11 @@ pub fn load_prepared_audience_objects_on(
             let object_id = encoded
                 .parse()
                 .map_err(|error| DbError::context("stored remote object id", error))?;
-            PreparedAudiencePackage::from_remote(store_dir, load_remote_object_on(conn, object_id)?)
+            PreparedAudiencePackage::from_remote(
+                conn,
+                store_dir,
+                load_remote_object_on(conn, object_id)?,
+            )
         })
         .collect::<Result<Vec<_>, DbError>>()?;
     let blobs = blob_rows

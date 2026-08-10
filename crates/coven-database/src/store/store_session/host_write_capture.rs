@@ -965,7 +965,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             };
             let changeset_hash = match (|| -> Result<ObjectHash, DbError> {
                 let mut changeset_writer =
-                    crate::payload_spool::PayloadSpoolWriter::create(store_dir)?;
+                    crate::store::store_session::StoreTransaction::new(&tx, store_dir)
+                        .payload_writer();
                 journal.changeset_strm(&mut changeset_writer)?;
                 Ok(changeset_writer.commit()?.0)
             })() {
