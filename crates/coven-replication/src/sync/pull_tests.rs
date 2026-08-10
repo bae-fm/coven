@@ -12,7 +12,7 @@ use async_trait::async_trait;
 
 use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
 use coven_database::Migration;
-use coven_database::SyntheticDatabase;
+use coven_database::SyntheticStoreFixture;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::blob::{CacheFill, Provenance};
@@ -78,7 +78,7 @@ trait PullTestDatabaseOps {
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId;
     async fn pull_exact_store_into(
         &self,
-        source: &coven_database::SyntheticDatabase,
+        source: &coven_database::SyntheticStoreFixture,
         storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -90,13 +90,14 @@ trait PullTestDatabaseOps {
     async fn row_blob_object_key(&self, table: &str, row_id: &str) -> String;
 }
 
-impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
+impl PullTestDatabaseOps for coven_database::SyntheticStoreFixture {
     async fn exact_row_blob_ref(
         &self,
         table: &str,
         row_id: &str,
     ) -> coven_protocol::blob::RowBlobRef {
-        self.row_blob_ref(table, row_id)
+        self.database
+            .row_blob_ref(table, row_id)
             .await
             .expect("load exact row blob reference")
     }
@@ -105,7 +106,8 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> coven_protocol::remote_object::RemoteObjectRecord {
-        self.remote_object_for_test(object.clone())
+        self.database
+            .remote_object_for_test(object.clone())
             .await
             .expect("load exact remote object")
     }
@@ -113,17 +115,19 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
     async fn stored_remote_objects(
         &self,
     ) -> Vec<coven_protocol::remote_object::RemoteObjectRecord> {
-        self.remote_objects_for_test()
+        self.database
+            .remote_objects_for_test()
             .await
             .expect("load remote objects")
     }
 
     async fn replace_retained_merge_input(&self, stream_id: String, canonical_input: Vec<u8>) {
-        self.test_sql(move |database| {
-            database.replace_retained_merge_input(&stream_id, &canonical_input)
-        })
-        .await
-        .expect("replace retained Merge input and its exact ownership closure");
+        self.database
+            .test_sql(move |database| {
+                database.replace_retained_merge_input(&stream_id, &canonical_input)
+            })
+            .await
+            .expect("replace retained Merge input and its exact ownership closure");
     }
 
     async fn replace_stored_remote_object(
@@ -131,13 +135,14 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
         object: &coven_protocol::objects::ExactObjectRef,
         remote: &coven_protocol::remote_object::RemoteObjectRecord,
     ) {
-        self.replace_remote_object_for_test(object.clone(), remote.clone())
+        self.database
+            .replace_remote_object_for_test(object.clone(), remote.clone())
             .await
             .expect("replace test remote object");
     }
 
     async fn local_announcement_stream(&self) -> coven_protocol::membership::AuthorStreamId {
-        let registration = store_database(self)
+        let registration = store_database(&self.database)
             .local_blob_write_authority()
             .await
             .expect("read active local Store registration");
@@ -150,7 +155,7 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
 
     async fn pull_exact_store_into(
         &self,
-        source: &coven_database::SyntheticDatabase,
+        source: &coven_database::SyntheticStoreFixture,
         storage: &Arc<CloudSyncConnection>,
         identity: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
@@ -158,13 +163,13 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
         std::collections::BTreeMap<String, u64>,
         crate::sync::store::StorePullResult,
     ) {
-        let root = coven_database::StoreDatabase::new(source)
+        let root = coven_database::StoreDatabase::new(&source.database)
             .local_store_root_ref()
             .await
             .expect("read source Store root")
             .expect("source Store has exact root authority");
         let initialized = crate::sync::store::Store::open(
-            coven_database::StoreDatabase::new(self),
+            coven_database::StoreDatabase::new(&self.database),
             storage.clone(),
             store_dir.clone(),
             &root,
@@ -190,7 +195,7 @@ impl PullTestDatabaseOps for coven_database::SyntheticDatabase {
     }
 
     async fn materialized_sequences(&self) -> HashMap<String, u64> {
-        store_database(self)
+        store_database(&self.database)
             .materialized_frontier()
             .await
             .expect("read materialized Store frontier")
@@ -265,14 +270,14 @@ fn commit_stream_id(reference: &coven_protocol::store_commit::StoreBatchCommitRe
 trait TestStoreStorage: Sync {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String>;
 
     async fn sync_for_test(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -280,7 +285,12 @@ trait TestStoreStorage: Sync {
         keypair: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, String> {
-        let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
+        let configured_tables: Vec<_> = db
+            .database
+            .synced_tables()
+            .iter()
+            .map(SyncedTable::name)
+            .collect();
         let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
         assert_eq!(configured_tables, supplied_tables);
         assert!(
@@ -298,7 +308,7 @@ trait TestStoreStorage: Sync {
                 .map_or(0, |position| position.coord.sequence()),
             local_seq
         );
-        coven_database::StoreDatabase::new(db)
+        coven_database::StoreDatabase::new(&db.database)
             .enqueue_store_changeset_for_test(outgoing)
             .await
             .map_err(|error| error.to_string())?;
@@ -327,7 +337,7 @@ trait TestStoreStorage: Sync {
     /// the resulting immutable Store objects as `keypair`.
     async fn publish_test_cycle(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         tables: &[SyncedTable],
         outgoing: Vec<u8>,
         local_seq: u64,
@@ -346,7 +356,7 @@ trait TestStoreStorage: Sync {
 impl TestStoreStorage for TestStore {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
@@ -362,18 +372,18 @@ impl TestStoreStorage for TestStore {
 impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
     async fn store_for_test_publish(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
-        if coven_database::StoreDatabase::new(db)
+        if coven_database::StoreDatabase::new(&db.database)
             .local_store_root_ref()
             .await
             .map_err(|error| error.to_string())?
             .is_none()
         {
             crate::sync::store::Store::create(
-                coven_database::StoreDatabase::new(db),
+                coven_database::StoreDatabase::new(&db.database),
                 self.clone(),
                 store_dir.clone(),
                 self.store_id(),
@@ -383,7 +393,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
             .map_err(|error| error.to_string())?;
         }
         crate::sync::store::Store::load(
-            coven_database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(&db.database),
             self.clone(),
             store_dir.clone(),
             keypair.clone(),
@@ -396,7 +406,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
 trait PullTestStoreOps {
     async fn make_root_remote(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     );
@@ -404,11 +414,11 @@ trait PullTestStoreOps {
     async fn read_exact_blob(&self, blob: &coven_protocol::blob::locator::StoredBlobRef)
         -> Vec<u8>;
 
-    async fn author_scoped_write(&self, db: &coven_database::SyntheticDatabase, sql: String);
+    async fn author_scoped_write(&self, db: &coven_database::SyntheticStoreFixture, sql: String);
 
     async fn pull_scoped(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure>;
 
     async fn publish_exact_changeset_with_authority(
@@ -424,7 +434,7 @@ trait PullTestStoreOps {
 impl PullTestStoreOps for TestStore {
     async fn make_root_remote(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         store_dir: &coven_foundation::store_dir::StoreDir,
         root_id: &str,
     ) {
@@ -433,11 +443,14 @@ impl PullTestStoreOps for TestStore {
             .bind_founder_device(db)
             .await
             .expect("load exact fixture Store");
-        crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(db), store_dir.clone())
-            .local_transitions()
-            .make_remote("notes", root_id, false)
-            .await
-            .expect("queue exact blob fixture upload");
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            store_database(&db.database),
+            store_dir.clone(),
+        )
+        .local_transitions()
+        .make_remote("notes", root_id, false)
+        .await
+        .expect("queue exact blob fixture upload");
         let outcome = device
             .drain_uploads(store_dir, &coven_foundation::clock::SystemClock, None, None)
             .await
@@ -483,8 +496,8 @@ impl PullTestStoreOps for TestStore {
             .expect("read staged exact blob plaintext")
     }
 
-    async fn author_scoped_write(&self, db: &coven_database::SyntheticDatabase, sql: String) {
-        coven_database::StoreDatabase::new(db)
+    async fn author_scoped_write(&self, db: &coven_database::SyntheticStoreFixture, sql: String) {
+        coven_database::StoreDatabase::new(&db.database)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
                 None,
@@ -503,7 +516,7 @@ impl PullTestStoreOps for TestStore {
 
     async fn pull_scoped(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let device = self
             .open_into(db)
@@ -571,7 +584,7 @@ fn photo_decl_with_blob_id_column() -> BlobDecl {
         .with_id_column("cloud_path")
 }
 
-fn unique_note_db() -> coven_database::SyntheticDatabase {
+fn unique_note_db() -> coven_database::SyntheticStoreFixture {
     open_test_db_schema(
         vec![SyncedTable::new(
             "unique_notes",
@@ -592,7 +605,7 @@ fn unique_note_db() -> coven_database::SyntheticDatabase {
     )
 }
 
-fn uuid_note_db() -> coven_database::SyntheticDatabase {
+fn uuid_note_db() -> coven_database::SyntheticStoreFixture {
     open_test_db_schema(
         vec![SyncedTable::new(
             "uuid_notes",
@@ -611,7 +624,7 @@ fn uuid_note_db() -> coven_database::SyntheticDatabase {
     )
 }
 
-fn mixed_constraint_db() -> coven_database::SyntheticDatabase {
+fn mixed_constraint_db() -> coven_database::SyntheticStoreFixture {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -645,8 +658,8 @@ fn mixed_constraint_db() -> coven_database::SyntheticDatabase {
 fn open_blob_test_db_at(
     path: &std::path::Path,
     decl: BlobDecl,
-) -> coven_database::SyntheticDatabase {
-    coven_database::SyntheticDatabase::open(
+) -> coven_database::SyntheticStoreFixture {
+    coven_database::SyntheticStoreFixture::open(
         path,
         test_synced_tables_with_blob(decl),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -659,7 +672,7 @@ fn open_blob_test_db_at(
 }
 
 async fn create_store(
-    db: &coven_database::SyntheticDatabase,
+    db: &coven_database::SyntheticStoreFixture,
     signer: UserKeypair,
 ) -> std::sync::Arc<TestStore> {
     TestStore::create(
@@ -1604,6 +1617,7 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
 
     // Source device records a note as changeset seq 1.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -1628,7 +1642,8 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         "the row and its durable position commit in the pull that applies it",
     );
     assert_eq!(
-        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db2.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "First"
     );
@@ -1643,6 +1658,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -1655,6 +1671,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
 
     let target = open_test_db();
     target
+        .database
         .execute_test_sql(
             "CREATE TEMP TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
          BEGIN SELECT RAISE(ABORT, 'injected materialized-position write failure'); END;",
@@ -1671,6 +1688,7 @@ async fn position_write_failure_rolls_back_the_remote_rows() {
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "the row cannot commit when its position write fails",
@@ -1683,6 +1701,7 @@ async fn ordinary_pull_starts_from_its_durable_position() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('stale-row', 'Remote', NULL, \
@@ -1708,6 +1727,7 @@ async fn ordinary_pull_starts_from_its_durable_position() {
     );
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'stale-row'")
             .await,
         "ordinary pull derives coverage from durable rows, not caller input",
@@ -1719,6 +1739,7 @@ async fn ordinary_pull_uses_its_durable_position_on_every_call() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let first = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('position-row', 'One', NULL, \
@@ -1726,6 +1747,7 @@ async fn ordinary_pull_uses_its_durable_position_on_every_call() {
         ])
         .await;
     let second = source
+        .database
         .capture_test_changeset(&["UPDATE notes SET title = 'Two', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'position-row'"])
         .await;
@@ -1750,6 +1772,7 @@ async fn ordinary_pull_uses_its_durable_position_on_every_call() {
     assert_eq!(updated.get(&stream_id), Some(&2));
     assert_eq!(
         target
+            .database
             .query_test_text("SELECT title FROM notes WHERE id = 'position-row'")
             .await,
         "Two",
@@ -1761,6 +1784,7 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let first = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('next-row', 'One', NULL, \
@@ -1768,6 +1792,7 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position
         ])
         .await;
     let second = source
+        .database
         .capture_test_changeset(&["UPDATE notes SET title = 'Two', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'next-row'"])
         .await;
@@ -1799,16 +1824,17 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position
 async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() {
     let target = open_test_db();
     let invalid_insert = target
+        .database
         .test_sql(|database| database.insert_invalid_materialized_commit())
         .await;
     assert!(invalid_insert.is_err());
-    assert!(store_database(&target)
+    assert!(store_database(&target.database)
         .materialized_frontier()
         .await
         .unwrap()
         .is_empty());
     assert_eq!(
-        store_database(&target)
+        store_database(&target.database)
             .snapshot_coverage_frontier()
             .await
             .unwrap(),
@@ -1821,6 +1847,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('retained-row', 'Retained', NULL, \
@@ -1835,7 +1862,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
     let target_dir = tempfile::tempdir().expect("create retained-input database directory");
     let target_path = target_dir.path().join("target.sqlite");
     let open_target = || {
-        SyntheticDatabase::open(
+        SyntheticStoreFixture::open(
             &target_path,
             test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -1851,6 +1878,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
 
     let queried_stream = stream_id.clone();
     let (canonical_input, input_hash, retained_ref) = target
+        .database
         .test_sql(move |database| database.retained_materialization_input(&queried_stream, 1))
         .await
         .expect("read retained Merge materialization input");
@@ -1985,6 +2013,7 @@ async fn merge_materialization_retains_closed_input_and_rejects_corruption_after
         .collect::<Vec<_>>();
     let corrupt_stream = stream_id.clone();
     target
+        .database
         .test_sql(move |database| {
             database.corrupt_retained_materialization_input(&corrupt_stream, 1)
         })
@@ -2027,6 +2056,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let first_changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('pin-first', 'First', NULL, \
@@ -2038,6 +2068,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
         .await
         .expect("publish first replay-pin fixture");
     let second_changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('pin-second', 'Second', NULL, \
@@ -2052,10 +2083,12 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     storage.pull_into(&target, &temp_store_dir().1).await;
 
     let (_first_owner, first_package, first_remote) = target
+        .database
         .retained_store_package_pin_for_test(&first)
         .await
         .expect("load first retained Store package pin");
     let (second_owner, second_package, second_remote) = target
+        .database
         .retained_store_package_pin_for_test(&second)
         .await
         .expect("load second retained Store package pin");
@@ -2079,6 +2112,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     let store_dir = target.store_dir.clone();
     assert!(target
+        .database
         .test_sql(move |database| {
             database
                 .load_retained_merge_replay_inputs(&store_dir, &root)
@@ -2117,6 +2151,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     let store_dir = target.store_dir.clone();
     assert!(target
+        .database
         .test_sql(move |database| {
             database
                 .load_retained_merge_replay_inputs(&store_dir, &root)
@@ -2149,12 +2184,14 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let second_owner_for_insert = second_owner.clone();
     let first_object = first_package.object.clone();
     target
+        .database
         .test_sql(move |database| {
             database.insert_retained_replay_object(&second_owner_for_insert, &first_object)
         })
         .await
         .expect("invent replay ownership index row");
     assert!(target
+        .database
         .store_package_is_retained_for_replay_for_test(first_package, first)
         .await
         .expect_err("invented replay pin must block reclamation validation")
@@ -2163,6 +2200,7 @@ async fn merge_materialization_rejects_missing_tampered_and_invented_replay_pins
     let root = storage.root.clone();
     let store_dir = target.store_dir.clone();
     assert!(target
+        .database
         .test_sql(move |database| {
             database
                 .load_retained_merge_replay_inputs(&store_dir, &root)
@@ -2179,6 +2217,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('rollback-row', 'Must roll back', NULL, \
@@ -2194,6 +2233,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     let target_path = target_dir.path().join("store.sqlite");
     let copied_path = target_path.clone();
     source
+        .database
         .test_sql(move |conn| {
             conn.execute("VACUUM INTO ?1", [copied_path.to_string_lossy().as_ref()])
                 .map(|_| ())
@@ -2205,7 +2245,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
         &source.store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(target_dir.path()),
     );
-    let target = coven_database::SyntheticDatabase::open(
+    let target = coven_database::SyntheticStoreFixture::open(
         &target_path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -2217,6 +2257,7 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     .expect("open copied retained collision database");
     let conflicting_stream = stream_id.clone();
     target
+        .database
         .test_sql(move |database| {
             database.transaction(|transaction| {
                 transaction.delete_materialized_commit(&conflicting_stream, 1)?;
@@ -2241,11 +2282,13 @@ async fn retained_input_collision_rolls_back_remote_rows_and_materialization() {
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'rollback-row'")
             .await
     );
     let checked_stream = stream_id.clone();
     let materialized = target
+        .database
         .test_sql(move |database| database.materialized_commit_exists(&checked_stream, 1))
         .await
         .expect("read rolled-back materialization state");
@@ -2279,6 +2322,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     let source = open_test_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('remote', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2294,7 +2338,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     let (_tmp, store_dir) = temp_store_dir();
     storage.pull_into(&target, &store_dir).await;
 
-    coven_database::StoreDatabase::new(&target)
+    coven_database::StoreDatabase::new(&target.database)
         .run_host_store_write_for_test(None, None, move |tx| {
             let remote_row: bool = tx
                 .query_row(
@@ -2325,6 +2369,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
 
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'local'")
             .await
     );
@@ -2345,6 +2390,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     // the object and advances the head to seq 1; deleting the object leaves the
     // head pointing past a hole.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'First', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2399,6 +2445,7 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
     let db1 = uuid_note_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
     let cs = db1
+        .database
         .capture_test_changeset(&["INSERT INTO uuid_notes (id, title, _updated_at) \
              VALUES ('NOT-A-CANONICAL-UUID', 'Forged', '0000000001000-0000-dev1')"])
         .await;
@@ -2419,7 +2466,8 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
         HeldStorePositionReason::InvalidRowIdentity { table, .. } if table == "uuid_notes"
     ));
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'")
             .await
     );
     assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
@@ -2436,6 +2484,7 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
     let storage = create_store(&source, UserKeypair::generate()).await;
 
     let insert = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
@@ -2450,23 +2499,27 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
     // shared row) and a concurrent second device's later edit.
     let deleter = open_test_db();
     deleter
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
         )
         .await;
     let delete = deleter
+        .database
         .capture_test_changeset(&["DELETE FROM notes WHERE id = 'n1'"])
         .await;
 
     let editor = open_test_db();
     editor
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'original', NULL, 1, '0000000001000-0000-founder', '2026-01-01')",
         )
         .await;
     let edit = editor
+        .database
         .capture_test_changeset(&["UPDATE notes SET title = 'edited', \
            _updated_at = '0000000009000-0000-editor' WHERE id = 'n1'"])
         .await;
@@ -2515,11 +2568,13 @@ async fn delete_edit_converged_state(delete_first: bool) -> Option<String> {
     );
 
     if target
+        .database
         .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
         .await
     {
         Some(
             target
+                .database
                 .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
                 .await,
         )
@@ -2547,6 +2602,7 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let db1 = unique_note_db();
     let storage = create_store(&db1, UserKeypair::generate()).await;
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
              VALUES ('would-partially-land', 'free-slug', 'First row', \
@@ -2562,11 +2618,12 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let stream_id = commit_stream_id(&commit);
 
     let db2 = unique_note_db();
-    db2.execute_test_sql(
-        "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+    db2.database
+        .execute_test_sql(
+            "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
          VALUES ('local', 'same-slug', 'Local', '0000000002000-0000-dev2', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     let (_tmp, ld) = temp_store_dir();
     let (updated, result) = storage.pull_into(&db2, &ld).await;
 
@@ -2590,15 +2647,18 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
         "a rejected changeset has no durable position",
     );
     assert!(
-        db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'local'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'local'")
             .await
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'remote'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'remote'")
             .await
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'would-partially-land'",)
+        !db2.database
+            .test_row_exists("SELECT 1 FROM unique_notes WHERE id = 'would-partially-land'",)
             .await,
         "rows before the constraint conflict roll back with the rejected changeset",
     );
@@ -2610,6 +2670,7 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
     let source = mixed_constraint_db();
     let storage = create_store(&source, UserKeypair::generate()).await;
     source
+        .database
         .execute_test_sql(
             "INSERT INTO constraint_parents (id, _updated_at) \
          VALUES ('missing-on-target', '0000000001000-0000-dev1'); \
@@ -2618,6 +2679,7 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
         )
         .await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
              VALUES ('fk-row', 'missing-on-target', 'free-slug', \
@@ -2634,6 +2696,7 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
 
     let target = mixed_constraint_db();
     target
+        .database
         .execute_test_sql(
             "INSERT INTO constraint_parents (id, _updated_at) \
          VALUES ('present-on-target', '0000000001000-0000-dev2'); \
@@ -2657,16 +2720,19 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
     assert_eq!(target.materialized_sequences().await.get("dev1"), None);
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'fk-row'")
             .await
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'unique-row'")
             .await
     );
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM constraint_items WHERE id = 'local-row'")
             .await
     );
@@ -2698,12 +2764,14 @@ async fn fk_violation_still_retries_and_resolves() {
     // changeset — the child ships the tag alone, FK-violating until the parent
     // arrives.
     child_source
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
         )
         .await;
     let child_cs = child_source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
              VALUES ('t1', 'n1', 'green', '0000000001001-0000-child', '2026-01-01')",
@@ -2716,6 +2784,7 @@ async fn fk_violation_still_retries_and_resolves() {
 
     let parent_source = open_test_db();
     let parent_cs = parent_source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'Parent', NULL, '0000000001000-0000-parent', '2026-01-01')",
@@ -2750,6 +2819,7 @@ async fn fk_violation_still_retries_and_resolves() {
     assert!(constraint_conflicts(&result).is_empty());
     assert_eq!(
         target
+            .database
             .query_test_text("SELECT tag FROM note_tags WHERE id = 't1'")
             .await,
         "green"
@@ -2771,6 +2841,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     // position so the position check passes and the loop reaches the signature and
     // schema checks.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'ForgedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2817,7 +2888,8 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     );
     assert!(newer_schema_positions(&result).is_empty());
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(
@@ -2836,6 +2908,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     let founder = UserKeypair::generate();
     let storage = create_store(&db1, founder.clone()).await;
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'SignedFuture', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2870,7 +2943,8 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     // Held, not advanced: it becomes applicable once this app upgrades.
     assert_eq!(updated.get("dev1"), None);
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
 }
@@ -2888,10 +2962,11 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
     let founder = UserKeypair::generate();
     let storage = create_store(&db1, founder.clone()).await;
 
-    let n = db1.schema_version();
+    let n = db1.database.schema_version();
 
     // seq 1 stamped at exactly the peer's schema version: applies.
     let cs1 = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'At N', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2905,6 +2980,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 
     // seq 2 stamped one above the peer's schema version: skipped, position held.
     let cs2 = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n2', 'Above N', NULL, '0000000002000-0000-dev1', '2026-01-01')",
@@ -2929,7 +3005,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 
     let db2 = open_test_db();
     assert_eq!(
-        db2.schema_version(),
+        db2.database.schema_version(),
         n,
         "both peers open the same migration ladder, so they share the wire version"
     );
@@ -2950,11 +3026,13 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         "position stops at the applied seq, never past the skipped one"
     );
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
             .await
     );
 }
@@ -2973,6 +3051,7 @@ async fn push_stamps_the_dbs_schema_version() {
     // `shared = 1` so the gated `notes` root survives the push gate and there is an
     // outgoing changeset to inspect.
     let outgoing = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -2999,7 +3078,7 @@ async fn push_stamps_the_dbs_schema_version() {
             .store_package()
             .expect("outgoing Store commit carries a Store package")
             .schema_version,
-        db1.schema_version(),
+        db1.database.schema_version(),
         "the outgoing Store package is stamped with the database schema version",
     );
 }
@@ -3015,6 +3094,7 @@ async fn sync_reuses_opened_schema_models() {
     assert_eq!(coven_database::gate_from_tables_call_count(), 1);
 
     let outgoing = db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'One', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -3041,16 +3121,17 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .expect("retain source Store device");
 
     // Source dev1: seq 1 references a photo blob; seq 2 is a plain note.
-    db1.capture_test_changeset(&[
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db1.database
+        .capture_test_changeset(&[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'One', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        &format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('ph1', 'n1', 'attach', 11, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-            coven_protocol::blob::content_hash(b"PHOTO-BYTES"),
-        ),
-    ])
-    .await;
+                coven_protocol::blob::content_hash(b"PHOTO-BYTES"),
+            ),
+        ])
+        .await;
     let (_source_tmp, source_store_dir) = temp_store_dir();
     source_store_dir.store_local("ph1", b"PHOTO-BYTES").await;
     storage
@@ -3063,6 +3144,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .expect("blob publication created a Store commit");
     let stream_id = commit_stream_id(&first_commit);
     let stored = db1
+        .database
         .row_blob_ref("note_photos", "ph1")
         .await
         .expect("load exact published blob row")
@@ -3075,6 +3157,7 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
         .await
         .expect("remove exact remote blob fixture");
     let cs2 = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n2', 'Two', NULL, '0000000002000-0000-dev1', '2026-01-01')",
@@ -3112,13 +3195,15 @@ async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     // blob missing" never exists. (Before #111 the row was applied and only the
     // position held back, so n1 was visible with no photo file on disk.)
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "seq 1's row must not be applied when its blob download fails",
     );
     // seq 2 is never reached -- the pull stops this device at the failed seq 1.
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n2'")
             .await,
         "seq 2 is not processed past the blob-failed seq 1",
     );
@@ -3136,6 +3221,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let storage = create_store(&db1, founder.clone()).await;
 
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Corrupt', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -3181,7 +3267,8 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         result.held_positions[0]
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "a size-mismatched changeset must not be applied",
     );
@@ -3200,6 +3287,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let storage = create_store(&src, founder.clone()).await;
 
     let cs = src
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Replayed', NULL, '0000000005000-0000-dev', '2026-01-01')",
@@ -3263,7 +3351,8 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         result.held_positions[0]
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "a Store commit relocated to another sequence must not be applied",
     );
@@ -3281,6 +3370,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let storage = create_store(&src, founder.clone()).await;
 
     let cs = src
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Relocated', NULL, '0000000001000-0000-devVictim', '2026-01-01')",
@@ -3344,7 +3434,8 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         result.held_positions[0]
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "a Store commit relocated to another device must not be applied",
     );
@@ -3362,6 +3453,7 @@ async fn a_changeset_at_its_own_position_still_applies() {
     let src = open_test_db();
     let storage = create_store(&src, UserKeypair::generate()).await;
     let cs = src
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'InPlace', NULL, '0000000001000-0000-dev', '2026-01-01')",
@@ -3378,7 +3470,8 @@ async fn a_changeset_at_its_own_position_still_applies() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&stream_id), Some(&1));
@@ -3407,6 +3500,7 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
         .expect("load invalid producer position");
 
     let good_cs = good_source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
@@ -3421,12 +3515,14 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
     // The base row exists (so the UPDATE below is an UPDATE, not an insert), but
     // through raw `exec`, so only the UPDATE enters the captured changeset.
     bad_source
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-bad', 'Base', NULL, '0000000001000-0000-devB', '2026-01-01')",
         )
         .await;
     let bad_cs = bad_source
+        .database
         .capture_test_changeset(&[
             "UPDATE notes SET title = 'Bad', _updated_at = '0000000002000-0000-devB' \
              WHERE id = 'n-bad'",
@@ -3439,6 +3535,7 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
 
     let target = open_test_db();
     target
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n-bad', 'Local', NULL, 'not-a-stamp', '2026-01-01')",
@@ -3455,6 +3552,7 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
     assert!(matches!(error, TestPullError::Pull(_)));
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
             .await,
         "independent commit did not apply",
@@ -3473,6 +3571,7 @@ async fn corrupt_local_register_fails_without_materializing_the_remote_commit() 
     );
     assert_eq!(
         target
+            .database
             .query_test_text("SELECT title FROM notes WHERE id = 'n-bad'")
             .await,
         "Local",
@@ -3504,6 +3603,7 @@ async fn malformed_store_package_isolates_to_one_device() {
     assert!(activation_result.held_positions.is_empty());
 
     let bad_seed = bad_source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-bad', 'Bad', NULL, '0000000001000-0000-devB', '2026-01-01')",
@@ -3516,6 +3616,7 @@ async fn malformed_store_package_isolates_to_one_device() {
 
     let good_source = open_test_db();
     let good_cs = good_source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n-good', 'Good', NULL, '0000000001000-0000-devA', '2026-01-01')",
@@ -3543,6 +3644,7 @@ async fn malformed_store_package_isolates_to_one_device() {
 
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-good'")
             .await
     );
@@ -3582,16 +3684,17 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // Source: a note + a cover photo. The blob id is ≥4 chars so it forms the
     // `{ab}/{cd}` cache shard.
-    db1.capture_test_changeset(&[
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db1.database
+        .capture_test_changeset(&[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        &format!(
-            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                  VALUES ('p1ab', 'n1', 'cover', 10, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-            coven_protocol::blob::content_hash(b"PHOTOBYTES"),
-        ),
-    ])
-    .await;
+                coven_protocol::blob::content_hash(b"PHOTOBYTES"),
+            ),
+        ])
+        .await;
 
     let (_source_tmp, source_store_dir) = temp_store_dir();
     source_store_dir.store_local("p1ab", b"PHOTOBYTES").await;
@@ -3623,6 +3726,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let stream_id = commit_stream_id(&commit);
     let sequence = commit.coord.sequence();
     let input_hash = db2
+        .database
         .test_sql(move |database| {
             database
                 .retained_merge_input(&stream_id, sequence)
@@ -3663,7 +3767,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
     // Source: a shared note + an audio row, declared user-provided · CacheLazy.
-    db1.capture_test_changeset(&[
+    db1.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -3678,14 +3782,17 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     let source = source_tmp.path().join("audio1.flac");
     std::fs::write(&source, b"AUDIO-PAYLOAD").expect("write exact external audio fixture");
     let reference = db1
+        .database
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact external audio row");
-    db1.test_sql(move |database| database.register_external_blob(&reference, &source))
+    db1.database
+        .test_sql(move |database| database.register_external_blob(&reference, &source))
         .await
         .expect("register exact external audio fixture");
     storage.make_root_remote(&db1, &ld1, "n1").await;
     let audio_blob = db1
+        .database
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact published audio row")
@@ -3725,7 +3832,8 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     );
     assert!(error.is_offline());
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
 
@@ -3736,7 +3844,8 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
-        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db2.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "WithAudio",
         "the row carrying the CacheLazy blob still reaches the peer",
@@ -3751,7 +3860,7 @@ async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     );
 }
 
-fn open_scoped_circle_test_db() -> coven_database::SyntheticDatabase {
+fn open_scoped_circle_test_db() -> coven_database::SyntheticStoreFixture {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -3806,7 +3915,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
         "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
          INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
     );
-    coven_database::StoreDatabase::new(&source)
+    coven_database::StoreDatabase::new(&source.database)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -3840,6 +3949,7 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     assert!(result.changesets_applied >= 1);
     assert!(
         target
+            .database
             .test_row_exists(&format!("SELECT 1 FROM notes WHERE id = '{note_id}'"))
             .await,
         "Circle root was not applied: {:?}",
@@ -3847,10 +3957,12 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     );
     assert!(
         target
+            .database
             .test_row_exists(&format!("SELECT 1 FROM comments WHERE id = '{comment_id}'"))
             .await
     );
     let (routes, mirrors): (i64, i64) = target
+        .database
         .test_sql(move |database| database.scoped_routing_counts(circle_id))
         .await
         .expect("read pulled routing state");
@@ -3950,7 +4062,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
 
     assert!(result.held_positions.is_empty(), "{result:?}");
     assert_eq!(
-        store_database(&receiver)
+        store_database(&receiver.database)
             .get_circles(
                 &coven_keys::keys::public_key_hex(&owner),
                 std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&owner)]),
@@ -3966,7 +4078,7 @@ async fn merge_pull_applies_a_circle_activation_before_its_reversed_order_succes
     );
 }
 
-fn scoped_fk_circle_db() -> coven_database::SyntheticDatabase {
+fn scoped_fk_circle_db() -> coven_database::SyntheticStoreFixture {
     open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -4071,6 +4183,7 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
         .expect("receiver pulls the valid relationship");
     assert!(
         receiver
+            .database
             .test_row_exists(&format!(
                 "SELECT 1 FROM categories WHERE id = '{category_id}'"
             ))
@@ -4111,6 +4224,7 @@ async fn receiver_refuses_a_concurrent_ancestor_move_that_breaks_its_component()
         "the receiver refuses the move by its final-component FK validation: {refusal}",
     );
     let category_audience = receiver
+        .database
         .query_test_text(&format!(
             "SELECT audience FROM categories WHERE id = '{category_id}'"
         ))
@@ -4137,23 +4251,27 @@ async fn local_user_provided_blob_does_not_block_changeset_publish() {
     let (tmp, ld) = temp_store_dir();
     let external = tmp.path().join("audio.flac");
     std::fs::write(&external, b"local audio").expect("write external file");
-    db.execute_test_sql(&format!(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.database
+        .execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
          INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        coven_protocol::blob::content_hash(b"local audio"),
-    ))
-    .await;
+            coven_protocol::blob::content_hash(b"local audio"),
+        ))
+        .await;
     let reference = db
+        .database
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact external row blob reference");
     let external = external.clone();
-    db.test_sql(move |database| database.register_external_blob(&reference, &external))
+    db.database
+        .test_sql(move |database| database.register_external_blob(&reference, &external))
         .await
         .expect("register exact external blob reference");
     let outgoing = db
+        .database
         .capture_test_changeset(&["UPDATE notes SET title = 'Changed', \
            _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'"])
         .await;
@@ -4184,7 +4302,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         .founder_device()
         .await
         .expect("retain local Store device");
-    let outgoing = db.capture_test_changeset(&[
+    let outgoing = db.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4229,7 +4347,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         .founder_device()
         .await
         .expect("retain local Store device");
-    db.capture_test_changeset(&[
+    db.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4244,10 +4362,12 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     let source = tmp.path().join("audio1.flac");
     std::fs::write(&source, b"AUDIO-PAYLOAD").expect("write exact external audio fixture");
     let reference = db
+        .database
         .row_blob_ref("note_photos", "audio1")
         .await
         .expect("load exact external row blob reference");
-    db.test_sql(move |database| database.register_external_blob(&reference, &source))
+    db.database
+        .test_sql(move |database| database.register_external_blob(&reference, &source))
         .await
         .expect("register exact external audio fixture");
     storage.make_root_remote(&db, &store_dir, "n1").await;
@@ -4273,16 +4393,18 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
         CacheFill::CacheLazy,
     ));
     let storage = create_store(&db, UserKeypair::generate()).await;
-    db.execute_test_sql(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.database
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
          INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
          VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
     // is just the DELETE under test.
     let outgoing = db
+        .database
         .capture_test_changeset(&["DELETE FROM note_photos WHERE id = 'audio1'"])
         .await;
     let (_tmp, ld) = temp_store_dir();
@@ -4318,6 +4440,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         coven_protocol::blob::content_hash(b"missing"),
     );
     let outgoing = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4342,7 +4465,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         err.contains("outbound blob photos/p1ab is absent from storage"),
         "an absent blob must abort Store publication, got {err:?}",
     );
-    let pending = coven_database::StoreDatabase::new(&db1)
+    let pending = coven_database::StoreDatabase::new(&db1.database)
         .pending_writes()
         .await
         .expect("read blocked write");
@@ -4391,7 +4514,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
             coven_protocol::blob::content_hash(bytes),
         ),
     ];
-    let outgoing = db.capture_test_changeset(&rows).await;
+    let outgoing = db.database.capture_test_changeset(&rows).await;
     storage
         .publish_test_cycle(&db, &tables, outgoing.clone(), 0, &keypair, &ld)
         .await;
@@ -4460,7 +4583,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // The cover's readable key lives in the row's `cloud_path` column.
     // The host stages the cover into the cache before the inline push reads it.
     ld1.store_local("p1cover", plaintext).await;
-    let outgoing = db1.capture_test_changeset(&[
+    let outgoing = db1.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -4548,6 +4671,7 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     // `n1/cover.jpg` names no blob: it would key p1cover today and its replacement
     // tomorrow at one and the same cloud object.
     let outgoing = db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4593,6 +4717,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
         let (_t1, ld1) = temp_store_dir();
         ld1.store_local("p1cover", old_bytes).await;
         let outgoing = db1
+            .database
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4626,6 +4751,7 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
         // Add another blob whose readable path names it.
         ld1.store_local("p2cover", new_bytes).await;
         let outgoing = db1
+            .database
             .capture_test_changeset(&[&format!(
                 "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
@@ -4693,6 +4819,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
         let (_ta, ld_a) = temp_store_dir();
         ld_a.store_local("p0cover", original).await;
         let outgoing = db_a
+            .database
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4713,6 +4840,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
         // Each replacement uses a fresh blob id and readable path.
         ld_a.store_local("pAcover", from_a).await;
         let outgoing_a = db_a
+            .database
             .capture_test_changeset(&[&format!(
                 "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
@@ -4727,6 +4855,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
 
         ld_a.store_local("pBcover", from_b).await;
         let outgoing_b = db_a
+            .database
             .capture_test_changeset(&[&format!(
                 "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
@@ -4770,6 +4899,7 @@ async fn plain_scheme_two_replacements_write_two_objects() {
         );
 
         let winner: String = db_c
+            .database
             .test_sql(|conn| {
                 conn.query_row(
                     "SELECT blob_id FROM note_photos WHERE id = 'ph1'",
@@ -4809,6 +4939,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     let (_t1, ld1) = temp_store_dir();
     ld1.store_local("p1cover", old_bytes).await;
     let outgoing = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4829,6 +4960,7 @@ async fn plain_scheme_a_laggard_finds_blobs_from_each_changeset() {
     // Another blob is published while the laggard is away.
     ld1.store_local("p2cover", new_bytes).await;
     let outgoing = db1
+        .database
         .capture_test_changeset(&[&format!(
             "INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, cloud_path, _updated_at, created_at) \
@@ -4896,6 +5028,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let (_t1, ld1) = temp_store_dir();
     ld1.store_local("f1audio", bytes).await;
     let outgoing = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4957,6 +5090,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let (_t, ld) = temp_store_dir();
     ld.store_local("f1audio", first).await;
     let outgoing = db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -4979,6 +5113,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     // the first blob occupies.
     ld.store_local("f2audio", second).await;
     let outgoing = db
+        .database
         .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'f2audio', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
@@ -5035,6 +5170,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         let ld1 = db1.store_dir.clone();
         ld1.store_local("p1cover", old_bytes).await;
         let outgoing = db1
+            .database
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -5074,6 +5210,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
             .await
             .expect("drop the replaced blob's local copy");
         let outgoing = db1
+            .database
             .capture_test_changeset(&[&format!(
                 "UPDATE note_photos SET blob_id = 'p2cover', cloud_path = 'n1/cover-p2cover.jpg', \
              size = {}, hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
@@ -5144,6 +5281,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     let (_t1, ld1) = temp_store_dir();
     ld1.store_local("p1cover", old_bytes).await;
     let outgoing = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -5166,6 +5304,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     // would be keyed at the old blob's object.
     ld1.store_local("p2cover", new_bytes).await;
     let outgoing = db1
+        .database
         .capture_test_changeset(&[&format!(
             "UPDATE note_photos SET blob_id = 'p2cover', size = {}, hash = '{}', \
              _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
@@ -5222,7 +5361,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     let (_t1, ld1) = temp_store_dir();
     // The host stages the cover into the cache before the inline push reads it.
     ld1.store_local("p1cover", plaintext).await;
-    let outgoing = db1.capture_test_changeset(&[
+    let outgoing = db1.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5253,6 +5392,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 
     // At rest the cover photo is ciphertext, not the source bytes.
     let source_blob = db1
+        .database
         .row_blob_ref("note_photos", "p1cover")
         .await
         .expect("load exact published blob row");
@@ -5282,7 +5422,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
     assert_eq!(
-        db2.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db2.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "WithPhoto"
     );
@@ -5301,10 +5442,11 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // blob — so a later read (after a cache eviction) keys it under A's prefix
     // without a listing scan.
     let row_blob = db2
+        .database
         .row_blob_ref("note_photos", "p1cover")
         .await
         .expect("read exact pulled row blob reference");
-    let uploader = store_database(&db2)
+    let uploader = store_database(&db2.database)
         .activated_store_device_registration(
             row_blob
                 .stored()
@@ -5335,23 +5477,26 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
     // the cover CacheLazy. Both inherit the `notes` gate, so a shared note carries
     // both through the inline push in one cycle.
     let (_t1, ld1) = temp_store_dir();
-    db1.execute_test_sql(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db1.database
+        .execute_test_sql(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithBlobs', NULL, 0, '0000000001000-0000-dev1', '2026-01-01')",
-    )
-    .await;
-    db1.execute_test_sql(&format!(
-        "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+        )
+        .await;
+    db1.database
+        .execute_test_sql(&format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('peager01', 'n1', 'cover', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
-        coven_protocol::blob::content_hash(b"EAGER-BYTES"),
-    ))
-    .await;
-    db1.execute_test_sql(&format!(
-        "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
+            coven_protocol::blob::content_hash(b"EAGER-BYTES"),
+        ))
+        .await;
+    db1.database
+        .execute_test_sql(&format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
              VALUES ('clazy001', 'n1', 10, '{}', '0000000001001-0000-dev1', '2026-01-01')",
-        coven_protocol::blob::content_hash(b"LAZY-BYTES"),
-    ))
-    .await;
+            coven_protocol::blob::content_hash(b"LAZY-BYTES"),
+        ))
+        .await;
     // The host stores both blobs in the local store (their Local home) before the
     // inline push reads them to upload.
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -5374,6 +5519,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.
     let eager = db1
+        .database
         .row_blob_ref("note_photos", "peager01")
         .await
         .expect("load exact eager row blob reference");
@@ -5383,6 +5529,7 @@ async fn make_remote_publishes_host_blobs_with_different_cache_fill() {
         .await
         .expect("verify exact eager blob object");
     let lazy = db1
+        .database
         .row_blob_ref("note_covers", "clazy001")
         .await
         .expect("load exact lazy row blob reference");
@@ -5403,7 +5550,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
     // Source dev1: a note + a CacheEager cover row, the cover present in the cloud.
-    db1.capture_test_changeset(&[
+    db1.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5439,7 +5586,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // DELETE through the real transition publication path.
     let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        coven_database::StoreDatabase::new(&db1),
+        coven_database::StoreDatabase::new(&db1.database),
         source_store_dir.clone(),
     )
     .connected_blob_transitions(storage.storage(), None, None)
@@ -5464,6 +5611,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let source = open_test_db_with_blob(cleanup_decl());
     let storage = create_store(&source, UserKeypair::generate()).await;
     source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -5488,6 +5636,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let store_dir = target.store_dir.clone();
     storage.pull_into(&target, &store_dir).await;
     let deleted_locator_hash = target
+        .database
         .row_blob_ref("note_photos", "cleanup01")
         .await
         .expect("load exact blob before deletion")
@@ -5497,6 +5646,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
         .locator_hash()
         .to_string();
     let deletion = source
+        .database
         .capture_test_changeset(&["DELETE FROM note_photos WHERE id = 'cleanup01'"])
         .await;
     storage
@@ -5516,10 +5666,12 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert!(error.to_string().contains("local blob cleanup"), "{error}");
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM note_photos WHERE id = 'cleanup01'")
             .await
     );
     let pending_before_restart = target
+        .database
         .test_sql(|database| database.cleanup_intent_copy_identities())
         .await
         .unwrap();
@@ -5539,6 +5691,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
     let pending_after_restart: i64 = restarted
+        .database
         .test_sql(|database| {
             database.table_row_count(coven_database::DatabaseTestTable::named(
                 "local_cleanup_intents",
@@ -5556,6 +5709,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let target = open_test_db_with_blob(decl);
     let storage = std::sync::Arc::new(create_store(&target, UserKeypair::generate()).await);
     target
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Host write parent', NULL, \
@@ -5567,13 +5721,14 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         )
         .await;
     target
+        .database
         .test_sql(|database| database.insert_cleanup_intent("photos", "cleanup-race", "local"))
         .await
         .unwrap();
 
     let store_dir = target.store_dir.clone();
     store_dir.store_local("cleanup-race", b"old bytes").await;
-    let (reached_filesystem, resume_cleanup) = target.arm_test_pause(
+    let (reached_filesystem, resume_cleanup) = target.database.arm_test_pause(
         coven_database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
             namespace: "photos".to_string(),
             blob_id: "cleanup-race".to_string(),
@@ -5586,7 +5741,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
         tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     reached_filesystem.notified().await;
-    let store_database = coven_database::StoreDatabase::new(&target);
+    let store_database = coven_database::StoreDatabase::new(&target.database);
     let host_write = store_database
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
@@ -5625,11 +5780,13 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM note_photos WHERE id = 'new-row'")
             .await
     );
     assert!(
         target
+            .database
             .test_row_exists(
                 "SELECT 1 FROM note_photos \
          WHERE id = 'existing-row' AND blob_id = 'other-blob'",
@@ -5653,6 +5810,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         .with_id_column("blob_id");
     let target = open_test_db_with_blob(decl);
     target
+        .database
         .execute_test_sql(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'Cleanup parent', NULL, \
@@ -5660,20 +5818,22 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         )
         .await;
     target
+        .database
         .test_sql(|database| database.insert_cleanup_intent("photos", "shared-intent", "local"))
         .await
         .unwrap();
 
     let (_tmp, store_dir) = temp_store_dir();
     store_dir.store_local("shared-intent", b"old bytes").await;
-    let mut points = target.observe_test_points();
+    let mut points = target.database.observe_test_points();
     let before_filesystem = DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
         namespace: "photos".to_string(),
         blob_id: "shared-intent".to_string(),
     };
-    let (first_reached_filesystem, resume_first) = target.arm_test_pause(before_filesystem.clone());
+    let (first_reached_filesystem, resume_first) =
+        target.database.arm_test_pause(before_filesystem.clone());
 
-    let first_db = coven_database::StoreDatabase::new(&target);
+    let first_db = coven_database::StoreDatabase::new(&target.database);
     let first = tokio::spawn(async move {
         coven_database::LocalBlobCleanup::new(&first_db)
             .drain()
@@ -5690,7 +5850,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     );
     assert_eq!(points.recv().await, Some(before_filesystem));
 
-    let host_re_reference = coven_database::StoreDatabase::new(&target)
+    let host_re_reference = coven_database::StoreDatabase::new(&target.database)
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "INSERT INTO note_photos \
@@ -5708,7 +5868,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         "the cleanup intent rejects a host row re-reference"
     );
 
-    let second_db = coven_database::StoreDatabase::new(&target);
+    let second_db = coven_database::StoreDatabase::new(&target.database);
     let second = tokio::spawn(async move {
         coven_database::LocalBlobCleanup::new(&second_db)
             .drain()
@@ -5737,6 +5897,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     assert!(!second.await.expect("second drain task").unwrap());
 
     target
+        .database
         .execute_test_sql(
             "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
@@ -5748,10 +5909,12 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         .store_local("shared-intent", b"recreated bytes")
         .await;
     assert!(
-        !coven_database::LocalBlobCleanup::new(&coven_database::StoreDatabase::new(&target))
-            .drain()
-            .await
-            .unwrap()
+        !coven_database::LocalBlobCleanup::new(&coven_database::StoreDatabase::new(
+            &target.database
+        ))
+        .drain()
+        .await
+        .unwrap()
     );
     assert!(
         store_dir
@@ -5768,7 +5931,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let db1 = open_test_db_with_blob(decl.clone());
     let storage = create_store(&db1, UserKeypair::generate()).await;
 
-    db1.capture_test_changeset(&[
+    db1.database.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'SharedBlob', NULL, '0000000001000-0000-dev1', '2026-01-01')",
             &format!(
@@ -5805,6 +5968,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 
     source_store_dir.store_local("newblob", b"NEW-BYTES").await;
     let cs2 = db1
+        .database
         .capture_test_changeset(&[&format!(
             "UPDATE note_photos \
              SET cloud_path = 'newblob', size = 9, hash = '{}', \
@@ -5821,10 +5985,11 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        db2.test_row_exists(
-            "SELECT 1 FROM note_photos WHERE id = 'photo-b' AND cloud_path = 'sharedblob'",
-        )
-        .await,
+        db2.database
+            .test_row_exists(
+                "SELECT 1 FROM note_photos WHERE id = 'photo-b' AND cloud_path = 'sharedblob'",
+            )
+            .await,
         "another row still references the old blob",
     );
     assert!(
@@ -5846,6 +6011,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     let chain = ExactMembershipChain::load(&storage).await;
 
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -5902,7 +6068,8 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         result.held_positions[0]
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(
@@ -5926,7 +6093,8 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
 
     // The puller has a different owner pinned from the exact root authority.
     let owner = UserKeypair::generate();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
@@ -5965,7 +6133,8 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .expect("founder has an exact membership head")
         .clone();
 
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
         .await
         .unwrap();
     storage
@@ -5986,7 +6155,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
 struct PersistedCycleRemoval {
     storage: std::sync::Arc<TestStore>,
-    db: coven_database::SyntheticDatabase,
+    db: coven_database::SyntheticStoreFixture,
     founder_pubkey: String,
     second_owner_head: coven_protocol::membership::MembershipHeadRef,
     removed_member_pubkey: String,
@@ -6095,6 +6264,7 @@ async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empt
     assert_eq!(
         fixture
             .db
+            .database
             .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
             .await
             .expect("read persisted owner pin")
@@ -6145,6 +6315,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .await
         .expect("bind mid-cycle fixture to its exact Store root");
     target
+        .database
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
         .await
         .unwrap();
@@ -6158,6 +6329,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let add_member = signed_member_grant(&chain, &owner, &member);
     chain.publish_entry(add_member, &owner).await;
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'AdvancedHead', NULL, '0000000002000-0000-devM', '2026-01-01')",
@@ -6193,6 +6365,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     assert!(unauthorized_positions(&result).is_empty());
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
@@ -6216,6 +6389,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     // guard the cycle would (fail to list, drop to chain=None, then) apply this.
     let _chain = ExactMembershipChain::load(&storage).await;
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'X', NULL, '0000000001000-0000-owner', '2026-01-01')",
@@ -6227,7 +6401,8 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         .expect("publish owner exact Store changeset");
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6241,7 +6416,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let result = crate::sync::store::Store::load(
-        coven_database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2.database),
         failing,
         store_dir,
         owner,
@@ -6255,7 +6430,8 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
         "an exact membership read failure on an owner-pinned store must abort the cycle",
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "nothing is applied when membership cannot be verified",
     );
@@ -6276,6 +6452,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     let chain = ExactMembershipChain::load(&storage).await;
     // The owner authors a signed changeset.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromOwner', NULL, '0000000001000-0000-owner', '2026-01-01')",
@@ -6298,7 +6475,8 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6306,7 +6484,8 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&stream_id), Some(&1));
@@ -6368,6 +6547,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .await
         .expect("load membership after second Owner promotion");
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'BeforeDemotion', NULL, '0000000002000-0000-owner', '2026-01-01')",
@@ -6403,6 +6583,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
 
     let target = open_test_db();
     target
+        .database
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
@@ -6413,7 +6594,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
     assert!(unauthorized_positions(&result).is_empty());
     let stream_id = commit_stream_id(&reference);
     assert_eq!(
-        store_database(&target)
+        store_database(&target.database)
             .exact_materialized_ref(&stream_id, reference.coord.sequence())
             .await
             .expect("load exact materialized predecessor-authorized commit"),
@@ -6434,6 +6615,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     let _chain = ExactMembershipChain::load(&storage).await;
 
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'MissingGrant', NULL, '0000000001000-0000-owner', '2026-01-01')",
@@ -6457,6 +6639,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
 
     let target = open_test_db();
     target
+        .database
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
@@ -6465,6 +6648,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     assert_eq!(result.changesets_applied, 0);
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
@@ -6490,6 +6674,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
 
     let target = open_test_db();
     target
+        .database
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
@@ -6501,6 +6686,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
     assert!(activation_result.held_positions.is_empty());
 
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'WrongStreamSigner', NULL, '0000000002000-0000-devOwner', '2026-01-01')",
@@ -6557,6 +6743,7 @@ async fn pull_rejects_a_head_that_names_another_device_stream() {
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
@@ -6610,6 +6797,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     // The member authors a signed changeset, stamping the grant coordinate of the
     // entry that authorizes them: (owner, 2), the Add that is lagging the LIST.
     let cs = member_db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
@@ -6619,7 +6807,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let reference = storage
         .sync_for_test(
             &member_db,
-            member_db.synced_tables(),
+            member_db.database.synced_tables(),
             cs,
             0,
             "",
@@ -6632,7 +6820,8 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6644,7 +6833,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     ));
     let (_pull_temp, pull_store_dir) = temp_store_dir();
     let store = crate::sync::store::Store::open(
-        coven_database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2.database),
         lagging,
         pull_store_dir,
         &storage.root,
@@ -6676,7 +6865,8 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     assert_eq!(result.changesets_applied, 1);
     assert!(unauthorized_positions(&result).is_empty());
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&stream_id), Some(&1));
@@ -6711,6 +6901,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // Replace the valid commit's authority with another membership coordinate.
     // The commit remains signed, but its proof no longer matches its predecessor.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Forged', NULL, '0000000001000-0000-devX', '2026-01-01')",
@@ -6722,7 +6913,8 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6731,7 +6923,8 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // Nothing applies and the durable frontier remains before the forged commit.
     assert_eq!(result.changesets_applied, 0);
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     let invalid_authority = missing_exact_membership_authority_positions(&result);
@@ -6769,6 +6962,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     // then its signature is corrupted. The signature check must reject it before
     // authorization is even considered.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'Tampered', NULL, '0000000001000-0000-dev1', '2026-01-01')",
@@ -6802,7 +6996,8 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let expected_stream_id = commit_stream_id(&graph.reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6826,7 +7021,8 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     );
     assert!(unauthorized_positions(&result).is_empty());
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(
@@ -6857,6 +7053,7 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         .expect("activate member device");
 
     let cs = member_db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromRemoved', NULL, '0000000003000-0000-devM', '2026-01-01')",
@@ -6866,7 +7063,7 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
     let reference = storage
         .sync_for_test(
             &member_db,
-            member_db.synced_tables(),
+            member_db.database.synced_tables(),
             cs,
             0,
             "",
@@ -6889,7 +7086,8 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
     chain.publish_entry(remove_member, &owner).await;
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -6901,7 +7099,8 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
     let (updated, result) = storage.pull_into(&db2, &temp_store_dir().1).await;
 
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert!(
@@ -6913,7 +7112,7 @@ async fn pull_accepts_a_member_write_authorized_before_removal() {
         Some(reference.coord.sequence())
     );
     assert_eq!(
-        store_database(&db2)
+        store_database(&db2.database)
             .exact_materialized_ref(&stream_id, reference.coord.sequence())
             .await
             .expect("load causally authorized member Store position"),
@@ -6941,6 +7140,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .await
         .expect("activate member device");
     let member_changeset = member_db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('member-candidate', 'Member candidate', NULL, \
@@ -6951,7 +7151,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     let candidate = storage
         .sync_for_test(
             &member_db,
-            member_db.synced_tables(),
+            member_db.database.synced_tables(),
             member_changeset,
             0,
             "",
@@ -6974,6 +7174,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .expect("active Owner removes membership grant");
     chain.publish_entry(remove_member, &owner).await;
     let owner_changeset = owner_db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('revocation-witness', 'Revocation witness', NULL, \
@@ -6989,7 +7190,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     storage
         .sync_for_test(
             &owner_db,
-            owner_db.synced_tables(),
+            owner_db.database.synced_tables(),
             owner_changeset,
             owner_sequence,
             "",
@@ -7023,7 +7224,7 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
         .cleanup_merge_candidate_for_test(write_id.clone())
         .await
         .expect("verify and resume removed-member candidate cleanup");
-    coven_database::StoreDatabase::new(&member_db)
+    coven_database::StoreDatabase::new(&member_db.database)
         .finish_retracted_merge_candidate_cleanup(write_id.clone())
         .await
         .expect("finalize removed-member candidate cleanup");
@@ -7032,18 +7233,18 @@ async fn removed_member_candidate_cleanup_verifies_the_exact_revocation_witness(
     );
     assert!(storage.provider_object_is_absent(candidate_graph.head_object.slot().logical_key()));
     assert!(matches!(
-        coven_database::StoreDatabase::new(&member_db)
+        coven_database::StoreDatabase::new(&member_db.database)
             .write_status(&write_id)
             .await
             .expect("read retracted member write"),
         coven_protocol::write::WriteStatus::Resolved(coven_protocol::write::WriteResolution::Retracted { witness })
             if witness.original_position().commit() == &candidate_graph.reference
     ));
-    assert!(!coven_database::StoreDatabase::new(&member_db)
+    assert!(!coven_database::StoreDatabase::new(&member_db.database)
         .merge_candidate_cleanup_pending(&write_id)
         .await
         .expect("read completed member cleanup"));
-    assert!(coven_database::StoreDatabase::new(&member_db)
+    assert!(coven_database::StoreDatabase::new(&member_db.database)
         .protocol_inert_object(candidate_graph.head_object)
         .await
         .expect("read terminal member head")
@@ -7085,7 +7286,8 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     // The puller learns the full chain, Remove included, while the provider
     // still serves everything.
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let (_temp, store_dir) = temp_store_dir();
@@ -7119,7 +7321,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     // indistinguishable from tampering, so the load fails loud instead of
     // re-admitting whatever the truncated walk hash-links into.
     let error = crate::sync::store::Store::load(
-        coven_database::StoreDatabase::new(&db2),
+        coven_database::StoreDatabase::new(&db2.database),
         lagging,
         store_dir,
         owner,
@@ -7168,6 +7370,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     // The member authors a signed changeset, stamping the grant coordinate of the
     // entry that authorizes them: (owner, 2), the Add no head covers yet.
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromUncommittedMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
@@ -7179,7 +7382,8 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -7192,7 +7396,8 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         "unexpected uncovered-grant result: {result:#?}"
     );
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&stream_id), None);
@@ -7239,6 +7444,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .expect("relocate the grant to another author's coordinate");
 
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'RelocatedGrant', NULL, '0000000002000-0000-devM', '2026-01-01')",
@@ -7263,6 +7469,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
 
     let target = open_test_db();
     target
+        .database
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
@@ -7279,6 +7486,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     );
     assert!(
         !target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
@@ -7301,7 +7509,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let mut chain = ExactMembershipChain::load(&storage).await;
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     storage
@@ -7314,7 +7523,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     ));
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let retained_store = crate::sync::store::Store::load(
-        store_database(&db2),
+        store_database(&db2.database),
         failing.clone(),
         store_dir,
         owner.clone(),
@@ -7335,6 +7544,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
         .expect("activate member device");
 
     let cs = member_db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromLaggingMember', NULL, '0000000002000-0000-devM', '2026-01-01')",
@@ -7344,7 +7554,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let reference = storage
         .sync_for_test(
             &member_db,
-            member_db.synced_tables(),
+            member_db.database.synced_tables(),
             cs,
             0,
             "",
@@ -7369,7 +7579,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
             if detail.contains("forced exact membership read failure")
     )));
     assert!(
-        !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        !db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(db2.materialized_sequences().await.get(&stream_id), None);
@@ -7412,7 +7623,8 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
         .expect("load exact remove membership head reference")
         .clone();
 
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -7492,7 +7704,8 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .await
         .expect("publish corrupt exact founder entry");
 
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &storage.protocol_founder_pubkey())
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &storage.protocol_founder_pubkey())
         .await
         .unwrap();
 
@@ -7518,6 +7731,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     let chain = ExactMembershipChain::load(&storage).await;
 
     let cs = db1
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('n1', 'FromMember', NULL, '0000000001000-0000-devA', '2026-01-01')",
@@ -7540,7 +7754,8 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     let stream_id = commit_stream_id(&reference);
 
     let db2 = open_test_db();
-    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.database
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -7548,7 +7763,8 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db2.database
+            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&stream_id), Some(&1));
@@ -7581,7 +7797,7 @@ mod blob_path_traversal {
         // The source's changeset adds a note + a photo row whose id is the
         // traversal string. (The mock stored the blob above; this is the row that
         // references it.)
-        db1.capture_test_changeset(&[
+        db1.database.capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
                 &format!(
@@ -7593,12 +7809,14 @@ mod blob_path_traversal {
         )
         .await;
         let (_tmp, store_dir) = temp_store_dir();
-        let error =
-            crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
-                .local_transitions()
-                .make_remote("notes", "n1", false)
-                .await
-                .expect_err("a traversal blob id cannot enter the upload journal");
+        let error = crate::sync::test_owner_graph::TestOwnerGraph::new(
+            store_database(&db1.database),
+            store_dir,
+        )
+        .local_transitions()
+        .make_remote("notes", "n1", false)
+        .await
+        .expect_err("a traversal blob id cannot enter the upload journal");
         assert!(matches!(
             error,
             crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }
@@ -7617,25 +7835,28 @@ mod blob_path_traversal {
         let db1 = open_test_db_with_blob(photo_decl());
         create_store(&db1, UserKeypair::generate()).await;
 
-        db1.capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+        db1.database
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
-            // prefix slice, so the path builder refuses it.
-            &format!(
+                // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
+                // prefix slice, so the path builder refuses it.
+                &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('a', 'n1', 'cover', 1, '{}', '0000000001000-0000-dev1', '2026-01-01')",
                 coven_protocol::blob::content_hash(b"A"),
             ),
-        ])
-        .await;
+            ])
+            .await;
         let (_tmp, store_dir) = temp_store_dir();
-        let error =
-            crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
-                .local_transitions()
-                .make_remote("notes", "n1", false)
-                .await
-                .expect_err("an unindexable blob id cannot enter the upload journal");
+        let error = crate::sync::test_owner_graph::TestOwnerGraph::new(
+            store_database(&db1.database),
+            store_dir,
+        )
+        .local_transitions()
+        .make_remote("notes", "n1", false)
+        .await
+        .expect_err("an unindexable blob id cannot enter the upload journal");
         assert!(matches!(
             error,
             crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }
@@ -7651,7 +7872,7 @@ mod blob_path_traversal {
         let db1 = open_test_db_with_blob(photo_decl());
         let storage = create_store(&db1, UserKeypair::generate()).await;
 
-        db1.capture_test_changeset(&[
+        db1.database.capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
                 &format!(
@@ -7737,6 +7958,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
 
     let (_ti, ld_ins) = temp_store_dir();
     let insert = db_ins
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('n1', 'orig', NULL, 1, '0000000001000-0000-ins', '2026-01-01')",
@@ -7759,7 +7981,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
     let (_tu, ld_upd) = temp_store_dir();
     storage.pull_into(db_upd, &ld_upd).await;
     assert_eq!(
-        store_database(db_upd)
+        store_database(&db_upd.database)
             .materialized_frontier()
             .await
             .expect("read updater materialized frontier")
@@ -7768,6 +7990,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
         "the updater durably materializes the exact insert before capturing its update",
     );
     let update = db_upd
+        .database
         .capture_test_changeset(&[
             "UPDATE notes SET title = 'updated', _updated_at = '0000000002000-0000-upd' \
            WHERE id = 'n1'",
@@ -7801,6 +8024,7 @@ async fn causal_update_waits_for_its_insert_despite_reversed_discovery() {
 
     assert_eq!(
         receiver
+            .database
             .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "updated",

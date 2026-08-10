@@ -273,9 +273,9 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let database = StoreDatabase::new(&db);
+        let database = StoreDatabase::new(&db.database);
 
-        db.test_sql(move |conn| {
+        db.database.test_sql(move |conn| {
             conn.execute_batch(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES ('parent', 'parent', 1, '0000000001000-0000-test', '2026-01-01');
@@ -334,21 +334,22 @@ mod tests {
             .await
             .expect("record obsolete row copies");
 
-        db.test_sql(|conn| {
-            conn.query(
-                "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .map_err(DbError::from)
-        })
-        .await
-        .map(|identities| {
-            assert_eq!(
-                identities,
-                [removed_locator.to_string(), "local".to_string()]
-            );
-        })
-        .expect("record exact cleanup despite a live same-id row");
+        db.database
+            .test_sql(|conn| {
+                conn.query(
+                    "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)
+            })
+            .await
+            .map(|identities| {
+                assert_eq!(
+                    identities,
+                    [removed_locator.to_string(), "local".to_string()]
+                );
+            })
+            .expect("record exact cleanup despite a live same-id row");
     }
 }

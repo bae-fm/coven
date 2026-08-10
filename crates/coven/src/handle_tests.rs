@@ -63,8 +63,11 @@ fn test_identity_custody() -> Arc<dyn DeviceIdentityCustody> {
     )
 }
 
-fn host_blob_test_db(namespace: &str, store_dir: &StoreDir) -> coven_database::SyntheticDatabase {
-    coven_database::SyntheticDatabase::open(
+fn host_blob_test_db(
+    namespace: &str,
+    store_dir: &StoreDir,
+) -> coven_database::SyntheticStoreFixture {
+    coven_database::SyntheticStoreFixture::open(
         &store_dir.db_path(),
         test_synced_tables_with_blob(
             coven_protocol::synced_schema::BlobDecl::new(
@@ -238,9 +241,9 @@ async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
     config.cloud_home.provider = Some(CloudProvider::S3);
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let handle = CovenHandle::new(
-        db.clone().into_database(),
+        db.database.clone(),
         // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-        db.clone().into_database(),
+        db.database.clone(),
         store_dir.clone(),
         config_provider,
         StoreKeys::bind("lib-setup-error".to_string()),
@@ -254,9 +257,11 @@ async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
         coven_storage::BlobChunking::DEFAULT,
     );
 
-    db.plant_blob_row_for_test("anyblob0", false, b"typed setup error")
+    db.database
+        .plant_blob_row_for_test("anyblob0", false, b"typed setup error")
         .await;
     let blob = db
+        .database
         .row_blob_ref("note_photos", "anyblob0")
         .await
         .expect("capture local blob row");
@@ -273,7 +278,7 @@ async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
 fn test_handle(
     store_id: &str,
     store_dir: StoreDir,
-    db: coven_database::SyntheticDatabase,
+    db: coven_database::SyntheticStoreFixture,
 ) -> CovenHandle {
     test_handle_with_custody_and_storage(
         store_id,
@@ -287,7 +292,7 @@ fn test_handle(
 fn test_handle_with_custody(
     store_id: &str,
     store_dir: StoreDir,
-    db: coven_database::SyntheticDatabase,
+    db: coven_database::SyntheticStoreFixture,
     key_custody: coven_keys::custody::KeyCustody,
 ) -> CovenHandle {
     let store_keys = test_store_keys(store_id);
@@ -298,11 +303,11 @@ fn test_handle_with_custody(
 fn test_handle_with_custody_and_storage(
     store_id: &str,
     store_dir: StoreDir,
-    db: coven_database::SyntheticDatabase,
+    db: coven_database::SyntheticStoreFixture,
     key_custody: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     storage: HomeStorage,
 ) -> CovenHandle {
-    let db = db.into_database();
+    let db = db.database;
     let mut config = Config::with_defaults(
         store_id.to_string(),
         "test-device".to_string(),
@@ -608,9 +613,9 @@ async fn test_home_drives_drain_and_read_through_the_handle() {
                 .resolve(&store_keys, &store_dir);
 
             let handle = CovenHandle::new(
-                db.clone().into_database(),
+                db.database.clone(),
                 // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-                db.clone().into_database(),
+                db.database.clone(),
                 store_dir.clone(),
                 config_provider,
                 store_keys,
@@ -745,9 +750,9 @@ async fn caller_driven_connect_leaves_the_only_drain_to_the_caller() {
                 .resolve(&store_keys, &store_dir);
 
             let handle = CovenHandle::new(
-                db.clone().into_database(),
+                db.database.clone(),
                 // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-                db.clone().into_database(),
+                db.database.clone(),
                 store_dir.clone(),
                 config_provider,
                 store_keys,
@@ -890,9 +895,9 @@ async fn connected_seal_honors_the_handles_configured_blob_chunking() {
             let upload_pause = Arc::new(PausedUploadDrain::new());
 
             let handle = CovenHandle::new(
-                db.clone().into_database(),
+                db.database.clone(),
                 // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-                db.clone().into_database(),
+                db.database.clone(),
                 store_dir.clone(),
                 config_provider,
                 store_keys,
@@ -1001,9 +1006,9 @@ async fn connected_sync_reuses_connection_storage_for_loop() {
     };
 
     let handle = CovenHandle::new(
-        db.clone().into_database(),
+        db.database.clone(),
         // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-        db.clone().into_database(),
+        db.database.clone(),
         store_dir.clone(),
         config_provider,
         StoreKeys::bind("lib-cloudkit-home-reuse".to_string()),
@@ -1074,8 +1079,8 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
                 Arc::new(move || config.clone())
             };
             let writer = CovenHandle::new(
-                db.clone().into_database(),
-                db.clone().into_database(),
+                db.database.clone(),
+                db.database.clone(),
                 store_dir.clone(),
                 config_provider,
                 key_service.clone(),
@@ -1102,7 +1107,7 @@ async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
                 Arc::new(move || config.clone())
             };
             let reader = crate::read_handle::CovenReadHandle::new(
-                db.into_database(),
+                db.database,
                 store_dir,
                 config_provider,
                 key_service,
@@ -1211,8 +1216,8 @@ async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back()
             let identity_custody = coven_keys::identity_custody::IdentityCustody::Keyring
                 .resolve(&store_keys, &store_dir);
             let handle = CovenHandle::new(
-                db.clone().into_database(),
-                db.clone().into_database(),
+                db.database.clone(),
+                db.database.clone(),
                 store_dir.clone(),
                 config_provider,
                 store_keys,
@@ -1327,9 +1332,9 @@ async fn import_master_key_accepts_the_current_serialized_keyring() {
 fn test_handle_with_real_identity(
     store_id: &str,
     store_dir: StoreDir,
-    db: coven_database::SyntheticDatabase,
+    db: coven_database::SyntheticStoreFixture,
 ) -> CovenHandle {
-    let db = db.into_database();
+    let db = db.database;
     let config = Config::with_defaults(
         store_id.to_string(),
         "test-device".to_string(),
@@ -1527,7 +1532,7 @@ async fn open_app_data_round_trips_through_the_read_handle() {
     let store_keys = test_store_keys(store_id);
     let key_custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let reader = crate::read_handle::CovenReadHandle::new(
-        db.into_database(),
+        db.database,
         store_dir.clone(),
         config_provider,
         store_keys,
@@ -1689,7 +1694,7 @@ async fn create_circle_returns_after_merge_activation_is_materialized() {
             .security
             .established_identity()
             .expect("read test identity");
-        assert!(StoreDatabase::from_database(db.clone().into_database())
+        assert!(StoreDatabase::from_database(db.database.clone())
             .get_circle_members(
                 circle_id,
                 &identity.public_key_hex(),
@@ -1706,6 +1711,7 @@ async fn create_circle_returns_after_merge_activation_is_materialized() {
             .is_empty());
 
         let counts = db
+            .database
             .test_sql(move |database| database.circle_state_counts(circle_id))
             .await
             .expect("read activated circle state");
@@ -1893,8 +1899,8 @@ async fn reconnect_sync_stops_the_previous_loop() {
                 // These tests never call `sql_read`, and the in-memory test database has
                 // no shareable read-only companion, so the writer clone stands in.
                 let handle = CovenHandle::new(
-                    db.clone().into_database(),
-                    db.clone().into_database(),
+                    db.database.clone(),
+                    db.database.clone(),
                     store_dir.clone(),
                     config_provider,
                     StoreKeys::bind("lib-reconnect-loop".to_string()),
@@ -1956,8 +1962,8 @@ async fn stopped_installed_loop_blocks_blob_transitions() {
                 // These tests never call `sql_read`, and the in-memory test database has
                 // no shareable read-only companion, so the writer clone stands in.
                 let handle = CovenHandle::new(
-                    db.clone().into_database(),
-                    db.clone().into_database(),
+                    db.database.clone(),
+                    db.database.clone(),
                     store_dir.clone(),
                     config_provider,
                     StoreKeys::bind("lib-stopped-loop-readiness".to_string()),
@@ -2027,9 +2033,9 @@ async fn encrypted_session_keeps_its_binding_after_config_changes() {
                 };
 
                 let handle = CovenHandle::new(
-                    db.clone().into_database(),
+                    db.database.clone(),
                     // `read_db`: this test never calls `sql_read`, so the writer clone stands in.
-                    db.clone().into_database(),
+                    db.database.clone(),
                     store_dir.clone(),
                     config_provider,
                     StoreKeys::bind("lib-test".to_string()),
@@ -2143,11 +2149,11 @@ fn status_test_handle(store_id: &str) -> (tempfile::TempDir, CovenHandle) {
         Arc::new(move || config.clone())
     };
     let handle = CovenHandle::new(
-        db.clone().into_database(),
+        db.database.clone(),
         // `read_db`: these tests never call `sql_read`, and the test db is
         // `:memory:` (unique per connection, no shareable read-only companion),
         // so the writer clone stands in.
-        db.clone().into_database(),
+        db.database.clone(),
         store_dir.clone(),
         config_provider,
         StoreKeys::bind(store_id.to_string()),

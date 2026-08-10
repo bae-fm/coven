@@ -858,7 +858,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .expect("load owner membership");
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&db);
+    let store_database = coven_database::StoreDatabase::new(&db.database);
     let snapshot = store_database
         .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
         .await
@@ -1119,7 +1119,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_dir = snapshot_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&owner_db);
+    let store_database = coven_database::StoreDatabase::new(&owner_db.database);
     let snapshot = store_database
         .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
         .await
@@ -1203,6 +1203,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await
             .expect("load owner membership");
         db_owner
+            .database
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
@@ -1210,7 +1211,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await;
         let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
         let snap_dir = snap_tmp.path().to_path_buf();
-        let store_database = coven_database::StoreDatabase::new(&db_owner);
+        let store_database = coven_database::StoreDatabase::new(&db_owner.database);
         let snapshot = store_database
             .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
             .await
@@ -1449,7 +1450,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let membership_floor = MembershipFloor(chain.head_refs().to_vec());
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&db_owner);
+    let store_database = coven_database::StoreDatabase::new(&db_owner.database);
     let snapshot = store_database
         .capture_snapshot_image_for_test(storage.root.clone(), snap_dir, None)
         .await
@@ -1541,12 +1542,14 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("initialize owner Store");
         let store_root = owner_device.store_root().clone();
         db_owner
+            .database
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
             )
             .await;
         db_owner
+            .database
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
@@ -1572,7 +1575,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("build owner cycle storage");
         let components = Box::pin(
             coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
-                coven_database::StoreDatabase::new(&db_owner),
+                coven_database::StoreDatabase::new(&db_owner.database),
                 owner_dir.clone(),
             )
             .prepare_sync(cycle_storage, owner_keypair.clone()),
@@ -1590,6 +1593,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let layout = StoreLayout::new(restore_app.path());
         let lib_b = layout.store_dir(store_id);
         let owner_blob = db_owner
+            .database
             .row_blob_ref("note_photos", "photo1")
             .await
             .expect("capture exact snapshot blob");
@@ -1610,11 +1614,13 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .await
             .expect("export exact activated continuation");
         let materialized_commits_without_device_state = db_owner
+            .database
             .test_sql(|database| database.materialized_commits_without_device_state_count())
             .await
             .expect("verify source device-state snapshots");
         assert_eq!(materialized_commits_without_device_state, 0);
         let published_snapshot_bytes = db_owner
+            .database
             .test_sql(|database| database.latest_published_store_snapshot_bytes())
             .await
             .expect("read published snapshot metadata");

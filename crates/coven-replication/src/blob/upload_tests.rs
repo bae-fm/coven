@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 use coven_database::StoreDatabase;
-use coven_database::{DbError, SyntheticDatabase};
+use coven_database::{DbError, SyntheticStoreFixture};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -258,7 +258,7 @@ impl ExactSlotStorage for InstrumentedHome {
 }
 
 struct UploadFixture {
-    db: SyntheticDatabase,
+    db: SyntheticStoreFixture,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
     storage: Arc<CloudSyncConnection>,
@@ -275,7 +275,7 @@ impl UploadFixture {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
-        let db = SyntheticDatabase::open(
+        let db = SyntheticStoreFixture::open(
             std::path::Path::new(":memory:"),
             test_synced_tables_with_blob(BlobDecl::new(
                 "photos",
@@ -309,7 +309,7 @@ impl UploadFixture {
         .await
         .expect("initialize exact local blob authority");
         home.reset_observations();
-        let database = coven_database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db.database);
         Self {
             db,
             database,
@@ -331,7 +331,7 @@ impl UploadFixture {
     }
 
     async fn journal(&self, blob_id: &str) -> coven_database::OutboxEntry {
-        coven_database::StoreDatabase::new(&self.db)
+        coven_database::StoreDatabase::new(&self.db.database)
             .pending_blob_uploads()
             .await
             .expect("read upload journals")
@@ -349,6 +349,7 @@ impl UploadFixture {
     async fn journal_attempt(&self, blob_id: &str) -> coven_database::OutboxAttempt {
         let blob_id = blob_id.to_string();
         self.db
+            .database
             .test_sql(move |database| database.upload_outbox_attempt(&blob_id))
             .await
             .expect("read journal attempt")
@@ -361,6 +362,7 @@ impl UploadFixture {
         rows: &[(&str, &[u8])],
     ) -> Vec<std::path::PathBuf> {
         self.db
+            .database
             .insert_local_upload_rows_for_test(ROOT_ID, rows)
             .await
             .expect("plant exact Local blob rows");
@@ -374,7 +376,7 @@ impl UploadFixture {
             coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
-            coven_database::StoreDatabase::new(&self.db)
+            coven_database::StoreDatabase::new(&self.db.database)
                 .register_external_blob_for_test("note_photos", id, &path)
                 .await;
             paths.push(path);
@@ -717,7 +719,7 @@ async fn backoff_skips_item_inside_window() {
         .await;
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
-    coven_database::StoreDatabase::new(&fixture.db)
+    coven_database::StoreDatabase::new(&fixture.db.database)
         .record_outbox_failure(&entry, "prior", T0)
         .await
         .unwrap();
@@ -765,6 +767,7 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     let entry_id = entry.id;
     fixture
         .db
+        .database
         .test_sql(move |database| database.corrupt_upload_outbox_attempt_time(entry_id))
         .await
         .expect("corrupt last_attempt_at");
@@ -880,6 +883,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await;
     let row = fixture
         .db
+        .database
         .row_blob_ref("note_photos", "transact")
         .await
         .unwrap();
@@ -888,6 +892,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     let rollback_path = paths[0].clone();
     fixture
         .db
+        .database
         .test_sql(move |database| {
             database.rolled_back_transaction(|transaction| {
                 transaction.enqueue_blob_upload(
@@ -902,7 +907,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         })
         .await
         .unwrap();
-    assert!(coven_database::StoreDatabase::new(&fixture.db)
+    assert!(coven_database::StoreDatabase::new(&fixture.db.database)
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -910,6 +915,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
 
     fixture
         .db
+        .database
         .test_sql(move |database| {
             database.transaction(|transaction| {
                 transaction.enqueue_blob_upload("notes", ROOT_ID, &row, &paths[0], false, T0)
@@ -918,7 +924,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await
         .unwrap();
     assert_eq!(
-        coven_database::StoreDatabase::new(&fixture.db)
+        coven_database::StoreDatabase::new(&fixture.db.database)
             .pending_blob_uploads()
             .await
             .unwrap()

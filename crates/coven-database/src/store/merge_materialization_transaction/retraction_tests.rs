@@ -63,6 +63,7 @@ async fn merge_retraction_retires_its_circle_bootstrap_coverage_atomically() {
     let encoded_activation =
         serde_json::to_string(&activation).expect("serialize bootstrap activation");
     database
+        .database
         .test_sql(move |connection| {
             let store_dir = store_dir;
             let image = b"Circle bootstrap retraction image";

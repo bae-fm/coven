@@ -11,7 +11,7 @@ async fn loaded_store_authorization_retains_its_verified_root() {
         .expect("create Store");
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let store = Store::load(
-        coven_database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db.database),
         fixture.storage(),
         store_dir,
         signer,
@@ -41,6 +41,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
     .expect("create source Store");
     let target = open_test_db();
     target
+        .database
         .test_sql(|sql| {
             sql.execute_batch(
                 "CREATE TEMP TRIGGER fail_owner_anchor_baseline
@@ -63,7 +64,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         "unexpected owner anchor failure: {error}"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(&target)
+        coven_database::StoreDatabase::new(&target.database)
             .local_store_root_ref()
             .await
             .expect("read Store root after rolled-back installation"),
@@ -72,6 +73,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
     );
 
     target
+        .database
         .test_sql(|sql| {
             sql.execute_batch("DROP TRIGGER fail_owner_anchor_baseline")
                 .map_err(coven_database::DbError::from)
@@ -83,7 +85,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         .await
         .expect("retry Store loading after rollback");
     assert_eq!(
-        coven_database::StoreDatabase::new(&target)
+        coven_database::StoreDatabase::new(&target.database)
             .local_store_root_ref()
             .await
             .expect("read Store root after committed retry"),
@@ -108,7 +110,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
     let target = open_test_db();
     let target_device = fixture.open_into(&target).await.expect("open target Store");
     let authority = fixture.founder_recovery_authority().await;
-    target.fail_next_merge_materialization_at(
+    target.database.fail_next_merge_materialization_at(
         coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
     );
 
@@ -125,7 +127,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
         "unexpected Owner recovery failure: {error}"
     );
 
-    let database = coven_database::StoreDatabase::new(&target);
+    let database = coven_database::StoreDatabase::new(&target.database);
     let staged = database
         .latest_local_store_device_registration()
         .await

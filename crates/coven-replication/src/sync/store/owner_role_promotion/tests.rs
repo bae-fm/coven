@@ -12,12 +12,12 @@ use super::journal::OwnerPromotionJournalState;
 /// device's registration names — the starting point of every promotion case that
 /// works on a single candidate.
 struct PromotionCandidate {
-    owner_db: coven_database::SyntheticDatabase,
+    owner_db: coven_database::SyntheticStoreFixture,
     owner: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     member: UserKeypair,
-    member_db: coven_database::SyntheticDatabase,
+    member_db: coven_database::SyntheticStoreFixture,
     member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     encryption: EncryptionService,
 }
@@ -195,7 +195,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     .expect("activate Owner promotion");
 
     assert!(
-        StoreDatabase::new(&member_db)
+        StoreDatabase::new(&member_db.database)
             .load_owner_promotion_target(target_key(&member_registration).unwrap())
             .await
             .expect("load candidate target index")
@@ -226,7 +226,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. }
     ));
 
-    let mut journal = StoreDatabase::new(&owner_db)
+    let mut journal = StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load finalized promotion journal")
@@ -251,6 +251,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     state.heads.sort();
     let encoded = serde_json::to_string(&journal).expect("serialize substituted receipt journal");
     owner_db
+        .database
         .set_protocol_state(
             &format!("owner_promotion/{}", journal.promotion_id),
             &encoded,
@@ -258,7 +259,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .await
         .expect("install substituted receipt journal");
 
-    assert!(StoreDatabase::new(&owner_db)
+    assert!(StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_journal(journal.promotion_id)
         .await
         .is_err());
@@ -284,7 +285,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .begin_owner_promotion(member_registration.clone())
         .await
         .expect_err("interrupted publication retains RequestPrepared");
-    let journal = StoreDatabase::new(&owner_db)
+    let journal = StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load prepared request journal")
@@ -300,6 +301,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let encoded =
         serde_json::to_string(&substituted_request).expect("serialize corrupt request journal");
     owner_db
+        .database
         .set_protocol_state(
             &format!("owner_promotion/{}", journal.promotion_id),
             &encoded,
@@ -307,11 +309,12 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("install corrupt id journal");
     owner_db
+        .database
         .set_protocol_state(&target_key(&journal.target).unwrap(), &encoded)
         .await
         .expect("install corrupt target journal");
 
-    assert!(StoreDatabase::new(&owner_db)
+    assert!(StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_journal(journal.promotion_id)
         .await
         .is_err());
@@ -332,6 +335,7 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let encoded = serde_json::to_string(&substituted_bytes)
         .expect("serialize substituted prepared bytes journal");
     owner_db
+        .database
         .set_protocol_state(
             &format!("owner_promotion/{}", substituted_bytes.promotion_id),
             &encoded,
@@ -339,11 +343,12 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("install substituted id journal");
     owner_db
+        .database
         .set_protocol_state(&target_key(&substituted_bytes.target).unwrap(), &encoded)
         .await
         .expect("install substituted target journal");
 
-    assert!(StoreDatabase::new(&owner_db)
+    assert!(StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_journal(substituted_bytes.promotion_id)
         .await
         .is_err());
@@ -389,6 +394,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     // A queued host write composes against the same next position the
     // finalization will, and takes it the moment it drains.
     owner_db
+        .database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \
@@ -419,7 +425,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     )
     .await
     .expect_err("the interrupted finalization cannot publish its head");
-    let interrupted = StoreDatabase::new(&owner_db)
+    let interrupted = StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load the interrupted promotion journal")
@@ -460,7 +466,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         ),
         "the finalization ends on the verified winner: {lost}",
     );
-    let ended = StoreDatabase::new(&owner_db)
+    let ended = StoreDatabase::new(&owner_db.database)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load the ended promotion journal")

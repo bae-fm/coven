@@ -1,7 +1,7 @@
 use super::*;
 use crate::sync::test_helpers::{open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore};
 use coven_database::StoreDatabase;
-use coven_database::SyntheticDatabase;
+use coven_database::SyntheticStoreFixture;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{MasterKeyCustody, UserKeypair};
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
@@ -20,7 +20,7 @@ struct MergeFixture {
     home: Arc<coven_storage::InMemoryCloudHome>,
     store_id: String,
     device: crate::sync::test_helpers::TestDevice,
-    db: SyntheticDatabase,
+    db: SyntheticStoreFixture,
     database: StoreDatabase,
     owner: UserKeypair,
     owner_pubkey: String,
@@ -41,7 +41,7 @@ impl MergeFixture {
             .bind_device(&db, &owner)
             .await
             .expect("bind exact Store");
-        let database = coven_database::StoreDatabase::new(&db);
+        let database = coven_database::StoreDatabase::new(&db.database);
         let (store_dir_temp, store_dir) = temp_store_dir();
         Self {
             store,
@@ -226,6 +226,7 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
     let chain = fixture.load().await;
     let before_owner = fixture
         .db
+        .database
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .unwrap();
@@ -254,6 +255,7 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
     assert_eq!(
         fixture
             .db
+            .database
             .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),
@@ -451,6 +453,7 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
     .expect("load Store owner");
     fixture
         .db
+        .database
         .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .expect("remove the installed owner anchor");
@@ -492,6 +495,7 @@ async fn store_membership_reads_reject_tampered_founder_state() {
     .expect("load Store owner");
     fixture
         .db
+        .database
         .set_protocol_state(coven_database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
         .await
         .expect("tamper with the installed founder state");
@@ -601,7 +605,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .load_membership_head_for_test(&founder_ref)
         .await
         .expect("load founder membership head");
-    let registration = coven_database::StoreDatabase::new(&fixture.db)
+    let registration = coven_database::StoreDatabase::new(&fixture.db.database)
         .activated_store_device_registration(founder_head.body.author_registration.clone())
         .await
         .expect("load founder device registration");
@@ -820,7 +824,7 @@ async fn pruned_membership_author_stream_is_replaced_and_persisted() {
     let grant = MembershipGrantId(coven_protocol::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
-    let database = coven_database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db.database);
     let first = database
         .select_membership_author_stream(&author, &grant, Default::default())
         .await
@@ -886,19 +890,20 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     floor.sort_by_key(|reference| reference.coord.stream_key());
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
-    db.test_sql(move |conn| {
-        conn.execute_batch(&format!(
-            "CREATE TRIGGER reject_second_membership_floor \
+    db.database
+        .test_sql(move |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER reject_second_membership_floor \
                  BEFORE INSERT ON protocol_state \
                  WHEN NEW.key = '{rejected_key}' \
                  BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
-        ))
-        .map_err(coven_database::DbError::from)
-    })
-    .await
-    .unwrap();
+            ))
+            .map_err(coven_database::DbError::from)
+        })
+        .await
+        .unwrap();
 
-    let database = coven_database::StoreDatabase::new(&db);
+    let database = coven_database::StoreDatabase::new(&db.database);
     assert!(database
         .persist_membership_head_cursors(floor)
         .await
@@ -924,20 +929,21 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .clone();
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
-    db.test_sql(move |conn| {
-        conn.execute_batch(&format!(
-            "CREATE TRIGGER reject_anchor_cursor \
+    db.database
+        .test_sql(move |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER reject_anchor_cursor \
              BEFORE INSERT ON protocol_state \
              WHEN NEW.key = '{rejected_key}' \
              BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
-        ))
-        .map_err(coven_database::DbError::from)
-    })
-    .await
-    .unwrap();
+            ))
+            .map_err(coven_database::DbError::from)
+        })
+        .await
+        .unwrap();
 
     assert!(crate::sync::store::Store::open(
-        coven_database::StoreDatabase::new(&db),
+        coven_database::StoreDatabase::new(&db.database),
         fixture.store.storage(),
         fixture.store_dir.clone(),
         &fixture.store.root,
@@ -946,10 +952,13 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
     .await
     .is_err());
     assert_eq!(
-        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.database
+            .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
+            .await
+            .unwrap(),
         None
     );
-    assert!(coven_database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db.database)
         .membership_head_cursors()
         .await
         .unwrap()
@@ -1086,6 +1095,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     // will, and takes it the moment it drains.
     fixture
         .db
+        .database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \

@@ -505,6 +505,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
 
     let db = crate::sync::test_helpers::open_test_db();
     let circle_id = db
+        .database
         .test_sql(|conn| {
             Ok(conn
                 .install_test_active_circle("current-control-conflict")
@@ -513,6 +514,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         .await
         .expect("install founder current state");
     let founder = db
+        .database
         .test_sql(move |database| {
             database.circle_current_state(circle_id)?.ok_or_else(|| {
                 coven_database::DbError::Message("test Circle current state is absent".to_string())

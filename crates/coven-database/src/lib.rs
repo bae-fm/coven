@@ -147,7 +147,7 @@ pub use test_sql::DatabaseTestSql;
 pub use test_support::synthetic_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::{
-    synthetic_store::SyntheticDatabase, DatabaseImageTest, OutboxAttempt,
+    synthetic_store::SyntheticStoreFixture, DatabaseImageTest, OutboxAttempt,
     RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(any(test, feature = "test-utils"))]

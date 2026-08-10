@@ -38,7 +38,7 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
     owner_store: TestDevice,
-    owner_db: coven_database::SyntheticDatabase,
+    owner_db: coven_database::SyntheticStoreFixture,
     owner_database: coven_database::StoreDatabase,
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
@@ -97,7 +97,7 @@ impl TransportFixture {
         let owner = UserKeypair::generate();
         let owner_db = open_test_db();
         let owner_database =
-            coven_database::StoreDatabase::from_database(owner_db.clone().into_database());
+            coven_database::StoreDatabase::from_database(owner_db.database.clone());
         let create_store_db = owner_db.clone();
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();
@@ -217,6 +217,7 @@ impl TransportFixture {
         id: &str,
     ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         self.owner_db
+            .database
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('{id}', '{id}', 1, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z')"

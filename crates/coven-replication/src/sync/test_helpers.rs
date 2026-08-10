@@ -306,7 +306,7 @@ mod test_device {
     }
 
     impl TestStoreDir {
-        pub fn from_database(database: &SyntheticDatabase) -> Self {
+        pub fn from_database(database: &SyntheticStoreFixture) -> Self {
             Self {
                 dir: database.store_dir.clone(),
             }
@@ -333,13 +333,13 @@ mod test_device {
 
     impl TestDevice {
         pub async fn create(
-            db: &SyntheticDatabase,
+            db: &SyntheticStoreFixture,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             founder_timestamp: &str,
             identity: UserKeypair,
         ) -> Result<Self, String> {
             Self::create_with_database(
-                coven_database::StoreDatabase::new(db),
+                coven_database::StoreDatabase::new(&db.database),
                 TestStoreDir::from_database(db),
                 storage,
                 founder_timestamp,
@@ -401,12 +401,12 @@ mod test_device {
         }
 
         pub async fn load(
-            db: &SyntheticDatabase,
+            db: &SyntheticStoreFixture,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
             Self::load_with_database(
-                coven_database::StoreDatabase::new(db),
+                coven_database::StoreDatabase::new(&db.database),
                 storage,
                 identity,
                 TestStoreDir::from_database(db),
@@ -2548,19 +2548,19 @@ struct TestStoreProducers {
 impl TestStore {
     pub async fn bind_founder_device(
         &self,
-        database: &SyntheticDatabase,
+        database: &SyntheticStoreFixture,
     ) -> Result<TestDevice, String> {
         self.bind_device(database, &self.signer).await
     }
 
     pub async fn open_store_with_identity(
         &self,
-        database: &SyntheticDatabase,
+        database: &SyntheticStoreFixture,
         store_dir: StoreDir,
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(
-            coven_database::StoreDatabase::new(database),
+            coven_database::StoreDatabase::new(&database.database),
             self.storage.clone(),
             store_dir,
             identity,
@@ -2662,13 +2662,13 @@ impl TestStore {
 
     pub async fn pull_with_storage_for_test(
         &self,
-        database: &SyntheticDatabase,
+        database: &SyntheticStoreFixture,
         storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
         store_dir: &StoreDir,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let store = crate::sync::store::Store::load(
-            coven_database::StoreDatabase::new(database),
+            coven_database::StoreDatabase::new(&database.database),
             storage,
             store_dir.clone(),
             self.signer.clone(),
@@ -2760,7 +2760,7 @@ impl TestStore {
 
     pub async fn pull_into_result(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_dir: &StoreDir,
     ) -> Result<
         (
@@ -2777,7 +2777,7 @@ impl TestStore {
 
     pub async fn pull_into(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_dir: &StoreDir,
     ) -> (
         std::collections::BTreeMap<String, u64>,
@@ -2790,8 +2790,8 @@ impl TestStore {
 
     pub async fn promote_active_member_fixture(
         &self,
-        owner_db: &SyntheticDatabase,
-        member_db: &SyntheticDatabase,
+        owner_db: &SyntheticStoreFixture,
+        member_db: &SyntheticStoreFixture,
         owner: &UserKeypair,
         member: &UserKeypair,
         encryption: &coven_keys::encryption::EncryptionService,
@@ -2843,7 +2843,7 @@ impl TestStore {
     }
 
     pub async fn create(
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2862,7 +2862,7 @@ impl TestStore {
     }
 
     pub async fn create_encrypted(
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2905,7 +2905,7 @@ impl TestStore {
     /// (sealed under the store key, hashed paths). The pair is fixed per home,
     /// so a test that needs the browsable verification story needs this store.
     pub async fn create_browsable(
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_id: &str,
         signer: UserKeypair,
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2922,7 +2922,7 @@ impl TestStore {
     }
 
     async fn create_with_protection(
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_id: &str,
         signer: UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
@@ -2930,7 +2930,7 @@ impl TestStore {
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         Self::create_with_protection_database(
-            coven_database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(&db.database),
             TestStoreDir::from_database(db),
             store_id,
             signer,
@@ -3322,10 +3322,10 @@ impl TestStore {
 
     pub async fn publish_third_candidate_winner(
         &self,
-        peer_db: &SyntheticDatabase,
+        peer_db: &SyntheticStoreFixture,
         candidate: &coven_database::BlockedMergeCandidate,
     ) {
-        let registration = coven_database::StoreDatabase::new(peer_db)
+        let registration = coven_database::StoreDatabase::new(&peer_db.database)
             .activated_store_device_registration(
                 candidate.commit.value().author_registration.clone(),
             )
@@ -3342,7 +3342,7 @@ impl TestStore {
             candidate_family,
             candidate.commit.value().write_id.clone(),
             coord.clone(),
-            peer_db.schema_version(),
+            peer_db.database.schema_version(),
             b"third winner package".to_vec(),
             Vec::new(),
         )
@@ -3393,7 +3393,7 @@ impl TestStore {
             coven_protocol::store_commit::StoreCommitOperationsInput {
                 store_package: Some(coven_protocol::store_commit::StorePackageInput {
                     candidate_family,
-                    schema_version: peer_db.schema_version(),
+                    schema_version: peer_db.database.schema_version(),
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
@@ -3554,11 +3554,11 @@ impl TestStore {
 
     pub async fn bind_device(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
         TestDevice::load_with_database(
-            coven_database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(&db.database),
             self.storage_for_device(identity.clone())?,
             identity.clone(),
             TestStoreDir::from_database(db),
@@ -3586,8 +3586,8 @@ impl TestStore {
 
     pub async fn activate_joined_device(
         &self,
-        observer_db: &SyntheticDatabase,
-        joining_db: &SyntheticDatabase,
+        observer_db: &SyntheticStoreFixture,
+        joining_db: &SyntheticStoreFixture,
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
@@ -3604,11 +3604,11 @@ impl TestStore {
     async fn activate_joined_device_with_observer(
         &self,
         observer: TestDevice,
-        joining_db: &SyntheticDatabase,
+        joining_db: &SyntheticStoreFixture,
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
-        let joining_database = coven_database::StoreDatabase::new(joining_db);
+        let joining_database = coven_database::StoreDatabase::new(&joining_db.database);
         let activated_database = joining_database.clone();
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open(
@@ -3705,7 +3705,7 @@ impl TestStore {
 
     pub async fn invite_member(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         identity: &UserKeypair,
         member_pubkey: &str,
         invitee_email: Option<&str>,
@@ -3732,8 +3732,8 @@ impl TestStore {
 
     pub async fn invite_and_activate_peer(
         &self,
-        observer_db: &SyntheticDatabase,
-        peer_db: &SyntheticDatabase,
+        observer_db: &SyntheticStoreFixture,
+        peer_db: &SyntheticStoreFixture,
         peer: &UserKeypair,
     ) -> Result<TestDevice, String> {
         self.invite_member(
@@ -3753,7 +3753,7 @@ impl TestStore {
 
     pub async fn remove_member(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         identity: &UserKeypair,
         member_pubkey: &str,
         encryption: &coven_keys::encryption::EncryptionService,
@@ -3852,9 +3852,9 @@ impl TestStore {
             .clone())
     }
 
-    pub async fn open_into(&self, db: &SyntheticDatabase) -> Result<TestDevice, String> {
+    pub async fn open_into(&self, db: &SyntheticStoreFixture) -> Result<TestDevice, String> {
         TestDevice::open_with_database(
-            coven_database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(&db.database),
             TestStoreDir::from_database(db),
             self.storage_for_device(self.signer.clone())?,
             &self.root,
@@ -3879,11 +3879,14 @@ impl TestStore {
 
     pub async fn publish_pending(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
-        self.publish_pending_store_database(&coven_database::StoreDatabase::new(db), store_dir)
-            .await
+        self.publish_pending_store_database(
+            &coven_database::StoreDatabase::new(&db.database),
+            store_dir,
+        )
+        .await
     }
 
     pub async fn publish_pending_store_database(
@@ -4039,7 +4042,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn push_circle_snapshots(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         temp_dir: std::path::PathBuf,
         schema_version: u32,
         created_at: &str,
@@ -4068,7 +4071,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn load_circle_snapshot_metas(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Result<
@@ -4092,7 +4095,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn verify_standalone_circle_snapshot_image(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         circle_id: coven_protocol::circle::CircleId,
         access: &coven_protocol::circle_activation::CircleEpochAccess,
         store_routing: &coven_keys::encryption::EncryptionService,
@@ -4114,7 +4117,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn circle_snapshot_is_stable(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         circle_id: coven_protocol::circle::CircleId,
         snapshot_cut: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<bool, crate::sync::store::SnapshotError> {
@@ -4135,7 +4138,7 @@ impl TestStore {
     #[cfg(test)]
     pub async fn load_circle_acknowledgement(
         &self,
-        db: &SyntheticDatabase,
+        db: &SyntheticStoreFixture,
         reference: &coven_protocol::store_commit::CircleAckRef,
     ) -> Result<coven_protocol::store_commit::CircleAck, crate::sync::store::StoreAckError> {
         self.bind_device(db, &self.signer)

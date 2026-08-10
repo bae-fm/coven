@@ -168,12 +168,12 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/coven-database/src/test_support/synthetic_store.rs",
-        "SyntheticDatabase",
+        "SyntheticStoreFixture",
         "open",
     ),
     (
         "crates/coven-database/src/test_support/synthetic_store.rs",
-        "SyntheticDatabase",
+        "SyntheticStoreFixture",
         "open_with_hlc",
     ),
     (

@@ -605,7 +605,7 @@ mod tests {
         let surviving_writer_hash = spool.write(&bytes).await.expect("stage live writer");
         assert_eq!(failed_writer_hash, surviving_writer_hash);
 
-        commit_claims(&db, "live-writer", &[surviving_writer_hash]).await;
+        commit_claims(&db.database, "live-writer", &[surviving_writer_hash]).await;
 
         assert_eq!(
             spool
@@ -687,15 +687,15 @@ mod tests {
         let kept = spool.write(&payload(1, 64)).await.expect("write kept");
         let dropped = spool.write(&payload(2, 64)).await.expect("write dropped");
 
-        commit_claims(&db, "owner-a", &[kept, dropped]).await;
-        commit_claims(&db, "owner-a", &[kept]).await;
+        commit_claims(&db.database, "owner-a", &[kept, dropped]).await;
+        commit_claims(&db.database, "owner-a", &[kept]).await;
 
-        pay_owed_deletions(&db, &store_dir)
+        pay_owed_deletions(&db.database, &store_dir)
             .await
             .expect("drain obligations");
 
         assert_eq!(spool_entries(&store_dir), vec![kept.to_string()]);
-        assert_eq!(owed_deletions(&db).await, Vec::new());
+        assert_eq!(owed_deletions(&db.database).await, Vec::new());
     }
 
     /// Two owners naming one payload is the collision the claim table exists
@@ -708,19 +708,19 @@ mod tests {
         let spool = PayloadSpool::new(&store_dir);
         let shared = spool.write(&payload(3, 64)).await.expect("write shared");
 
-        commit_claims(&db, "owner-a", &[shared]).await;
-        commit_claims(&db, "owner-b", &[shared]).await;
-        commit_claims(&db, "owner-a", &[]).await;
+        commit_claims(&db.database, "owner-a", &[shared]).await;
+        commit_claims(&db.database, "owner-b", &[shared]).await;
+        commit_claims(&db.database, "owner-a", &[]).await;
 
-        assert_eq!(owed_deletions(&db).await, Vec::new());
+        assert_eq!(owed_deletions(&db.database).await, Vec::new());
 
-        pay_owed_deletions(&db, &store_dir)
+        pay_owed_deletions(&db.database, &store_dir)
             .await
             .expect("drain obligations");
         assert_eq!(spool_entries(&store_dir), vec![shared.to_string()]);
 
-        commit_claims(&db, "owner-b", &[]).await;
-        assert_eq!(owed_deletions(&db).await, vec![shared]);
+        commit_claims(&db.database, "owner-b", &[]).await;
+        assert_eq!(owed_deletions(&db.database).await, vec![shared]);
     }
 
     /// A payload an owner takes on is a payload some row names, so whatever
@@ -734,12 +734,12 @@ mod tests {
         let bytes = payload(4, 64);
         let hash = spool.write(&bytes).await.expect("write payload");
 
-        commit_claims(&db, "owner-a", &[hash]).await;
-        commit_claims(&db, "owner-a", &[]).await;
-        commit_claims(&db, "owner-b", &[hash]).await;
+        commit_claims(&db.database, "owner-a", &[hash]).await;
+        commit_claims(&db.database, "owner-a", &[]).await;
+        commit_claims(&db.database, "owner-b", &[hash]).await;
 
-        assert_eq!(owed_deletions(&db).await, Vec::new());
-        pay_owed_deletions(&db, &store_dir)
+        assert_eq!(owed_deletions(&db.database).await, Vec::new());
+        pay_owed_deletions(&db.database, &store_dir)
             .await
             .expect("drain obligations");
         assert_eq!(spool.read(hash).await.expect("read payload"), bytes);
@@ -756,11 +756,11 @@ mod tests {
         let superseded = spool.write(&payload(6, 64)).await.expect("write old");
         let fresh = spool.write(&payload(7, 64)).await.expect("write new");
 
-        commit_claims(&db, "owner-a", &[carried, superseded]).await;
-        commit_claims(&db, "owner-a", &[carried, fresh]).await;
+        commit_claims(&db.database, "owner-a", &[carried, superseded]).await;
+        commit_claims(&db.database, "owner-a", &[carried, fresh]).await;
 
-        assert_eq!(owed_deletions(&db).await, vec![superseded]);
-        pay_owed_deletions(&db, &store_dir)
+        assert_eq!(owed_deletions(&db.database).await, vec![superseded]);
+        pay_owed_deletions(&db.database, &store_dir)
             .await
             .expect("drain obligations");
 
@@ -780,13 +780,13 @@ mod tests {
         let hash = spool.write(&payload(8, 64)).await.expect("write payload");
         delete_payload_blocking(&store_dir, hash).expect("delete payload");
 
-        commit_claims(&db, "owner-a", &[hash]).await;
-        commit_claims(&db, "owner-a", &[]).await;
-        pay_owed_deletions(&db, &store_dir)
+        commit_claims(&db.database, "owner-a", &[hash]).await;
+        commit_claims(&db.database, "owner-a", &[]).await;
+        pay_owed_deletions(&db.database, &store_dir)
             .await
             .expect("drain obligations");
 
-        assert_eq!(owed_deletions(&db).await, Vec::new());
+        assert_eq!(owed_deletions(&db.database).await, Vec::new());
     }
 
     #[tokio::test]
@@ -795,10 +795,10 @@ mod tests {
         let store_dir = db.store_dir.clone();
         let spool = PayloadSpool::new(&store_dir);
         let hash = spool.write(&payload(9, 64)).await.expect("write payload");
-        commit_claims(&db, "owner-a", &[hash]).await;
-        commit_claims(&db, "owner-a", &[]).await;
+        commit_claims(&db.database, "owner-a", &[hash]).await;
+        commit_claims(&db.database, "owner-a", &[]).await;
 
-        let store = crate::StoreDatabase::new(&db);
+        let store = crate::StoreDatabase::new(&db.database);
         store
             .write_status(&coven_protocol::write::WriteId::from_generated(
                 "absent-write".to_string(),
@@ -810,6 +810,6 @@ mod tests {
             spool.read(hash).await,
             Err(PayloadSpoolError::Missing { hash: missing, .. }) if missing == hash
         ));
-        assert_eq!(owed_deletions(&db).await, Vec::new());
+        assert_eq!(owed_deletions(&db.database).await, Vec::new());
     }
 }

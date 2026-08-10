@@ -147,27 +147,30 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     let db = crate::synthetic_store::open_test_db();
     let (_spool, store_dir) = coven_foundation::store_dir::temp_store_dir();
     let activation_store_dir = store_dir.clone();
-    let store_database = crate::StoreDatabase::new(&db);
+    let store_database = crate::StoreDatabase::new(&db.database);
     let first_commit = verified_commit.clone();
-    db.test_sql(move |database| {
-        database.record_verified_circle_activations(
-            &activation_store_dir,
-            &first_commit,
-            &[verified],
-        )
-    })
-    .await
-    .expect("record multi-Owner control");
+    db.database
+        .test_sql(move |database| {
+            database.record_verified_circle_activations(
+                &activation_store_dir,
+                &first_commit,
+                &[verified],
+            )
+        })
+        .await
+        .expect("record multi-Owner control");
     let cached_owner = db
+        .database
         .test_sql(move |database| database.circle_access_owner(creation.circle_id))
         .await
         .expect("read cached access owner");
     assert_eq!(cached_owner, author_pubkey);
-    db.test_sql(|database| {
-        database.clear_table(crate::DatabaseTestTable::named("circle_access_cache"))
-    })
-    .await
-    .expect("remove historical Circle projections");
+    db.database
+        .test_sql(|database| {
+            database.clear_table(crate::DatabaseTestTable::named("circle_access_cache"))
+        })
+        .await
+        .expect("remove historical Circle projections");
     let circles = store_database
         .get_circles(
             &author_pubkey,
@@ -264,6 +267,7 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     )
     .expect("authenticate second Store commit");
     let error = db
+        .database
         .test_sql(move |database| {
             database.record_verified_circle_activations(
                 &store_dir,

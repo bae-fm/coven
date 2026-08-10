@@ -30,7 +30,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
 
     let initialized = crate::sync::store::Store::create(
-        store_database(&db),
+        store_database(&db.database),
         storage,
         store_dir,
         "0000000000001-0000-founder",
@@ -38,7 +38,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     )
     .await
     .expect("create Store with founder graph");
-    let root_ref = store_database(&db)
+    let root_ref = store_database(&db.database)
         .local_store_root_ref()
         .await
         .expect("read exact Store root")
@@ -72,10 +72,13 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
         let (_store_dir_temp, store_dir) = temp_store_dir();
         let timestamp = "0000000000001-0000-founder";
         let staged = FounderStoreCreation::begin(
-            store_database(&db),
+            store_database(&db.database),
             storage.clone(),
             &store_dir,
-            crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
+            crate::sync::store::blob::StoreBlobCache::new(
+                store_database(&db.database),
+                store_dir.clone(),
+            ),
             timestamp,
             &founder,
         )
@@ -106,7 +109,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             );
         }
         crate::sync::store::Store::create(
-            store_database(&db),
+            store_database(&db.database),
             storage.clone(),
             store_dir,
             timestamp,
@@ -200,10 +203,13 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(&db),
+        store_database(&db.database),
         storage.clone(),
         &store_dir,
-        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
+        crate::sync::store::blob::StoreBlobCache::new(
+            store_database(&db.database),
+            store_dir.clone(),
+        ),
         timestamp,
         &founder,
     )
@@ -220,7 +226,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(&first_db),
+            store_database(&first_db.database),
             first_storage,
             first_store_dir,
             timestamp,
@@ -235,7 +241,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let second_store_dir = store_dir;
     let second = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(&second_db),
+            store_database(&second_db.database),
             second_storage,
             second_store_dir,
             timestamp,
@@ -279,10 +285,13 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(&db),
+        store_database(&db.database),
         storage,
         &store_dir,
-        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
+        crate::sync::store::blob::StoreBlobCache::new(
+            store_database(&db.database),
+            store_dir.clone(),
+        ),
         timestamp,
         &founder,
     )
@@ -336,7 +345,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     let (_store_dir_temp, store_dir) = temp_store_dir();
 
     crate::sync::store::Store::create(
-        store_database(&db),
+        store_database(&db.database),
         storage.clone(),
         store_dir.clone(),
         "0000000000001-0000-opaque-founder",
@@ -344,13 +353,13 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     )
     .await
     .expect("create opaque Store");
-    let root_ref = store_database(&db)
+    let root_ref = store_database(&db.database)
         .local_store_root_ref()
         .await
         .expect("read Store root reference")
         .expect("Store root exists");
     let opened = crate::sync::store::Store::open(
-        store_database(&db),
+        store_database(&db.database),
         storage,
         store_dir,
         &root_ref,
@@ -363,7 +372,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         .load_founder_registration_for_test()
         .await
         .expect("open exact opaque founder registration");
-    let durable = coven_database::StoreDatabase::new(&db)
+    let durable = coven_database::StoreDatabase::new(&db.database)
         .latest_local_store_device_registration()
         .await
         .expect("read durable founder registration")

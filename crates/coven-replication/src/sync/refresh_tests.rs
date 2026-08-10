@@ -37,12 +37,12 @@ trait RefreshTestStoreOps {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
         pending_rotation: &PendingRotation,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
     ) -> Result<String, MembershipOpsError>;
 
     async fn revoke_member_durable(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -52,18 +52,19 @@ trait RefreshTestStoreOps {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &coven_database::SyntheticDatabase,
+        owner_db: &coven_database::SyntheticStoreFixture,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
         encryption: &EncryptionService,
     ) -> MembershipChain;
 
-    async fn load_exact_chain(&self, db: &coven_database::SyntheticDatabase) -> MembershipChain;
+    async fn load_exact_chain(&self, db: &coven_database::SyntheticStoreFixture)
+        -> MembershipChain;
 
     async fn create_unreferenced_wrapped_key(
         &self,
-        owner_db: &coven_database::SyntheticDatabase,
+        owner_db: &coven_database::SyntheticStoreFixture,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -79,7 +80,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
         pending_rotation: &PendingRotation,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
     ) -> Result<String, MembershipOpsError> {
         self.bind_device(db, user_keypair)
             .await
@@ -96,7 +97,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn revoke_member_durable(
         &self,
-        db: &coven_database::SyntheticDatabase,
+        db: &coven_database::SyntheticStoreFixture,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -123,7 +124,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &coven_database::SyntheticDatabase,
+        owner_db: &coven_database::SyntheticStoreFixture,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
@@ -150,7 +151,10 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .expect("read exact membership after invitation")
     }
 
-    async fn load_exact_chain(&self, db: &coven_database::SyntheticDatabase) -> MembershipChain {
+    async fn load_exact_chain(
+        &self,
+        db: &coven_database::SyntheticStoreFixture,
+    ) -> MembershipChain {
         let device = self
             .open_into(db)
             .await
@@ -163,7 +167,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn create_unreferenced_wrapped_key(
         &self,
-        owner_db: &coven_database::SyntheticDatabase,
+        owner_db: &coven_database::SyntheticStoreFixture,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -195,7 +199,10 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 async fn exact_store(
     owner: &UserKeypair,
     encryption: &EncryptionService,
-) -> (std::sync::Arc<TestStore>, coven_database::SyntheticDatabase) {
+) -> (
+    std::sync::Arc<TestStore>,
+    coven_database::SyntheticStoreFixture,
+) {
     let owner_db = open_test_db();
     let storage = Box::pin(TestStore::create_encrypted(
         &owner_db,
@@ -485,13 +492,14 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     // also proves the pull ran and applied it while sealing was paused.
     let peer_src = open_test_db();
     let peer_cs = peer_src
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
         ])
         .await;
     storage
-        .publish_changeset("owner-device", 4, &peer_cs, db_b.schema_version())
+        .publish_changeset("owner-device", 4, &peer_cs, db_b.database.schema_version())
         .await
         .expect("publish exact owner changeset");
 

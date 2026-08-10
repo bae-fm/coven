@@ -14,13 +14,14 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     replacement_commit.body_mut().write_id = replacement_write_id;
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
-    db.test_sql(move |database| {
-        database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
-    })
-    .await
-    .expect("install mismatched Circle operation payload");
+    db.database
+        .test_sql(move |database| {
+            database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
+        })
+        .await
+        .expect("install mismatched Circle operation payload");
 
-    let error = coven_database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db.database)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload operation id");
@@ -37,13 +38,14 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     let mut replacement = journal.clone();
     replacement.circle_id = replacement_circle_id;
     replacement.operation_mut().creation.circle_id = replacement_circle_id;
-    db.test_sql(move |database| {
-        database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
-    })
-    .await
-    .expect("install mismatched Circle operation payload");
+    db.database
+        .test_sql(move |database| {
+            database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
+        })
+        .await
+        .expect("install mismatched Circle operation payload");
 
-    let error = coven_database::StoreDatabase::new(&db)
+    let error = coven_database::StoreDatabase::new(&db.database)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload Circle id");
@@ -61,13 +63,13 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare second Circle operation");
-    coven_database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db.database)
         .insert_circle_operation(second.journal.clone(), second.prepared_objects)
         .await
         .expect("persist second Circle operation");
     let second = second.journal;
 
-    coven_database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db.database)
         .block_circle_operation(
             &first.operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -79,12 +81,12 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect("block first Circle operation");
 
-    let first = coven_database::StoreDatabase::new(&db)
+    let first = coven_database::StoreDatabase::new(&db.database)
         .circle_operation(&first.operation_id)
         .await
         .expect("read first Circle operation")
         .expect("first Circle operation remains durable");
-    let second = coven_database::StoreDatabase::new(&db)
+    let second = coven_database::StoreDatabase::new(&db.database)
         .circle_operation(&second.operation_id)
         .await
         .expect("read second Circle operation")
@@ -114,7 +116,7 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
 
     assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
     assert_eq!(
-        coven_database::StoreDatabase::new(&db)
+        coven_database::StoreDatabase::new(&db.database)
             .circle_operation(&journal.operation_id)
             .await
             .expect("read exact Circle operation")

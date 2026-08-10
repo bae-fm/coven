@@ -8,24 +8,18 @@ use crate::Migration;
 use crate::{Database, DbError};
 use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 
-/// A test database and the Store directory the fixture supplied when opening
-/// it. Tests that compose replication services keep this explicit dependency;
-/// they do not recover it from the database owner.
+/// The database and Store directory produced by one synthetic Store fixture.
+///
+/// These are sibling construction outputs: tests name the dependency they use
+/// instead of treating the bundle as a database or recovering the directory
+/// from a database owner.
 #[derive(Clone)]
-pub struct SyntheticDatabase {
-    database: Database,
+pub struct SyntheticStoreFixture {
+    pub database: Database,
     pub store_dir: coven_foundation::store_dir::StoreDir,
 }
 
-impl std::ops::Deref for SyntheticDatabase {
-    type Target = Database;
-
-    fn deref(&self) -> &Self::Target {
-        &self.database
-    }
-}
-
-impl SyntheticDatabase {
+impl SyntheticStoreFixture {
     pub fn open(
         path: &std::path::Path,
         tables: Vec<SyncedTable>,
@@ -74,10 +68,6 @@ impl SyntheticDatabase {
             database,
             store_dir,
         })
-    }
-
-    pub fn into_database(self) -> Database {
-        self.database
     }
 }
 
@@ -202,7 +192,7 @@ pub fn test_synced_tables_with_user_and_host_blobs(
 
 /// Open a test [`Database`] over the synthetic schema with `note_photos` declared
 /// blob-bearing per `decl`.
-pub fn open_test_db_with_blob(decl: BlobDecl) -> SyntheticDatabase {
+pub fn open_test_db_with_blob(decl: BlobDecl) -> SyntheticStoreFixture {
     open_test_db_schema(test_synced_tables_with_blob(decl), test_migrations())
 }
 
@@ -213,7 +203,7 @@ pub fn open_test_db_with_blob(decl: BlobDecl) -> SyntheticDatabase {
 /// blob's namespace); its provenance/fill don't matter to that resolution (the read
 /// reads the row → root → gate, and takes provenance off the `BlobRef`), so this fixes
 /// them. Pair with [`Database::plant_blob_row_for_test`].
-pub fn read_test_db(namespace: &str) -> SyntheticDatabase {
+pub fn read_test_db(namespace: &str) -> SyntheticStoreFixture {
     open_test_db_with_blob(BlobDecl::new(
         namespace,
         coven_protocol::blob::Provenance::UserProvided,
@@ -223,7 +213,10 @@ pub fn read_test_db(namespace: &str) -> SyntheticDatabase {
 
 /// Like [`read_test_db`] but with a chosen `max_concurrent_downloads`, so a pin test
 /// can drive the download loop concurrently. Uploads run one at a time (not exercised here).
-pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> SyntheticDatabase {
+pub fn read_test_db_with_download_limit(
+    namespace: &str,
+    downloads: usize,
+) -> SyntheticStoreFixture {
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         namespace,
         coven_protocol::blob::Provenance::UserProvided,
@@ -254,7 +247,7 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Sy
 pub fn open_test_db_with_user_and_host_blobs(
     photo_decl: BlobDecl,
     cover_decl: BlobDecl,
-) -> SyntheticDatabase {
+) -> SyntheticStoreFixture {
     open_test_db_schema(
         test_synced_tables_with_user_and_host_blobs(photo_decl, cover_decl),
         test_migrations(),
@@ -316,11 +309,11 @@ pub fn create_synced_schema(conn: &crate::MigrationContext<'_>) -> Result<(), Db
 
 /// Open a [`Database`] over a fresh in-memory connection with the synthetic test
 /// schema and the [`test_synced_tables`] synced set.
-pub fn open_test_db() -> SyntheticDatabase {
+pub fn open_test_db() -> SyntheticStoreFixture {
     open_test_db_schema(test_synced_tables(), test_migrations())
 }
 
-pub fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> SyntheticDatabase {
+pub fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> SyntheticStoreFixture {
     open_test_db_schema_with_tombstone_grace(test_synced_tables(), test_migrations(), grace)
 }
 
@@ -329,7 +322,7 @@ pub fn open_test_db_with_tombstone_grace(grace: chrono::Duration) -> SyntheticDa
 pub fn open_test_db_schema(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
-) -> SyntheticDatabase {
+) -> SyntheticStoreFixture {
     open_test_db_schema_with_tombstone_grace(
         tables,
         migrations,
@@ -341,7 +334,7 @@ fn open_test_db_schema_with_tombstone_grace(
     tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
     grace: chrono::Duration,
-) -> SyntheticDatabase {
+) -> SyntheticStoreFixture {
     let hlc = std::sync::Arc::new(
         coven_protocol::hlc::Hlc::try_new(
             "test-device".to_string(),
@@ -364,7 +357,7 @@ fn open_synthetic_database(
     transfer_limits: coven_protocol::blob::TransferLimits,
     hlc: std::sync::Arc<coven_protocol::hlc::Hlc>,
     migrations: Vec<Migration>,
-) -> SyntheticDatabase {
+) -> SyntheticStoreFixture {
     let store_dir = coven_foundation::store_dir::StoreDir::new_ephemeral(
         std::env::temp_dir().join(format!("coven-test-store-{}", uuid::Uuid::new_v4())),
     );
@@ -378,7 +371,7 @@ fn open_synthetic_database(
         &migrations,
     )
     .expect("open test database");
-    SyntheticDatabase {
+    SyntheticStoreFixture {
         database,
         store_dir,
     }
@@ -396,7 +389,7 @@ pub fn open_test_db_with_hlc(
         + Send
         + Sync
         + 'static,
-) -> SyntheticDatabase {
+) -> SyntheticStoreFixture {
     let migrations = vec![Migration::run(1, "test-schema", move |conn| {
         create_synced_schema(conn)?;
         seed(conn)
@@ -425,7 +418,7 @@ pub fn photo_decl() -> BlobDecl {
 }
 
 /// The notes schema with a remote-root parent, carrying `decl` on `note_photos`.
-pub fn remote_root_db(decl: BlobDecl) -> SyntheticDatabase {
+pub fn remote_root_db(decl: BlobDecl) -> SyntheticStoreFixture {
     open_test_db_schema(
         vec![
             SyncedTable::new(

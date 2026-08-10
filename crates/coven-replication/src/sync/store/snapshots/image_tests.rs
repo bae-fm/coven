@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use coven_database::SyntheticDatabase;
+use coven_database::SyntheticStoreFixture;
 use coven_database::{verify_circle_bootstrap_image, StoreDatabase};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::CommitFrontier;
 
-fn open_scoped_snapshot_test_db() -> SyntheticDatabase {
+fn open_scoped_snapshot_test_db() -> SyntheticStoreFixture {
     crate::sync::test_helpers::open_test_db_schema(
         vec![
             SyncedTable::new(
@@ -39,8 +39,10 @@ fn open_scoped_snapshot_test_db() -> SyntheticDatabase {
     )
 }
 
-async fn seed_scoped_snapshot_rows(source: &SyntheticDatabase) -> coven_protocol::circle::CircleId {
-    let database = StoreDatabase::new(source);
+async fn seed_scoped_snapshot_rows(
+    source: &SyntheticStoreFixture,
+) -> coven_protocol::circle::CircleId {
+    let database = StoreDatabase::new(&source.database);
     let circle = database
         .install_test_active_circle("snapshot-route-circle".to_string())
         .await
@@ -114,14 +116,14 @@ async fn seed_scoped_snapshot_rows(source: &SyntheticDatabase) -> coven_protocol
 }
 
 fn circle_bootstrap_reference(
-    source: &SyntheticDatabase,
+    source: &SyntheticStoreFixture,
     image: &[u8],
 ) -> coven_protocol::circle::CircleBootstrapRef {
     let image_hash = coven_protocol::store_commit::ObjectHash::digest(image);
     coven_protocol::circle::CircleBootstrapRef {
         coverage: CommitFrontier(BTreeMap::new()),
-        schema_version: source.schema_version(),
-        sync_routing_hash: source.sync_routing_hash(),
+        schema_version: source.database.schema_version(),
+        sync_routing_hash: source.database.sync_routing_hash(),
         image: coven_protocol::store_commit::SnapshotImageRef {
             image_hash,
             object: coven_protocol::objects::ExactObjectRef::new(
@@ -152,7 +154,7 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
     let image_dir = tempfile::tempdir().expect("Circle bootstrap routing image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -163,9 +165,14 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
         .expect("create Circle bootstrap routing image");
     let reference = circle_bootstrap_reference(&source, &image);
 
-    let error =
-        verify_circle_bootstrap_image(&image, &reference, circle_id, source.synced_tables(), None)
-            .expect_err("scoped Circle bootstrap verification must require its routing key");
+    let error = verify_circle_bootstrap_image(
+        &image,
+        &reference,
+        circle_id,
+        source.database.synced_tables(),
+        None,
+    )
+    .expect_err("scoped Circle bootstrap verification must require its routing key");
     assert!(
         error
             .to_string()
@@ -189,7 +196,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     let image_dir = tempfile::tempdir().expect("Circle bootstrap Store-row image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -200,7 +207,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         .expect("create Circle projection for Store-row tampering");
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(&source)
+        StoreDatabase::new(&source.database)
             .local_store_root_ref()
             .await
             .expect("read Store-row Store root")
@@ -237,7 +244,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         &image,
         &reference,
         circle_id,
-        source.synced_tables(),
+        source.database.synced_tables(),
         Some(&routing_key),
     )
     .expect_err("Circle bootstrap must reject a scoped Store row");
@@ -288,6 +295,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     .await
     .expect("create Circle bootstrap unscoped-row Store");
     let circle_id = source
+        .database
         .test_sql(|connection| {
             Ok::<_, coven_database::DbError>(
                 connection
@@ -300,7 +308,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     let image_dir = tempfile::tempdir().expect("Circle bootstrap unscoped image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -324,7 +332,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(&source)
+        StoreDatabase::new(&source.database)
             .local_store_root_ref()
             .await
             .expect("read unscoped-row Store root")
@@ -337,7 +345,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
         &image,
         &reference,
         circle_id,
-        source.synced_tables(),
+        source.database.synced_tables(),
         Some(&routing_key),
     )
     .expect_err("Circle bootstrap must reject an unscoped synced row");
@@ -359,7 +367,7 @@ enum ScopedSnapshotImage {
 }
 
 struct PublishedScopedSnapshot {
-    source: SyntheticDatabase,
+    source: SyntheticStoreFixture,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     membership: coven_protocol::membership::MembershipChain,
     _store_dir_temp: tempfile::TempDir,
@@ -391,7 +399,7 @@ impl PublishedScopedSnapshot {
         let image_dir = tempfile::tempdir().expect("published scoped snapshot image directory");
         let image_path = image_dir.path().to_path_buf();
         let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
+        let image = StoreDatabase::new(&source.database)
             .capture_snapshot_image_for_test(
                 root,
                 image_path,
@@ -412,6 +420,7 @@ impl PublishedScopedSnapshot {
             }
             ScopedSnapshotImage::CircleRow => {
                 let route = source
+                    .database
                     .test_sql(|database| {
                         database.document_circle_route("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
                     })
@@ -492,7 +501,7 @@ impl PublishedScopedSnapshot {
         bootstrap
             .install(
                 &self.store_dir,
-                self.source.synced_tables().to_vec(),
+                self.source.database.synced_tables().to_vec(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
                 "joining-device".to_string(),
@@ -533,7 +542,7 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -582,7 +591,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
     let image_dir = tempfile::tempdir().expect("Circle snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -670,7 +679,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     )
     .await
     .expect("create Circle parent snapshot Store");
-    let database = StoreDatabase::new(&source);
+    let database = StoreDatabase::new(&source.database);
     let circle_id = database
         .install_test_active_circle("snapshot-parent-circle".to_string())
         .await
@@ -715,7 +724,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let image_dir = tempfile::tempdir().expect("Circle parent snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -727,7 +736,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(&source)
+        StoreDatabase::new(&source.database)
             .local_store_root_ref()
             .await
             .expect("read Circle parent Store root")
@@ -739,7 +748,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         &image,
         &reference,
         circle_id,
-        source.synced_tables(),
+        source.database.synced_tables(),
         Some(&routing_key),
     )
     .expect("verify Circle bootstrap with its required Store parent");
@@ -794,6 +803,7 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
     .expect("create invalid-live-route Store");
     seed_scoped_snapshot_rows(&source).await;
     source
+        .database
         .test_sql(|connection| {
             connection.corrupt_live_document_route_id("01890a5d-ac96-774b-bcce-b302099c3f74")
         })
@@ -803,7 +813,7 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
     let image_dir = tempfile::tempdir().expect("invalid-live-route snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let result = StoreDatabase::new(&source)
+    let result = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -883,7 +893,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         .membership_for_test()
         .await
         .expect("project scoped migration membership");
-    StoreDatabase::new(&source)
+    StoreDatabase::new(&source.database)
         .run_host_store_write_for_test(
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -909,7 +919,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
     let image_dir = tempfile::tempdir().expect("scoped migration snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -1091,6 +1101,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
         .expect("authorize device-state snapshot writer");
     for sequence in 1..=3 {
         source
+            .database
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                      VALUES ('snapshot-state-{sequence}', 'state', NULL, 1, \
@@ -1109,7 +1120,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
             1,
         );
     }
-    let expected = StoreDatabase::new(&source)
+    let expected = StoreDatabase::new(&source.database)
         .materialized_frontier()
         .await
         .expect("load snapshot frontier")
@@ -1119,7 +1130,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create scoped snapshot image");
@@ -1158,7 +1169,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         let image_path = image_dir.path().to_path_buf();
         let tables = crate::sync::test_helpers::test_synced_tables();
         let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
+        let image = StoreDatabase::new(&source.database)
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create bootstrap database image");
@@ -1273,7 +1284,7 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create unstable bootstrap database image");
@@ -1309,6 +1320,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
     .await
     .expect("create snapshot materialization Store");
     let changeset = source
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('snapshot-row', 'Snapshot', 1, \
@@ -1320,6 +1332,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
         .await
         .expect("publish snapshot materialization fixture");
     let live_counts = source
+        .database
         .test_sql(|database| {
             Ok((
                 database.table_row_count(coven_database::DatabaseTestTable::named(
@@ -1342,7 +1355,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root.clone();
-    let image = StoreDatabase::new(&source)
+    let image = StoreDatabase::new(&source.database)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create materialization snapshot");
@@ -1382,12 +1395,14 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         .await
         .expect("create exact blob Store");
         source
+            .database
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
              VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
             )
             .await;
         source
+            .database
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos
                  (id, note_id, kind, size, hash, _updated_at, created_at)
@@ -1416,7 +1431,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         )
         .expect("construct blob writer");
         let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&source),
+            StoreDatabase::new(&source.database),
             source_dir.clone(),
         )
         .prepare_sync(writer, signer)
@@ -1430,7 +1445,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         let image_dir = tempfile::tempdir().expect("snapshot image directory");
         let image_path = image_dir.path().to_path_buf();
         let root = store.root.clone();
-        let image = StoreDatabase::new(&source)
+        let image = StoreDatabase::new(&source.database)
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create blob snapshot");

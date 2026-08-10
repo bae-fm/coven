@@ -173,6 +173,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         );
         assert!(fixture.home.exact_reads().contains(&unavailable_slot));
         let state = member_database
+            .database
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await;
         assert_eq!(
@@ -186,7 +187,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}"
         );
         assert_eq!(
-            StoreDatabase::new(&member_database)
+            StoreDatabase::new(&member_database.database)
                 .exact_materialized_ref(&commit_stream_id(&first.coord), first.coord.sequence())
                 .await
                 .expect("load unavailable-package baseline position"),
@@ -194,7 +195,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}"
         );
         assert!(
-            StoreDatabase::new(&member_database)
+            StoreDatabase::new(&member_database.database)
                 .exact_materialized_ref(
                     &commit_stream_id(&unavailable.coord),
                     unavailable.coord.sequence(),

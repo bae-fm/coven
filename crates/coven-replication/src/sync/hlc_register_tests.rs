@@ -47,7 +47,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     // without publishing a snapshot that already contains the row.
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db_with_hlc(a_hlc.clone(), |_conn| Ok(()));
-    let store_database_a = coven_database::StoreDatabase::new(&db_a);
+    let store_database_a = coven_database::StoreDatabase::new(&db_a.database);
     let keypair = UserKeypair::generate();
     let storage = TestStore::create(
         &db_a,
@@ -62,11 +62,12 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .open_into(&db_a)
         .await
         .expect("open exact test Store");
-    db_a.execute_test_host_write(&format!(
-        "INSERT INTO notes (id, title, body, _updated_at, created_at, shared) \
+    db_a.database
+        .execute_test_host_write(&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at, shared) \
              VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01', 1)"
-    ))
-    .await;
+        ))
+        .await;
     assert_eq!(
         store_database_a.pending_writes().await.unwrap().len(),
         1,
@@ -84,7 +85,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "A's Store publication must finish its initial edit"
     );
 
-    // B's join bootstrap pulls the signed cut into its own SyntheticDatabase (clock =
+    // B's join bootstrap pulls the signed cut into its own SyntheticStoreFixture (clock =
     // b_hlc), including A's edit, before it activates the local registration.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_store_dir();
@@ -93,6 +94,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .await
         .expect("install B's active exact device fixture");
     let active_device_count = db_a
+        .database
         .test_sql(|database| {
             database.table_row_count(coven_database::DatabaseTestTable::named(
                 "store_device_registration_activations",
@@ -102,7 +104,8 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .expect("count A's activated devices");
     assert_eq!(active_device_count, 2, "A must activate B's registration");
     assert_eq!(
-        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db_b.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "A wrote this",
         "A's row must be present when B's registration activates",
@@ -118,11 +121,12 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     );
 
     // And LWW agrees: applying B's edit replaces A's row.
-    db_b.execute_test_host_write(&format!(
-        "UPDATE notes SET title = 'B wrote this', _updated_at = '{b_stamp}' \
+    db_b.database
+        .execute_test_host_write(&format!(
+            "UPDATE notes SET title = 'B wrote this', _updated_at = '{b_stamp}' \
              WHERE id = 'n1'"
-    ))
-    .await;
+        ))
+        .await;
     assert!(
         storage
             .publish_pending(&db_b, &ld)
@@ -145,7 +149,8 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         second_pull.held_positions
     );
     assert_eq!(
-        db_a.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db_a.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "B wrote this",
         "B's causally-later edit must win the merge on A; pulls: {first_pull:?}, {second_pull:?}",
@@ -187,6 +192,7 @@ async fn pull_advances_register_as_each_changeset_applies() {
     .await
     .expect("create exact test Store for the test database");
     let cs_a = db_a
+        .database
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01')"
@@ -233,6 +239,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
         .expect("create exact test Store for the test database"),
     );
     let changeset = source
+        .database
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('remote-boundary', 'Remote', NULL, '{remote_stamp}', '2026-01-01')"
@@ -251,18 +258,20 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
     let (_tmp, store_dir) = temp_store_dir();
     let (commit_reached, _resume_pull) =
-        target.arm_test_pause(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
-            device_id: expected_stream.clone(),
-            seq: 1,
-        });
+        target
+            .database
+            .arm_test_pause(coven_database::DatabaseTestPoint::PullAfterRemoteCommit {
+                device_id: expected_stream.clone(),
+                seq: 1,
+            });
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
     let pull = tokio::spawn(async move { pull_storage.pull_into(&pull_db, &pull_store_dir).await });
 
     commit_reached.notified().await;
-    let queued_stamp = coven_database::StoreDatabase::new(&target).stamp();
-    let host_stamp = coven_database::StoreDatabase::new(&target)
+    let queued_stamp = coven_database::StoreDatabase::new(&target.database).stamp();
+    let host_stamp = coven_database::StoreDatabase::new(&target.database)
         .run_host_store_write_for_test(None, None, move |tx| {
             tx.execute(
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
@@ -285,11 +294,12 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     );
     assert!(
         target
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'remote-boundary'")
             .await
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(&target)
+        coven_database::StoreDatabase::new(&target.database)
             .materialized_frontier()
             .await
             .expect("read materialized frontier")
@@ -379,12 +389,14 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await
         .expect("install member's active exact device fixture");
     let member_device_id = member_db
+        .database
         .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
         .await
         .expect("read member device id")
         .expect("member device registration is active");
 
     member_db
+        .database
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
@@ -392,7 +404,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         .await;
     let (_member_temp, member_store_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
-        coven_database::StoreDatabase::new(&member_db),
+        coven_database::StoreDatabase::new(&member_db.database),
         storage.storage(),
         member_store_dir,
         member.clone(),
@@ -432,13 +444,14 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
 
     assert!(
         !receiver_db
+            .database
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await
     );
     assert_eq!(updated.get(&member_device_id), None);
 }
 
-/// `SyntheticDatabase::open` seeds the register from the persisted high-water mark, so the
+/// `SyntheticStoreFixture::open` seeds the register from the persisted high-water mark, so the
 /// very first host stamp after a restart does not regress below existing rows.
 #[tokio::test]
 async fn register_seeds_from_persisted_high_water() {
@@ -448,7 +461,7 @@ async fn register_seeds_from_persisted_high_water() {
     let temp = tempfile::tempdir().expect("create register restart directory");
     let path = temp.path().join("register.sqlite");
     let migrations = test_migrations();
-    let before_restart = coven_database::SyntheticDatabase::open(
+    let before_restart = coven_database::SyntheticStoreFixture::open(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -459,12 +472,13 @@ async fn register_seeds_from_persisted_high_water() {
     )
     .expect("open register database before restart");
     before_restart
+        .database
         .set_protocol_state(HIGHWATER_STATE_KEY, high)
         .await
         .expect("persist high-water before restart");
     drop(before_restart);
 
-    let db = coven_database::SyntheticDatabase::open_with_hlc(
+    let db = coven_database::SyntheticStoreFixture::open_with_hlc(
         &path,
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -477,7 +491,7 @@ async fn register_seeds_from_persisted_high_water() {
     )
     .expect("reopen register database with persisted high-water");
 
-    let stamp = coven_database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db.database).stamp();
     assert!(
         stamp.as_str() > high,
         "first stamp {stamp} must sort after the seeded high-water {high}",
@@ -507,7 +521,7 @@ async fn register_seeds_from_on_disk_rows_above_high_water() {
         },
     );
 
-    let stamp = coven_database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db.database).stamp();
     assert!(
         stamp.as_str() > row_stamp,
         "first stamp {stamp} must sort after the on-disk row {row_stamp}; \
@@ -548,7 +562,7 @@ async fn restart_does_not_seed_past_grossly_future_synced_row() {
         },
     );
 
-    let stamp = coven_database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db.database).stamp();
     assert!(
         stamp.as_str() > honest.as_str(),
         "first stamp {stamp} must sort after honest on-disk row {honest}",
@@ -581,7 +595,7 @@ async fn restart_seeds_past_within_bound_synced_row() {
         },
     );
 
-    let stamp = coven_database::StoreDatabase::new(&db).stamp();
+    let stamp = coven_database::StoreDatabase::new(&db.database).stamp();
     assert!(
         stamp.as_str() > within.as_str(),
         "first stamp {stamp} must sort after within-bound on-disk row {within}",
@@ -611,11 +625,12 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     // B already holds an honest local edit of n1, stamped at its own wall time.
     let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    db_b.execute_test_sql(&format!(
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db_b.database
+        .execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
-    ))
-    .await;
+        ))
+        .await;
 
     // A publishes a competing edit of n1 stamped ten years in the future — far
     // beyond any legitimate offline skew.
@@ -631,6 +646,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     .await
     .expect("create exact test Store for the test database");
     let cs_a = db_a
+        .database
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A far future', NULL, '{a_future_stamp}', '2026-01-01')"
@@ -646,7 +662,8 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
 
     // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
     assert_eq!(
-        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db_b.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "B honest",
         "a grossly-future incoming _updated_at won LWW over an honest local stamp",
@@ -679,11 +696,12 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     // B holds an honest local edit at its own wall time.
     let b_local_stamp = format!("{b_wall:013}-0000-dev-b");
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    db_b.execute_test_sql(&format!(
-        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    db_b.database
+        .execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'B honest', NULL, '{b_local_stamp}', '2026-01-01')"
-    ))
-    .await;
+        ))
+        .await;
 
     // A's edit is stamped three days ahead — a plausible cross-device clock spread,
     // well within the offline-skew allowance.
@@ -699,6 +717,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     .await
     .expect("create exact test Store for the test database");
     let cs_a = db_a
+        .database
         .capture_test_changeset(&[&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'A skewed', NULL, '{a_stamp}', '2026-01-01')"
@@ -713,7 +732,8 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 
     // A's causally-later (within-allowance) edit wins.
     assert_eq!(
-        db_b.query_test_text("SELECT title FROM notes WHERE id = 'n1'")
+        db_b.database
+            .query_test_text("SELECT title FROM notes WHERE id = 'n1'")
             .await,
         "A skewed",
         "a legitimately-skewed incoming edit failed to win LWW",
@@ -730,7 +750,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 }
 
 /// Regression: a sync cycle that errors mid-cycle must still leave host-write
-/// capture working. The `SyntheticDatabase` and its connection thread outlive the cycle and
+/// capture working. The `SyntheticStoreFixture` and its connection thread outlive the cycle and
 /// are reused every cycle. Capture is structural — each host write records into the
 /// pending-changeset journal inside its own transaction, and the journal already
 /// holds any change a failed cycle didn't manage to push — so there is no
@@ -746,7 +766,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // Open normally, then make `protocol_state` reject every INSERT so a
     // `set_protocol_state` inside the cycle fails. Reads remain available.
     let migrations = test_migrations();
-    let db = coven_database::SyntheticDatabase::open(
+    let db = coven_database::SyntheticStoreFixture::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -769,18 +789,20 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         .open_into(&db)
         .await
         .expect("bind the founder device before installing protocol_state fault");
-    db.test_sql(|database| database.install_protocol_state_insert_failure_trigger())
+    db.database
+        .test_sql(|database| database.install_protocol_state_insert_failure_trigger())
         .await
         .expect("install protocol_state fault");
 
     // A local insert gives the cycle a pending Store write. The trigger also blocks
     // the unconditional HLC high-water persist, so the cycle fails after the write
     // commits to the ledger.
-    db.execute_test_host_write(
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.database
+        .execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-dev-self', '2026-01-01')",
-    )
-    .await;
+        )
+        .await;
 
     let (_t, ld) = temp_store_dir();
     let result = device.run_cycle(&ld, None).await;
@@ -795,6 +817,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     // failed cycle never pushed). If a failure could leave capture off, this drain
     // would not carry n2.
     let next = db
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n2', 'After failure', NULL, 1, '0000000002000-0000-dev-self', '2026-01-01')",

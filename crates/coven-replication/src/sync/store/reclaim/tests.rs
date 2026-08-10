@@ -58,10 +58,16 @@ impl ReclaimJourneyFixture {
             ),
         ] {
             let changeset = crate::sync::test_helpers::open_test_db()
+                .database
                 .capture_test_changeset(&[row])
                 .await;
             let activation = store
-                .publish_changeset("founder", sequence, &changeset, db.schema_version())
+                .publish_changeset(
+                    "founder",
+                    sequence,
+                    &changeset,
+                    db.database.schema_version(),
+                )
                 .await
                 .expect("publish package activation");
             activations.push(activation);
@@ -78,13 +84,14 @@ impl ReclaimJourneyFixture {
             .publish_acknowledgement(coverage)
             .await
             .expect("acknowledge covering snapshot");
-        db.test_sql(|database| {
-            database.transaction(|transaction| {
-                transaction.remove_retained_replay_ownership_from_snapshot()
+        db.database
+            .test_sql(|database| {
+                database.transaction(|transaction| {
+                    transaction.remove_retained_replay_ownership_from_snapshot()
+                })
             })
-        })
-        .await
-        .expect("release retained replay ownership");
+            .await
+            .expect("release retained replay ownership");
 
         let mut packages = Vec::new();
         for activation in activations {
@@ -174,6 +181,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .await
         .expect("bind reclaim Store");
     let first_changeset = crate::sync::test_helpers::open_test_db()
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('stable-snapshot-row', 'stable', NULL, \
@@ -181,7 +189,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         ])
         .await;
     let first_commit = store
-        .publish_changeset("founder", 1, &first_changeset, db.schema_version())
+        .publish_changeset("founder", 1, &first_changeset, db.database.schema_version())
         .await
         .expect("publish first Store position");
     let StoreCommitCoord { stream_id, .. } = first_commit.coord;
@@ -194,13 +202,14 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         .publish_acknowledgement(first_coverage)
         .await
         .expect("acknowledge stable snapshot");
-    let stable = coven_database::StoreDatabase::new(&db)
+    let stable = coven_database::StoreDatabase::new(&db.database)
         .latest_local_store_snapshot()
         .await
         .expect("load stable snapshot")
         .expect("stable snapshot exists");
 
     let second_changeset = crate::sync::test_helpers::open_test_db()
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('unstable-snapshot-row', 'unstable', NULL, \
@@ -208,7 +217,12 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         ])
         .await;
     let second_commit = store
-        .publish_changeset("founder", 3, &second_changeset, db.schema_version())
+        .publish_changeset(
+            "founder",
+            3,
+            &second_changeset,
+            db.database.schema_version(),
+        )
         .await
         .expect("publish second Store position");
     device
@@ -218,7 +232,7 @@ async fn reclaim_selects_an_older_stable_snapshot_over_a_newer_unacknowledged_sn
         )
         .await
         .expect("publish unacknowledged snapshot");
-    let registrations = coven_database::StoreDatabase::new(&db)
+    let registrations = coven_database::StoreDatabase::new(&db.database)
         .activated_store_device_registration_records()
         .await
         .expect("load active registrations");
@@ -249,6 +263,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     .await
     .expect("create Store");
     let changeset = crate::sync::test_helpers::open_test_db()
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('reclaim-row', 'reclaim', NULL, \
@@ -256,7 +271,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         ])
         .await;
     let activation = store
-        .publish_changeset("founder", 1, &changeset, db.schema_version())
+        .publish_changeset("founder", 1, &changeset, db.database.schema_version())
         .await
         .expect("publish package activation");
     let founder_authority = store
@@ -407,12 +422,14 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
         Err(StoreProtocolError::InvalidSignature)
     ));
 
-    db.test_sql(|database| {
-        database
-            .transaction(|transaction| transaction.remove_retained_replay_ownership_from_snapshot())
-    })
-    .await
-    .expect("release retained replay package ownership");
+    db.database
+        .test_sql(|database| {
+            database.transaction(|transaction| {
+                transaction.remove_retained_replay_ownership_from_snapshot()
+            })
+        })
+        .await
+        .expect("release retained replay package ownership");
     let target = evidence.claim.target();
     let super::ReclaimActivation::Commit(target_activation) = target.activation() else {
         panic!("a Store package reclaim target is activated by a Store commit");
@@ -481,6 +498,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
     .await
     .expect("create Store");
     let changeset = crate::sync::test_helpers::open_test_db()
+        .database
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('reclaim-head-row', 'reclaim', NULL, \
@@ -488,7 +506,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         ])
         .await;
     let target_activation = store
-        .publish_changeset("founder", 1, &changeset, db.schema_version())
+        .publish_changeset("founder", 1, &changeset, db.database.schema_version())
         .await
         .expect("publish target package activation");
     let loaded = store
@@ -514,23 +532,25 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .publish_acknowledgement(coverage)
         .await
         .expect("publish covering acknowledgement");
-    let snapshot = coven_database::StoreDatabase::new(&db)
+    let snapshot = coven_database::StoreDatabase::new(&db.database)
         .latest_local_store_snapshot()
         .await
         .expect("load covering snapshot")
         .expect("covering snapshot exists");
-    let acknowledgement = coven_database::StoreDatabase::new(&db)
+    let acknowledgement = coven_database::StoreDatabase::new(&db.database)
         .latest_local_store_ack()
         .await
         .expect("load covering acknowledgement")
         .expect("covering acknowledgement exists")
         .reference;
-    db.test_sql(|database| {
-        database
-            .transaction(|transaction| transaction.remove_retained_replay_ownership_from_snapshot())
-    })
-    .await
-    .expect("release target retained replay ownership");
+    db.database
+        .test_sql(|database| {
+            database.transaction(|transaction| {
+                transaction.remove_retained_replay_ownership_from_snapshot()
+            })
+        })
+        .await
+        .expect("release target retained replay ownership");
     let mut writer = loaded
         .authorize_writer()
         .await
@@ -550,7 +570,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         }))
         .await
         .expect("prepare reclaim authorization");
-    let candidate = coven_database::StoreDatabase::new(&db)
+    let candidate = coven_database::StoreDatabase::new(&db.database)
         .store_reclaim_operations()
         .await
         .expect("load reclaim candidate")
@@ -573,7 +593,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .delete_protocol_object(&activation_head.object)
         .await
         .expect("remove reclaim activation head");
-    let authorized = coven_database::StoreDatabase::new(&db)
+    let authorized = coven_database::StoreDatabase::new(&db.database)
         .store_reclaim_operations()
         .await
         .expect("load activated reclaim")
@@ -614,7 +634,8 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         DurableStoreReclaimOperation::Authorized { activation, .. } => activation.commit().clone(),
         _ => unreachable!("fixture has an activated reclaim"),
     };
-    db.test_sql(move |database| database.delete_exact_materialized_commit(&activation_commit))
+    db.database
+        .test_sql(move |database| database.delete_exact_materialized_commit(&activation_commit))
         .await
         .expect("retract reclaim activation materialization");
 

@@ -127,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn database_probe_journal_rejects_a_skipped_progress_state() {
         let db = crate::synthetic_store::open_test_db();
-        let journal = crate::StoreDatabase::new(&db);
+        let journal = crate::StoreDatabase::new(&db.database);
         let probe_id = ProviderProbeId::from_bytes([44; 32]);
         let binding = coven_protocol::objects::ResolvedProviderBinding {
             store: test_store_binding(),

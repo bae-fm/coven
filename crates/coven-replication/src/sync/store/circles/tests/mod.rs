@@ -7,7 +7,7 @@ use crate::sync::test_helpers::{
     TestStore,
 };
 use coven_database::StoreDatabase;
-use coven_database::{DbError, SyntheticDatabase};
+use coven_database::{DbError, SyntheticStoreFixture};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
@@ -30,7 +30,7 @@ use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
 async fn create_test_store_in_its_own_task(
-    db: &SyntheticDatabase,
+    db: &SyntheticStoreFixture,
     name: &str,
     signer: &UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
@@ -45,7 +45,7 @@ async fn create_test_store_in_its_own_task(
 }
 
 async fn persist_merge_operation(
-    db: &SyntheticDatabase,
+    db: &SyntheticStoreFixture,
     name: &str,
 ) -> (
     std::sync::Arc<TestStore>,
@@ -63,7 +63,7 @@ async fn persist_merge_operation(
         .prepare_circle_operation("0000000001000-0000-creator", "Household")
         .await
         .expect("prepare circle operation");
-    StoreDatabase::new(db)
+    StoreDatabase::new(&db.database)
         .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
         .await
         .expect("persist circle operation");
@@ -198,7 +198,7 @@ fn circle_test_cloud_storage(
 
 /// The initialized production sync components a Circle test's owner drives.
 async fn prepare_owner_sync_components(
-    db: &SyntheticDatabase,
+    db: &SyntheticStoreFixture,
     store: &TestStore,
     home: &Arc<coven_storage::InMemoryCloudHome>,
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -206,10 +206,10 @@ async fn prepare_owner_sync_components(
     store_id: &str,
 ) -> crate::sync::cycle::SyncComponents {
     crate::sync::cycle::PreparedSyncComponents::prepare(
-        coven_database::StoreDatabase::new(db),
+        coven_database::StoreDatabase::new(&db.database),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            coven_database::StoreDatabase::new(db),
+            coven_database::StoreDatabase::new(&db.database),
             store_dir.clone(),
         ),
         circle_test_cloud_storage(home, store_id, signer),
@@ -231,7 +231,7 @@ async fn prepare_owner_sync_components(
 /// after the operation that opened the close.
 async fn finalize_circle_epoch_close(
     store: &TestStore,
-    db: &SyntheticDatabase,
+    db: &SyntheticStoreFixture,
     signer: &UserKeypair,
     components: &crate::sync::cycle::SyncComponents,
 ) {

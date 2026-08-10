@@ -61,7 +61,7 @@ async fn store_read_drop_round_trip() {
 #[tokio::test]
 async fn local_store_blob_survives_an_evict_to_budget_sweep() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db);
+    let store_database = StoreDatabase::new(&db.database);
     let (_tmp, ld) = temp_store_dir();
 
     // A host-provided blob in the local store.

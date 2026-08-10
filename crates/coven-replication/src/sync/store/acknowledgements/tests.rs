@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::test_helpers::TestDevice;
-use coven_database::SyntheticDatabase;
+use coven_database::SyntheticStoreFixture;
 use coven_keys::keys::UserKeypair;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> SyntheticDatabase {
-    SyntheticDatabase::open(
+fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
+    SyntheticStoreFixture::open(
         path,
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
@@ -21,8 +21,8 @@ fn open(path: &Path, device_id: &str) -> SyntheticDatabase {
     .expect("open acknowledgement test database")
 }
 
-fn store_database(database: &SyntheticDatabase) -> StoreDatabase {
-    StoreDatabase::new(database)
+fn store_database(database: &SyntheticStoreFixture) -> StoreDatabase {
+    StoreDatabase::new(&database.database)
 }
 
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
@@ -39,7 +39,7 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConne
 }
 
 async fn initialize(
-    db: &SyntheticDatabase,
+    db: &SyntheticStoreFixture,
     storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> TestDevice {
@@ -52,7 +52,7 @@ struct LosingAckFixture {
     home: InMemoryCloudHome,
     signer: UserKeypair,
     storage: Arc<CloudSyncConnection>,
-    db: SyntheticDatabase,
+    db: SyntheticStoreFixture,
     device: TestDevice,
     outbound: coven_database::OutboundStoreAck,
     losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
@@ -248,14 +248,15 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
                 .to_str()
                 .expect("temporary database path is UTF-8")
                 .to_string();
-            seed.test_sql(move |connection| {
-                connection
-                    .execute("VACUUM INTO ?1", [destination])
-                    .map(|_| ())
-                    .map_err(coven_database::DbError::from)
-            })
-            .await
-            .expect("copy acknowledgement database");
+            seed.database
+                .test_sql(move |connection| {
+                    connection
+                        .execute("VACUUM INTO ?1", [destination])
+                        .map(|_| ())
+                        .map_err(coven_database::DbError::from)
+                })
+                .await
+                .expect("copy acknowledgement database");
         }
         drop(seed_device);
         drop(seed);
@@ -325,13 +326,14 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .await
             .expect("read drained acknowledgement outbox")
             .is_none());
-        assert!(coven_database::StoreDatabase::new(&loser_db)
+        assert!(coven_database::StoreDatabase::new(&loser_db.database)
             .protocol_inert_object(loser.reference.object)
             .await
             .expect("read losing acknowledgement inert state")
             .is_none());
         for object_id in losing_object_ids {
             let exists = loser_db
+                .database
                 .remote_object_id_exists_for_test(object_id)
                 .await
                 .expect("read losing acknowledgement candidate ownership");
@@ -425,7 +427,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
-    coven_database::StoreDatabase::new(&db)
+    coven_database::StoreDatabase::new(&db.database)
         .mark_remote_object_uploaded(acknowledgement_remote.into_record())
         .await
         .expect("record acknowledgement upload");
@@ -599,7 +601,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .reference,
         outbound.reference
     );
-    let inert = coven_database::StoreDatabase::new(&db)
+    let inert = coven_database::StoreDatabase::new(&db.database)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -651,7 +653,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
         coven_database::OutboundStoreAckActivation::Nonactivating(ref candidate)
             if candidate.reference == losing.reference
     ));
-    assert!(coven_database::StoreDatabase::new(&db)
+    assert!(coven_database::StoreDatabase::new(&db.database)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -699,6 +701,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
 
         let head = losing.head_ref();
         let mut remote = db
+            .database
             .remote_object_for_test(head.object.clone())
             .await
             .expect("load test head ownership");
@@ -731,7 +734,8 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             );
             remote.validate().expect("validate test head ownership");
         }
-        db.replace_remote_object_for_test(head.object, remote)
+        db.database
+            .replace_remote_object_for_test(head.object, remote)
             .await
             .expect("install mismatched durable head proof");
 
@@ -830,6 +834,7 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let db = open(&path, "circle-ack-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
+        .database
         .test_sql(|conn| Ok(conn.install_test_active_circle("ack-circle")))
         .await
         .expect("install active Circle");
@@ -872,6 +877,7 @@ async fn inactive_circle_stages_no_acknowledgement() {
     let db = open(&path, "inactive-circle-device");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
+        .database
         .test_sql(|conn| Ok(conn.install_test_inactive_circle("inactive-circle")))
         .await
         .expect("install inactive Circle");
@@ -911,6 +917,7 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let db = open(&path, "circle-ack-restart");
     let device = initialize(&db, &storage, &signer).await;
     let (circle_id, _control) = db
+        .database
         .test_sql(|conn| Ok(conn.install_test_active_circle("restart-circle")))
         .await
         .expect("install active Circle");
@@ -978,7 +985,8 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-collision");
     let device = initialize(&db, &storage, &signer).await;
-    db.test_sql(|conn| Ok(conn.install_test_active_circle("collision-circle")))
+    db.database
+        .test_sql(|conn| Ok(conn.install_test_active_circle("collision-circle")))
         .await
         .expect("install active Circle");
 
@@ -998,6 +1006,7 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     // Read the exact slot the staged Circle acknowledgement reserved, then occupy
     // it with different bytes before the drain uploads its object.
     let prepared = db
+        .database
         .test_sql(|database| database.staged_circle_acknowledgement_object())
         .await
         .expect("read staged Circle acknowledgement object");

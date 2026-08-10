@@ -145,6 +145,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let store_dir_for_insert = closure_store_dir.clone();
     let saved_remote_for_insert = package_remote.clone();
     closure_db
+        .database
         .test_sql(move |conn| {
             conn.persist_exact_remote_object(
                 &store_dir_for_insert,
@@ -157,6 +158,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let operation_for_insert = operation.clone();
     let absence_for_insert = absence.clone();
     closure_db
+        .database
         .test_sql(move |conn| {
             conn.transaction(|tx| {
                 tx.insert_store_reclaim_operation(&operation_for_insert)?;
@@ -169,6 +171,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let store_dir_for_revival = closure_store_dir.clone();
     let saved_remote_for_revival = package_remote.clone();
     closure_db
+        .database
         .test_sql(move |conn| {
             assert!(conn.load_remote_object(object_id).is_err());
             assert_eq!(conn.load_reclaimed_store_package(object_id)?, Some(absence));
@@ -198,11 +201,13 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     .expect("valid receipt closure");
     let receipted_for_insert = receipted.clone();
     closure_db
+        .database
         .test_sql(move |conn| conn.record_reclaimed_store_package(&receipted_for_insert))
         .await
         .expect("attach receipt to reclaimed package");
     assert_eq!(
         closure_db
+            .database
             .test_sql(move |conn| conn.load_reclaimed_store_package(object_id))
             .await
             .expect("load receipted closure"),
