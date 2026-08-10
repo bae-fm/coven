@@ -265,6 +265,86 @@ async fn byte_stream_fills_the_reserved_stage_before_commit() {
     assert!(temp_entries(tmp.path()).await.is_empty());
 }
 
+#[test]
+fn disabled_durability_waits_for_streamed_writes_to_finish() {
+    struct BlockingChunkReader {
+        chunks_read: usize,
+        release_blocker: Option<std::sync::mpsc::Receiver<()>>,
+        reached_end: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    #[async_trait]
+    impl PlaintextChunkReader for BlockingChunkReader {
+        type Error = String;
+
+        async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+            self.chunks_read += 1;
+            match self.chunks_read {
+                1 => Ok(vec![1; max.min(128 * 1024)]),
+                2 => {
+                    let release = self
+                        .release_blocker
+                        .take()
+                        .expect("blocking worker release receiver");
+                    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                    tokio::task::spawn_blocking(move || {
+                        started_tx.send(()).expect("report blocking worker start");
+                        release.recv().expect("release blocking worker");
+                    });
+                    started_rx.await.expect("blocking worker started");
+                    Ok(vec![2; 18_928])
+                }
+                _ => {
+                    self.reached_end
+                        .take()
+                        .expect("end-of-stream sender")
+                        .send(())
+                        .expect("report end of stream");
+                    Ok(Vec::new())
+                }
+            }
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("build test runtime");
+    runtime.block_on(async {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (reached_end_tx, reached_end_rx) = tokio::sync::oneshot::channel();
+        let mut source = BlockingChunkReader {
+            chunks_read: 0,
+            release_blocker: Some(release_rx),
+            reached_end: Some(reached_end_tx),
+        };
+        let mut staged = AtomicStagedFile::create_with_file_sync(&destination, FileSync::Disabled)
+            .await
+            .expect("reserve staging file");
+        let write = tokio::spawn(async move {
+            let result = staged.write_plaintext(&mut source).await;
+            (staged, result)
+        });
+
+        reached_end_rx.await.expect("stream reached its end");
+        let returned_before_pending_write = write.is_finished();
+        release_tx.send(()).expect("release blocking worker");
+        let (staged, written) = write.await.expect("join staged write");
+        assert_eq!(written.expect("write plaintext"), 150_000);
+        assert_eq!(
+            staged.read_bytes().await.expect("read staged bytes").len(),
+            150_000
+        );
+        assert!(
+            !returned_before_pending_write,
+            "the write returned while Tokio still had pending file bytes"
+        );
+    });
+}
+
 #[tokio::test]
 async fn staged_file_publish_rolls_back_when_directory_sync_fails() {
     let tmp = tempfile::tempdir().expect("temp dir");

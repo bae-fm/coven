@@ -30,7 +30,17 @@ impl FileSync {
         }
     }
 
-    pub(crate) async fn sync_file(&self, file: &tokio::fs::File) -> std::io::Result<()> {
+    pub(crate) async fn finish_async_write(
+        &self,
+        file: &mut tokio::fs::File,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        file.flush().await?;
+        self.sync_file(file).await
+    }
+
+    async fn sync_file(&self, file: &tokio::fs::File) -> std::io::Result<()> {
         self.requested();
         match self {
             Self::Enabled => file.sync_all().await,

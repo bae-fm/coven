@@ -164,13 +164,13 @@ impl AtomicStagedFile {
         file.write_all(bytes)
             .await
             .map_err(|error| format!("write staged blob {}: {error}", path.display()))?;
-        // This writes an already-open blob stage that a later rename publishes,
-        // so its owning durability policy handles the completed file here and
-        // the committed parent directory at publication.
+        // Finish Tokio's queued writes before this stage can be inspected or
+        // published. The owning durability policy separately decides whether
+        // the completed file also needs a physical barrier.
         self.file_sync
-            .sync_file(file)
+            .finish_async_write(file)
             .await
-            .map_err(|error| format!("fsync staged blob {}: {error}", path.display()))
+            .map_err(|error| format!("finish staged blob write {}: {error}", path.display()))
     }
 
     /// Fill this unpublished stage from a plaintext stream and apply its file
@@ -207,12 +207,18 @@ impl AtomicStagedFile {
             })?;
             written += chunk.len() as u64;
         }
-        // The payload arrives as a stream of chunks, so its owning durability
-        // policy handles the completed file here and the committed parent
-        // directory at publication.
-        self.file_sync.sync_file(file).await.map_err(|error| {
-            StreamWriteError::Local(format!("fsync staged blob {}: {error}", path.display()))
-        })?;
+        // Finish Tokio's queued writes before the caller verifies this stage.
+        // The owning durability policy separately decides whether the
+        // completed file also needs a physical barrier.
+        self.file_sync
+            .finish_async_write(file)
+            .await
+            .map_err(|error| {
+                StreamWriteError::Local(format!(
+                    "finish staged blob write {}: {error}",
+                    path.display()
+                ))
+            })?;
         Ok(written)
     }
 
@@ -255,15 +261,18 @@ impl AtomicStagedFile {
                 })?;
                 written += chunk.len() as u64;
             }
-            // The stage is filled incrementally, so its owning durability
-            // policy handles the completed file here and the committed parent
-            // directory at publication.
-            self.file_sync.sync_file(file).await.map_err(|error| {
-                AtomicChunkWriteError::Local(format!(
-                    "fsync staged blob {}: {error}",
-                    path.display()
-                ))
-            })?;
+            // Finish Tokio's queued writes before this stage can be inspected
+            // or published. The owning durability policy separately decides
+            // whether the completed file also needs a physical barrier.
+            self.file_sync
+                .finish_async_write(file)
+                .await
+                .map_err(|error| {
+                    AtomicChunkWriteError::Local(format!(
+                        "finish staged blob write {}: {error}",
+                        path.display()
+                    ))
+                })?;
             Ok(written)
         }
         .await;
@@ -326,13 +335,15 @@ impl AtomicStagedFile {
                         format!("write temp pin {}: {error}", staged.path.display())
                     })?;
             }
-            // This copies through a fixed buffer while hashing, so the owning
-            // durability policy handles the completed file here and the
-            // committed parent directory at publication.
+            // Finish Tokio's queued writes before returning the hash and size.
+            // The owning durability policy separately decides whether the
+            // completed file also needs a physical barrier.
             self.file_sync
-                .sync_file(staged.file_mut())
+                .finish_async_write(staged.file_mut())
                 .await
-                .map_err(|error| format!("fsync temp pin {}: {error}", staged.path.display()))?;
+                .map_err(|error| {
+                    format!("finish temp pin write {}: {error}", staged.path.display())
+                })?;
             Ok::<_, String>((size, hasher.finalize().into()))
         }
         .await;
