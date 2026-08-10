@@ -95,11 +95,9 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         .expect("install B's active exact device fixture");
     let active_device_count = db_a
         .database
-        .test_sql(|database| {
-            database.table_row_count(coven_database::DatabaseTestTable::named(
-                "store_device_registration_activations",
-            ))
-        })
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+            "store_device_registration_activations",
+        ))
         .await
         .expect("count A's activated devices");
     assert_eq!(active_device_count, 2, "A must activate B's registration");
@@ -793,7 +791,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         .await
         .expect("bind the founder device before installing protocol_state fault");
     db.database
-        .test_sql(|database| database.install_protocol_state_insert_failure_trigger())
+        .install_protocol_state_insert_failure_for_test()
         .await
         .expect("install protocol_state fault");
 

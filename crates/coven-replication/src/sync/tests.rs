@@ -274,13 +274,10 @@ async fn lww_earlier_update_loses() {
     let receiver_wall_ms = target.database.receive_wall_ms();
     let winners = target
         .database
-        .test_sql(move |database| {
-            database
-                .apply_changeset(&bytes, &tables, receiver_wall_ms)
-                .map(|result| result.winning_rows)
-        })
+        .apply_changeset_for_test(bytes, tables, receiver_wall_ms)
         .await
-        .expect("apply local-winning update");
+        .expect("apply local-winning update")
+        .winning_rows;
     assert!(
         winners.is_empty(),
         "a local-winning row must not authorize replacement of its exact blob binding"
@@ -555,21 +552,14 @@ async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changese
     let target = open_test_db();
     let tables = test_synced_tables();
     let receiver_wall_ms = target.database.receive_wall_ms();
-    target
+    let (results, violations) = target
         .database
-        .test_sql(move |database| {
-            let (results, violations) = database.apply_changesets_atomically(
-                vec![child, parent],
-                &tables,
-                receiver_wall_ms,
-            )?;
-            assert!(results[0].had_fk_violations);
-            assert!(!results[1].had_fk_violations);
-            assert!(!violations);
-            Ok(())
-        })
+        .apply_changesets_atomically_for_test(vec![child, parent], tables, receiver_wall_ms)
         .await
         .expect("apply dependent changesets atomically");
+    assert!(results[0].had_fk_violations);
+    assert!(!results[1].had_fk_violations);
+    assert!(!violations);
 
     assert_eq!(
         target

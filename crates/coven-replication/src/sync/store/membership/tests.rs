@@ -888,15 +888,7 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
     db.database
-        .test_sql(move |conn| {
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER reject_second_membership_floor \
-                 BEFORE INSERT ON protocol_state \
-                 WHEN NEW.key = '{rejected_key}' \
-                 BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
-            ))
-            .map_err(coven_database::DbError::from)
-        })
+        .install_protocol_state_key_insert_failure_for_test(rejected_key)
         .await
         .unwrap();
 
@@ -927,15 +919,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
     db.database
-        .test_sql(move |conn| {
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER reject_anchor_cursor \
-             BEFORE INSERT ON protocol_state \
-             WHEN NEW.key = '{rejected_key}' \
-             BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
-            ))
-            .map_err(coven_database::DbError::from)
-        })
+        .install_protocol_state_key_insert_failure_for_test(rejected_key)
         .await
         .unwrap();
 

@@ -87,11 +87,7 @@ impl ReclaimJourneyFixture {
             .await
             .expect("acknowledge covering snapshot");
         db.database
-            .test_sql(|database| {
-                database.transaction(|transaction| {
-                    transaction.remove_retained_replay_ownership_from_snapshot()
-                })
-            })
+            .release_retained_replay_ownership_for_test()
             .await
             .expect("release retained replay ownership");
 
@@ -422,11 +418,7 @@ async fn signed_reclaim_authority_rejects_relocated_objects_and_unproven_deletio
     ));
 
     db.database
-        .test_sql(|database| {
-            database.transaction(|transaction| {
-                transaction.remove_retained_replay_ownership_from_snapshot()
-            })
-        })
+        .release_retained_replay_ownership_for_test()
         .await
         .expect("release retained replay package ownership");
     let target = evidence.claim.target();
@@ -545,11 +537,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         .expect("covering acknowledgement exists")
         .reference;
     db.database
-        .test_sql(|database| {
-            database.transaction(|transaction| {
-                transaction.remove_retained_replay_ownership_from_snapshot()
-            })
-        })
+        .release_retained_replay_ownership_for_test()
         .await
         .expect("release target retained replay ownership");
     let mut writer = loaded
@@ -633,7 +621,7 @@ async fn missing_or_retracted_merge_activation_blocks_reclaim_deletion() {
         _ => unreachable!("fixture has an activated reclaim"),
     };
     db.database
-        .test_sql(move |database| database.delete_exact_materialized_commit(&activation_commit))
+        .delete_exact_materialized_commit_for_test(activation_commit)
         .await
         .expect("retract reclaim activation materialization");
 

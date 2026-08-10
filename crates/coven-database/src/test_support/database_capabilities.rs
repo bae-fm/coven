@@ -234,4 +234,56 @@ impl Database {
         self.test_sql(move |database| database.forge_device_in_state_snapshots(forged_device_id))
             .await
     }
+
+    pub async fn delete_exact_materialized_commit_for_test(
+        &self,
+        reference: coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| database.delete_exact_materialized_commit(&reference))
+            .await
+    }
+
+    pub async fn install_protocol_state_key_insert_failure_for_test(
+        &self,
+        rejected_key: String,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database
+                .execute_batch(&format!(
+                    "CREATE TRIGGER reject_protocol_state_key
+                     BEFORE INSERT ON protocol_state
+                     WHEN NEW.key = '{rejected_key}'
+                     BEGIN SELECT RAISE(ABORT, 'forced cursor failure'); END;"
+                ))
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub async fn install_protocol_state_insert_failure_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| database.install_protocol_state_insert_failure_trigger())
+            .await
+    }
+
+    pub async fn apply_changeset_for_test(
+        &self,
+        bytes: Vec<u8>,
+        tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        receiver_wall_ms: u64,
+    ) -> Result<crate::ApplyResult, DbError> {
+        self.test_sql(move |database| database.apply_changeset(&bytes, &tables, receiver_wall_ms))
+            .await
+    }
+
+    pub async fn apply_changesets_atomically_for_test(
+        &self,
+        changesets: Vec<Vec<u8>>,
+        tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+        receiver_wall_ms: u64,
+    ) -> Result<(Vec<crate::ApplyResult>, bool), DbError> {
+        self.test_sql(move |database| {
+            database.apply_changesets_atomically(changesets, &tables, receiver_wall_ms)
+        })
+        .await
+    }
 }
