@@ -273,9 +273,9 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let database = StoreDatabase::new(&db.database);
+        let database = StoreDatabase::new(db.database());
 
-        db.database
+        db.database()
             .seed_distinct_cleanup_bindings_for_test(
                 removed_locator,
                 live_locator,
@@ -295,7 +295,7 @@ mod tests {
             .await
             .expect("record obsolete row copies");
 
-        db.database
+        db.database()
             .cleanup_intent_copy_identities_for_test()
             .await
             .map(|identities| {

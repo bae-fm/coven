@@ -14,7 +14,7 @@ pub trait CloudSyncRotationStateAccess: Send + Sync {
     ) -> Result<(), String>;
     fn gate(&self) -> Option<RotationGate>;
     fn install_durable_gate(&self, gate: Option<RotationGate>);
-    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending>;
+    fn check(&self, live_generation: Option<u64>) -> Result<(), RotationPending>;
 }
 
 impl Default for PendingRotation {
@@ -91,13 +91,12 @@ impl PendingRotation {
         *self.0.write().unwrap() = gate;
     }
 
-    /// Check `cipher` against the committed generation, if one is pending. A
+    /// Check the live generation against the committed generation, if one is pending. A
     /// plaintext home never rotates a store key (sharing, and hence removal,
     /// requires an encrypted home), so it is never blocked.
-    pub fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
-        let live_generation = match cipher {
-            CloudCipher::Encrypted(enc) => enc.current_generation(),
-            CloudCipher::Plaintext => return Ok(()),
+    pub fn check(&self, live_generation: Option<u64>) -> Result<(), RotationPending> {
+        let Some(live_generation) = live_generation else {
+            return Ok(());
         };
         if let Some(gate) = self.gate() {
             return Err(RotationPending {
@@ -165,7 +164,7 @@ impl CloudSyncRotationStateAccess for PendingRotation {
         PendingRotation::install_durable_gate(self, gate);
     }
 
-    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
-        PendingRotation::check(self, cipher)
+    fn check(&self, live_generation: Option<u64>) -> Result<(), RotationPending> {
+        PendingRotation::check(self, live_generation)
     }
 }

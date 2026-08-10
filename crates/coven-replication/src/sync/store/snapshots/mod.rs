@@ -40,6 +40,37 @@ pub(crate) struct StoreSnapshotCut {
     coverage: CommitFrontier,
 }
 
+enum SnapshotBlobDestination {
+    Store,
+    Circle {
+        circle_id: coven_protocol::CircleId,
+        protection: coven_protocol::objects::BlobSpoolProtection,
+    },
+}
+
+impl SnapshotBlobDestination {
+    fn audience(&self) -> coven_protocol::blob::locator::RemoteAudience {
+        match self {
+            Self::Store => coven_protocol::blob::locator::RemoteAudience::Store,
+            Self::Circle { circle_id, .. } => {
+                coven_protocol::blob::locator::RemoteAudience::Circle(*circle_id)
+            }
+        }
+    }
+
+    fn key_fingerprint(&self) -> Option<coven_keys::encryption::KeyFingerprint> {
+        match self {
+            Self::Store => None,
+            Self::Circle { protection, .. } => match protection {
+                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+                    Some(encryption.seal_key_fingerprint())
+                }
+                coven_protocol::objects::BlobSpoolProtection::Browsable => None,
+            },
+        }
+    }
+}
+
 impl StoreSnapshotCut {
     #[cfg(test)]
     pub(crate) fn coverage(&self) -> &CommitFrontier {
@@ -447,10 +478,9 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let mut coalesced = std::collections::BTreeMap::<String, usize>::new();
         let preparation = async {
     for captured in blobs {
-        let (audience, protection, package_authority) = match captured.audience {
+        let (destination, package_authority) = match captured.audience {
             SnapshotBlobAudience::Store => (
-                coven_protocol::blob::locator::RemoteAudience::Store,
-                storage.store_blob_protection().map_err(SnapshotError::Bucket)?,
+                SnapshotBlobDestination::Store,
                 coven_protocol::audience_package::PackageAudience::Store,
             ),
             SnapshotBlobAudience::Circle { circle_id, control } => {
@@ -460,8 +490,10 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                     .map_err(SnapshotError::from)?;
                 let key_fingerprint = access.key_fingerprint();
                 (
-                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
-                    access.blob_protection(),
+                    SnapshotBlobDestination::Circle {
+                        circle_id,
+                        protection: access.blob_protection(),
+                    },
                     coven_protocol::audience_package::PackageAudience::Circle {
                         circle_id,
                         control: control.coordinate().clone(),
@@ -470,6 +502,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 )
             }
         };
+        let audience = destination.audience();
         if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
             && captured.fact.previous.is_none()
         {
@@ -482,7 +515,12 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             let locator = crate::sync::store::commit_publication::prepare_partition_blob_locator(
                 &captured.fact,
                 audience.clone(),
-                &protection,
+                match &destination {
+                    SnapshotBlobDestination::Store => storage
+                        .store_blob_key_fingerprint()
+                        .map_err(SnapshotError::Bucket)?,
+                    SnapshotBlobDestination::Circle { .. } => destination.key_fingerprint(),
+                },
                 &authority,
             )
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
@@ -521,15 +559,25 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             prepared[index].bindings.push(binding);
             continue;
         }
-        let (binding, blob) = self
-            .writer
-            .prepare_partition_blob(
-                &captured.fact,
-                audience,
+        let prepared_blob = match destination {
+            SnapshotBlobDestination::Store => self
+                .writer
+                .prepare_store_partition_blob(&captured.fact, &authority)
+                .await,
+            SnapshotBlobDestination::Circle {
+                circle_id,
                 protection,
-                &authority,
-            )
-            .await
+            } => self
+                .writer
+                .prepare_circle_partition_blob(
+                    &captured.fact,
+                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
+                    protection,
+                    &authority,
+                )
+                .await,
+        };
+        let (binding, blob) = prepared_blob
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
         if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
             && !blob.uploaded_verified

@@ -131,17 +131,15 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
 #[tokio::test]
 async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
     let database = crate::sync::test_helpers::open_test_db();
-    let crate::sync::test_helpers::TestStoreFixture {
-        store,
-        storage: cloud_storage,
-    } = crate::sync::test_helpers::TestStoreFixture::create(
+    let (store, cloud_storage) = (crate::sync::test_helpers::TestStoreFixture::create(
         &database,
         "shared-spool-test",
         coven_keys::keys::UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
-    .expect("create exact test Store");
+    .expect("create exact test Store"))
+    .into_parts();
     let device = store
         .founder_device()
         .await
@@ -155,9 +153,9 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("load exact blob write authority");
     let authority = BlobWriteAuthority::new(authority.referenced_registration());
-    let protection = cloud_storage
-        .store_blob_protection()
-        .expect("load Store blob protection");
+    let key_fingerprint = cloud_storage
+        .store_blob_key_fingerprint()
+        .expect("load Store blob key fingerprint");
     let (temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let source = temp.path().join("source");
     let plaintext = b"spool owned by another pending write";
@@ -184,8 +182,9 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         audience_move: None,
     };
     let audience = coven_protocol::blob::locator::RemoteAudience::Store;
-    let locator = prepare_partition_blob_locator(&fact, audience.clone(), &protection, &authority)
-        .expect("prepare exact blob locator");
+    let locator =
+        prepare_partition_blob_locator(&fact, audience.clone(), key_fingerprint, &authority)
+            .expect("prepare exact blob locator");
     let spool = store_dir.outbound_blob_spool_path(locator.locator_hash());
     let spool_stage = store_dir
         .stage_atomic_file(&spool)
@@ -193,10 +192,9 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .expect("create exact spool stage");
     assert_eq!(
         cloud_storage
-            .seal_blob_to_spool(
+            .seal_store_blob_to_spool(
                 &locator,
                 &authority,
-                protection.clone(),
                 fact.external_path.as_ref().expect("external source"),
                 spool_stage,
             )
@@ -208,10 +206,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("read seeded exact spool");
 
-    let error = match writer
-        .prepare_partition_blob(&fact, audience, protection, &authority)
-        .await
-    {
+    let error = match writer.prepare_store_partition_blob(&fact, &authority).await {
         Ok(_) => panic!("invalid binding must fail after reusing the exact spool"),
         Err(error) => error,
     };
@@ -232,17 +227,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("sync removed shared exact spool");
 
-    let error = match writer
-        .prepare_partition_blob(
-            &fact,
-            coven_protocol::blob::locator::RemoteAudience::Store,
-            cloud_storage
-                .store_blob_protection()
-                .expect("reload Store blob protection"),
-            &authority,
-        )
-        .await
-    {
+    let error = match writer.prepare_store_partition_blob(&fact, &authority).await {
         Ok(_) => panic!("invalid binding must fail after creating an exact spool"),
         Err(error) => error,
     };

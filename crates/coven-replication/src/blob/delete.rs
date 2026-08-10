@@ -44,30 +44,14 @@ use tracing::{debug, warn};
 use coven_database::{OutboxEntry, OutboxOperation};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::blob::locator::StoredBlobRef;
-use coven_protocol::objects::StorageError;
 use coven_storage::CloudSyncObjectStorage;
-use coven_storage::{CloudSyncCipherStateAccess, CloudSyncRotationStateAccess};
 
 /// The cloud key-prefix under which tombstones live. The suffix after this prefix
 /// is the hash of the exact immutable provider object reference.
-pub(crate) const TOMBSTONE_PREFIX: &str = "blob_tombstones/";
-
 pub(crate) fn tombstone_object_id(
     stored: &StoredBlobRef,
 ) -> coven_protocol::store_commit::ObjectHash {
-    coven_protocol::remote_object::remote_object_id(stored.object())
-}
-
-pub(crate) fn tombstone_key(stored: &StoredBlobRef, suffix: &str) -> String {
-    format!("{TOMBSTONE_PREFIX}{}{suffix}", tombstone_object_id(stored))
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) fn tombstone_key_for_test(
-    stored: &StoredBlobRef,
-    cipher: &coven_storage::CloudCipher,
-) -> String {
-    tombstone_key(stored, cipher.suffix())
+    coven_storage::blob_tombstone_object_id(stored)
 }
 
 pub(crate) fn stored_cloud_key(stored: &StoredBlobRef) -> &str {
@@ -105,8 +89,6 @@ enum ExistingTombstone {
 pub(crate) struct TombstoneDrain<'a> {
     db: &'a coven_database::StoreDatabase,
     storage: &'a dyn CloudSyncObjectStorage,
-    cipher: &'a dyn CloudSyncCipherStateAccess,
-    pending_rotation: &'a dyn CloudSyncRotationStateAccess,
     store_id: &'a str,
     keypair: &'a UserKeypair,
     clock: &'a dyn coven_foundation::clock::Clock,
@@ -205,18 +187,15 @@ fn tombstone_signing_payload(store_id: &str, stored: &StoredBlobRef, deleted_at:
 impl<'a> TombstoneDrain<'a> {
     async fn existing_tombstone_state(
         &self,
-        key: &str,
         expected_stored: &StoredBlobRef,
     ) -> Result<ExistingTombstone, String> {
-        let stored = match self.storage.read_provider_object(key).await {
-            Ok(stored) => stored,
-            Err(StorageError::NotFound(_)) => return Ok(ExistingTombstone::Absent),
-            Err(e) => return Err(format!("tombstone read failed: {e}")),
-        };
-        let aad_context = coven_storage::cloud_aad_context(self.store_id, key);
-        let decoded = match self.cipher.snapshot().open(stored, &aad_context) {
-            Ok(decoded) => decoded,
-            Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
+        let decoded = match self.storage.read_blob_tombstone(expected_stored).await {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => return Ok(ExistingTombstone::Absent),
+            Err(coven_protocol::objects::StorageError::InvalidContent(error)) => {
+                return Ok(ExistingTombstone::Invalid(format!("open failed: {error}")));
+            }
+            Err(error) => return Err(format!("tombstone read failed: {error}")),
         };
         let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
             Ok(tombstone) => tombstone,
@@ -238,7 +217,6 @@ impl<'a> TombstoneDrain<'a> {
 
     async fn write_signed_tombstone(
         &self,
-        key: &str,
         stored: &StoredBlobRef,
         deleted_at: &str,
     ) -> Result<(), String> {
@@ -250,14 +228,8 @@ impl<'a> TombstoneDrain<'a> {
         );
         let bytes = serde_json::to_vec(&tombstone)
             .map_err(|e| format!("tombstone serialization failed: {e}"))?;
-        let aad_context = coven_storage::cloud_aad_context(self.store_id, key);
-        let cipher = self.cipher.snapshot();
-        self.pending_rotation
-            .check(&cipher)
-            .map_err(|e| e.to_string())?;
-        let sealed = cipher.seal(bytes, &aad_context);
         self.storage
-            .write_provider_object(key, sealed)
+            .write_blob_tombstone(stored, bytes)
             .await
             .map_err(|e| format!("tombstone write failed: {e}"))
     }
@@ -286,8 +258,6 @@ impl<'a> TombstoneDrain<'a> {
     pub(crate) fn new(
         db: &'a coven_database::StoreDatabase,
         storage: &'a dyn CloudSyncObjectStorage,
-        cipher: &'a dyn CloudSyncCipherStateAccess,
-        pending_rotation: &'a dyn CloudSyncRotationStateAccess,
         store_id: &'a str,
         keypair: &'a UserKeypair,
         clock: &'a dyn coven_foundation::clock::Clock,
@@ -295,8 +265,6 @@ impl<'a> TombstoneDrain<'a> {
         TombstoneDrain {
             db,
             storage,
-            cipher,
-            pending_rotation,
             store_id,
             keypair,
             clock,
@@ -316,7 +284,6 @@ impl<'a> TombstoneDrain<'a> {
 
         let now = clock.now();
         let now_rfc = now.to_rfc3339();
-        let suffix = self.cipher.snapshot().suffix();
         let mut count = 0;
         let scheduled_deletes = deletes
             .into_iter()
@@ -338,13 +305,11 @@ impl<'a> TombstoneDrain<'a> {
                 continue;
             }
 
-            let key = tombstone_key(stored, suffix);
-
             // Write only when the slot is absent or invalid. A valid tombstone already
             // at the key carries the original `deleted_at` that the grace is measured
             // from; overwriting it with a fresh `now` would reset the grace, so a row
             // that re-drains (its prior row-removal failed) must not move the deadline.
-            match self.existing_tombstone_state(&key, stored).await {
+            match self.existing_tombstone_state(stored).await {
                 Ok(ExistingTombstone::Valid) => {
                     debug!(
                         %cloud_key,
@@ -352,7 +317,7 @@ impl<'a> TombstoneDrain<'a> {
                     );
                 }
                 Ok(ExistingTombstone::Absent) => {
-                    if let Err(e) = self.write_signed_tombstone(&key, stored, &now_rfc).await {
+                    if let Err(e) = self.write_signed_tombstone(stored, &now_rfc).await {
                         self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
                             .await?;
                         return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
@@ -365,7 +330,7 @@ impl<'a> TombstoneDrain<'a> {
                         reason = %reason,
                         "replacing invalid tombstone object"
                     );
-                    if let Err(e) = self.write_signed_tombstone(&key, stored, &now_rfc).await {
+                    if let Err(e) = self.write_signed_tombstone(stored, &now_rfc).await {
                         self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
                             .await?;
                         return Err(format!("Tombstone write failed for {cloud_key}: {e}"));

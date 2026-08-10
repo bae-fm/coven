@@ -15,59 +15,6 @@ use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-struct NoImmutableCopyHome;
-
-#[async_trait::async_trait]
-impl CloudHome for NoImmutableCopyHome {
-    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<coven_storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-
-    async fn set_access(
-        &self,
-        _desired: coven_storage::cloud::CloudAccessState,
-    ) -> Result<coven_storage::cloud::CloudAccessOutcome, CloudHomeError> {
-        panic!("incapable home must be rejected before I/O")
-    }
-}
-
 struct NoKeyCustody;
 
 impl MasterKeyCustody for NoKeyCustody {
@@ -142,7 +89,7 @@ fn store_sync(
     database: coven_database::SyntheticStoreFixture,
     store_dir: &StoreDir,
 ) -> StoreSync {
-    let database = StoreDatabase::from_database(database.database);
+    let database = StoreDatabase::from_database(database.database().clone());
     let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
         database.clone(),
         store_dir.clone(),
@@ -175,7 +122,7 @@ fn store_sync(
 
 async fn connect_test_home(
     sync: StoreSync,
-    home: Arc<dyn CloudHome>,
+    home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
     cipher: CloudCipher,
 ) -> Result<(), SyncError> {
     tokio::spawn(async move { sync.connect_with_test_home(home, cipher).await })
@@ -214,7 +161,9 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let master_keys: Arc<dyn MasterKeyCustody> = Arc::new(NoKeyCustody);
     let security = store_security(keys, master_keys.clone(), established_identity_custody());
     let database = StoreDatabase::from_database(
-        coven_replication::sync::test_helpers::open_test_db().database,
+        coven_replication::sync::test_helpers::open_test_db()
+            .database()
+            .clone(),
     );
     let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
         database.clone(),
@@ -270,9 +219,18 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
         "Test Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);
+    config.cloud_home.s3_bucket = Some("bucket".to_string());
+    config.cloud_home.s3_region = Some("us-east-1".to_string());
+    let store_keys = StoreKeys::bind("sync-opaque-no-encryption".to_string());
+    store_keys
+        .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+        })
+        .expect("seed S3 credentials");
     let sync = store_sync(
         Arc::new(move || config.clone()),
-        StoreKeys::bind("sync-opaque-no-encryption".to_string()),
+        store_keys,
         Arc::new(NoKeyCustody),
         established_identity_custody(),
         coven_replication::sync::test_helpers::open_test_db(),
@@ -283,7 +241,10 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
         .connect()
         .await
         .expect_err("opaque home without an established master key must fail");
-    assert!(matches!(error, SyncError::MasterKeyNotEstablished));
+    assert!(
+        matches!(error, SyncError::MasterKeyNotEstablished),
+        "expected MasterKeyNotEstablished, got {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -333,22 +294,6 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
         .connect()
         .await
         .expect_err("unsupported immutable-copy provider is refused");
-    assert!(matches!(
-        error,
-        SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
-            provider: CloudProvider::Dropbox,
-        })
-    ));
-    assert!(sync.is_syncing());
-    assert!(sync.loop_uses_connected_storage_for_test());
-
-    let error = connect_test_home(
-        sync.clone(),
-        Arc::new(NoImmutableCopyHome),
-        CloudCipher::Plaintext,
-    )
-    .await
-    .expect_err("injected home without immutable-copy storage is refused");
     assert!(matches!(
         error,
         SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
@@ -487,16 +432,13 @@ async fn foreign_founder_installs_no_connection() {
     config.cloud_home.storage = HomeStorage::Browsable;
     let home = Arc::new(InMemoryCloudHome::new());
     let attacker = coven_keys::keys::UserKeypair::generate();
-    let attacker_storage = Arc::new(
-        CloudSyncConnection::new(
-            home.clone(),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            store_id,
-            attacker.clone(),
-        )
-        .expect("build attacker storage"),
-    );
+    let attacker_storage = Arc::new(CloudSyncConnection::new(
+        home.clone(),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        store_id,
+        attacker.clone(),
+    ));
     let attacker_db = coven_replication::sync::test_helpers::open_test_db();
     let _attacker_device = coven_replication::sync::test_helpers::TestDevice::create(
         &attacker_db,
@@ -532,7 +474,7 @@ async fn foreign_founder_installs_no_connection() {
     assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database
-            .database
+            .database()
             .get_protocol_state(coven_protocol::membership::OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),
@@ -552,7 +494,7 @@ fn cipher_resolution_reads_current_custody_each_time() {
     let security = store_security(store_keys, custody.clone(), established_identity_custody());
 
     let fingerprint_a = match security
-        .resolve_cloud_cipher(HomeStorage::Opaque)
+        .cloud_cipher_for_test(HomeStorage::Opaque)
         .expect("resolve key A")
     {
         CloudCipher::Encrypted(encryption) => encryption.fingerprint(),
@@ -561,7 +503,7 @@ fn cipher_resolution_reads_current_custody_each_time() {
     let key_b = MasterKeyring::generate();
     custody.persist(&key_b).expect("replace custody with key B");
     let fingerprint_b = match security
-        .resolve_cloud_cipher(HomeStorage::Opaque)
+        .cloud_cipher_for_test(HomeStorage::Opaque)
         .expect("resolve key B")
     {
         CloudCipher::Encrypted(encryption) => encryption.fingerprint(),

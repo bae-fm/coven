@@ -158,22 +158,12 @@ impl LocalStoreWriter {
         &self,
         database: &coven_database::StoreDatabase,
         storage: &dyn coven_storage::CloudSyncObjectStorage,
-        cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
-        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         store_id: &str,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
-        crate::blob::delete::TombstoneDrain::new(
-            database,
-            storage,
-            cipher,
-            pending_rotation,
-            store_id,
-            &self.identity,
-            clock,
-        )
-        .drain()
-        .await
+        crate::blob::delete::TombstoneDrain::new(database, storage, store_id, &self.identity, clock)
+            .drain()
+            .await
     }
 
     pub(crate) fn sign_operation_batch(

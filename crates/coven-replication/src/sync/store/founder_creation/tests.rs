@@ -16,21 +16,18 @@ fn store_database(database: &Database) -> StoreDatabase {
 async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "exact-founder-graph",
-            founder.clone(),
-        )
-        .expect("construct exact founder storage"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "exact-founder-graph",
+        founder.clone(),
+    ));
     let db = open_test_db();
     let (_store_dir_temp, store_dir) = temp_store_dir();
 
     let initialized = crate::sync::store::Store::create(
-        store_database(&db.database),
+        store_database(db.database()),
         storage,
         store_dir,
         "0000000000001-0000-founder",
@@ -38,7 +35,7 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     )
     .await
     .expect("create Store with founder graph");
-    let root_ref = store_database(&db.database)
+    let root_ref = store_database(db.database())
         .local_store_root_ref()
         .await
         .expect("read exact Store root")
@@ -58,25 +55,22 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
     for failing_create in 1..=5 {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = Arc::new(
-            CloudSyncConnection::new(
-                Arc::new(home.clone()),
-                CloudCipher::Plaintext,
-                BlobPathScheme::Plain,
-                format!("founder-rollback-{failing_create}"),
-                founder.clone(),
-            )
-            .expect("construct founder rollback storage"),
-        );
+        let storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            format!("founder-rollback-{failing_create}"),
+            founder.clone(),
+        ));
         let db = open_test_db();
         let (_store_dir_temp, store_dir) = temp_store_dir();
         let timestamp = "0000000000001-0000-founder";
         let staged = FounderStoreCreation::begin(
-            store_database(&db.database),
+            store_database(db.database()),
             storage.clone(),
             &store_dir,
             crate::sync::store::blob::StoreBlobCache::new(
-                store_database(&db.database),
+                store_database(db.database()),
                 store_dir.clone(),
             ),
             timestamp,
@@ -109,7 +103,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             );
         }
         crate::sync::store::Store::create(
-            store_database(&db.database),
+            store_database(db.database()),
             storage.clone(),
             store_dir,
             timestamp,
@@ -124,16 +118,13 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
 async fn failed_founder_rollback_is_resumed_before_publication_retry() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "founder-rollback-retry",
-            founder.clone(),
-        )
-        .expect("construct founder rollback retry storage"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "founder-rollback-retry",
+        founder.clone(),
+    ));
     let temp = tempfile::tempdir().expect("create founder rollback database directory");
     let path = temp.path().join("founder-rollback.sqlite");
     let open = || {
@@ -189,25 +180,22 @@ async fn failed_founder_rollback_is_resumed_before_publication_retry() {
 async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "concurrent-founder-publication",
-            founder.clone(),
-        )
-        .expect("construct concurrent founder storage"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "concurrent-founder-publication",
+        founder.clone(),
+    ));
     let db = open_test_db();
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(&db.database),
+        store_database(db.database()),
         storage.clone(),
         &store_dir,
         crate::sync::store::blob::StoreBlobCache::new(
-            store_database(&db.database),
+            store_database(db.database()),
             store_dir.clone(),
         ),
         timestamp,
@@ -226,7 +214,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(&first_db.database),
+            store_database(first_db.database()),
             first_storage,
             first_store_dir,
             timestamp,
@@ -241,7 +229,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let second_store_dir = store_dir;
     let second = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(&second_db.database),
+            store_database(second_db.database()),
             second_storage,
             second_store_dir,
             timestamp,
@@ -271,25 +259,22 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
 async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "founder-rollback-slot-collision",
-            founder.clone(),
-        )
-        .expect("construct founder collision storage"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "founder-rollback-slot-collision",
+        founder.clone(),
+    ));
     let db = open_test_db();
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(&db.database),
+        store_database(db.database()),
         storage,
         &store_dir,
         crate::sync::store::blob::StoreBlobCache::new(
-            store_database(&db.database),
+            store_database(db.database()),
             store_dir.clone(),
         ),
         timestamp,
@@ -329,23 +314,20 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
 async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key(
-                [41; 32],
-            )),
-            BlobPathScheme::Hashed,
-            "opaque-founder-graph",
-            founder.clone(),
-        )
-        .expect("construct opaque founder storage"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key(
+            [41; 32],
+        )),
+        BlobPathScheme::Hashed,
+        "opaque-founder-graph",
+        founder.clone(),
+    ));
     let db = open_test_db();
     let (_store_dir_temp, store_dir) = temp_store_dir();
 
     crate::sync::store::Store::create(
-        store_database(&db.database),
+        store_database(db.database()),
         storage.clone(),
         store_dir.clone(),
         "0000000000001-0000-opaque-founder",
@@ -353,13 +335,13 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     )
     .await
     .expect("create opaque Store");
-    let root_ref = store_database(&db.database)
+    let root_ref = store_database(db.database())
         .local_store_root_ref()
         .await
         .expect("read Store root reference")
         .expect("Store root exists");
     let opened = crate::sync::store::Store::open(
-        store_database(&db.database),
+        store_database(db.database()),
         storage,
         store_dir,
         &root_ref,
@@ -392,7 +374,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         .load_founder_registration_for_test()
         .await
         .expect("open exact opaque founder registration");
-    let durable = coven_database::StoreDatabase::new(&db.database)
+    let durable = coven_database::StoreDatabase::new(db.database())
         .latest_local_store_device_registration()
         .await
         .expect("read durable founder registration")

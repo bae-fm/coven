@@ -178,7 +178,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     ) -> WrappedStoreKeyRef {
         let recipient_pubkey = pubkey_hex(recipient);
         let wrapped = WrappedStoreKey::seal_keyring(
-            &self.root.store_root_id.to_string(),
+            &self.root().store_root_id.to_string(),
             &recipient_pubkey,
             &recipient.to_x25519_public_key(),
             encryption,
@@ -208,10 +208,7 @@ struct ExactStoreFixture {
 
 async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> ExactStoreFixture {
     let owner_db = open_test_db();
-    let TestStoreFixture {
-        store,
-        storage: cloud_storage,
-    } = Box::pin(TestStoreFixture::create_encrypted(
+    let (store, cloud_storage) = (Box::pin(TestStoreFixture::create_encrypted(
         &owner_db,
         LIB_ID,
         owner.clone(),
@@ -219,7 +216,8 @@ async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> Exa
         encryption.clone(),
     ))
     .await
-    .expect("create exact refresh Store");
+    .expect("create exact refresh Store"))
+    .into_parts();
     Box::pin(store.open_into(&owner_db))
         .await
         .expect("open exact refresh Store on owner device");
@@ -319,9 +317,9 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         .expect("pre-rotation cycle");
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B has encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         old_key,
         "before any rotation B keeps the key it joined with",
     );
@@ -355,9 +353,9 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // the two halves `apply_key_rotation` performs.
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         new_key.key_bytes(),
         "B adopted the rotated key into its live cipher without a restart",
     );
@@ -520,14 +518,19 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     // also proves the pull ran and applied it while sealing was paused.
     let peer_src = open_test_db();
     let peer_cs = peer_src
-        .database
+        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
         ])
         .await;
     storage
-        .publish_changeset("owner-device", 4, &peer_cs, db_b.database.schema_version())
+        .publish_changeset(
+            "owner-device",
+            4,
+            &peer_cs,
+            db_b.database().schema_version(),
+        )
         .await
         .expect("publish exact owner changeset");
 
@@ -545,15 +548,19 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     assert_eq!(result.rotation_pending, None);
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         old_key,
         "an unreferenced key must not replace the live cipher",
     );
-    load_wrapped_store_key(&*cloud_storage, storage.root.store_root_hash, &unreferenced)
-        .await
-        .expect("the ignored exact object remains readable by its exact reference");
+    load_wrapped_store_key(
+        &*cloud_storage,
+        storage.root().store_root_hash,
+        &unreferenced,
+    )
+    .await
+    .expect("the ignored exact object remains readable by its exact reference");
 }
 
 #[tokio::test]
@@ -613,7 +620,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("adopt generation 2");
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B adopted an encrypted keyring")
             .current_generation(),
         new_key.current_generation()
@@ -621,7 +628,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 
     load_wrapped_store_key(
         &*cloud_storage,
-        storage.root.store_root_hash,
+        storage.root().store_root_hash,
         &old_reference,
     )
     .await
@@ -634,15 +641,15 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         new_key.key_bytes(),
         "a replayed older wrapped key must not roll the device back",
     );
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
             .current_generation(),
         new_key.current_generation(),
@@ -700,9 +707,9 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
 
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         expected.key_bytes(),
         "same-generation forks select the greatest fingerprint independent of arrival order",
     );
@@ -805,9 +812,9 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
 
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         new_key.key_bytes()
     );
 }
@@ -1038,9 +1045,9 @@ async fn removed_owner_key_is_not_adopted() {
         .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         rotated.key_bytes(),
         "a removed owner's retained historical wrap is not active",
     );
@@ -1100,21 +1107,21 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     // Critically, B did NOT swap its cipher to the attacker's key.
     assert_eq!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         real_key,
         "B keeps its real key; the unauthenticated forged key is never adopted",
     );
     assert_ne!(
         running_b
-            .current_encryption_for_test()
+            .current_keyring_for_test()
             .expect("B retains encrypted storage")
-            .key_bytes(),
+            .seal_key(),
         forged_key,
         "the attacker's key was rejected",
     );
-    load_wrapped_store_key(&*cloud_storage, storage.root.store_root_hash, &forged)
+    load_wrapped_store_key(&*cloud_storage, storage.root().store_root_hash, &forged)
         .await
         .expect("the ignored attacker object exists at its exact reference");
 }
@@ -1358,7 +1365,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             .expect("refresh cycle");
         assert_eq!(
             running_owner
-                .current_encryption_for_test()
+                .current_keyring_for_test()
                 .expect("owner retains encrypted storage")
                 .current_generation(),
             2,

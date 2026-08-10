@@ -6,17 +6,36 @@ use super::*;
 /// `finish` writes the `{key}.manifest` record that makes the object readable.
 /// Existing records stay readable until the manifest points at the new token.
 pub(crate) struct CloudKitPartSink {
-    pub ops: Arc<dyn CloudKitOps>,
-    pub scope: CloudKitScope,
-    pub key: String,
-    pub upload_id: String,
-    pub index: usize,
-    pub total_len: usize,
-    pub written_len: usize,
-    pub settled: Arc<std::sync::atomic::AtomicBool>,
+    ops: Arc<dyn CloudKitOps>,
+    scope: CloudKitScope,
+    key: String,
+    upload_id: String,
+    index: usize,
+    total_len: usize,
+    written_len: usize,
+    settled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CloudKitPartSink {
+    pub(crate) fn new(
+        ops: Arc<dyn CloudKitOps>,
+        scope: CloudKitScope,
+        key: String,
+        upload_id: String,
+        total_len: usize,
+    ) -> Self {
+        Self {
+            ops,
+            scope,
+            key,
+            upload_id,
+            index: 0,
+            total_len,
+            written_len: 0,
+            settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
         if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(());

@@ -265,12 +265,6 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for GoogleDriveCloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let media_body = Bytes::from(data);
         let encoded = encode_key(key);
@@ -380,34 +374,30 @@ impl CloudHome for GoogleDriveCloudHome {
             "{}/files/{}/permissions?fields=permissions(id,emailAddress,role),nextPageToken&supportsAllDrives=true",
             self.drive_api, self.folder_id
         );
-        let access = sharing::SharedFolderAccess {
-            session: &self.session,
-            list_url: list_url.clone(),
-            permissions_field: "permissions",
-            email_of: |permission: &serde_json::Value| {
-                permission["emailAddress"].as_str().map(String::from)
-            },
-            next_page: |page: &serde_json::Value| drive_permissions_next_page_url(&list_url, page),
-            delete_url: |permission_id: &str| {
+        let access = sharing::SharedFolderAccess::new(
+            &self.session,
+            list_url.clone(),
+            "permissions",
+            |permission: &serde_json::Value| permission["emailAddress"].as_str().map(String::from),
+            |page: &serde_json::Value| drive_permissions_next_page_url(&list_url, page),
+            |permission_id: &str| {
                 format!(
                     "{}/files/{}/permissions/{}?supportsAllDrives=true",
                     self.drive_api, self.folder_id, permission_id
                 )
             },
-            has_role: |permission: &serde_json::Value| {
-                permission["role"].as_str() == Some("writer")
-            },
-            role_name: "writer",
-            grant_url: format!(
+            |permission: &serde_json::Value| permission["role"].as_str() == Some("writer"),
+            "writer",
+            format!(
                 "{}/files/{}/permissions?supportsAllDrives=true",
                 self.drive_api, self.folder_id
             ),
-            grant_body: serde_json::json!({
+            serde_json::json!({
                 "type": "user",
                 "role": "writer",
                 "emailAddress": email,
             }),
-        };
+        );
         match desired {
             CloudAccessState::Present { .. } => {
                 access.ensure_present(email).await?;

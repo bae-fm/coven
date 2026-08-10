@@ -534,10 +534,9 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     ))
                 }
             };
-            let protection = self.history.store_blob_protection()?;
             match self
                 .history
-                .prepare_package(package, protection, self.package_schema.clone())
+                .prepare_package(package, self.package_schema.clone())
                 .await?
             {
                 Ok(package) => packages.push(package),
@@ -555,11 +554,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             };
             match self
                 .history
-                .prepare_package(
-                    package,
-                    loaded.blob_protection.clone(),
-                    self.package_schema.clone(),
-                )
+                .prepare_package(package, self.package_schema.clone())
                 .await?
             {
                 Ok(package) => packages.push(package),

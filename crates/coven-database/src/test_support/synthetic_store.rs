@@ -15,11 +15,19 @@ use coven_protocol::synced_schema::{BlobDecl, SyncedTable};
 /// from a database owner.
 #[derive(Clone)]
 pub struct SyntheticStoreFixture {
-    pub database: Database,
-    pub store_dir: coven_foundation::store_dir::StoreDir,
+    database: Database,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl SyntheticStoreFixture {
+    pub fn database(&self) -> &Database {
+        &self.database
+    }
+
+    pub fn store_dir(&self) -> &coven_foundation::store_dir::StoreDir {
+        &self.store_dir
+    }
+
     pub fn open(
         path: &std::path::Path,
         tables: Vec<SyncedTable>,

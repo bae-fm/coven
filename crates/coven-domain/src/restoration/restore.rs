@@ -21,7 +21,7 @@ use coven_protocol::synced_schema::SyncedTable;
 use coven_replication::sync::store::{
     PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError,
 };
-use coven_storage::cloud::{CloudHome, CloudHomeJoinInfo};
+use coven_storage::cloud::{CloudHomeJoinInfo, ExactCloudHome};
 use coven_storage::oauth::OAuthTokens;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
@@ -30,19 +30,35 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 /// expire — the user re-authenticates on restore — and holds no live CloudKit
 /// driver).
 pub struct RestoreSource {
-    pub join_info: CloudHomeJoinInfo,
-    pub exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-    pub oauth_clients: coven_storage::oauth::OAuthClients,
-    pub oauth_tokens: Option<OAuthTokens>,
-    pub cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
+    join_info: CloudHomeJoinInfo,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    oauth_clients: coven_storage::oauth::OAuthClients,
+    oauth_tokens: Option<OAuthTokens>,
+    cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
 }
 
 impl RestoreSource {
+    pub fn new(
+        join_info: CloudHomeJoinInfo,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+        oauth_clients: coven_storage::oauth::OAuthClients,
+        oauth_tokens: Option<OAuthTokens>,
+        cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
+    ) -> Self {
+        Self {
+            join_info,
+            exact_upload_verification,
+            oauth_clients,
+            oauth_tokens,
+            cloudkit_ops,
+        }
+    }
+
     async fn open_cloud_home(
         &self,
         store_keys: &StoreKeys,
         clock: coven_foundation::clock::ClockRef,
-    ) -> Result<Arc<dyn CloudHome>, BootstrapError> {
+    ) -> Result<Arc<dyn ExactCloudHome>, BootstrapError> {
         use coven_storage::cloud::*;
 
         let Self {
@@ -66,7 +82,7 @@ impl RestoreSource {
             Ok::<_, BootstrapError>(tokens)
         };
 
-        let home: Arc<dyn CloudHome> = match join_info {
+        let home: Arc<dyn ExactCloudHome> = match join_info {
             CloudHomeJoinInfo::S3 {
                 bucket,
                 region,
@@ -288,7 +304,7 @@ pub async fn restore_from_cloud(
                 blob_paths,
                 store_id.to_string(),
                 keypair.clone(),
-            )?);
+            ));
 
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own
@@ -511,13 +527,13 @@ pub async fn restore_from_code(
     // `parsed.provider` is already the shared `CloudHomeJoinInfo`; restore matches
     // on it and pulls in these extras, so there's
     // no per-provider conversion left to do here.
-    let source = RestoreSource {
-        join_info: parsed.provider.clone(),
+    let source = RestoreSource::new(
+        parsed.provider.clone(),
         exact_upload_verification,
         oauth_clients,
         oauth_tokens,
         cloudkit_ops,
-    };
+    );
 
     // `restore_from_cloud` imports this store's signing identity as the step
     // before it saves the config, so a saved config always has its identity in
@@ -569,16 +585,15 @@ mod tests {
             refresh_token: Some("refresh-token".to_string()),
             expires_at: None,
         };
-        let source = RestoreSource {
-            join_info: CloudHomeJoinInfo::Dropbox {
+        let source = RestoreSource::new(
+            CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
-            exact_upload_verification:
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-            oauth_clients: coven_storage::oauth::OAuthClients::for_tests(),
-            oauth_tokens: Some(tokens.clone()),
-            cloudkit_ops: None,
-        };
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_storage::oauth::OAuthClients::for_tests(),
+            Some(tokens.clone()),
+            None,
+        );
 
         let store_keys = StoreKeys::bind(store_id.to_string());
         source
@@ -606,8 +621,8 @@ mod open_cloud_home_tests {
     /// that same join information becomes `Config.cloud_home.s3_key_prefix`.
     #[tokio::test]
     async fn open_cloud_home_s3_preserves_key_prefix() {
-        let source = RestoreSource {
-            join_info: CloudHomeJoinInfo::S3 {
+        let source = RestoreSource::new(
+            CloudHomeJoinInfo::S3 {
                 bucket: "b".to_string(),
                 region: "us-east-1".to_string(),
                 endpoint: None,
@@ -615,12 +630,11 @@ mod open_cloud_home_tests {
                 secret_key: "sk".to_string(),
                 key_prefix: Some("prefix/".to_string()),
             },
-            exact_upload_verification:
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
-            oauth_tokens: None,
-            cloudkit_ops: None,
-        };
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_storage::oauth::OAuthClients::empty(),
+            None,
+            None,
+        );
 
         let store_keys = StoreKeys::bind("store-id".to_string());
         source
@@ -642,18 +656,17 @@ mod open_cloud_home_tests {
     /// shared to you.
     #[tokio::test]
     async fn open_cloud_home_rejects_cloudkit_share() {
-        let source = RestoreSource {
-            join_info: CloudHomeJoinInfo::CloudKitShare {
+        let source = RestoreSource::new(
+            CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://share.example".to_string(),
                 owner_name: "owner".to_string(),
                 zone_name: "zone".to_string(),
             },
-            exact_upload_verification:
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
-            oauth_tokens: None,
-            cloudkit_ops: None,
-        };
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_storage::oauth::OAuthClients::empty(),
+            None,
+            None,
+        );
 
         let store_keys = StoreKeys::bind("store-id".to_string());
         let result = source

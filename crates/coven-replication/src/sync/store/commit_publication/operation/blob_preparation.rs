@@ -13,6 +13,25 @@ use coven_protocol::store_commit::{
 };
 use coven_protocol::{audience_package, circle, remote_object};
 
+enum PartitionBlobDestination {
+    Store,
+    Circle {
+        circle_id: coven_protocol::CircleId,
+        protection: coven_protocol::objects::BlobSpoolProtection,
+    },
+}
+
+impl PartitionBlobDestination {
+    fn audience(&self) -> coven_protocol::blob::locator::RemoteAudience {
+        match self {
+            Self::Store => coven_protocol::blob::locator::RemoteAudience::Store,
+            Self::Circle { circle_id, .. } => {
+                coven_protocol::blob::locator::RemoteAudience::Circle(*circle_id)
+            }
+        }
+    }
+}
+
 impl AuthorizedWriterOperation<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prepare_partition_package(
@@ -50,17 +69,8 @@ impl AuthorizedWriterOperation<'_> {
             partition
         };
         let blob_facts = partition_blob_facts(&partition.changeset, blob_facts)?;
-        let (remote_audience, protection) = match partition.audience {
-            circle::Audience::Store => (
-                coven_protocol::blob::locator::RemoteAudience::Store,
-                storage
-                    .store_blob_protection()
-                    .map_err(|source| StoreError::BlobStorage {
-                        namespace: "store".to_string(),
-                        id: "protection".to_string(),
-                        source,
-                    })?,
-            ),
+        let blob_destination = match partition.audience {
+            circle::Audience::Store => PartitionBlobDestination::Store,
             circle::Audience::Circle(circle_id) => {
                 let control = partition.control.as_ref().ok_or_else(|| {
                     StoreError::InvalidOutbound(format!(
@@ -70,10 +80,10 @@ impl AuthorizedWriterOperation<'_> {
                 let access = database
                     .circle_publication_context(circle_id, control.coordinate().clone())
                     .await?;
-                (
-                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
-                    access.blob_protection(),
-                )
+                PartitionBlobDestination::Circle {
+                    circle_id,
+                    protection: access.blob_protection(),
+                }
             }
             circle::Audience::Local => {
                 return Err(StoreError::InvalidOutbound(
@@ -84,14 +94,23 @@ impl AuthorizedWriterOperation<'_> {
         let mut prepared_blobs = Vec::with_capacity(blob_facts.len());
         let mut blob_bindings = Vec::with_capacity(blob_facts.len());
         for fact in blob_facts {
-            let (binding, blob) = self
-                .prepare_partition_blob(
-                    fact,
-                    remote_audience.clone(),
-                    protection.clone(),
-                    &authority,
-                )
-                .await?;
+            let (binding, blob) = match &blob_destination {
+                PartitionBlobDestination::Store => {
+                    self.prepare_store_partition_blob(fact, &authority).await?
+                }
+                PartitionBlobDestination::Circle {
+                    circle_id,
+                    protection,
+                } => {
+                    self.prepare_circle_partition_blob(
+                        fact,
+                        coven_protocol::blob::locator::RemoteAudience::Circle(*circle_id),
+                        protection.clone(),
+                        &authority,
+                    )
+                    .await?
+                }
+            };
             blob_bindings.push(binding);
             prepared_blobs.push(blob);
         }
@@ -191,7 +210,27 @@ impl AuthorizedWriterOperation<'_> {
         })
     }
 
-    pub(crate) async fn prepare_partition_blob(
+    pub(crate) async fn prepare_store_partition_blob(
+        &self,
+        fact: &StoreWriteBlobFact,
+        authority: &BlobWriteAuthority<'_>,
+    ) -> Result<
+        (
+            audience_package::RowBlobLocatorBinding,
+            PreparedPartitionBlob,
+        ),
+        StoreError,
+    > {
+        self.prepare_partition_blob(
+            fact,
+            coven_protocol::blob::locator::RemoteAudience::Store,
+            PartitionBlobDestination::Store,
+            authority,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_circle_partition_blob(
         &self,
         fact: &StoreWriteBlobFact,
         audience: coven_protocol::blob::locator::RemoteAudience,
@@ -204,9 +243,65 @@ impl AuthorizedWriterOperation<'_> {
         ),
         StoreError,
     > {
+        let coven_protocol::blob::locator::RemoteAudience::Circle(circle_id) = audience else {
+            return Err(StoreError::InvalidOutbound(
+                "Circle blob preparation requires a Circle audience".to_string(),
+            ));
+        };
+        self.prepare_partition_blob(
+            fact,
+            coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
+            PartitionBlobDestination::Circle {
+                circle_id,
+                protection,
+            },
+            authority,
+        )
+        .await
+    }
+
+    async fn prepare_partition_blob(
+        &self,
+        fact: &StoreWriteBlobFact,
+        audience: coven_protocol::blob::locator::RemoteAudience,
+        destination: PartitionBlobDestination,
+        authority: &BlobWriteAuthority<'_>,
+    ) -> Result<
+        (
+            audience_package::RowBlobLocatorBinding,
+            PreparedPartitionBlob,
+        ),
+        StoreError,
+    > {
         let storage = self.storage.as_ref();
+        if destination.audience() != audience {
+            return Err(StoreError::InvalidOutbound(
+                "blob destination differs from its remote audience".to_string(),
+            ));
+        }
+        let key_fingerprint = match &destination {
+            PartitionBlobDestination::Store => {
+                storage
+                    .store_blob_key_fingerprint()
+                    .map_err(|source| StoreError::BlobStorage {
+                        namespace: fact.blob.namespace.clone(),
+                        id: fact.blob.id.clone(),
+                        source,
+                    })?
+            }
+            PartitionBlobDestination::Circle { protection, .. } => match protection {
+                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
+                    Some(encryption.seal_key_fingerprint())
+                }
+                coven_protocol::objects::BlobSpoolProtection::Browsable => {
+                    return Err(StoreError::InvalidOutbound(
+                        "Circle blob cannot use Browsable storage".to_string(),
+                    ));
+                }
+            },
+        };
         let locator =
-            prepare_partition_blob_locator(fact, audience.clone(), &protection, authority)?;
+            prepare_partition_blob_locator(fact, audience.clone(), key_fingerprint, authority)?;
         if let Some(audience_move) = &fact.audience_move {
             let coven_database::StoreWriteBlobMoveDestination::Remote {
                 audience: staged_audience,
@@ -345,14 +440,23 @@ impl AuthorizedWriterOperation<'_> {
             .stage_atomic_file(&spool_path)
             .await
             .map_err(StoreError::InvalidOutbound)?;
-        let spool_write = match storage
-            .seal_blob_to_spool(&locator, authority, protection, source.path(), spool)
-            .await
-            .map_err(|source| StoreError::BlobStorage {
-                namespace: fact.blob.namespace.clone(),
-                id: fact.blob.id.clone(),
-                source,
-            }) {
+        let sealed = match destination {
+            PartitionBlobDestination::Store => {
+                storage
+                    .seal_store_blob_to_spool(&locator, authority, source.path(), spool)
+                    .await
+            }
+            PartitionBlobDestination::Circle { protection, .. } => {
+                storage
+                    .seal_blob_to_spool(&locator, authority, protection, source.path(), spool)
+                    .await
+            }
+        };
+        let spool_write = match sealed.map_err(|source| StoreError::BlobStorage {
+            namespace: fact.blob.namespace.clone(),
+            id: fact.blob.id.clone(),
+            source,
+        }) {
             Ok(spool_write) => spool_write,
             Err(error) => {
                 return Err(source.cleanup_failure(None, error).await);
@@ -582,23 +686,21 @@ async fn remove_durable_file(
 pub(crate) fn prepare_partition_blob_locator(
     fact: &StoreWriteBlobFact,
     audience: coven_protocol::blob::locator::RemoteAudience,
-    protection: &coven_protocol::objects::BlobSpoolProtection,
+    key_fingerprint: Option<coven_keys::encryption::KeyFingerprint>,
     authority: &BlobWriteAuthority<'_>,
 ) -> Result<coven_protocol::blob::locator::BlobLocator, StoreError> {
-    match protection {
-        coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-            coven_protocol::blob::locator::BlobLocator::opaque(
-                fact.blob.namespace.clone(),
-                fact.blob.id.clone(),
-                authority.reference.clone(),
-                audience,
-                fact.blob.scope.clone(),
-                encryption.seal_key_fingerprint(),
-                fact.plaintext_size,
-                fact.plaintext_hash,
-            )
-        }
-        coven_protocol::objects::BlobSpoolProtection::Browsable => {
+    match key_fingerprint {
+        Some(key_fingerprint) => coven_protocol::blob::locator::BlobLocator::opaque(
+            fact.blob.namespace.clone(),
+            fact.blob.id.clone(),
+            authority.reference.clone(),
+            audience,
+            fact.blob.scope.clone(),
+            key_fingerprint,
+            fact.plaintext_size,
+            fact.plaintext_hash,
+        ),
+        None => {
             if audience != coven_protocol::blob::locator::RemoteAudience::Store {
                 return Err(StoreError::InvalidOutbound(
                     "Circle blob cannot use Browsable storage".to_string(),

@@ -834,16 +834,13 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     let serialized_keyring = master_key.to_serialized();
     let cipher = CloudCipher::Encrypted(EncryptionService::from(master_key.clone()));
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
-    let owner_storage = Arc::new(
-        CloudSyncConnection::new(
-            cloud.clone(),
-            cipher.clone(),
-            blob_paths,
-            store_id.to_string(),
-            owner_keypair.clone(),
-        )
-        .expect("build owner cloud storage"),
-    );
+    let owner_storage = Arc::new(CloudSyncConnection::new(
+        cloud.clone(),
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        owner_keypair.clone(),
+    ));
 
     let tables = test_synced_tables();
     let db = open_test_db();
@@ -858,7 +855,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .expect("load owner membership");
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&db.database);
+    let store_database = coven_database::StoreDatabase::new(db.database());
     let snapshot = store_database
         .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
         .await
@@ -889,14 +886,13 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         &migrations,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
-        crate::restoration::RestoreSource {
-            join_info: CloudHomeJoinInfo::CloudKit,
-            exact_upload_verification:
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
-            oauth_tokens: None,
-            cloudkit_ops: Some(cloudkit_ops.clone()),
-        },
+        crate::restoration::RestoreSource::new(
+            CloudHomeJoinInfo::CloudKit,
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_storage::oauth::OAuthClients::empty(),
+            None,
+            Some(cloudkit_ops.clone()),
+        ),
         &MembershipFloor(membership.head_refs().to_vec()),
         &joiner_keypair,
         &authority,
@@ -973,14 +969,13 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         &migrations,
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
-        crate::restoration::RestoreSource {
-            join_info: CloudHomeJoinInfo::CloudKit,
-            exact_upload_verification:
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-            oauth_clients: coven_storage::oauth::OAuthClients::empty(),
-            oauth_tokens: None,
-            cloudkit_ops: Some(cloudkit_ops),
-        },
+        crate::restoration::RestoreSource::new(
+            CloudHomeJoinInfo::CloudKit,
+            coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_storage::oauth::OAuthClients::empty(),
+            None,
+            Some(cloudkit_ops),
+        ),
         &MembershipFloor(membership.head_refs().to_vec()),
         &joiner_keypair,
         &authority,
@@ -1093,16 +1088,13 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         ),
     );
     let owner = UserKeypair::generate();
-    let owner_storage = Arc::new(
-        CloudSyncConnection::new(
-            cloud.clone(),
-            CloudCipher::Plaintext,
-            BlobPathScheme::for_storage(HomeStorage::Browsable),
-            store_id.to_string(),
-            owner.clone(),
-        )
-        .expect("build Owner recovery storage"),
-    );
+    let owner_storage = Arc::new(CloudSyncConnection::new(
+        cloud.clone(),
+        CloudCipher::Plaintext,
+        BlobPathScheme::for_storage(HomeStorage::Browsable),
+        store_id.to_string(),
+        owner.clone(),
+    ));
     let owner_db = open_test_db();
     let owner_device =
         TestDevice::create(&owner_db, owner_storage.clone(), store_id, owner.clone())
@@ -1117,7 +1109,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_dir = snapshot_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&owner_db.database);
+    let store_database = coven_database::StoreDatabase::new(owner_db.database());
     let snapshot = store_database
         .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
         .await
@@ -1173,16 +1165,13 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         let tables = test_synced_tables();
         let owner_keypair = UserKeypair::generate();
 
-        let owner_storage = Arc::new(
-            CloudSyncConnection::new(
-                Arc::new(cloud.clone()) as Arc<dyn coven_storage::cloud::CloudHome>,
-                cipher.clone(),
-                blob_paths,
-                store_id.to_string(),
-                owner_keypair.clone(),
-            )
-            .expect("build owner cloud storage"),
-        );
+        let owner_storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(cloud.clone()) as Arc<dyn coven_storage::cloud::ExactCloudHome>,
+            cipher.clone(),
+            blob_paths,
+            store_id.to_string(),
+            owner_keypair.clone(),
+        ));
 
         // Owner: a store with one shared note, captured straight into the published
         // snapshot — the shape a device sees the first time it opens a shared store.
@@ -1201,7 +1190,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await
             .expect("load owner membership");
         db_owner
-            .database
+            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
@@ -1209,7 +1198,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await;
         let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
         let snap_dir = snap_tmp.path().to_path_buf();
-        let store_database = coven_database::StoreDatabase::new(&db_owner.database);
+        let store_database = coven_database::StoreDatabase::new(db_owner.database());
         let snapshot = store_database
             .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
             .await
@@ -1225,7 +1214,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .expect("publish owner snapshot acknowledgement");
 
         let snapshot_before = owner_storage
-            .list_provider_objects("store-v1/snapshots/")
+            .list_provider_keys_for_test("store-v1/snapshots/")
             .await
             .expect("list Store snapshot objects");
 
@@ -1338,8 +1327,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             blob_paths,
             store_id.to_string(),
             joiner_keypair.clone(),
-        )
-        .expect("build joiner cloud storage");
+        );
         let components = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
             coven_database::StoreDatabase::new(&db_b),
             lib_b.clone(),
@@ -1402,8 +1390,8 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     )
     .await
     .expect("create exact owner Store");
-    let storage = fixture.store;
-    let cloud_storage = fixture.storage;
+    let storage = fixture.store();
+    let cloud_storage = fixture.storage();
     let member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
@@ -1450,9 +1438,9 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let membership_floor = MembershipFloor(chain.head_refs().to_vec());
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(&db_owner.database);
+    let store_database = coven_database::StoreDatabase::new(db_owner.database());
     let snapshot = store_database
-        .capture_snapshot_image_for_test(storage.root.clone(), snap_dir, None)
+        .capture_snapshot_image_for_test(storage.root(), snap_dir, None)
         .await
         .expect("owner snapshot");
     owner_device
@@ -1514,16 +1502,13 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         ));
         let owner_keypair = UserKeypair::generate();
 
-        let owner_storage = Arc::new(
-            CloudSyncConnection::new(
-                cloud.clone(),
-                cipher.clone(),
-                blob_paths,
-                store_id.to_string(),
-                owner_keypair.clone(),
-            )
-            .expect("build owner cloud storage"),
-        );
+        let owner_storage = Arc::new(CloudSyncConnection::new(
+            cloud.clone(),
+            cipher.clone(),
+            blob_paths,
+            store_id.to_string(),
+            owner_keypair.clone(),
+        ));
 
         // Owner: a shared note with a cover photo, both captured into the snapshot.
         let db_owner = open_test_db_with_blob(BlobDecl::new(
@@ -1541,14 +1526,14 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("initialize owner Store");
         let store_root = owner_device.store_root().clone();
         db_owner
-            .database
+            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
             )
             .await;
         db_owner
-            .database
+            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
@@ -1570,11 +1555,10 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             blob_paths,
             store_id.to_string(),
             owner_keypair.clone(),
-        )
-        .expect("build owner cycle storage");
+        );
         let components = Box::pin(
             coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
-                coven_database::StoreDatabase::new(&db_owner.database),
+                coven_database::StoreDatabase::new(db_owner.database()),
                 owner_dir.clone(),
             )
             .prepare_sync(cycle_storage, owner_keypair.clone()),
@@ -1592,7 +1576,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let layout = StoreLayout::new(restore_app.path());
         let lib_b = layout.store_dir(store_id);
         let owner_blob = db_owner
-            .database
+            .database()
             .row_blob_ref("note_photos", "photo1")
             .await
             .expect("capture exact snapshot blob");
@@ -1613,13 +1597,13 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .await
             .expect("export exact activated continuation");
         let materialized_commits_without_device_state = db_owner
-            .database
+            .database()
             .materialized_commits_without_device_state_count_for_test()
             .await
             .expect("verify source device-state snapshots");
         assert_eq!(materialized_commits_without_device_state, 0);
         let published_snapshot_bytes = db_owner
-            .database
+            .database()
             .latest_published_store_snapshot_bytes_for_test()
             .await
             .expect("read published snapshot metadata");
@@ -1670,14 +1654,13 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             &test_migrations(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
-            crate::restoration::RestoreSource {
-                join_info: CloudHomeJoinInfo::CloudKit,
-                exact_upload_verification:
-                    coven_foundation::config::ExactUploadVerification::MetadataHash,
-                oauth_clients: coven_storage::oauth::OAuthClients::empty(),
-                oauth_tokens: None,
-                cloudkit_ops: Some(cloudkit_ops),
-            },
+            crate::restoration::RestoreSource::new(
+                CloudHomeJoinInfo::CloudKit,
+                coven_foundation::config::ExactUploadVerification::MetadataHash,
+                coven_storage::oauth::OAuthClients::empty(),
+                None,
+                Some(cloudkit_ops),
+            ),
             &MembershipFloor(membership.head_refs().to_vec()),
             &joiner_keypair,
             &authority,
@@ -1747,8 +1730,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             blob_paths,
             store_id.to_string(),
             joiner_keypair.clone(),
-        )
-        .expect("build restored cloud storage");
+        );
         let components = Box::pin(
             coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
                 coven_database::StoreDatabase::new(&restored),

@@ -125,13 +125,26 @@ pub(crate) fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudH
 }
 
 pub(crate) struct CloudKitStagingCleanup {
-    pub ops: Arc<dyn CloudKitOps>,
-    pub scope: CloudKitScope,
-    pub batch: CloudKitAtomicCreateBatch,
-    pub armed: std::sync::atomic::AtomicBool,
+    ops: Arc<dyn CloudKitOps>,
+    scope: CloudKitScope,
+    batch: CloudKitAtomicCreateBatch,
+    armed: std::sync::atomic::AtomicBool,
 }
 
 impl CloudKitStagingCleanup {
+    pub(crate) fn new(
+        ops: Arc<dyn CloudKitOps>,
+        scope: CloudKitScope,
+        batch: CloudKitAtomicCreateBatch,
+    ) -> Self {
+        Self {
+            ops,
+            scope,
+            batch,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
     pub(crate) fn disarm(&self) {
         self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
     }

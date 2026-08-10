@@ -266,7 +266,6 @@ impl Candidate {
 pub struct LoadedCirclePackage {
     pub(crate) reference: CirclePackageRef,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) blob_protection: BlobSpoolProtection,
 }
 
 pub(crate) fn commit_stream_id(coord: &StoreCommitCoord) -> String {

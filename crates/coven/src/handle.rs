@@ -53,7 +53,7 @@ use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache}
 use coven_replication::sync::sync_loop::SyncLoopStatus;
 use coven_replication::sync::{BlobCacheError, BlobStream};
 #[cfg(any(test, feature = "test-utils"))]
-use coven_storage::cloud::CloudHome;
+use coven_storage::cloud::ExactCloudHome;
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::CloudCipher;
 use tokio::sync::watch;
@@ -184,7 +184,7 @@ impl CovenHandle {
         let rows = StoreRows::new(
             coven_database::StoreRowWrites::new(database.clone()),
             read_database,
-            security.clone(),
+            key_custody,
             sync.clone(),
         );
         let blobs = StoreBlobs::new(database.clone(), blob_access, local_blob_access);
@@ -342,7 +342,7 @@ impl CovenHandle {
         self.sync.connect_with_cloudkit(cloudkit_ops).await
     }
 
-    /// Test-only: connect a started sync loop over an injected [`CloudHome`]
+    /// Test-only: connect a started sync loop over an injected [`ExactCloudHome`]
     /// instead of one built from [`crate::Config`], so a host's integration tests drive
     /// the real make-Remote / make-Local / upload-drain and read paths over a mock
     /// cloud with no live provider.
@@ -360,13 +360,13 @@ impl CovenHandle {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn connect_sync_with_test_home(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
         self.sync.connect_with_test_home(home, cipher).await
     }
 
-    /// Test-only: connect over an injected [`CloudHome`] exactly as
+    /// Test-only: connect over an injected [`ExactCloudHome`] exactly as
     /// [`connect_sync_with_test_home`](Self::connect_sync_with_test_home) does,
     /// but start no background loop — the caller drives sync itself.
     ///
@@ -387,7 +387,7 @@ impl CovenHandle {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn connect_sync_with_test_home_caller_driven(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
         self.sync
@@ -395,7 +395,7 @@ impl CovenHandle {
             .await
     }
 
-    /// Test-only: connect over an injected [`CloudHome`] while resolving the
+    /// Test-only: connect over an injected [`ExactCloudHome`] while resolving the
     /// at-rest cipher from custody the way production
     /// [`connect_sync`](Self::connect_sync) does, instead of taking an explicit
     /// cipher like [`connect_sync_with_test_home`](Self::connect_sync_with_test_home).
@@ -409,7 +409,7 @@ impl CovenHandle {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn connect_sync_with_test_home_custody(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
     ) -> Result<(), SyncError> {
         self.sync.connect_with_test_home_custody(home).await
     }

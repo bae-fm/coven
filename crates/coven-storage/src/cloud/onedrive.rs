@@ -494,12 +494,6 @@ impl OAuthRestHome for OneDriveCloudHome {
 
 #[async_trait]
 impl CloudHome for OneDriveCloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let body = Bytes::from(data);
         let url = format!("{}/content", self.item_path_url(key));
@@ -581,38 +575,38 @@ impl CloudHome for OneDriveCloudHome {
             "{}/drives/{}/items/{}/permissions",
             self.graph_api, self.drive_id, self.folder_id
         );
-        let access = sharing::SharedFolderAccess {
-            session: &self.session,
-            list_url: perms_url.clone(),
-            permissions_field: "value",
-            email_of: |permission: &serde_json::Value| {
+        let access = sharing::SharedFolderAccess::new(
+            &self.session,
+            perms_url.clone(),
+            "value",
+            |permission: &serde_json::Value| {
                 permission["grantedToV2"]["user"]["email"]
                     .as_str()
                     .or_else(|| permission["grantedTo"]["user"]["email"].as_str())
                     .map(String::from)
             },
-            next_page: |page: &serde_json::Value| {
+            |page: &serde_json::Value| {
                 Ok(page["@odata.nextLink"]
                     .as_str()
                     .map(std::string::ToString::to_string))
             },
-            delete_url: |permission_id: &str| format!("{perms_url}/{permission_id}"),
-            has_role: |permission: &serde_json::Value| {
+            |permission_id: &str| format!("{perms_url}/{permission_id}"),
+            |permission: &serde_json::Value| {
                 permission["roles"]
                     .as_array()
                     .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("write")))
             },
-            role_name: "write",
-            grant_url: format!(
+            "write",
+            format!(
                 "{}/drives/{}/items/{}/invite",
                 self.graph_api, self.drive_id, self.folder_id
             ),
-            grant_body: serde_json::json!({
+            serde_json::json!({
                 "recipients": [{"email": email}],
                 "roles": ["write"],
                 "requireSignIn": true,
             }),
-        };
+        );
         match desired {
             CloudAccessState::Present { .. } => {
                 access.ensure_present(email).await?;

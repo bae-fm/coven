@@ -13,15 +13,35 @@ pub(super) struct PreparedWriteFixture {
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
     keypair: UserKeypair,
-    pub(super) root: StoreRootRef,
-    pub(super) device_id: String,
-    pub(super) write_id: coven_protocol::write::WriteId,
-    pub(super) commit_ref: StoreBatchCommitRef,
-    pub(super) package_object: coven_protocol::objects::ExactObjectRef,
-    pub(super) head_object: coven_protocol::objects::ExactObjectRef,
+    root: StoreRootRef,
+    device_id: String,
+    write_id: coven_protocol::write::WriteId,
+    commit_ref: StoreBatchCommitRef,
+    package_object: coven_protocol::objects::ExactObjectRef,
+    head_object: coven_protocol::objects::ExactObjectRef,
 }
 
 impl PreparedWriteFixture {
+    pub(super) fn device_id(&self) -> String {
+        self.device_id.clone()
+    }
+
+    pub(super) fn write_id(&self) -> coven_protocol::write::WriteId {
+        self.write_id.clone()
+    }
+
+    pub(super) fn commit_ref(&self) -> StoreBatchCommitRef {
+        self.commit_ref.clone()
+    }
+
+    pub(super) fn package_object(&self) -> coven_protocol::objects::ExactObjectRef {
+        self.package_object.clone()
+    }
+
+    pub(super) fn head_object(&self) -> coven_protocol::objects::ExactObjectRef {
+        self.head_object.clone()
+    }
+
     pub(super) fn fail_exact_create_before_call(&self, call: usize) {
         self.home.fail_exact_create_before_call(call);
     }
@@ -140,7 +160,7 @@ impl PreparedWriteFixture {
     pub(super) async fn retained_canonical_input(&self) -> Vec<u8> {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
-            .database
+            .database()
             .retained_canonical_input_for_test(stream_id, 1)
             .await
             .expect("load retained local package application")
@@ -149,7 +169,7 @@ impl PreparedWriteFixture {
     pub(super) async fn corrupt_retained_input(&self) {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
-            .database
+            .database()
             .corrupt_retained_materialization_input_for_test(stream_id, 1)
             .await
             .expect("corrupt retained local materialization");
@@ -166,7 +186,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn write_retains_prepared(&self) -> bool {
         self.db
-            .database
+            .database()
             .write_retains_prepared_for_test(self.write_id.clone())
             .await
             .expect("check durable losing candidate")
@@ -174,7 +194,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn install_outbound_completion_failure(&self) {
         self.db
-            .database
+            .database()
             .install_outbound_completion_failure_for_test()
             .await
             .expect("install completion fault");
@@ -182,7 +202,7 @@ impl PreparedWriteFixture {
 
     pub(super) async fn remove_outbound_completion_failure(&self) {
         self.db
-            .database
+            .database()
             .remove_outbound_completion_failure_for_test()
             .await
             .expect("remove completion fault");
@@ -244,16 +264,13 @@ impl PreparedWriteFixture {
         tokio::spawn(async {
             let home = InMemoryCloudHome::new();
             let keypair = UserKeypair::generate();
-            let storage = Arc::new(
-                CloudSyncConnection::new(
-                    Arc::new(home.clone()),
-                    CloudCipher::Plaintext,
-                    BlobPathScheme::Plain,
-                    "outbound-crash-test",
-                    keypair.clone(),
-                )
-                .expect("in-memory home supports immutable copies"),
-            );
+            let storage = Arc::new(CloudSyncConnection::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                "outbound-crash-test",
+                keypair.clone(),
+            ));
             let db = open_test_db();
             let device = crate::sync::test_helpers::TestDevice::create(
                 &db,
@@ -264,9 +281,9 @@ impl PreparedWriteFixture {
             .await
             .expect("create outbound crash test Store");
             let root = device.store_root().clone();
-            let device_id = device.device_id.clone();
-            let database = coven_database::StoreDatabase::new(&db.database);
-            db.database
+            let device_id = device.device_id().clone();
+            let database = coven_database::StoreDatabase::new(db.database());
+            db.database()
                 .execute_test_host_write(
                     "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'outbound', NULL, 1, '0000000001000-0000-writer', '2026-01-01')",
@@ -335,7 +352,7 @@ impl PreparedWriteFixture {
             candidate.candidate_family(),
             candidate.write_id.clone(),
             batch.head.value.commit.coord.clone(),
-            self.db.database.schema_version(),
+            self.db.database().schema_version(),
             b"competing valid package".to_vec(),
             Vec::new(),
         )
@@ -390,7 +407,7 @@ impl PreparedWriteFixture {
             StoreCommitOperationsInput {
                 store_package: Some(StorePackageInput {
                     candidate_family: candidate.candidate_family(),
-                    schema_version: self.db.database.schema_version(),
+                    schema_version: self.db.database().schema_version(),
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
@@ -531,7 +548,7 @@ impl PreparedWriteFixture {
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> coven_protocol::remote_object::RemoteObjectRecord {
         self.db
-            .database
+            .database()
             .remote_object_for_test(object.clone())
             .await
             .expect("load stored remote object")
@@ -542,7 +559,7 @@ impl PreparedWriteFixture {
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
-            .database
+            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("check stored remote object")

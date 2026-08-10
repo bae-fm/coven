@@ -47,7 +47,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("prepare operation while successor is authorized");
     let journal_operation_id = journal.journal.operation_id.clone();
     let journal_circle_id = journal.journal.circle_id();
-    StoreDatabase::new(&successor_db.database)
+    StoreDatabase::new(successor_db.database())
         .insert_circle_operation(journal.journal, journal.prepared_objects)
         .await
         .expect("persist operation that will lose authorization");
@@ -88,7 +88,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("prepare still-authorized operation");
     let later_operation_id = later.journal.operation_id.clone();
     let later_circle_id = later.journal.circle_id();
-    StoreDatabase::new(&successor_db.database)
+    StoreDatabase::new(successor_db.database())
         .insert_circle_operation(later.journal, later.prepared_objects)
         .await
         .expect("persist still-authorized operation");
@@ -101,7 +101,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .await
         .expect("revoked journal is blocked without interrupting the resume loop");
 
-    let blocked = StoreDatabase::new(&successor_db.database)
+    let blocked = StoreDatabase::new(successor_db.database())
         .circle_operation(&journal_operation_id)
         .await
         .expect("read revoked journal")
@@ -110,13 +110,13 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         blocked.state(),
         CircleOperationState::Blocked { .. }
     ));
-    assert!(StoreDatabase::new(&successor_db.database)
+    assert!(StoreDatabase::new(successor_db.database())
         .circle_operation(&later_operation_id)
         .await
         .expect("read later journal")
         .is_none());
     assert_eq!(
-        StoreDatabase::new(&successor_db.database)
+        StoreDatabase::new(successor_db.database())
             .get_circles(
                 &successor_pubkey,
                 std::collections::BTreeSet::from([successor_pubkey.clone()]),
@@ -131,7 +131,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         }]
     );
     assert_eq!(
-        StoreDatabase::new(&successor_db.database)
+        StoreDatabase::new(successor_db.database())
             .circle_control_activation_count_for_test(journal_circle_id)
             .await
             .expect("count circle activations"),
@@ -167,8 +167,8 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     )
     .await
     .expect("create retained Circle Store");
-    let store = fixture.store;
-    let cloud_storage = fixture.storage;
+    let store = fixture.store();
+    let cloud_storage = fixture.storage();
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
@@ -199,7 +199,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     let journal = prepared.journal;
     let commit = journal.commit().expect("parse retained Circle commit");
     let commit_ref = &journal.operation().commit_ref;
-    let author = coven_database::StoreDatabase::new(&db.database)
+    let author = coven_database::StoreDatabase::new(db.database())
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");

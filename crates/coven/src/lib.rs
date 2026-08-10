@@ -135,8 +135,8 @@ pub use coven_storage::{
     CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
     CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink, S3CloudHome,
-    UploadProgress,
+    ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink,
+    S3CloudHome, UploadProgress,
 };
 pub use handle::CovenHandle;
 pub use read_handle::CovenReadHandle;

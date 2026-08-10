@@ -4,6 +4,7 @@ impl StoreSync {
     pub(super) fn map_storage_setup_error(error: StorageSetupError) -> SyncError {
         match error {
             StorageSetupError::Key(error) => SyncError::Key(error),
+            StorageSetupError::NoEncryptionKey => SyncError::MasterKeyNotEstablished,
             error => SyncError::StorageSetup(error),
         }
     }
@@ -120,9 +121,7 @@ impl StoreSync {
             return Ok(());
         };
 
-        let routing_encryption = self
-            .security
-            .routing_encryption(self.database.has_scoped_graph())?;
+        let routing_encryption = self.connected_encryption(storage.is_plaintext())?;
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
@@ -147,13 +146,10 @@ impl StoreSync {
                 .cloud_storage
                 .admit(&config, cloudkit_ops)
                 .map_err(Self::map_storage_setup_error)?;
-            let cipher = self
-                .security
-                .resolve_cloud_cipher(config.cloud_home.storage)?;
             self.stop_current()?;
             Some(Arc::new(
                 admitted
-                    .open(Some(cipher))
+                    .open(None)
                     .await
                     .map_err(Self::map_storage_setup_error)?,
             ))
@@ -187,11 +183,15 @@ impl StoreSync {
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) async fn replace_with_test_home(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
         driver: SyncDriver,
     ) -> Result<(), SyncError> {
         let config = self.config();
+        let routing_encryption = match &cipher {
+            coven_storage::CloudCipher::Encrypted(encryption) => Some(encryption.clone()),
+            coven_storage::CloudCipher::Plaintext => None,
+        };
         let admitted = self
             .cloud_storage
             .admit_home(&config, home)
@@ -202,9 +202,6 @@ impl StoreSync {
                 .open(Some(cipher))
                 .map_err(Self::map_storage_setup_error)?,
         );
-        let routing_encryption = self
-            .security
-            .routing_encryption(self.database.has_scoped_graph())?;
         let components = self
             .initialize_components(Arc::clone(&storage), routing_encryption.clone())
             .await?;
@@ -224,7 +221,7 @@ impl StoreSync {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn connect_with_test_home(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
@@ -237,7 +234,7 @@ impl StoreSync {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn connect_with_test_home_caller_driven(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
@@ -252,14 +249,17 @@ impl StoreSync {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn connect_with_test_home_custody(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
     ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        let cipher = self
-            .security
-            .resolve_cloud_cipher(self.config().cloud_home.storage)?;
-        self.replace_with_test_home(home, cipher, SyncDriver::Loop)
-            .await?;
+        let config = self.config();
+        let admitted = self
+            .cloud_storage
+            .admit_home(&config, home)
+            .map_err(Self::map_storage_setup_error)?;
+        self.stop_current()?;
+        let storage = Arc::new(admitted.open(None).map_err(Self::map_storage_setup_error)?);
+        self.build_connection(config, Some(storage)).await?;
         info!("store sync connected over an injected test cloud home");
         Ok(())
     }

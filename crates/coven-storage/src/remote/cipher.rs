@@ -1,17 +1,92 @@
 use super::*;
 
-/// A sync session's fixed at-rest representation. The mode is selected once at
-/// construction: plaintext has no mutable key state, while encrypted sessions
-/// may merge new key generations without ever becoming plaintext.
-pub struct CloudCipherState {
-    mode: CloudCipherMode,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKeyringMerge {
+    live_key_count: usize,
+    merged_key_count: usize,
+    merged_generation: u64,
 }
 
-/// Read-only access to a session cipher snapshot. Production storage implements
-/// this with [`CloudCipherState`], whose mode cannot change. The test-utils
-/// implementation for a raw lock exists only for injected engine tests.
+impl CloudKeyringMerge {
+    pub fn live_key_count(&self) -> usize {
+        self.live_key_count
+    }
+
+    pub fn merged_key_count(&self) -> usize {
+        self.merged_key_count
+    }
+
+    pub fn merged_generation(&self) -> u64 {
+        self.merged_generation
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdoptedCloudKeyRotation {
+    fingerprint: String,
+    generation: u64,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKeyringFacts {
+    entries: Vec<(u64, [u8; 32])>,
+    seal_key: [u8; 32],
+    current_generation: u64,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl CloudKeyringFacts {
+    pub(super) fn from_encryption(encryption: &EncryptionService) -> Self {
+        Self {
+            entries: encryption.keyring_entries(),
+            seal_key: encryption.key_bytes(),
+            current_generation: encryption.current_generation(),
+        }
+    }
+
+    pub fn entries(&self) -> &[(u64, [u8; 32])] {
+        &self.entries
+    }
+
+    pub fn seal_key(&self) -> [u8; 32] {
+        self.seal_key
+    }
+
+    pub fn current_generation(&self) -> u64 {
+        self.current_generation
+    }
+}
+
+impl AdoptedCloudKeyRotation {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// Closed access to one session's live at-rest keyring. Callers can use the
+/// cipher but cannot take the retained key service out of its owner.
 pub trait CloudSyncCipherStateAccess: Send + Sync {
-    fn snapshot(&self) -> CloudCipher;
+    fn is_plaintext(&self) -> bool;
+    fn suffix(&self) -> &'static str;
+    fn current_generation(&self) -> Option<u64>;
+    fn current_fingerprint(&self) -> Option<String>;
+    fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError>;
+    fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8>;
+    #[cfg(any(test, feature = "test-utils"))]
+    fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String>;
+    fn merged_keyring(
+        &self,
+        new_encryption: &EncryptionService,
+    ) -> Result<CloudKeyringMerge, EncryptionError>;
     fn merge_key_rotation(
         &self,
         new_encryption: &EncryptionService,
@@ -22,89 +97,35 @@ pub trait CloudSyncCipherStateAccess: Send + Sync {
         &self,
         new_encryption: &EncryptionService,
         custody: &dyn coven_keys::keys::MasterKeyCustody,
-    ) -> Result<String, coven_keys::keys::KeyError> {
-        if let Some(fingerprint) = self.merge_key_rotation(new_encryption, custody)? {
-            return Ok(fingerprint);
-        }
-        let CloudCipher::Encrypted(live) = self.snapshot() else {
-            return Err(coven_keys::keys::KeyError::Crypto(
+    ) -> Result<AdoptedCloudKeyRotation, coven_keys::keys::KeyError> {
+        let fingerprint = match self.merge_key_rotation(new_encryption, custody)? {
+            Some(fingerprint) => fingerprint,
+            None => self
+                .merged_keyring(new_encryption)
+                .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))
+                .and_then(|status| {
+                    if status.live_key_count() != status.merged_key_count() {
+                        return Err(coven_keys::keys::KeyError::Crypto(
+                            "live keyring changed without retaining an adopted rotation"
+                                .to_string(),
+                        ));
+                    }
+                    self.current_fingerprint().ok_or_else(|| {
+                        coven_keys::keys::KeyError::Crypto(
+                            "cannot rotate the key of a plaintext cloud home".to_string(),
+                        )
+                    })
+                })?,
+        };
+        let generation = self.current_generation().ok_or_else(|| {
+            coven_keys::keys::KeyError::Crypto(
                 "cannot rotate the key of a plaintext cloud home".to_string(),
-            ));
-        };
-        let retained = live
-            .merged_with(new_encryption)
-            .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
-        if retained.key_count() != live.key_count() {
-            return Err(coven_keys::keys::KeyError::Crypto(
-                "live keyring changed without retaining an adopted rotation".to_string(),
-            ));
-        }
-        Ok(live.fingerprint())
-    }
-}
-
-pub(crate) enum CloudCipherMode {
-    Encrypted(RwLock<EncryptionService>),
-    Plaintext,
-}
-
-impl CloudCipherState {
-    pub fn new(cipher: CloudCipher) -> Self {
-        let mode = match cipher {
-            CloudCipher::Encrypted(encryption) => {
-                CloudCipherMode::Encrypted(RwLock::new(encryption))
-            }
-            CloudCipher::Plaintext => CloudCipherMode::Plaintext,
-        };
-        Self { mode }
-    }
-
-    pub fn is_plaintext(&self) -> bool {
-        matches!(self.mode, CloudCipherMode::Plaintext)
-    }
-
-    pub fn snapshot(&self) -> CloudCipher {
-        match &self.mode {
-            CloudCipherMode::Encrypted(encryption) => {
-                CloudCipher::Encrypted(encryption.read().unwrap().clone())
-            }
-            CloudCipherMode::Plaintext => CloudCipher::Plaintext,
-        }
-    }
-
-    pub fn merge_key_rotation(
-        &self,
-        new_encryption: &EncryptionService,
-        custody: &dyn coven_keys::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
-        let CloudCipherMode::Encrypted(live) = &self.mode else {
-            return Err(coven_keys::keys::KeyError::Crypto(
-                "cannot rotate the key of a plaintext cloud home".to_string(),
-            ));
-        };
-        merge_into(&mut live.write().unwrap(), new_encryption, custody)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn encryption(&self) -> Option<EncryptionService> {
-        match &self.mode {
-            CloudCipherMode::Encrypted(encryption) => Some(encryption.read().unwrap().clone()),
-            CloudCipherMode::Plaintext => None,
-        }
-    }
-}
-
-impl CloudSyncCipherStateAccess for CloudCipherState {
-    fn snapshot(&self) -> CloudCipher {
-        CloudCipherState::snapshot(self)
-    }
-
-    fn merge_key_rotation(
-        &self,
-        new_encryption: &EncryptionService,
-        custody: &dyn coven_keys::keys::MasterKeyCustody,
-    ) -> Result<Option<String>, coven_keys::keys::KeyError> {
-        CloudCipherState::merge_key_rotation(self, new_encryption, custody)
+            )
+        })?;
+        Ok(AdoptedCloudKeyRotation {
+            fingerprint,
+            generation,
+        })
     }
 }
 
@@ -131,10 +152,66 @@ fn merge_into(
     Ok(Some(live.fingerprint()))
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
-    fn snapshot(&self) -> CloudCipher {
-        self.read().unwrap().clone()
+    fn is_plaintext(&self) -> bool {
+        self.read().unwrap().is_plaintext()
+    }
+
+    fn suffix(&self) -> &'static str {
+        self.read().unwrap().suffix()
+    }
+
+    fn current_generation(&self) -> Option<u64> {
+        match &*self.read().unwrap() {
+            CloudCipher::Encrypted(encryption) => Some(encryption.current_generation()),
+            CloudCipher::Plaintext => None,
+        }
+    }
+
+    fn current_fingerprint(&self) -> Option<String> {
+        match &*self.read().unwrap() {
+            CloudCipher::Encrypted(encryption) => Some(encryption.fingerprint()),
+            CloudCipher::Plaintext => None,
+        }
+    }
+
+    fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        self.read().unwrap().open(stored, aad_context)
+    }
+
+    fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
+        self.read().unwrap().seal(plaintext, aad_context)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+        let cipher = self.read().unwrap();
+        let CloudCipher::Encrypted(encryption) = &*cipher else {
+            return Err("session is not encrypted".to_string());
+        };
+        super::blob_io::open_sealed_blob(stored, encryption, aad_context)
+    }
+
+    fn merged_keyring(
+        &self,
+        new_encryption: &EncryptionService,
+    ) -> Result<CloudKeyringMerge, EncryptionError> {
+        let cipher = self.read().unwrap();
+        let CloudCipher::Encrypted(live) = &*cipher else {
+            return Err(EncryptionError::KeyManagement(
+                "cannot merge keys into a plaintext cloud home".to_string(),
+            ));
+        };
+        let merged = live.merged_with(new_encryption)?;
+        Ok(CloudKeyringMerge {
+            live_key_count: live.key_count(),
+            merged_key_count: merged.key_count(),
+            merged_generation: merged.current_generation(),
+        })
     }
 
     fn merge_key_rotation(

@@ -72,7 +72,7 @@ impl RevokedOperation {
             .await
             .expect("prepare operation while authorized");
         let operation_id = prepared.journal.operation_id.clone();
-        StoreDatabase::new(&successor_db.database)
+        StoreDatabase::new(successor_db.database())
             .insert_circle_operation(prepared.journal, prepared.prepared_objects)
             .await
             .expect("persist operation");
@@ -100,14 +100,14 @@ impl RevokedOperation {
     async fn witness_membership_revocation(&self) {
         let changeset = self
             .owner_db
-            .database
+            .database()
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
                      '0000000001004-0000-founder', '2026-01-01')",
             ])
             .await;
-        StoreDatabase::new(&self.owner_db.database)
+        StoreDatabase::new(self.owner_db.database())
             .enqueue_store_changeset_for_test(changeset)
             .await
             .expect("enqueue the membership-revocation witness");
@@ -172,7 +172,7 @@ async fn operation_inspection_surface_reports_the_typed_block() {
         .await
         .expect("resume blocks the revoked operation without failing");
 
-    let operations = StoreDatabase::new(&revoked.db.database)
+    let operations = StoreDatabase::new(revoked.db.database())
         .get_circle_operations()
         .await
         .expect("read the operation-inspection surface");
@@ -212,7 +212,7 @@ async fn operation_inspection_surface_reports_the_typed_block() {
         .await
         .expect("prepare a ready operation");
     let ready_id = prepared.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist the ready operation");
@@ -240,7 +240,7 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
         .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation without failing");
-    let blocked = StoreDatabase::new(&revoked.db.database)
+    let blocked = StoreDatabase::new(revoked.db.database())
         .circle_operation(&revoked.operation_id)
         .await
         .expect("read blocked operation")
@@ -255,7 +255,7 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
         "the block names the author's exact grant"
     );
     // Surfaced typed through the query API.
-    let operations = StoreDatabase::new(&revoked.db.database)
+    let operations = StoreDatabase::new(revoked.db.database())
         .get_circle_operations()
         .await
         .expect("read circle operations");
@@ -303,7 +303,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .collect::<Vec<_>>()
         .try_into()
         .expect("founder has one active Store grant");
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist authorized operation");
@@ -311,7 +311,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     // The operation is durably blocked (its exact retained payload preserved),
     // then retried. Retry restores the phase and re-enters the publish pipeline
     // without regenerating anything.
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .block_circle_operation(
             &operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -328,12 +328,12 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .await
         .expect("retry publishes the still-authorized operation");
 
-    assert!(coven_database::StoreDatabase::new(&db.database)
+    assert!(coven_database::StoreDatabase::new(db.database())
         .circle_operation(&operation_id)
         .await
         .expect("read retried operation")
         .is_none());
-    let (activated, activation_commit_ref) = coven_database::StoreDatabase::new(&db.database)
+    let (activated, activation_commit_ref) = coven_database::StoreDatabase::new(db.database())
         .circle_authoring_context(circle_id, &keys::public_key_hex(&founder))
         .await
         .expect("load activated Circle authoring state");
@@ -375,7 +375,7 @@ async fn discard_without_nonactivation_proof_is_refused() {
         "{refusal:?}"
     );
     assert!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .circle_operation(&operation_id)
             .await
             .expect("read operation after refused discard")
@@ -413,7 +413,7 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .expect("the accepted membership revocation permits discard");
 
     assert!(
-        StoreDatabase::new(&revoked.db.database)
+        StoreDatabase::new(revoked.db.database())
             .circle_operation(&revoked.operation_id)
             .await
             .expect("read discarded operation")
@@ -460,7 +460,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         .expect("the verified winner permits discard");
 
     assert!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .circle_operation(&operation_id)
             .await
             .expect("read discarded operation")
@@ -469,7 +469,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     );
     assert!(!_home.contains_exact_object(&candidate_commit));
     assert!(
-        !db.database
+        !db.database()
             .remote_object_exists_for_test(candidate_commit.clone())
             .await
             .expect("check stored remote object"),
@@ -517,7 +517,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         .await
         .expect_err("the injected delete failure interrupts cleanup");
     assert_eq!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .circle_operation(&operation_id)
             .await
             .expect("read interrupted operation")
@@ -535,7 +535,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         .await
         .expect("resume completes the interrupted discard");
     assert!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .circle_operation(&operation_id)
             .await
             .expect("read resumed operation")
@@ -564,7 +564,7 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
         .await
         .expect("prepare an authorized operation");
     let ready_id = ready.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .insert_circle_operation(ready.journal, ready.prepared_objects)
         .await
         .expect("persist the ready operation");
@@ -604,7 +604,7 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
             other => panic!("retry of a permanently-blocked operation must re-block: {other:?}"),
         }
         assert!(matches!(
-            StoreDatabase::new(&revoked.db.database)
+            StoreDatabase::new(revoked.db.database())
                 .circle_operation(&revoked.operation_id)
                 .await
                 .expect("read re-blocked operation")
@@ -633,7 +633,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .await
         .expect("prepare the operation queued behind the loser");
     let second_id = second.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .insert_circle_operation(second.journal, second.prepared_objects)
         .await
         .expect("persist the operation queued behind the loser");
@@ -648,7 +648,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         .await
         .expect("the resume queue drains past an operation that lost its position");
 
-    let second_after = coven_database::StoreDatabase::new(&db.database)
+    let second_after = coven_database::StoreDatabase::new(db.database())
         .circle_operation(&second_id)
         .await
         .expect("read the operation queued behind the loser")
@@ -663,7 +663,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         "the queue advanced to and classified the next operation: {:?}",
         second_after.state(),
     );
-    let blocked = coven_database::StoreDatabase::new(&db.database)
+    let blocked = coven_database::StoreDatabase::new(db.database())
         .circle_operation(&first.operation_id)
         .await
         .expect("read the operation that lost its position")
@@ -681,7 +681,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 
     // The block is a fact reported to the initiator, so it has to be legible from
     // the surface the initiator reads.
-    let reported = coven_database::StoreDatabase::new(&db.database)
+    let reported = coven_database::StoreDatabase::new(db.database())
         .get_circle_operations()
         .await
         .expect("list circle operations");
@@ -701,7 +701,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
 
     assert!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .oldest_pending_circle_operation()
             .await
             .expect("read the publish queue head")
@@ -730,7 +730,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
     assert!(
         matches!(
-            coven_database::StoreDatabase::new(&db.database)
+            coven_database::StoreDatabase::new(db.database())
                 .circle_operation(&first.operation_id)
                 .await
                 .expect("read the retried operation")
@@ -762,7 +762,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare the operation that stays pending");
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .insert_circle_operation(pending.journal.clone(), pending.prepared_objects)
         .await
         .expect("journal the operation that stays pending");
@@ -790,7 +790,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         .expect("activate the founder Circle");
 
     assert_eq!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
@@ -798,7 +798,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         "activation discharges its own cleanup obligations"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .circle_operation_payload_claims_for_test(&activating.operation_id)
             .await
             .expect("read the activated operation's payload claims"),
@@ -809,7 +809,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
     let mut kept_a_row = false;
     for (step, object) in &activating.operation().prepared_objects {
         let row_exists = db
-            .database
+            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("read whether the activated object kept its row");
@@ -843,7 +843,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
 #[tokio::test]
 async fn discard_releases_its_payload_claims() {
     let revoked = RevokedOperation::prepare("circle-payload-discard").await;
-    let journal = coven_database::StoreDatabase::new(&revoked.db.database)
+    let journal = coven_database::StoreDatabase::new(revoked.db.database())
         .circle_operation(&revoked.operation_id)
         .await
         .expect("read the operation to discard")
@@ -875,7 +875,7 @@ async fn discard_releases_its_payload_claims() {
         .expect("the accepted membership revocation permits discard");
 
     assert_eq!(
-        coven_database::StoreDatabase::new(&revoked.db.database)
+        coven_database::StoreDatabase::new(revoked.db.database())
             .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
@@ -883,7 +883,7 @@ async fn discard_releases_its_payload_claims() {
         "discard discharges its own cleanup obligations"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(&revoked.db.database)
+        coven_database::StoreDatabase::new(revoked.db.database())
             .circle_operation_payload_claims_for_test(&revoked.operation_id)
             .await
             .expect("read the discarded operation's payload claims"),
@@ -894,7 +894,7 @@ async fn discard_releases_its_payload_claims() {
     for (step, object) in &journal.operation().prepared_objects {
         let row_exists = revoked
             .db
-            .database
+            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("read whether the discarded object kept its row");

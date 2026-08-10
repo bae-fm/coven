@@ -80,15 +80,15 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn blob_protection_for_test(
+    pub(crate) async fn blob_key_fingerprint_for_test(
         &self,
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, String> {
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, String> {
         self.authorize_history()
             .await
             .map_err(|error| error.to_string())?
-            .blob_protection_for_test(authority, stored)
+            .blob_key_fingerprint_for_test(authority, stored)
             .await
             .map_err(|error| error.to_string())
     }

@@ -854,6 +854,14 @@ fn main() {
             }
             for violation in &result.owner_dependency_leaks {
                 match violation {
+                    OwnerDependencyLeak::Field {
+                        path,
+                        line,
+                        owner,
+                        field,
+                    } => eprintln!(
+                        "{path}:{line}: retained-service owner {owner} exposes field {field}"
+                    ),
                     OwnerDependencyLeak::CrateRootSessionField {
                         path,
                         line,
@@ -895,6 +903,14 @@ fn main() {
                         dependency,
                     } => eprintln!(
                         "{path}:{line}: {function} accepts raw dependency {dependency}"
+                    ),
+                    OwnerDependencyLeak::RawProviderOperation {
+                        path,
+                        line,
+                        owner,
+                        method,
+                    } => eprintln!(
+                        "{path}:{line}: {owner}::{method} exposes raw provider-object access"
                     ),
                 }
             }

@@ -23,7 +23,7 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         &serde_json::to_vec(&own_access.leaf.value).expect("serialize mismatched access leaf"),
     );
     own_access.envelope.resign(&signer);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted journal plaintext");
@@ -35,7 +35,7 @@ async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
         .await
         .expect_err("local activation must reject substituted journal plaintext");
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
@@ -69,7 +69,7 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .operation_mut()
         .prepared_objects
         .insert("metadata".to_string(), substituted);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted journal object");
@@ -83,7 +83,7 @@ async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() 
         .expect_err("local publication must reject objects outside the signed graph");
 
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
@@ -149,7 +149,7 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .get("store-head")
         .expect("Merge operation carries a Store head")
         .clone();
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted signed Circle graph");
@@ -163,7 +163,7 @@ async fn local_activation_rejects_substituted_exact_circle_edges() {
         .expect_err("local activation must verify every signed exact Circle edge");
 
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
@@ -251,7 +251,7 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             stream_id,
             sequence,
         } = journal.operation().commit_ref.coord;
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .substitute_circle_operation_for_test(journal.clone())
             .await
             .expect("persist Circle journal with substituted stream authority");
@@ -264,13 +264,13 @@ async fn local_circle_activation_rejects_another_circle_or_grant_anchor() {
             .await
             .expect_err("Circle stream activation must name its signed Circle and grant");
         assert_eq!(
-            StoreDatabase::new(&db.database)
+            StoreDatabase::new(db.database())
                 .circle_control_activation_count_for_test(journal.circle_id())
                 .await
                 .expect("count circle activations"),
             0
         );
-        assert!(coven_database::StoreDatabase::new(&db.database)
+        assert!(coven_database::StoreDatabase::new(db.database())
             .exact_materialized_ref(&stream_id.to_string(), sequence)
             .await
             .expect("read rejected Circle Store position")
@@ -292,7 +292,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
     device
         .stage_acknowledgement(
             coven_protocol::store_commit::CommitFrontier::from_refs(
-                coven_database::StoreDatabase::new(&db.database)
+                coven_database::StoreDatabase::new(db.database())
                     .materialized_frontier()
                     .await
                     .expect("read current Store frontier"),
@@ -302,7 +302,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         )
         .await
         .expect("stage a valid non-initial Store acknowledgement");
-    let acknowledgement = coven_database::StoreDatabase::new(&db.database)
+    let acknowledgement = coven_database::StoreDatabase::new(db.database())
         .oldest_outbound_store_ack()
         .await
         .expect("read staged Store acknowledgement")
@@ -343,7 +343,7 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         stream_id,
         sequence,
     } = journal.operation().commit_ref.coord;
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist Circle journal with unexpected acknowledgement");
@@ -357,13 +357,13 @@ async fn local_circle_activation_rejects_an_unexpected_acknowledgement() {
         .expect_err("Circle journal must contain no operation besides its control");
     assert!(error.to_string().contains("control-only batch"), "{error}");
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
         0
     );
-    assert!(coven_database::StoreDatabase::new(&db.database)
+    assert!(coven_database::StoreDatabase::new(db.database())
         .exact_materialized_ref(&stream_id.to_string(), sequence)
         .await
         .expect("read rejected Circle Store position")
@@ -393,7 +393,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
         .await
         .expect_err("interrupt rename before its first exact upload");
-    let operation_id = coven_database::StoreDatabase::new(&db.database)
+    let operation_id = coven_database::StoreDatabase::new(db.database())
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -401,13 +401,13 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted rename remains pending")
         .operation_id;
-    let mut journal = coven_database::StoreDatabase::new(&db.database)
+    let mut journal = coven_database::StoreDatabase::new(db.database())
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted rename")
         .expect("interrupted rename journal remains durable");
     let commit = journal.commit().expect("parse rename commit");
-    let author = coven_database::StoreDatabase::new(&db.database)
+    let author = coven_database::StoreDatabase::new(db.database())
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load rename author");
@@ -486,7 +486,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .get("store-head")
         .expect("Merge operation carries a Store head")
         .clone();
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal)
         .await
         .expect("persist forged successor journal");
@@ -499,7 +499,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         .await
         .expect_err("common verifier must reject an unreserved Circle predecessor");
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
@@ -534,7 +534,7 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .operation_mut()
         .prepared_objects
         .insert("store-head".to_string(), substituted);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .substitute_circle_operation_for_test(journal.clone())
         .await
         .expect("persist substituted Store head slot");
@@ -548,7 +548,7 @@ async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
         .expect_err("local publication must reject an unreserved Store head slot");
 
     assert_eq!(
-        StoreDatabase::new(&db.database)
+        StoreDatabase::new(db.database())
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
@@ -570,8 +570,8 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
     let db = open_test_db();
     let (fixture, _home, signer, journal) =
         persist_merge_operation_fixture(&db, "circle-roster-kind-crossing").await;
-    let store = fixture.store;
-    let cloud_storage = fixture.storage;
+    let store = fixture.store();
+    let cloud_storage = fixture.storage();
     let author = keys::public_key_hex(&signer);
     let access = journal
         .operation()

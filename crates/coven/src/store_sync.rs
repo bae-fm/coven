@@ -20,8 +20,6 @@ use coven_replication::sync::store::blob::LocalStoreBlobAccess;
 use coven_replication::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
-#[cfg(any(test, feature = "test-utils"))]
-use coven_storage::cloud::CloudHome;
 #[cfg(test)]
 use coven_storage::BlobChunking;
 use coven_storage::{BlobPathScheme, CloudSyncConnection, CloudSyncObjectStorage};
@@ -107,6 +105,20 @@ pub(crate) struct StoreSync {
 }
 
 impl StoreSync {
+    fn connected_encryption(
+        &self,
+        cloud_is_plaintext: bool,
+    ) -> Result<Option<EncryptionService>, coven_keys::keys::RoutingEncryptionError> {
+        if cloud_is_plaintext {
+            return Ok(None);
+        }
+        let keyring = self
+            .master_keys
+            .unlock()?
+            .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+        Ok(Some(EncryptionService::from(keyring)))
+    }
+
     /// The loop handle of an installed cloud connection, whoever drives its
     /// cycles. Enough for anything the connection already knows — its config,
     /// path scheme, uploader — and for waking a cycle that may or may not run.

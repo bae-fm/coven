@@ -19,18 +19,34 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         self.home.set_access(state).await.map_err(Into::into)
     }
 
-    async fn read_provider_object(&self, key: &str) -> Result<Vec<u8>, StorageError> {
-        self.home.read(key).await.map_err(Into::into)
+    async fn read_blob_tombstone(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = crate::blob_tombstone_key(stored, self.cipher().suffix());
+        let stored_bytes = match self.home.read(&key).await.map_err(StorageError::from) {
+            Ok(bytes) => bytes,
+            Err(StorageError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let aad_context = cloud_aad_context(&self.store_id, &key);
+        self.cipher()
+            .open(stored_bytes, &aad_context)
+            .map(Some)
+            .map_err(|error| StorageError::InvalidContent(error.to_string()))
     }
 
-    async fn write_provider_object(
+    async fn write_blob_tombstone(
         &self,
-        key: &str,
-        stored_bytes: Vec<u8>,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+        plaintext: Vec<u8>,
     ) -> Result<(), StorageError> {
+        let key = crate::blob_tombstone_key(stored, self.cipher().suffix());
+        let aad_context = cloud_aad_context(&self.store_id, &key);
+        let stored_bytes = self.cipher_for_seal()?.seal(plaintext, &aad_context);
         self.home
             .write(
-                key,
+                &key,
                 BlobBody::from_bytes(stored_bytes),
                 &crate::cloud::no_progress(),
             )
@@ -38,16 +54,87 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             .map_err(Into::into)
     }
 
-    async fn list_provider_objects(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+    async fn list_blob_tombstones(&self) -> Result<Vec<crate::ListedBlobTombstone>, StorageError> {
+        let suffix = self.cipher().suffix();
+        let keys = self
+            .home
+            .list(crate::BLOB_TOMBSTONE_PREFIX)
+            .await
+            .map_err(StorageError::from)?;
+        let mut listed = Vec::with_capacity(keys.len());
+        for key in keys {
+            let object_id = key
+                .strip_suffix(suffix)
+                .and_then(|key| key.strip_prefix(crate::BLOB_TOMBSTONE_PREFIX))
+                .and_then(|encoded| encoded.parse().ok());
+            let Some(object_id) = object_id else {
+                listed.push(crate::ListedBlobTombstone::Invalid {
+                    provider_key: key,
+                    reason: "unexpected tombstone key format".to_string(),
+                });
+                continue;
+            };
+            let stored_bytes = self.home.read(&key).await.map_err(StorageError::from)?;
+            let aad_context = cloud_aad_context(&self.store_id, &key);
+            match self.cipher().open(stored_bytes, &aad_context) {
+                Ok(plaintext) => listed.push(crate::ListedBlobTombstone::Opened {
+                    object_id,
+                    plaintext,
+                }),
+                Err(error) => listed.push(crate::ListedBlobTombstone::Invalid {
+                    provider_key: key,
+                    reason: format!("open failed: {error}"),
+                }),
+            }
+        }
+        Ok(listed)
+    }
+
+    async fn blob_tombstone_exists(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, StorageError> {
+        let key = crate::blob_tombstone_key(stored, self.cipher().suffix());
+        self.home.exists(&key).await.map_err(Into::into)
+    }
+
+    async fn delete_blob_tombstone(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError> {
+        let key = crate::blob_tombstone_key(stored, self.cipher().suffix());
+        self.home.delete(&key).await.map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn read_provider_bytes_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        self.home.read(key).await.map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn write_provider_bytes_for_test(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.home
+            .write(
+                key,
+                BlobBody::from_bytes(bytes),
+                &crate::cloud::no_progress(),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn list_provider_keys_for_test(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         self.home.list(prefix).await.map_err(Into::into)
     }
 
-    async fn provider_object_exists(&self, key: &str) -> Result<bool, StorageError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn provider_key_exists_for_test(&self, key: &str) -> Result<bool, StorageError> {
         self.home.exists(key).await.map_err(Into::into)
-    }
-
-    async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError> {
-        self.home.delete(key).await.map_err(Into::into)
     }
 
     async fn reserve_cross_principal_response_slot(
@@ -169,32 +256,30 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         &self,
         slot: &ObjectSlot,
     ) -> Result<Option<ExactObjectRef>, StorageError> {
-        self.exact.observe_at(slot).await.map_err(Into::into)
+        self.home.observe_at(slot).await.map_err(Into::into)
     }
 
     async fn delete_exact_slot_and_verify_absent(
         &self,
         slot: &ObjectSlot,
     ) -> Result<(), StorageError> {
-        self.exact
+        self.home
             .delete_and_verify_absent(slot)
             .await
             .map_err(Into::into)
     }
 
-    fn store_blob_protection(
+    fn store_blob_key_fingerprint(
         &self,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, StorageError> {
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, StorageError> {
         Ok(match self.cipher_for_seal()? {
-            CloudCipher::Encrypted(encryption) => {
-                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption)
-            }
-            CloudCipher::Plaintext => coven_protocol::objects::BlobSpoolProtection::Browsable,
+            CloudCipher::Encrypted(encryption) => Some(encryption.seal_key_fingerprint()),
+            CloudCipher::Plaintext => None,
         })
     }
 
     async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError> {
-        self.exact.provider_binding().await.map_err(Into::into)
+        self.home.provider_binding().await.map_err(Into::into)
     }
 
     async fn allocate_protocol_slot(
@@ -206,7 +291,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         context.validate_path(semantic_prefix)?;
         context.validate_extension(extension)?;
         Ok(self
-            .exact
+            .home
             .allocate_slot(&format!("{semantic_prefix}{extension}"))
             .await?)
     }
@@ -261,7 +346,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
     ) -> Result<(), StorageError> {
         let upload =
             crate::cloud::ExactUpload::from_bytes(prepared.reference(), prepared.stored_bytes())?;
-        self.exact
+        self.home
             .create_at(&upload, &crate::cloud::no_progress())
             .await
             .map(drop)
@@ -275,7 +360,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
         context.validate_reference(object, semantic_prefix)?;
-        let stored = self.exact.read_at(object.slot()).await?;
+        let stored = self.home.read_at(object.slot()).await?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
         let cipher = self.protocol_cipher_for_open(context);
         let object = object.clone();
@@ -313,7 +398,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         semantic_prefix: &str,
     ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
         context.validate_slot(slot, semantic_prefix)?;
-        let stored = self.exact.read_at(slot).await?;
+        let stored = self.home.read_at(slot).await?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
         let cipher = self.protocol_cipher_for_open(context);
         let slot = slot.clone();
@@ -339,7 +424,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
     }
 
     async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {
-        match self.exact.read_at(object.slot()).await {
+        match self.home.read_at(object.slot()).await {
             Err(crate::cloud::CloudHomeError::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error.into()),
             Ok(stored)
@@ -354,14 +439,14 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             }
             Ok(_) => {}
         }
-        let delete_error = self.exact.delete_at(object.slot()).await.err();
+        let delete_error = self.home.delete_at(object.slot()).await.err();
         if delete_error
             .as_ref()
             .is_some_and(|error| !error.is_retryable())
         {
             return Err(delete_error.expect("delete error exists").into());
         }
-        match self.exact.read_at(object.slot()).await {
+        match self.home.read_at(object.slot()).await {
             Err(crate::cloud::CloudHomeError::NotFound(_)) => Ok(()),
             Err(readback) => match delete_error {
                 Some(operation) => Err(StorageError::UnresolvedOutcome {
@@ -388,7 +473,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
-        Ok(self.exact.allocate_slot(&locator.semantic_key()).await?)
+        Ok(self.home.allocate_slot(&locator.semantic_key()).await?)
     }
 
     async fn seal_blob_to_spool(
@@ -573,6 +658,23 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         }
     }
 
+    async fn seal_store_blob_to_spool(
+        &self,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        plaintext_file: &Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<coven_protocol::objects::BlobSpoolWrite, StorageError> {
+        self.seal_blob_to_spool(
+            locator,
+            authority,
+            self.store_blob_protection()?,
+            plaintext_file,
+            spool,
+        )
+        .await
+    }
+
     async fn prepare_blob_object(
         &self,
         locator: &coven_protocol::blob::locator::BlobLocator,
@@ -620,7 +722,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             )));
         }
         let upload = crate::cloud::ExactUpload::from_file(object, stored_file).await?;
-        self.exact
+        self.home
             .create_at(&upload, progress)
             .await
             .map(drop)
@@ -639,7 +741,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 blob.object().slot().logical_key()
             )));
         }
-        let stored = self.exact.read_at(blob.object().slot()).await?;
+        let stored = self.home.read_at(blob.object().slot()).await?;
         blob.object().verify(&stored)
     }
 
@@ -687,6 +789,15 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         Ok(plaintext)
     }
 
+    async fn stage_verified_store_blob_plaintext(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        plaintext: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
+        self.stage_verified_blob_plaintext(blob, self.store_blob_protection()?, plaintext)
+            .await
+    }
+
     async fn open_blob_range_reader(
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
@@ -722,7 +833,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         // later range is arithmetic over the header it carries, so this is the
         // only request a range does not pay for.
         let prefix = self
-            .exact
+            .home
             .read_range_at(&slot, 0, (KeyTag::LEN + SEALED_BLOB_HEADER_LEN) as u64)
             .await
             .map_err(StorageError::from)?;
@@ -734,13 +845,21 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             &master,
             &cloud_aad_context(&self.store_id, &locator.semantic_key()),
         )?;
-        Ok(BlobRangeReader {
-            exact: self.exact.clone(),
+        Ok(BlobRangeReader::new(
+            self.home.clone(),
             slot,
             opener,
-            plaintext_size: locator.plaintext_size(),
-            window: self.blob_chunking.window(),
-        })
+            locator.plaintext_size(),
+            self.blob_chunking.window(),
+        ))
+    }
+
+    async fn open_store_blob_range_reader(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<BlobRangeReader, StorageError> {
+        self.open_blob_range_reader(blob, self.store_blob_protection()?)
+            .await
     }
 
     async fn delete_blob_object(
@@ -781,7 +900,7 @@ impl CloudSyncConnection {
                 object.slot().logical_key()
             )));
         }
-        self.exact
+        self.home
             .read_at_to_file(object.slot(), staged.path_for_atomic_replacement())
             .await
             .map_err(|error| match error {

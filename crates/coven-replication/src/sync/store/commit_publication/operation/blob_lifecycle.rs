@@ -5,20 +5,11 @@ use tracing::{debug, warn};
 impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_tombstones(
         &self,
-        cipher: &dyn CloudSyncCipherStateAccess,
-        pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
         self.writer
-            .drain_tombstones(
-                &self.database,
-                self.storage.as_ref(),
-                cipher,
-                pending_rotation,
-                &store_id,
-                clock,
-            )
+            .drain_tombstones(&self.database, self.storage.as_ref(), &store_id, clock)
             .await
     }
 
@@ -34,7 +25,6 @@ impl AuthorizedWriterOperation<'_> {
     /// unauthorized, foreign-Store, and within-grace objects remain non-actionable.
     pub(crate) async fn gc_tombstones(
         &self,
-        cipher: &dyn CloudSyncCipherStateAccess,
         clock: &dyn coven_foundation::clock::Clock,
     ) -> Result<usize, String> {
         let store_id = self.store_root().store_root_id.to_string();
@@ -45,42 +35,30 @@ impl AuthorizedWriterOperation<'_> {
             .map_err(|error| error.to_string())?;
         let self_pubkey = self.writer.author_pubkey();
         let grace = self.database.blob_tombstone_grace();
-        let suffix = cipher.snapshot().suffix();
-        let keys = self
+        let tombstones = self
             .storage
-            .list_provider_objects(crate::blob::delete::TOMBSTONE_PREFIX)
+            .list_blob_tombstones()
             .await
             .map_err(|error| format!("Failed to list tombstones: {error}"))?;
         let is_owner = self.membership.is_owner_now(&self_pubkey);
         let now = clock.now();
         let mut deleted = 0;
 
-        for key in keys {
-            let key_object_id = match key
-                .strip_suffix(suffix)
-                .and_then(|key| key.strip_prefix(crate::blob::delete::TOMBSTONE_PREFIX))
-                .and_then(|encoded| encoded.parse().ok())
-            {
-                Some(object_id) => object_id,
-                None => {
-                    debug!("skipping tombstone key with unexpected format: {key}");
+        for listed in tombstones {
+            let (key_object_id, decoded) = match listed {
+                coven_storage::ListedBlobTombstone::Opened {
+                    object_id,
+                    plaintext,
+                } => (object_id, plaintext),
+                coven_storage::ListedBlobTombstone::Invalid {
+                    provider_key,
+                    reason,
+                } => {
+                    debug!("skipping invalid tombstone {provider_key}: {reason}");
                     continue;
                 }
             };
-
-            let stored = self
-                .storage
-                .read_provider_object(&key)
-                .await
-                .map_err(|error| format!("Failed to read tombstone {key}: {error}"))?;
-            let aad_context = coven_storage::cloud_aad_context(&store_id, &key);
-            let decoded = match cipher.snapshot().open(stored, &aad_context) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    debug!("skipping tombstone {key} this store cannot decrypt: {error}");
-                    continue;
-                }
-            };
+            let key = key_object_id.to_string();
             let tombstone: crate::blob::delete::BlobTombstoneJson =
                 match serde_json::from_slice(&decoded) {
                     Ok(tombstone) => tombstone,
@@ -137,7 +115,7 @@ impl AuthorizedWriterOperation<'_> {
             {
                 StoredBlobReferenceState::LiveRemote => {
                     self.storage
-                        .delete_provider_object(&key)
+                        .delete_blob_tombstone(&tombstone.stored)
                         .await
                         .map_err(|error| {
                             format!("Failed to cancel stale tombstone {key}: {error}")
@@ -176,7 +154,7 @@ impl AuthorizedWriterOperation<'_> {
                 continue;
             }
 
-            match self.storage.provider_object_exists(&key).await {
+            match self.storage.blob_tombstone_exists(&tombstone.stored).await {
                 Ok(true) => {}
                 Ok(false) => {
                     debug!("tombstone {key} disappeared before reclaim; skipping");
@@ -220,7 +198,7 @@ impl AuthorizedWriterOperation<'_> {
             }
 
             self.storage
-                .delete_provider_object(&key)
+                .delete_blob_tombstone(&tombstone.stored)
                 .await
                 .map_err(|error| {
                     format!("Failed to delete tombstone {key} after reclaim: {error}")

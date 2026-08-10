@@ -17,7 +17,7 @@ use coven_protocol::circle_activation::{
 };
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::StoreObjectError;
-use coven_protocol::objects::{BlobSpoolProtection, ExactObjectRef, StorageError};
+use coven_protocol::objects::{ExactObjectRef, StorageError};
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CirclePackageRef, CommitFrontier, ObjectHash,
     ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,

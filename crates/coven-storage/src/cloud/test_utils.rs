@@ -45,7 +45,7 @@ impl Drop for ExactStreamReadGuard {
 /// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
 /// clones act as separate devices reading and writing the same cloud bucket, and
 /// a test can keep its own handle for direct at-rest assertions while each device
-/// owns a `Box<dyn CloudHome>` clone.
+/// owns an exact cloud-home clone.
 ///
 /// Beyond the happy path it carries fault-injection knobs
 /// ([`arm_write_failures`](Self::arm_write_failures),
@@ -697,10 +697,6 @@ impl PartSink for InMemoryPartSink {
 
 #[async_trait]
 impl CloudHome for InMemoryCloudHome {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn probe(&self) -> Result<(), CloudHomeError> {
         let pause = self.probe_pause.lock().unwrap().take();
         if let Some(pause) = pause {

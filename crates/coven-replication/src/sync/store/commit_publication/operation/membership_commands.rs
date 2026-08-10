@@ -268,7 +268,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await?;
         let generation = new_key.current_generation();
-        let fingerprint = cipher
+        let adopted = cipher
             .adopt_key_rotation(&new_key, master_keys)
         .map_err(|source| {
             crate::sync::store::membership::MembershipOpsError::RotationCommittedAdoptionFailed {
@@ -277,7 +277,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         })?;
         self.complete_revoke_rotation_adoption(pending_rotation, generation)
             .await?;
-        Ok(fingerprint)
+        Ok(adopted.fingerprint().to_string())
     }
 
     pub(super) async fn revoke_member_without_local_adoption(

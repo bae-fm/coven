@@ -28,7 +28,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
-    let owner_database = coven_database::StoreDatabase::from_database(owner_db.database.clone());
+    let owner_database = coven_database::StoreDatabase::from_database(owner_db.database().clone());
     let home = test_cloud_home();
     let create_store_db = owner_db.clone();
     let create_store_owner = owner.clone();
@@ -69,7 +69,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
     let snapshot_path = snapshot_dir.path().to_path_buf();
     let snapshot = owner_database
-        .capture_snapshot_image_for_test(store.root.clone(), snapshot_path, None)
+        .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
         .await
         .expect("create join snapshot");
     let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());

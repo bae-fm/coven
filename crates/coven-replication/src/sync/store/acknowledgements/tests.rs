@@ -22,20 +22,17 @@ fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
 }
 
 fn store_database(database: &SyntheticStoreFixture) -> StoreDatabase {
-    StoreDatabase::new(&database.database)
+    StoreDatabase::new(database.database())
 }
 
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
-    Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "ack-exact-store",
-            signer.clone(),
-        )
-        .expect("construct acknowledgement test storage"),
-    )
+    Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "ack-exact-store",
+        signer.clone(),
+    ))
 }
 
 async fn initialize(
@@ -248,7 +245,7 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
                 .to_str()
                 .expect("temporary database path is UTF-8")
                 .to_string();
-            seed.database
+            seed.database()
                 .vacuum_into_for_test(destination)
                 .await
                 .expect("copy acknowledgement database");
@@ -321,14 +318,14 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .await
             .expect("read drained acknowledgement outbox")
             .is_none());
-        assert!(coven_database::StoreDatabase::new(&loser_db.database)
+        assert!(coven_database::StoreDatabase::new(loser_db.database())
             .protocol_inert_object(loser.reference.object)
             .await
             .expect("read losing acknowledgement inert state")
             .is_none());
         for object_id in losing_object_ids {
             let exists = loser_db
-                .database
+                .database()
                 .remote_object_id_exists_for_test(object_id)
                 .await
                 .expect("read losing acknowledgement candidate ownership");
@@ -422,7 +419,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .mark_remote_object_uploaded(acknowledgement_remote.into_record())
         .await
         .expect("record acknowledgement upload");
@@ -596,7 +593,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .reference,
         outbound.reference
     );
-    let inert = coven_database::StoreDatabase::new(&db.database)
+    let inert = coven_database::StoreDatabase::new(db.database())
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -648,7 +645,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
         coven_database::OutboundStoreAckActivation::Nonactivating(ref candidate)
             if candidate.reference == losing.reference
     ));
-    assert!(coven_database::StoreDatabase::new(&db.database)
+    assert!(coven_database::StoreDatabase::new(db.database())
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -696,7 +693,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
 
         let head = losing.head_ref();
         let mut remote = db
-            .database
+            .database()
             .remote_object_for_test(head.object.clone())
             .await
             .expect("load test head ownership");
@@ -729,7 +726,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             );
             remote.validate().expect("validate test head ownership");
         }
-        db.database
+        db.database()
             .replace_remote_object_for_test(head.object, remote)
             .await
             .expect("install mismatched durable head proof");
@@ -998,7 +995,7 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     // Read the exact slot the staged Circle acknowledgement reserved, then occupy
     // it with different bytes before the drain uploads its object.
     let prepared = db
-        .database
+        .database()
         .staged_circle_acknowledgement_object_for_test()
         .await
         .expect("read staged Circle acknowledgement object");

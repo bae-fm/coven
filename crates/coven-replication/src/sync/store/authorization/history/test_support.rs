@@ -2,13 +2,13 @@ use super::*;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn blob_protection_for_test(
+    pub(crate) async fn blob_key_fingerprint_for_test(
         &self,
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, crate::sync::BlobCacheError> {
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, crate::sync::BlobCacheError> {
         self.blob_source
-            .protection_for_test(authority, stored)
+            .key_fingerprint_for_test(authority, stored)
             .await
     }
 

@@ -61,14 +61,14 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
 
     assert_eq!(home.exact_create_count(), creates_before);
     let local_registrations = opened_db
-        .database
+        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "local_store_device_registration",
         ))
         .await
         .expect("count local Store device registrations");
     let activations = opened_db
-        .database
+        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "store_device_registration_activations",
         ))
@@ -81,11 +81,11 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
         .bind_device(&opened_db, &founder)
         .await
         .expect("bind the installed founder registration");
-    assert_eq!(rebound.device_id, opened.device_id);
+    assert_eq!(rebound.device_id(), opened.device_id());
     assert_eq!(home.exact_create_count(), creates_before);
     assert_eq!(
         opened_db
-            .database
+            .database()
             .table_row_count_for_test(coven_database::DatabaseTestTable::named(
                 "local_store_device_registration",
             ))
@@ -95,7 +95,7 @@ async fn opened_store_cannot_mint_a_second_founder_registration() {
     );
     assert_eq!(
         opened_db
-            .database
+            .database()
             .table_row_count_for_test(coven_database::DatabaseTestTable::named(
                 "store_device_registration_activations",
             ))
@@ -118,7 +118,7 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
     .await
     .expect("create source Store");
     source
-        .database
+        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('note-1', 'exact pull', 1, '0000000001000-0000-source', '2026-07-16')",
@@ -137,14 +137,14 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(
         destination
-            .database
+            .database()
             .query_test_text("SELECT title FROM notes WHERE id = 'note-1'")
             .await,
         "exact pull"
     );
 
     source
-        .database
+        .database()
         .execute_test_host_write(
             "UPDATE notes SET title = 'exact successor', \
          _updated_at = '0000000002000-0000-source' WHERE id = 'note-1'",
@@ -158,7 +158,7 @@ async fn opened_store_pulls_a_production_commit_through_exact_refs() {
     assert_eq!(successor.changesets_applied, 1);
     assert_eq!(
         destination
-            .database
+            .database()
             .query_test_text("SELECT title FROM notes WHERE id = 'note-1'")
             .await,
         "exact successor"
@@ -176,16 +176,16 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
     )
     .await
     .expect("create Store");
-    let baseline = coven_database::StoreDatabase::new(&db.database)
+    let baseline = coven_database::StoreDatabase::new(db.database())
         .generation_zero_replay_baseline_for_test()
         .await
         .expect("Store creation installs a retained replay baseline");
 
-    assert_eq!(baseline.schema_version, db.database.schema_version());
-    assert_eq!(baseline.routing_hash, db.database.sync_routing_hash());
+    assert_eq!(baseline.schema_version, db.database().schema_version());
+    assert_eq!(baseline.routing_hash, db.database().sync_routing_hash());
     match &baseline.authority {
         coven_database::RetainedReplayAuthority::Genesis(authority) => {
-            assert_eq!(authority.store_root, store.root)
+            assert_eq!(authority.store_root, store.root())
         }
         coven_database::RetainedReplayAuthority::StableSnapshot(_) => {
             panic!("Store creation installed a snapshot replay baseline")
@@ -208,7 +208,7 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
     )
     .await
     .expect("create Store");
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -276,7 +276,7 @@ async fn generation_zero_replay_baseline_rejects_an_image_payload_under_the_wron
     )
     .await
     .expect("create Store");
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await
@@ -314,7 +314,7 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
     )
     .await
     .expect("create Store");
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let baseline = database
         .generation_zero_replay_baseline_for_test()
         .await

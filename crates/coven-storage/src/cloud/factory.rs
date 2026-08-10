@@ -1,4 +1,4 @@
-use super::{cloudkit, CloudHome, CloudHomeError};
+use super::{cloudkit, CloudHomeError, ExactCloudHome};
 
 #[derive(Clone)]
 pub struct CloudHomeFactory {
@@ -22,7 +22,7 @@ impl CloudHomeFactory {
         config: &coven_foundation::config::Config,
         clock: coven_foundation::clock::ClockRef,
         cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
-    ) -> Result<Box<dyn CloudHome>, CloudHomeError> {
+    ) -> Result<Box<dyn ExactCloudHome>, CloudHomeError> {
         use coven_foundation::config::CloudProvider;
 
         #[cfg(not(feature = "oauth-providers"))]

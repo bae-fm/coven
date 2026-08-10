@@ -34,17 +34,15 @@ async fn ephemeral_stage(
 async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let database = crate::sync::test_helpers::open_test_db();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store,
-        storage: cloud_storage,
-    } = TestStoreFixture::create(
+    let (store, cloud_storage) = (TestStoreFixture::create(
         &database,
         "blob-reference-substitution",
         coven_keys::keys::UserKeypair::generate(),
         home,
     )
     .await
-    .expect("create blob substitution test Store");
+    .expect("create blob substitution test Store"))
+    .into_parts();
     let real = b"THE-OWNERS-REAL-BLOB";
     let planted = b"THE-ATTACKERS-FAKED!";
     assert_eq!(real.len(), planted.len(), "fixture uses equal-size blobs");
@@ -83,17 +81,15 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
 async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publication() {
     let database = crate::sync::test_helpers::open_test_db();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store,
-        storage: cloud_storage,
-    } = TestStoreFixture::create(
+    let (store, cloud_storage) = (TestStoreFixture::create(
         &database,
         "blob-provider-rollback",
         coven_keys::keys::UserKeypair::generate(),
         home.clone(),
     )
     .await
-    .expect("create provider rollback test Store");
+    .expect("create provider rollback test Store"))
+    .into_parts();
     let previous = b"blob-content-VERSION1";
     let current = b"blob-content-VERSION2";
     assert_eq!(

@@ -73,14 +73,30 @@ impl BlobChunking {
 /// authentic — its tag covers its bytes, its index, and the header — so there is
 /// nothing else to check and no whole-object pass to amortize.
 pub struct BlobRangeReader {
-    pub exact: Arc<dyn ExactSlotStorage>,
-    pub slot: coven_protocol::objects::ObjectSlot,
-    pub opener: coven_keys::encryption::SealedBlobOpener,
-    pub plaintext_size: u64,
-    pub window: std::num::NonZeroU64,
+    exact: Arc<dyn ExactCloudHome>,
+    slot: coven_protocol::objects::ObjectSlot,
+    opener: coven_keys::encryption::SealedBlobOpener,
+    plaintext_size: u64,
+    window: std::num::NonZeroU64,
 }
 
 impl BlobRangeReader {
+    pub(crate) fn new(
+        exact: Arc<dyn ExactCloudHome>,
+        slot: coven_protocol::objects::ObjectSlot,
+        opener: coven_keys::encryption::SealedBlobOpener,
+        plaintext_size: u64,
+        window: std::num::NonZeroU64,
+    ) -> Self {
+        Self {
+            exact,
+            slot,
+            opener,
+            plaintext_size,
+            window,
+        }
+    }
+
     /// The blob's whole plaintext length, as its row declares it.
     pub fn plaintext_size(&self) -> u64 {
         self.plaintext_size

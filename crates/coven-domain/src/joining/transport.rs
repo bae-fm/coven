@@ -186,7 +186,7 @@ fn scanned_invite_test_client(
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
-    home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
+    home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
 ) -> Result<DeviceJoinClient, BootstrapError> {
     Ok(scanned_invite_client(
         invite,
@@ -215,7 +215,7 @@ pub async fn join_with_scanned_invite_over_test_home(
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
-    home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
+    home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
     timing: DeviceJoinTransportTiming,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
@@ -244,7 +244,7 @@ pub async fn close_scanned_invite_join_over_test_home(
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
-    home: std::sync::Arc<dyn coven_storage::cloud::CloudHome>,
+    home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
     timing: DeviceJoinTransportTiming,
 ) -> Result<(), BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;

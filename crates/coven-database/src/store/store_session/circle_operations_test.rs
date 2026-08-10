@@ -145,19 +145,19 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         }),
     };
     let db = crate::synthetic_store::open_test_db();
-    let store_database = crate::StoreDatabase::new(&db.database);
+    let store_database = crate::StoreDatabase::new(db.database());
     let first_commit = verified_commit.clone();
-    db.database
+    db.database()
         .record_verified_circle_activations_for_test(first_commit, vec![verified])
         .await
         .expect("record multi-Owner control");
     let cached_owner = db
-        .database
+        .database()
         .circle_access_owner_for_test(creation.circle_id)
         .await
         .expect("read cached access owner");
     assert_eq!(cached_owner, author_pubkey);
-    db.database
+    db.database()
         .clear_circle_access_cache_for_test()
         .await
         .expect("remove historical Circle projections");
@@ -257,7 +257,7 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     )
     .expect("authenticate second Store commit");
     let error = db
-        .database
+        .database()
         .record_verified_circle_activations_for_test(
             second_commit,
             vec![coven_protocol::circle_activation::VerifiedCircleReference {

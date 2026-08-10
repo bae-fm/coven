@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
 use super::CloudSyncObjectStorage;
-use crate::cloud::{BlobBody, CloudFileReadError, CloudHome, ExactSlotStorage};
+use crate::cloud::{BlobBody, CloudFileReadError, ExactCloudHome};
 use coven_keys::encryption::{
     EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
     SEALED_BLOB_HEADER_LEN,
@@ -38,7 +38,11 @@ mod storage_impl;
 pub use blob_io::open_sealed_blob;
 pub use blob_io::BlobChunking;
 pub use blob_io::{BlobPathScheme, BlobRangeReader};
-pub use cipher::{cloud_aad_context, CloudCipherState, CloudSyncCipherStateAccess};
+#[cfg(any(test, feature = "test-utils"))]
+pub use cipher::CloudKeyringFacts;
+pub use cipher::{
+    cloud_aad_context, AdoptedCloudKeyRotation, CloudKeyringMerge, CloudSyncCipherStateAccess,
+};
 pub use rotation::{CloudSyncRotationStateAccess, PendingRotation};
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
@@ -53,14 +57,10 @@ pub enum CloudCipher {
 /// `CloudSyncObjectStorage` that delegates raw I/O to a `CloudHome` and handles the path
 /// layout and the at-rest protection (its [`CloudCipher`]).
 pub struct CloudSyncConnection {
-    home: Arc<dyn CloudHome>,
-    /// `Arc` (not `Box`) because a ranged read hands a clone to the
-    /// [`BlobRangeReader`] it opens — the reader holds this client for the life
-    /// of a stream and reads across awaits, so it is genuinely shared between
-    /// this storage and the readers it opens, not owned by one.
-    exact: Arc<dyn ExactSlotStorage>,
+    /// `Arc` because ranged readers retain this provider across awaits.
+    home: Arc<dyn ExactCloudHome>,
     provider_probes: ProviderProbeStorage,
-    cipher: Arc<CloudCipherState>,
+    cipher: Arc<RwLock<CloudCipher>>,
     /// Whether a committed rotation is outstanding — see [`PendingRotation`].
     /// Shared the same way `cipher` is, so a member removal or a refresh cycle
     /// that discovers a rotation this device can't adopt blocks every seal path,
@@ -81,34 +81,23 @@ pub struct CloudSyncConnection {
 
 impl CloudSyncConnection {
     pub fn new(
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
         blob_paths: BlobPathScheme,
         store_id: impl Into<String>,
         keypair: UserKeypair,
-    ) -> Result<Self, crate::cloud::CloudHomeError> {
-        let exact = home.clone().exact_slot_storage().ok_or_else(|| {
-            crate::cloud::CloudHomeError::Configuration(
-                "CloudSyncConnection requires exact-slot storage".to_string(),
-            )
-        })?;
-        let exact_probe_peer = home.clone().exact_slot_storage().ok_or_else(|| {
-            crate::cloud::CloudHomeError::Configuration(
-                "CloudSyncConnection requires a second exact-slot probe client".to_string(),
-            )
-        })?;
-        let provider_probes = ProviderProbeStorage::new(exact.clone(), exact_probe_peer);
-        Ok(CloudSyncConnection {
+    ) -> Self {
+        let provider_probes = ProviderProbeStorage::new(home.clone());
+        CloudSyncConnection {
             home,
-            exact,
             provider_probes,
-            cipher: Arc::new(CloudCipherState::new(cipher)),
+            cipher: Arc::new(RwLock::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
             blob_chunking: BlobChunking::DEFAULT,
             store_id: store_id.into(),
             keypair,
-        })
+        }
     }
 
     /// Seal and read blobs with `chunking` instead of [`BlobChunking::DEFAULT`].
@@ -174,7 +163,7 @@ impl CloudSyncConnection {
             ));
         }
         let live = self
-            .exact
+            .home
             .provider_binding()
             .await
             .map_err(StorageError::from)?;
@@ -192,11 +181,11 @@ impl CloudSyncConnection {
     }
 
     pub fn is_plaintext(&self) -> bool {
-        self.cipher.is_plaintext()
+        self.cipher.read().unwrap().is_plaintext()
     }
 
     fn cipher(&self) -> CloudCipher {
-        self.cipher.snapshot()
+        self.cipher.read().unwrap().clone()
     }
 
     /// The cipher to seal new data under — refuses while the cloud has committed
@@ -207,8 +196,20 @@ impl CloudSyncConnection {
     /// ciphertext's tag) and keep reading the cipher plainly.
     fn cipher_for_seal(&self) -> Result<CloudCipher, StorageError> {
         let cipher = self.cipher();
-        self.pending_rotation.check(&cipher)?;
+        self.pending_rotation
+            .check(self.cipher.current_generation())?;
         Ok(cipher)
+    }
+
+    fn store_blob_protection(
+        &self,
+    ) -> Result<coven_protocol::objects::BlobSpoolProtection, StorageError> {
+        Ok(match self.cipher_for_seal()? {
+            CloudCipher::Encrypted(encryption) => {
+                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption)
+            }
+            CloudCipher::Plaintext => coven_protocol::objects::BlobSpoolProtection::Browsable,
+        })
     }
 
     fn protocol_cipher_for_seal(
@@ -360,13 +361,13 @@ impl CloudSyncConnection {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn current_encryption(&self) -> Option<EncryptionService> {
-        self.cipher.encryption()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn cipher_snapshot(&self) -> CloudCipher {
-        self.cipher.snapshot()
+    pub fn keyring_facts_for_test(&self) -> Option<CloudKeyringFacts> {
+        match &*self.cipher.read().unwrap() {
+            CloudCipher::Encrypted(encryption) => {
+                Some(CloudKeyringFacts::from_encryption(encryption))
+            }
+            CloudCipher::Plaintext => None,
+        }
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -376,6 +377,7 @@ impl CloudSyncConnection {
         custody: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, coven_keys::keys::KeyError> {
         CloudSyncCipherStateAccess::adopt_key_rotation(self, encryption, custody)
+            .map(|adopted| adopted.fingerprint().to_string())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -395,8 +397,44 @@ impl CloudSyncConnection {
 }
 
 impl CloudSyncCipherStateAccess for CloudSyncConnection {
-    fn snapshot(&self) -> CloudCipher {
-        self.cipher.snapshot()
+    fn is_plaintext(&self) -> bool {
+        self.cipher.is_plaintext()
+    }
+
+    fn suffix(&self) -> &'static str {
+        self.cipher.suffix()
+    }
+
+    fn current_generation(&self) -> Option<u64> {
+        self.cipher.current_generation()
+    }
+
+    fn current_fingerprint(&self) -> Option<String> {
+        self.cipher.current_fingerprint()
+    }
+
+    fn open(&self, stored: Vec<u8>, aad_context: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        self.cipher.open(stored, aad_context)
+    }
+
+    fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
+        self.cipher.seal(plaintext, aad_context)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+        self.cipher.open_sealed_blob_for_test(stored, aad_context)
+    }
+
+    fn merged_keyring(
+        &self,
+        new_encryption: &EncryptionService,
+    ) -> Result<CloudKeyringMerge, EncryptionError> {
+        self.cipher.merged_keyring(new_encryption)
     }
 
     fn merge_key_rotation(
@@ -440,8 +478,8 @@ impl CloudSyncRotationStateAccess for CloudSyncConnection {
         self.pending_rotation.install_durable_gate(gate);
     }
 
-    fn check(&self, cipher: &CloudCipher) -> Result<(), RotationPending> {
-        self.pending_rotation.check(cipher)
+    fn check(&self, live_generation: Option<u64>) -> Result<(), RotationPending> {
+        self.pending_rotation.check(live_generation)
     }
 }
 

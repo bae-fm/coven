@@ -5,7 +5,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
     let fixture = PreparedWriteFixture::prepare().await;
 
     assert!(
-        fixture.remote_object_exists(&fixture.head_object).await,
+        fixture.remote_object_exists(&fixture.head_object()).await,
         "the prepared Merge head must have durable candidate ownership before publication",
     );
 
@@ -25,7 +25,9 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
         serde_json::Value::String("locally_authored".to_string()),
     );
 
-    let remote = fixture.stored_remote_object(&fixture.package_object).await;
+    let remote = fixture
+        .stored_remote_object(&fixture.package_object())
+        .await;
     assert!(matches!(
         remote,
         coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record)
@@ -40,7 +42,7 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                     } if ownership.pending.is_empty()
                         && ownership.activated.contains(
                             &coven_protocol::remote_object::SharedObjectOwner::StoreCommit(
-                                fixture.commit_ref.clone()
+                                fixture.commit_ref().clone()
                             )
                         )
                         && ownership.activated.iter().any(|owner| matches!(
@@ -50,13 +52,13 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                                     commit,
                                     ..
                                 }
-                            ) if commit == &fixture.commit_ref
+                            ) if commit == &fixture.commit_ref()
                         ))
                         && ownership.activated.len() == 2
                 )
     ));
     let commit = fixture
-        .stored_remote_object(&fixture.commit_ref.object)
+        .stored_remote_object(&fixture.commit_ref().object)
         .await;
     assert!(matches!(
         commit,
@@ -65,17 +67,17 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                 &record.identity.domain,
                 coven_protocol::remote_object::RetainedAuthorityObjectDomain::Commit {
                     reference
-                } if reference == &fixture.commit_ref
+                } if reference == &fixture.commit_ref()
             ) && matches!(
                 &record.state,
                 coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                     ownership
                 } if ownership.pending.is_empty()
                     && ownership.activated
-                        == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
+                        == std::collections::BTreeSet::from([fixture.commit_ref().clone()])
             )
     ));
-    let head = fixture.stored_remote_object(&fixture.head_object).await;
+    let head = fixture.stored_remote_object(&fixture.head_object()).await;
     assert!(matches!(
         head,
         coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -84,14 +86,14 @@ async fn accepted_package_transfers_to_shared_live_set_ownership() {
                 coven_protocol::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                     reference,
                     ..
-                } if reference.object == fixture.head_object
+                } if reference.object == fixture.head_object()
             ) && matches!(
                 &record.state,
                 coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified {
                     ownership
                 } if ownership.pending.is_empty()
                     && ownership.activated
-                        == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
+                        == std::collections::BTreeSet::from([fixture.commit_ref().clone()])
             )
     ));
 }
@@ -113,7 +115,7 @@ async fn local_publication_extends_connection_owned_verified_history() {
         .await
         .expect("use the retained input verified by local publication");
     assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0].commit_ref(), &fixture.commit_ref);
+    assert_eq!(retained[0].commit_ref(), &fixture.commit_ref());
 }
 
 #[tokio::test]
@@ -129,7 +131,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             "transport failure retains the exact prepared write for retry",
         );
         assert!(
-            fixture.prepared_write().await.commit.value.write_id == fixture.write_id,
+            fixture.prepared_write().await.commit.value.write_id == fixture.write_id(),
             "the exact prepared write remains after exact create call {failed_call}",
         );
         assert_eq!(
@@ -138,14 +140,14 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
             "local position cannot advance before a verified head",
         );
         assert_eq!(
-            fixture.contains_exact_object(&fixture.package_object),
+            fixture.contains_exact_object(&fixture.package_object()),
             failed_call > 1,
         );
         assert_eq!(
-            fixture.contains_exact_object(&fixture.commit_ref.object),
+            fixture.contains_exact_object(&fixture.commit_ref().object),
             failed_call > 2,
         );
-        assert!(!fixture.contains_exact_object(&fixture.head_object),);
+        assert!(!fixture.contains_exact_object(&fixture.head_object()),);
 
         assert_eq!(
             fixture
@@ -157,7 +159,7 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
         assert!(!fixture.prepared_write_exists().await);
         assert_eq!(
             fixture.exact_materialized_ref().await,
-            Some(fixture.commit_ref.clone()),
+            Some(fixture.commit_ref().clone()),
         );
         assert!(matches!(
             fixture.write_status().await,
@@ -165,9 +167,9 @@ async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_r
                 if matches!(
                     position.as_ref(),
                     coven_protocol::write::PublishedPosition { device_id, commit }
-                        if device_id == &fixture.device_id
+                        if device_id == &fixture.device_id()
                             && commit.coord.sequence() == 1
-                            && commit.commit_hash == fixture.commit_ref.commit_hash
+                            && commit.commit_hash == fixture.commit_ref().commit_hash
                 )
         ));
     }
@@ -192,7 +194,9 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     ));
     let retains_prepared = fixture.write_retains_prepared().await;
     assert!(retains_prepared);
-    let package = fixture.stored_remote_object(&fixture.package_object).await;
+    let package = fixture
+        .stored_remote_object(&fixture.package_object())
+        .await;
     assert!(matches!(
         package,
         coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record)
@@ -210,7 +214,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
             )
     ));
     let commit = fixture
-        .stored_remote_object(&fixture.commit_ref.object)
+        .stored_remote_object(&fixture.commit_ref().object)
         .await;
     assert!(matches!(
         commit,
@@ -224,7 +228,7 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
                 } if winner_head == &winner
             )
     ));
-    let head = fixture.stored_remote_object(&fixture.head_object).await;
+    let head = fixture.stored_remote_object(&fixture.head_object()).await;
     assert!(matches!(
         head,
         coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(record)
@@ -256,8 +260,8 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     );
     fixture.fail_exact_delete_on_call(2);
     assert!(fixture.cleanup_merge_candidate().await.is_err());
-    assert!(!fixture.contains_exact_object(&fixture.package_object));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref.object));
+    assert!(!fixture.contains_exact_object(&fixture.package_object()));
+    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
     fixture
         .cleanup_merge_candidate()
         .await
@@ -265,10 +269,10 @@ async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence(
     assert!(!fixture.merge_candidate_cleanup_pending().await);
     assert_eq!(
         fixture.discard_blocked_write().await,
-        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
+        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id().clone()]),
     );
-    assert!(!fixture.contains_exact_object(&fixture.package_object));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref.object));
+    assert!(!fixture.contains_exact_object(&fixture.package_object()));
+    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
     assert!(fixture.contains_exact_object(&winner.object));
 }
 
@@ -287,14 +291,14 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
         .discard_blocked_candidate()
         .await
         .expect("abandon and discard the blocked candidate");
-    assert_eq!(discarded, vec![fixture.write_id.clone()]);
+    assert_eq!(discarded, vec![fixture.write_id().clone()]);
     assert!(!fixture.merge_candidate_cleanup_pending().await);
     let authority = fixture
         .latest_local_store_position()
         .await
         .expect("read local Merge position")
         .expect("abandonment advances the local stream");
-    assert_ne!(authority, fixture.commit_ref);
+    assert_ne!(authority, fixture.commit_ref());
     let authority_remote = fixture.stored_remote_object(&authority.object).await;
     assert!(matches!(
         authority_remote,
@@ -306,8 +310,8 @@ async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
                 } if reference == &authority
             )
     ));
-    assert!(!fixture.contains_exact_object(&fixture.package_object));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref.object));
+    assert!(!fixture.contains_exact_object(&fixture.package_object()));
+    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
     assert!(matches!(
         fixture.write_status().await,
         coven_protocol::write::WriteStatus::Resolved(
@@ -437,11 +441,11 @@ async fn original_candidate_activation_wins_abandonment_race() {
     assert!(matches!(
         fixture.write_status().await,
         coven_protocol::write::WriteStatus::Published(position)
-            if position.commit() == &fixture.commit_ref
+            if position.commit() == &fixture.commit_ref()
     ));
-    assert!(fixture.contains_exact_object(&fixture.package_object));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref.object));
-    assert!(fixture.contains_exact_object(&fixture.head_object));
+    assert!(fixture.contains_exact_object(&fixture.package_object()));
+    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
+    assert!(fixture.contains_exact_object(&fixture.head_object()));
 }
 
 #[tokio::test]
@@ -471,14 +475,14 @@ async fn third_candidate_wins_after_abandonment_preparation() {
         MergeCandidateAbandonment::Abandoned,
     );
     assert!(!fixture.merge_candidate_cleanup_pending().await);
-    assert!(!fixture.contains_exact_object(&fixture.package_object));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref.object));
+    assert!(!fixture.contains_exact_object(&fixture.package_object()));
+    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
     assert!(fixture.contains_exact_object(&winner.object));
     assert!(!fixture.remote_object_exists(&authority_commit).await);
     assert!(!fixture.remote_object_exists(&authority_head).await);
     assert_eq!(
         fixture.discard_blocked_write().await,
-        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id.clone()]),
+        coven_database::BlockedWriteDiscard::Discarded(vec![fixture.write_id().clone()]),
     );
 }
 
@@ -505,8 +509,8 @@ async fn alternate_head_for_abandonment_authority_is_accepted() {
             .expect("accept alternate abandonment head"),
         MergeCandidateAbandonment::Abandoned,
     );
-    assert!(!fixture.contains_exact_object(&fixture.package_object));
-    assert!(!fixture.contains_exact_object(&fixture.commit_ref.object));
+    assert!(!fixture.contains_exact_object(&fixture.package_object()));
+    assert!(!fixture.contains_exact_object(&fixture.commit_ref().object));
     assert!(fixture.contains_exact_object(&accepted_head.object));
 }
 
@@ -525,7 +529,7 @@ async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
     assert!(matches!(
         fixture.write_status().await,
         coven_protocol::write::WriteStatus::Published(position)
-            if position.commit() == &fixture.commit_ref
+            if position.commit() == &fixture.commit_ref()
     ));
     let head = fixture.stored_remote_object(&accepted_head.object).await;
     assert!(matches!(
@@ -553,12 +557,12 @@ async fn lost_exact_head_response_is_settled_by_provider_verification_and_comple
             .expect("settle lost head response through exact-upload verification"),
         1
     );
-    assert!(fixture.contains_exact_object(&fixture.package_object));
-    assert!(fixture.contains_exact_object(&fixture.commit_ref.object));
-    assert!(fixture.contains_exact_object(&fixture.head_object));
+    assert!(fixture.contains_exact_object(&fixture.package_object()));
+    assert!(fixture.contains_exact_object(&fixture.commit_ref().object));
+    assert!(fixture.contains_exact_object(&fixture.head_object()));
     assert_eq!(
         fixture.exact_materialized_ref().await,
-        Some(fixture.commit_ref.clone())
+        Some(fixture.commit_ref().clone())
     );
 
     assert_eq!(
@@ -575,7 +579,7 @@ async fn lost_exact_head_response_is_settled_by_provider_verification_and_comple
                 position.as_ref(),
                 coven_protocol::write::PublishedPosition { commit, .. }
                     if commit.coord.sequence() == 1
-                        && commit.commit_hash == fixture.commit_ref.commit_hash
+                        && commit.commit_hash == fixture.commit_ref().commit_hash
             )
     ));
 }
@@ -590,7 +594,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
         fixture.write_status().await,
         coven_protocol::write::WriteStatus::Publishing,
     );
-    assert!(fixture.contains_exact_object(&fixture.head_object));
+    assert!(fixture.contains_exact_object(&fixture.head_object()));
     assert!(fixture.prepared_write_exists().await);
     assert_eq!(
         fixture.exact_materialized_ref().await,
@@ -608,7 +612,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
     );
     assert_eq!(
         fixture.exact_materialized_ref().await,
-        Some(fixture.commit_ref.clone()),
+        Some(fixture.commit_ref().clone()),
     );
     assert!(matches!(
         fixture.write_status().await,
@@ -617,7 +621,7 @@ async fn local_completion_failure_rolls_back_position_and_retries_after_visible_
                 position.as_ref(),
                 coven_protocol::write::PublishedPosition { commit, .. }
                     if commit.coord.sequence() == 1
-                        && commit.commit_hash == fixture.commit_ref.commit_hash
+                        && commit.commit_hash == fixture.commit_ref().commit_hash
             )
     ));
 }
@@ -644,16 +648,13 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         };
         let home = InMemoryCloudHome::new();
         let keypair = UserKeypair::generate();
-        let storage = Arc::new(
-            CloudSyncConnection::new(
-                Arc::new(home),
-                CloudCipher::Plaintext,
-                BlobPathScheme::Plain,
-                "prepared-root-status",
-                keypair.clone(),
-            )
-            .expect("in-memory home supports immutable copies"),
-        );
+        let storage = Arc::new(CloudSyncConnection::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "prepared-root-status",
+            keypair.clone(),
+        ));
         let db = open();
         let device = crate::sync::test_helpers::TestDevice::create(
             &db,
@@ -663,7 +664,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         )
         .await
         .expect("create prepared-root-status Store");
-        db.database
+        db.database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('root-status', 'outbound', NULL, 1, \
@@ -675,7 +676,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .prepare_pending_store_write(&store_dir)
             .await
             .expect("prepare write"));
-        let write_id = coven_database::StoreDatabase::new(&db.database)
+        let write_id = coven_database::StoreDatabase::new(db.database())
             .oldest_prepared_store_write()
             .await
             .expect("load prepared write")
@@ -684,7 +685,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .value
             .write_id
             .clone();
-        db.database
+        db.database()
             .replace_store_root_hash_for_test(invalid_root.map(str::to_string))
             .await
             .expect("make root unusable");
@@ -692,7 +693,7 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         drop(db);
 
         let reopened = open();
-        let reopened_database = coven_database::StoreDatabase::new(&reopened.database);
+        let reopened_database = coven_database::StoreDatabase::new(reopened.database());
         let result = match crate::sync::test_helpers::TestDevice::load(
             &reopened,
             storage.clone(),
@@ -731,18 +732,15 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
 async fn authorized_writer_retains_its_exact_root_without_reloading_durable_authority() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "blocked-retry",
-            keypair.clone(),
-        )
-        .expect("in-memory home supports immutable copies"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "blocked-retry",
+        keypair.clone(),
+    ));
     let db = open_test_db();
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
         storage.clone(),
@@ -751,7 +749,7 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
     )
     .await
     .expect("create blocked-retry Store");
-    db.database
+    db.database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('blocked-first', 'first', NULL, 1, \
@@ -767,7 +765,7 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         .authorize_writer()
         .await
         .expect("authorize writer before invalidating its durable root");
-    db.database.remove_store_protocol_root_for_test().await;
+    db.database().remove_store_protocol_root_for_test().await;
     assert!(writer
         .prepare_pending_store_write()
         .await
@@ -786,18 +784,15 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
 async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "blocked-discard",
-            keypair.clone(),
-        )
-        .expect("in-memory home supports immutable copies"),
-    );
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "blocked-discard",
+        keypair.clone(),
+    ));
     let db = open_test_db();
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
         storage.clone(),
@@ -806,14 +801,14 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
     )
     .await
     .expect("create blocked-discard Store");
-    db.database
+    db.database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-first', 'first', NULL, 1, \
                  '0000000001000-0000-writer', '2026-01-01')",
         )
         .await;
-    db.database
+    db.database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-second', 'second', NULL, 1, \
@@ -856,7 +851,7 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         );
     }
 
-    db.database
+    db.database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('after-discard', 'after', NULL, 1, \

@@ -16,7 +16,6 @@ pub enum CirclePackageReadError {
 
 pub(crate) struct OpenedCirclePackage {
     pub(crate) object: VerifiedObject<Vec<u8>>,
-    pub(crate) blob_protection: coven_protocol::objects::BlobSpoolProtection,
 }
 
 pub(crate) struct CirclePackageReader<'operation, 'storage> {
@@ -98,7 +97,6 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                 semantic_hash: reference.package.content_hash,
                 object: reference.package.object.clone(),
             },
-            blob_protection: access.blob_protection(),
         })
     }
 
@@ -271,7 +269,6 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             loaded.push(LoadedCirclePackage {
                 reference: reference.clone(),
                 bytes: package.object.value,
-                blob_protection: package.blob_protection,
             });
         }
         Ok(loaded)

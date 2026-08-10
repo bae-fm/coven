@@ -24,7 +24,7 @@ use coven_replication::sync::store::{
     InviteError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile, SnapshotError,
 };
 use coven_replication::sync::MemberInvitation;
-use coven_storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo, ExactCloudHome};
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
 /// Why joining or restoring a store failed. Both are the same operation —
@@ -193,7 +193,7 @@ async fn build_cloud_home_for_join(
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-) -> Result<Arc<dyn CloudHome>, BootstrapError> {
+) -> Result<Arc<dyn ExactCloudHome>, BootstrapError> {
     use coven_storage::cloud::*;
 
     #[cfg(not(feature = "oauth-providers"))]
@@ -346,7 +346,7 @@ pub struct DeviceJoinClient {
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     #[cfg(any(test, feature = "test-utils"))]
-    test_home: Option<Arc<dyn CloudHome>>,
+    test_home: Option<Arc<dyn ExactCloudHome>>,
 }
 
 struct DeviceJoinStorage {
@@ -406,7 +406,7 @@ impl DeviceJoinClient {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn CloudHome>) -> Self {
+    pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn ExactCloudHome>) -> Self {
         self.test_home = Some(home);
         self
     }
@@ -770,7 +770,7 @@ impl DeviceJoinClient {
         )?)
     }
 
-    async fn build_cloud_home(&self) -> Result<Arc<dyn CloudHome>, BootstrapError> {
+    async fn build_cloud_home(&self) -> Result<Arc<dyn ExactCloudHome>, BootstrapError> {
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(home) = &self.test_home {
             return Ok(home.clone());
@@ -801,7 +801,7 @@ impl DeviceJoinClient {
 
     fn plaintext_storage(
         &self,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
         signer: &UserKeypair,
     ) -> Result<CloudSyncConnection, BootstrapError> {
         Ok(CloudSyncConnection::new(
@@ -810,7 +810,7 @@ impl DeviceJoinClient {
             BlobPathScheme::for_storage(HomeStorage::Opaque),
             self.code.store_id.clone(),
             signer.clone(),
-        )?)
+        ))
     }
 
     async fn build_storage(
@@ -856,9 +856,6 @@ impl DeviceJoinClient {
         )
         .open_containing(signer, &chain, &self.code.wrapped_key)
         .await?;
-        cloud.clone().exact_slot_storage().ok_or_else(|| {
-            BootstrapError::Provider("provider has no exact-slot adapter".to_string())
-        })?;
         let keyring = MasterKeyring::from(encryption.clone());
         let storage = CloudSyncConnection::new(
             cloud,
@@ -866,7 +863,7 @@ impl DeviceJoinClient {
             BlobPathScheme::for_storage(HomeStorage::Opaque),
             self.code.store_id.clone(),
             signer.clone(),
-        )?;
+        );
         Ok(DeviceJoinStorage {
             storage: Arc::new(storage),
             keyring,

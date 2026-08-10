@@ -1,7 +1,6 @@
 use crate::{SqlContext, SqlReadContext, WriteBatch, WriteReceipt};
 use coven_database::{HostWriteError, HostWriteOperation, StoreRowWrites};
 
-use crate::store_security::StoreSecurity;
 use crate::store_sync::StoreSync;
 use crate::{CovenError, CovenResult};
 use coven_database::StoreDatabase;
@@ -24,7 +23,7 @@ where
 pub(crate) struct StoreRows {
     writes: StoreRowWrites,
     read_database: StoreDatabase,
-    security: StoreSecurity,
+    master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     sync: StoreSync,
 }
 
@@ -32,13 +31,13 @@ impl StoreRows {
     pub(crate) fn new(
         writes: StoreRowWrites,
         read_database: StoreDatabase,
-        security: StoreSecurity,
+        master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
         sync: StoreSync,
     ) -> Self {
         Self {
             writes,
             read_database,
-            security,
+            master_keys,
             sync,
         }
     }
@@ -96,8 +95,16 @@ impl StoreRows {
         Option<coven_keys::encryption::EncryptionService>,
         coven_keys::keys::RoutingEncryptionError,
     > {
-        self.security
-            .routing_encryption(self.writes.requires_routing_encryption())
+        if !self.writes.requires_routing_encryption() {
+            return Ok(None);
+        }
+        let keyring = self
+            .master_keys
+            .unlock()?
+            .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+        Ok(Some(coven_keys::encryption::EncryptionService::from(
+            keyring,
+        )))
     }
 
     fn host_write_blob_staging(&self) -> Option<Box<dyn coven_database::AudienceBlobMoveStaging>> {

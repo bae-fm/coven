@@ -55,13 +55,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         ))
     }
 
-    pub(crate) fn store_blob_protection(
-        &self,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
-    {
-        self.blob_source.store_protection()
-    }
-
     pub(crate) async fn drain_local_blob_cleanup(&self) -> Result<bool, coven_database::DbError> {
         self.blob_cache.drain_local_cleanup().await
     }
@@ -69,7 +62,6 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
     pub(crate) async fn prepare_package(
         &self,
         package: coven_protocol::audience_package::AudiencePackage,
-        blob_protection: coven_protocol::objects::BlobSpoolProtection,
         schema: std::sync::Arc<coven_database::TableSchema>,
     ) -> Result<Result<PreparedMergeMaterializationPackage, HeldStorePositionReason>, StorePullError>
     {
@@ -145,6 +137,8 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         }
         let mut verified = Vec::new();
         let mut failures = Vec::new();
+        let blob_authority =
+            coven_protocol::blob::RowBlobAuthority::Remote(package.audience().clone());
         for binding in package.blob_bindings() {
             let stored = binding.blob();
             if verified.iter().any(|candidate| candidate == stored) {
@@ -155,12 +149,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             let retain = eager.iter().any(|download| download == stored);
             if let Err(cause) = self
                 .blob_source
-                .verify_plaintext_with_protection(
-                    self.blob_cache,
-                    stored,
-                    blob_protection.clone(),
-                    retain,
-                )
+                .verify_plaintext(self.blob_cache, &blob_authority, stored, retain)
                 .await
             {
                 failures.push(BlobDownloadFailure {

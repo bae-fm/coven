@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::{
     collect_declared_types, is_test_only, is_test_source, type_name, RustFile, StructInfo,
-    TypeNames,
+    TypeNames, BORROWED_FACADE_TYPES, CAPABILITY_TYPES, NON_OWNER_TYPES,
 };
 
 const INTERNAL_DEPENDENCY_TYPES: &[&str] = &[
@@ -25,13 +26,27 @@ const CLOSED_SESSION_TYPES: &[&str] = &["DatabaseSession", "StoreSession"];
 const ALWAYS_FORBIDDEN_RETURNS: &[&str] = &[
     "Connection",
     "DatabaseCore",
+    "ExactSlotStorage",
     "ProviderProbeStorage",
     "Session",
     "Transaction",
 ];
+const RAW_PROVIDER_OPERATIONS: &[&str] = &[
+    "delete_provider_object",
+    "list_provider_objects",
+    "provider_object_exists",
+    "read_provider_object",
+    "write_provider_object",
+];
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub(crate) enum OwnerDependencyLeak {
+    Field {
+        path: String,
+        line: usize,
+        owner: String,
+        field: String,
+    },
     CrateRootSessionField {
         path: String,
         line: usize,
@@ -51,6 +66,12 @@ pub(crate) enum OwnerDependencyLeak {
         owner: String,
         method: String,
         dependency: String,
+    },
+    RawProviderOperation {
+        path: String,
+        line: usize,
+        owner: String,
+        method: String,
     },
     FreeReturn {
         path: String,
@@ -75,6 +96,7 @@ struct ReceiverMethod {
     parameters: BTreeSet<String>,
     returns_owner: bool,
     mutates_owner: bool,
+    crosses_owner: bool,
 }
 
 pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDependencyLeak> {
@@ -97,6 +119,7 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let service_owners = infer_field_owners(&declared_types);
     let mut exposed_dependencies = BTreeMap::<String, BTreeSet<String>>::new();
     loop {
         let before = exposed_dependencies.clone();
@@ -132,9 +155,20 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         .map(|name| (*name).to_string())
         .collect::<BTreeSet<_>>();
     let mut leaks = BTreeSet::new();
+    collect_retained_service_owner_fields(files, &service_owners, &mut leaks);
     collect_crate_root_session_fields(files, &internal_dependencies, &mut leaks);
     collect_database_callables(files, &raw_database_types, &mut leaks);
     for method in methods {
+        if method.owner == "CloudSyncObjectStorage"
+            && RAW_PROVIDER_OPERATIONS.contains(&method.method.as_str())
+        {
+            leaks.insert(OwnerDependencyLeak::RawProviderOperation {
+                path: method.path.clone(),
+                line: method.line,
+                owner: method.owner.clone(),
+                method: method.method.clone(),
+            });
+        }
         if !method.returns_owner {
             let retained = retained_dependencies
                 .get(&method.owner)
@@ -142,7 +176,9 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
                 .unwrap_or_default();
             for output in &method.output {
                 let returns_retained_dependency = always_forbidden_returns.contains(output)
-                    || (internal_dependencies.contains(output) && retained.contains(output));
+                    || (internal_dependencies.contains(output) && retained.contains(output))
+                    || (method.crosses_owner
+                        && returns_sensitive_derived_service(&method.owner, output, &retained));
                 let returns_leaking_wrapper = exposed_dependencies
                     .get(output)
                     .is_some_and(|nested| !nested.is_disjoint(&retained));
@@ -170,6 +206,123 @@ pub(crate) fn find_owner_dependency_leaks(files: &[RustFile]) -> Vec<OwnerDepend
         }
     }
     leaks.into_iter().collect()
+}
+
+fn infer_field_owners(types: &BTreeMap<String, StructInfo>) -> BTreeSet<String> {
+    let capabilities = CAPABILITY_TYPES
+        .iter()
+        .chain([
+            &"CloudCipher",
+            &"CloudKitOps",
+            &"CloudSyncCipherStateAccess",
+            &"ExactSlotStorage",
+            &"OAuthSession",
+            &"SealedBlobOpener",
+        ])
+        .map(|name| (*name).to_string())
+        .collect::<BTreeSet<_>>();
+    let mut owners = BTreeSet::new();
+    loop {
+        let before = owners.len();
+        for (name, info) in types {
+            if NON_OWNER_TYPES.contains(&name.as_str())
+                || BORROWED_FACADE_TYPES.contains(&name.as_str())
+            {
+                continue;
+            }
+            if info
+                .field_types
+                .iter()
+                .any(|field| capabilities.contains(field) || owners.contains(field))
+            {
+                owners.insert(name.clone());
+            }
+        }
+        if owners.len() == before {
+            return owners;
+        }
+    }
+}
+
+fn collect_retained_service_owner_fields(
+    files: &[RustFile],
+    service_owners: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    for file in files {
+        collect_retained_service_owner_fields_in_items(
+            &file.relative_path,
+            &file.syntax.items,
+            service_owners,
+            leaks,
+        );
+    }
+}
+
+fn collect_retained_service_owner_fields_in_items(
+    path: &str,
+    items: &[syn::Item],
+    service_owners: &BTreeSet<String>,
+    leaks: &mut BTreeSet<OwnerDependencyLeak>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Struct(item) if !is_test_only(&item.attrs) => {
+                let owner = item.ident.to_string();
+                if !service_owners.contains(&owner) {
+                    continue;
+                }
+                for (index, field) in item.fields.iter().enumerate() {
+                    if !super::visibility_crosses_owner(&field.vis) {
+                        continue;
+                    }
+                    leaks.insert(OwnerDependencyLeak::Field {
+                        path: path.to_string(),
+                        line: field.span().start().line,
+                        owner: owner.clone(),
+                        field: field
+                            .ident
+                            .as_ref()
+                            .map_or_else(|| index.to_string(), ToString::to_string),
+                    });
+                }
+            }
+            syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
+                if let Some((_, items)) = &item.content {
+                    collect_retained_service_owner_fields_in_items(
+                        path,
+                        items,
+                        service_owners,
+                        leaks,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn returns_sensitive_derived_service(
+    owner: &str,
+    output: &str,
+    retained: &BTreeSet<String>,
+) -> bool {
+    let owner_or_retained = |dependency: &str| owner == dependency || retained.contains(dependency);
+    match output {
+        "BlobSpoolProtection" => ["CloudSyncConnection", "CloudSyncObjectStorage"]
+            .iter()
+            .any(|dependency| owner_or_retained(dependency)),
+        "CloudCipher" | "EncryptionService" => [
+            "CloudCipher",
+            "CloudSyncCipherStateAccess",
+            "CloudSyncConnection",
+            "MasterKeyCustody",
+            "StoreSecurity",
+        ]
+        .iter()
+        .any(|dependency| owner_or_retained(dependency)),
+        _ => false,
+    }
 }
 
 fn collect_database_callables(
@@ -383,7 +536,12 @@ fn collect_receiver_methods_in_items(
                     if method.sig.receiver().is_none() || is_test_only(&method.attrs) {
                         continue;
                     }
-                    methods.push(receiver_method(path, &owner, &method.sig));
+                    methods.push(receiver_method(
+                        path,
+                        &owner,
+                        &method.sig,
+                        super::visibility_crosses_owner(&method.vis),
+                    ));
                 }
             }
             syn::Item::Trait(item) if !is_test_only(&item.attrs) => {
@@ -395,7 +553,7 @@ fn collect_receiver_methods_in_items(
                     if method.sig.receiver().is_none() || is_test_only(&method.attrs) {
                         continue;
                     }
-                    methods.push(receiver_method(path, &owner, &method.sig));
+                    methods.push(receiver_method(path, &owner, &method.sig, true));
                 }
             }
             syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
@@ -408,7 +566,12 @@ fn collect_receiver_methods_in_items(
     }
 }
 
-fn receiver_method(path: &str, owner: &str, signature: &syn::Signature) -> ReceiverMethod {
+fn receiver_method(
+    path: &str,
+    owner: &str,
+    signature: &syn::Signature,
+    crosses_owner: bool,
+) -> ReceiverMethod {
     let output = match &signature.output {
         syn::ReturnType::Default => BTreeSet::new(),
         syn::ReturnType::Type(_, output) => type_names(output),
@@ -431,6 +594,7 @@ fn receiver_method(path: &str, owner: &str, signature: &syn::Signature) -> Recei
             receiver.mutability.is_some()
                 || matches!(&receiver.kind, syn::ReceiverKind::Reference(_, _, Some(_)))
         }),
+        crosses_owner,
         output,
         parameters,
     }
@@ -606,6 +770,77 @@ mod tests {
                     && method == "provider_probes"
                     && dependency == "ProviderProbeStorage"
         ));
+    }
+
+    #[test]
+    fn storage_traits_cannot_expose_raw_provider_object_operations() {
+        let file = production_file_at(
+            "crates/coven-storage/src/cloud_object_storage.rs",
+            r#"
+            trait CloudSyncObjectStorage {
+                fn read_provider_object(&self, key: &str) -> Vec<u8>;
+                fn write_provider_object(&self, key: &str, bytes: Vec<u8>);
+                fn list_provider_objects(&self, prefix: &str) -> Vec<String>;
+                fn delete_provider_object(&self, key: &str);
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 4);
+    }
+
+    #[test]
+    fn retained_service_owners_cannot_expose_any_fields() {
+        let file = production_file_at(
+            "crates/coven-storage/src/remote/blob_io.rs",
+            r#"
+            trait ExactSlotStorage {}
+            struct BlobRangeReader {
+                pub exact: std::sync::Arc<dyn ExactSlotStorage>,
+                pub plaintext_size: u64,
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 2);
+    }
+
+    #[test]
+    fn test_support_cannot_expose_retained_service_fields() {
+        let file = production_file_at(
+            "crates/coven-replication/src/sync/test_helpers.rs",
+            r#"
+            trait CloudSyncObjectStorage {}
+            struct TestStoreFixture {
+                pub storage: std::sync::Arc<dyn CloudSyncObjectStorage>,
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 1);
+    }
+
+    #[test]
+    fn methods_cannot_return_key_or_provider_capabilities() {
+        let file = production_file_at(
+            "crates/coven-storage/src/remote/cipher.rs",
+            r#"
+            struct CloudCipher;
+            struct BlobSpoolProtection;
+            trait ExactSlotStorage {}
+            trait CloudSyncCipherStateAccess {
+                fn snapshot(&self) -> CloudCipher;
+            }
+            trait CloudSyncObjectStorage {
+                fn store_blob_protection(&self) -> BlobSpoolProtection;
+            }
+            trait CloudHome {
+                fn exact_slot_storage(&self) -> std::sync::Arc<dyn ExactSlotStorage>;
+            }
+            "#,
+        );
+
+        assert_eq!(find_owner_dependency_leaks(&[file]).len(), 3);
     }
 
     #[test]

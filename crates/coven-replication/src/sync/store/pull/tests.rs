@@ -35,7 +35,7 @@ async fn one_retained_checkpoint() -> (
         .membership_for_test()
         .await
         .expect("load checkpoint membership");
-    db.database
+    db.database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('checkpoint-conflict', 'checkpoint', NULL, 1, \
@@ -63,10 +63,10 @@ async fn one_retained_checkpoint() -> (
         .expect("load checkpoint position")
         .expect("checkpoint position exists");
     let snapshot_dir = tempfile::tempdir().expect("create checkpoint snapshot directory");
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     let image = database
         .capture_snapshot_image_for_test(
-            store.root.clone(),
+            store.root().clone(),
             snapshot_dir.path().to_path_buf(),
             None,
         )
@@ -122,7 +122,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
         .causal_cut
         .insert(coordinate, replacement);
     assert!(merge_retained_merge_history(
-        &store.root,
+        &store.root(),
         &membership,
         vec![checkpoint.clone(), conflicting_commit],
     )
@@ -136,7 +136,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
         .expect("opened checkpoint has an announcement frontier");
     announcement.reference.head_hash = ObjectHash::digest(b"same-stream competing head");
     assert!(merge_retained_merge_history(
-        &store.root,
+        &store.root(),
         &membership,
         vec![checkpoint, conflicting_head],
     )
@@ -147,7 +147,7 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
     let (db, store, signer, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
@@ -215,7 +215,7 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
     .await
     .expect("create canonical replay Store");
     founder
-        .database
+        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
          VALUES ('canonical-row', 'c0', 'b0', 1,
@@ -262,7 +262,7 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
          WHERE id = 'canonical-row'",
     ] {
         chain_producer
-            .database
+            .database()
             .execute_test_host_write(update)
             .await;
         let (_producer_temp, producer_store_dir) = crate::sync::test_helpers::temp_store_dir();
@@ -273,7 +273,7 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
         store.pull_into(&progressive, &progressive_store_dir).await;
     }
     x2_producer
-        .database
+        .database()
         .execute_test_host_write(
             "UPDATE notes SET title = 'c2', _updated_at = '0000000004000-0000-x2'
          WHERE id = 'canonical-row'",
@@ -288,11 +288,11 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
     store.pull_into(&canonical, &canonical_store_dir).await;
 
     let progressive_title = progressive
-        .database
+        .database()
         .query_test_text("SELECT title FROM notes WHERE id = 'canonical-row'")
         .await;
     let canonical_title = canonical
-        .database
+        .database()
         .query_test_text("SELECT title FROM notes WHERE id = 'canonical-row'")
         .await;
     assert_eq!(progressive_title, canonical_title);
@@ -393,7 +393,7 @@ impl EffectiveAccessFixture {
     async fn publish_row(&self, row_id: &str, body: &str, stamp: &str) -> StoreBatchCommitRef {
         let statement = if self
             .owner_database
-            .database
+            .database()
             .scoped_routing_state_for_test(row_id)
             .await
             .row
@@ -412,7 +412,7 @@ impl EffectiveAccessFixture {
             )
         };
         self.owner_database
-            .database
+            .database()
             .run_scoped_host_write_for_test(statement)
             .await;
         let mut writer = self
@@ -498,19 +498,18 @@ impl EffectiveAccessFixture {
             coven_storage::BlobPathScheme::Hashed,
             label,
             owner.clone(),
-        )
-        .expect("open effective-access owner storage");
+        );
         let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-            StoreDatabase::new(&owner_database.database),
+            StoreDatabase::new(owner_database.database()),
             owner_store_dir.clone(),
             crate::sync::test_owner_graph::local_blob_access(
-                StoreDatabase::new(&owner_database.database),
+                StoreDatabase::new(owner_database.database()),
                 owner_store_dir.clone(),
             ),
             owner_storage,
             owner.clone(),
             crate::sync::cycle::StoreInitialization::OpenStore {
-                expected_store_root: store.root.clone(),
+                expected_store_root: store.root().clone(),
             },
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -600,7 +599,7 @@ async fn newly_discovered_store_admission_activates_circle_access() {
     .await;
 
     assert_eq!(
-        StoreDatabase::new(&member_database.database)
+        StoreDatabase::new(member_database.database())
             .get_circles(
                 &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
@@ -646,7 +645,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     assert!(first_pull.held_positions.is_empty(), "{first_pull:?}");
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -709,16 +708,18 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .any(|(member, _)| member == &coven_keys::keys::public_key_hex(&fixture.member)));
 
     fixture.home.clear_exact_reads();
-    member_database.database.fail_next_merge_materialization_at(
-        coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
-    );
+    member_database
+        .database()
+        .fail_next_merge_materialization_at(
+            coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
+        );
     fixture
         .pull_member(&member_store_dir)
         .await
         .expect_err("injected transaction failure interrupts removed-member materialization");
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -726,7 +727,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
             .map(|row| row.1.as_str()),
         Some("visible before removal")
     );
-    assert!(StoreDatabase::new(&member_database.database)
+    assert!(StoreDatabase::new(member_database.database())
         .exact_materialized_ref(&commit_stream_id(&late.coord), late.coord.sequence(),)
         .await
         .expect("check rolled-back late position")
@@ -748,12 +749,12 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .contains(&hidden_before_removal_package_slot));
     assert!(!fixture.home.exact_reads().contains(&late_package_slot));
     let state = member_database
-        .database
+        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(state.row, None);
     assert_eq!(state.route, None);
-    assert!(StoreDatabase::new(&member_database.database)
+    assert!(StoreDatabase::new(member_database.database())
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&fixture.owner)]),
@@ -761,7 +762,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .expect("list Circles after Store membership removal")
         .is_empty());
-    assert!(StoreDatabase::new(&member_database.database)
+    assert!(StoreDatabase::new(member_database.database())
         .circle_authoring_context(
             fixture.circle_id,
             &coven_keys::keys::public_key_hex(&fixture.member),
@@ -769,7 +770,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .is_err());
     let (public_circle_state, private_circle_state): (i64, i64) = member_database
-        .database
+        .database()
         .circle_state_table_counts_for_test()
         .await
         .expect("count Circle state after Store membership removal");
@@ -784,7 +785,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     );
     for reference in [&first, &hidden_before_removal, &late, &removal] {
         assert_eq!(
-            StoreDatabase::new(&member_database.database)
+            StoreDatabase::new(member_database.database())
                 .exact_materialized_ref(
                     &commit_stream_id(&reference.coord),
                     reference.coord.sequence(),
@@ -804,7 +805,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .expect("close effective-access member database");
     let reopened = open_scoped_replay_database_at(&member_path);
     let reopened_state = reopened
-        .database
+        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(reopened_state.row, None);
@@ -817,13 +818,13 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         ))
     );
     assert_eq!(
-        StoreDatabase::new(&reopened.database)
+        StoreDatabase::new(reopened.database())
             .exact_materialized_ref(&commit_stream_id(&removal.coord), removal.coord.sequence(),)
             .await
             .expect("load reopened removal position"),
         Some(removal)
     );
-    assert!(StoreDatabase::new(&reopened.database)
+    assert!(StoreDatabase::new(reopened.database())
         .get_circles(
             &member_pubkey,
             std::collections::BTreeSet::from([owner_pubkey]),
@@ -832,7 +833,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .expect("list reopened Circles after Store membership removal")
         .is_empty());
     let reopened_public_circle_state: i64 = reopened
-        .database
+        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "circle_current_state",
         ))
@@ -912,7 +913,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     );
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row,
@@ -971,7 +972,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     assert!(readd_pull.held_positions.is_empty(), "{readd_pull:?}");
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -980,7 +981,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         Some("visible after re-add")
     );
     assert_eq!(
-        StoreDatabase::new(&member_database.database)
+        StoreDatabase::new(member_database.database())
             .get_circles(
                 &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
@@ -1055,7 +1056,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             .await
             .expect("create second routing-conflict Circle");
         founder
-            .database
+            .database()
             .run_scoped_host_write_for_test(format!(
                 "INSERT INTO notes VALUES (
                      '{ROW_ID}', NULL, 'base', '0000000002000-0000-base'
@@ -1188,7 +1189,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         };
 
         canonical_later
-            .database
+            .database()
             .run_scoped_host_write_for_test(canonical_later_sql)
             .await;
         assert!(store
@@ -1206,7 +1207,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         );
 
         canonical_earlier
-            .database
+            .database()
             .run_scoped_host_write_for_test(canonical_earlier_sql)
             .await;
         assert!(store
@@ -1233,11 +1234,11 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         );
 
         let progressive_state = progressive
-            .database
+            .database()
             .scoped_routing_state_for_test(ROW_ID)
             .await;
         let complete_state = complete
-            .database
+            .database()
             .scoped_routing_state_for_test(ROW_ID)
             .await;
         assert_eq!(
@@ -1371,14 +1372,14 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     };
 
     let changeset = crate::sync::test_helpers::open_test_db()
-        .database
+        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('causal-proof-row', 'causal proof', NULL, \
                    '0000000001000-0000-causal-proof', '2026-07-21')",
         ])
         .await;
-    coven_database::StoreDatabase::new(&later_db.database)
+    coven_database::StoreDatabase::new(later_db.database())
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
@@ -1462,22 +1463,22 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     .await
     .expect("create exact predecessor test Store");
     let changeset = crate::sync::test_helpers::open_test_db()
-        .database
+        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('gap-row', 'gap', NULL, '0000000001000-0000-gap', '2026-01-01')",
         ])
         .await;
     let first = store
-        .publish_changeset("founder", 1, &changeset, source.database.schema_version())
+        .publish_changeset("founder", 1, &changeset, source.database().schema_version())
         .await
         .expect("publish first exact commit");
     let second = store
-        .publish_changeset("founder", 2, &changeset, source.database.schema_version())
+        .publish_changeset("founder", 2, &changeset, source.database().schema_version())
         .await
         .expect("publish second exact commit");
     let third = store
-        .publish_changeset("founder", 3, &changeset, source.database.schema_version())
+        .publish_changeset("founder", 3, &changeset, source.database().schema_version())
         .await
         .expect("publish third exact commit");
     let founder_authority = store
@@ -1497,7 +1498,7 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
     let device_cut = coverage.commits().clone();
-    let source_database = StoreDatabase::new(&source.database);
+    let source_database = StoreDatabase::new(source.database());
     let (_, device_state) = source_database
         .store_device_state_for_history_cut(&StoreHistoryCut(device_cut))
         .await
@@ -1557,7 +1558,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         .expect("member pulls the pre-deletion Circle row");
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1571,17 +1572,17 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // must prune along with the row.
     fixture
         .owner_database
-        .database
+        .database()
         .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     member_database
-        .database
+        .database()
         .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(
         fixture
             .owner_database
-            .database
+            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         1,
@@ -1589,7 +1590,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert_eq!(
         member_database
-            .database
+            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         1,
@@ -1610,7 +1611,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // The owner converges to Deleted: rows pruned, control spine retained.
     assert!(fixture
         .owner_database
-        .database
+        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await
         .row
@@ -1618,7 +1619,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert!(
         fixture
             .owner_database
-            .database
+            .database()
             .circle_control_activation_count_for_test(fixture.circle_id)
             .await
             > 0,
@@ -1627,13 +1628,13 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert_eq!(
         fixture
             .owner_database
-            .database
+            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         0,
         "the owner's Circle row blob binding is pruned on deletion"
     );
-    let owner_circles = StoreDatabase::new(&fixture.owner_database.database)
+    let owner_circles = StoreDatabase::new(fixture.owner_database.database())
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.owner),
             fixture.effective_access_members(),
@@ -1653,7 +1654,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         .await
         .expect("member pulls the deletion");
     let pruned = member_database
-        .database
+        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert!(pruned.row.is_none(), "the member's Circle row is pruned");
@@ -1663,7 +1664,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1672,7 +1673,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert!(
         member_database
-            .database
+            .database()
             .circle_control_activation_count_for_test(fixture.circle_id)
             .await
             > 0,
@@ -1680,13 +1681,13 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert_eq!(
         member_database
-            .database
+            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         0,
         "the member's Circle row blob binding is pruned on deletion"
     );
-    let member_circles = StoreDatabase::new(&member_database.database)
+    let member_circles = StoreDatabase::new(member_database.database())
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1701,7 +1702,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
 
     // A new host write destined to the deleted Circle is refused at capture.
     let circle_id = fixture.circle_id;
-    let error = StoreDatabase::new(&fixture.owner_database.database)
+    let error = StoreDatabase::new(fixture.owner_database.database())
         .run_host_store_write_for_test(
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -1753,7 +1754,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
     );
 
     // The Circle is untouched — still active on the member.
-    let circles = StoreDatabase::new(&member_database.database)
+    let circles = StoreDatabase::new(member_database.database())
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1797,7 +1798,7 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
         .expect("member applies the pre-deletion package");
     assert_eq!(
         member_database
-            .database
+            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1815,12 +1816,12 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
         .await
         .expect("member pulls the later deletion");
     assert!(member_database
-        .database
+        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await
         .row
         .is_none());
-    let circles = StoreDatabase::new(&member_database.database)
+    let circles = StoreDatabase::new(member_database.database())
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1870,7 +1871,7 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
 
     // Live materialization is gone, but the authority spine still resolves the
     // historical control the package was signed under.
-    assert!(StoreDatabase::new(&fixture.owner_database.database)
+    assert!(StoreDatabase::new(fixture.owner_database.database())
         .circle_is_deleted(fixture.circle_id)
         .await
         .expect("read deleted state"));

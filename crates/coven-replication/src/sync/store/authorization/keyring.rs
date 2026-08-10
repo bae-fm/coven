@@ -190,22 +190,20 @@ mod tests {
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
         let db = open_test_db();
-        let TestStoreFixture {
-            store,
-            storage: cloud_storage,
-        } = TestStoreFixture::create(
+        let (store, cloud_storage) = (TestStoreFixture::create(
             &db,
             "wrapped-key-exact-objects",
             owner.clone(),
             test_cloud_home(),
         )
         .await
-        .expect("create exact wrapped-key Store");
+        .expect("create exact wrapped-key Store"))
+        .into_parts();
         let device = store
             .bind_device(&db, &owner)
             .await
             .expect("bind exact wrapped-key Store");
-        let store_id = store.root.store_root_id.to_string();
+        let store_id = store.root().store_root_id.to_string();
         let first = device
             .prepare_wrapped_key(
                 &recipient_pubkey,
@@ -233,7 +231,7 @@ mod tests {
         assert_eq!(
             load_wrapped_store_key(
                 &*cloud_storage,
-                store.root.store_root_hash,
+                store.root().store_root_hash,
                 &first.reference,
             )
             .await
@@ -243,7 +241,7 @@ mod tests {
         assert_eq!(
             load_wrapped_store_key(
                 &*cloud_storage,
-                store.root.store_root_hash,
+                store.root().store_root_hash,
                 &second.reference,
             )
             .await
@@ -258,17 +256,15 @@ mod tests {
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
         let db = open_test_db();
-        let TestStoreFixture {
-            store,
-            storage: cloud_storage,
-        } = TestStoreFixture::create(
+        let (store, cloud_storage) = (TestStoreFixture::create(
             &db,
             "wrapped-key-relocation",
             owner.clone(),
             test_cloud_home(),
         )
         .await
-        .expect("create relocation Store");
+        .expect("create relocation Store"))
+        .into_parts();
         let device = store
             .bind_device(&db, &owner)
             .await
@@ -277,7 +273,7 @@ mod tests {
             .prepare_wrapped_key(
                 &recipient_pubkey,
                 WrappedStoreKey::signed(
-                    &store.root.store_root_id.to_string(),
+                    &store.root().store_root_id.to_string(),
                     &recipient_pubkey,
                     1,
                     vec![3; 32],
@@ -294,7 +290,7 @@ mod tests {
         relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
 
         assert!(
-            load_wrapped_store_key(&*cloud_storage, store.root.store_root_hash, &relocated)
+            load_wrapped_store_key(&*cloud_storage, store.root().store_root_hash, &relocated)
                 .await
                 .is_err()
         );

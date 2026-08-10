@@ -11,6 +11,36 @@ use coven_protocol::objects::{
     PreparedExactObject, ProtocolObjectContext, ResolvedProviderBinding, StorageError,
 };
 
+pub const BLOB_TOMBSTONE_PREFIX: &str = "blob_tombstones/";
+
+pub fn blob_tombstone_object_id(
+    stored: &coven_protocol::blob::locator::StoredBlobRef,
+) -> coven_protocol::store_commit::ObjectHash {
+    coven_protocol::remote_object::remote_object_id(stored.object())
+}
+
+pub fn blob_tombstone_key(
+    stored: &coven_protocol::blob::locator::StoredBlobRef,
+    suffix: &str,
+) -> String {
+    format!(
+        "{BLOB_TOMBSTONE_PREFIX}{}{suffix}",
+        blob_tombstone_object_id(stored)
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListedBlobTombstone {
+    Opened {
+        object_id: coven_protocol::store_commit::ObjectHash,
+        plaintext: Vec<u8>,
+    },
+    Invalid {
+        provider_key: String,
+        reason: String,
+    },
+}
+
 #[async_trait]
 pub trait CloudSyncObjectStorage: Send + Sync {
     /// Return the cloud home's fixed blob path representation.
@@ -25,19 +55,44 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         state: crate::cloud::CloudAccessState,
     ) -> Result<crate::cloud::CloudAccessOutcome, StorageError>;
 
-    async fn read_provider_object(&self, key: &str) -> Result<Vec<u8>, StorageError>;
-
-    async fn write_provider_object(
+    async fn read_blob_tombstone(
         &self,
-        key: &str,
-        stored_bytes: Vec<u8>,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
+
+    async fn write_blob_tombstone(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+        plaintext: Vec<u8>,
     ) -> Result<(), StorageError>;
 
-    async fn list_provider_objects(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
+    async fn list_blob_tombstones(&self) -> Result<Vec<ListedBlobTombstone>, StorageError>;
 
-    async fn provider_object_exists(&self, key: &str) -> Result<bool, StorageError>;
+    async fn blob_tombstone_exists(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, StorageError>;
 
-    async fn delete_provider_object(&self, key: &str) -> Result<(), StorageError>;
+    async fn delete_blob_tombstone(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError>;
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn read_provider_bytes_for_test(&self, key: &str) -> Result<Vec<u8>, StorageError>;
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn write_provider_bytes_for_test(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<(), StorageError>;
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn list_provider_keys_for_test(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn provider_key_exists_for_test(&self, key: &str) -> Result<bool, StorageError>;
 
     async fn reserve_cross_principal_response_slot(
         &self,
@@ -117,9 +172,11 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         slot: &ObjectSlot,
     ) -> Result<(), StorageError>;
 
-    /// Return the cloud home's fixed Store blob opening protection. Circle blobs
-    /// use their exact activated Circle key instead.
-    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError>;
+    /// The value identity of the key used for new Store blobs. Browsable homes
+    /// have no key fingerprint; the key-bearing service remains inside storage.
+    fn store_blob_key_fingerprint(
+        &self,
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, StorageError>;
 
     /// Resolve the provider corpus and authenticated principal used by this
     /// adapter. Registrations bind the principal before allocating descendants.
@@ -243,6 +300,15 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         spool: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<BlobSpoolWrite, StorageError>;
 
+    /// Seal a Store-audience blob without handing the Store key to the caller.
+    async fn seal_store_blob_to_spool(
+        &self,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+        plaintext_file: &Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<BlobSpoolWrite, StorageError>;
+
     /// Derive an exact reference from an immutable stored blob file.
     async fn prepare_blob_object(
         &self,
@@ -277,6 +343,13 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
 
+    /// Open and verify a Store-audience blob without exposing the Store key.
+    async fn stage_verified_store_blob_plaintext(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        stage: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
+
     /// Open a reader that serves plaintext ranges of a stored blob by fetching
     /// only the sealed chunks covering each range. The ranged counterpart of
     /// [`Self::stage_verified_blob_plaintext`], which materializes the whole
@@ -286,6 +359,12 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
+    ) -> Result<crate::BlobRangeReader, StorageError>;
+
+    /// Open Store-audience ranges without exposing the Store key.
+    async fn open_store_blob_range_reader(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<crate::BlobRangeReader, StorageError>;
 
     /// Delete one exact stored blob body.

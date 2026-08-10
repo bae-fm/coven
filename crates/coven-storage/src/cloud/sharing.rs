@@ -110,27 +110,54 @@ pub(crate) async fn ensure_absent_by_email(
 /// list/grant/delete request shapes so the absolute-state reconciliation
 /// (read → revoke a wrong-role entry → grant → verify) lives here once.
 pub(crate) struct SharedFolderAccess<'a, EmailOf, NextPage, DeleteUrl, HasRole> {
-    pub session: &'a OAuthSession,
-    pub list_url: String,
-    pub permissions_field: &'static str,
-    pub email_of: EmailOf,
-    pub next_page: NextPage,
-    pub delete_url: DeleteUrl,
-    pub has_role: HasRole,
+    session: &'a OAuthSession,
+    list_url: String,
+    permissions_field: &'static str,
+    email_of: EmailOf,
+    next_page: NextPage,
+    delete_url: DeleteUrl,
+    has_role: HasRole,
     /// The provider's name for the granted role, for the verification error.
-    pub role_name: &'static str,
-    pub grant_url: String,
-    pub grant_body: serde_json::Value,
+    role_name: &'static str,
+    grant_url: String,
+    grant_body: serde_json::Value,
 }
 
-impl<EmailOf, NextPage, DeleteUrl, HasRole>
-    SharedFolderAccess<'_, EmailOf, NextPage, DeleteUrl, HasRole>
+impl<'a, EmailOf, NextPage, DeleteUrl, HasRole>
+    SharedFolderAccess<'a, EmailOf, NextPage, DeleteUrl, HasRole>
 where
     EmailOf: Fn(&serde_json::Value) -> Option<String>,
     NextPage: Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
     DeleteUrl: Fn(&str) -> String,
     HasRole: Fn(&serde_json::Value) -> bool,
 {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        session: &'a OAuthSession,
+        list_url: String,
+        permissions_field: &'static str,
+        email_of: EmailOf,
+        next_page: NextPage,
+        delete_url: DeleteUrl,
+        has_role: HasRole,
+        role_name: &'static str,
+        grant_url: String,
+        grant_body: serde_json::Value,
+    ) -> Self {
+        Self {
+            session,
+            list_url,
+            permissions_field,
+            email_of,
+            next_page,
+            delete_url,
+            has_role,
+            role_name,
+            grant_url,
+            grant_body,
+        }
+    }
+
     async fn current(&self, member_id: &str) -> Result<Option<serde_json::Value>, CloudHomeError> {
         permission_by_email(
             self.session,

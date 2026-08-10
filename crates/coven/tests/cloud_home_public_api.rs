@@ -182,10 +182,6 @@ fn object_slot_rejects_empty_components() {
 
 #[async_trait]
 impl CloudHome for ExternalProvider {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         Ok(())
     }
@@ -321,18 +317,14 @@ impl ExactSlotStorage for ExternalProvider {
 #[tokio::test]
 async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() {
     let exact_create_called = Arc::new(AtomicBool::new(false));
-    let provider: Arc<dyn CloudHome> = Arc::new(ExternalProvider {
+    let provider: Arc<dyn coven::ExactCloudHome> = Arc::new(ExternalProvider {
         exact_create_called: exact_create_called.clone(),
     });
-    let exact = provider
-        .clone()
-        .exact_slot_storage()
-        .expect("exact-slot adapter");
     assert!(matches!(
-        exact.provider_binding().await.unwrap().store,
+        provider.provider_binding().await.unwrap().store,
         StoreProviderBinding::Dropbox { .. }
     ));
-    let created = exact
+    let created = provider
         .allocate_slot("objects/default-create")
         .await
         .expect("allocate external provider slot");
@@ -344,7 +336,7 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
     );
     let created_upload =
         ExactUpload::from_bytes(&created_object, created_bytes).expect("valid exact upload");
-    exact
+    provider
         .create_at(&created_upload, &|_| {})
         .await
         .expect("provider creates the exact slot");
@@ -355,7 +347,7 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
     let temp = tempfile::tempdir().expect("temp dir");
     let destination = temp.path().join("object.bin");
 
-    exact
+    provider
         .read_at_to_file(&object, &destination)
         .await
         .expect("external provider stream");
@@ -367,12 +359,12 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
         b"external provider bytes"
     );
     assert_eq!(
-        exact.read_at(&object).await.unwrap(),
+        provider.read_at(&object).await.unwrap(),
         b"external provider bytes"
     );
     assert_eq!(
-        exact.read_range_at(&object, 9, 17).await.unwrap(),
+        provider.read_range_at(&object, 9, 17).await.unwrap(),
         b"provider"
     );
-    exact.delete_at(&object).await.unwrap();
+    provider.delete_at(&object).await.unwrap();
 }

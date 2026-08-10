@@ -69,7 +69,7 @@ mod tests {
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = coven_database::StoreDatabase::new(&db.database);
+        let database = coven_database::StoreDatabase::new(db.database());
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -101,19 +101,17 @@ mod tests {
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
         let db = open_test_db();
-        let database = coven_database::StoreDatabase::new(&db.database);
+        let database = coven_database::StoreDatabase::new(db.database());
         let initialized_db = open_test_db();
-        let TestStoreFixture {
-            store: _,
-            storage: cloud_storage,
-        } = TestStoreFixture::create(
+        let (_, cloud_storage) = (TestStoreFixture::create(
             &initialized_db,
             "registration-missing-root-storage",
             UserKeypair::generate(),
             crate::sync::test_helpers::test_cloud_home(),
         )
         .await
-        .expect("create registration failure test Store");
+        .expect("create registration failure test Store"))
+        .into_parts();
 
         let result = super::RegistrationOutbox::new(database, &*cloud_storage)
             .drain()
@@ -130,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
         let (store, db, signer) = initialized().await;
-        let database = coven_database::StoreDatabase::new(&db.database);
+        let database = coven_database::StoreDatabase::new(db.database());
         let loaded = store
             .bind_device(&db, &signer)
             .await
@@ -144,7 +142,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(activated.len(), 1);
-        assert_eq!(activated[0].store_root, store.root);
+        assert_eq!(activated[0].store_root, store.root());
     }
 
     #[tokio::test]
@@ -155,7 +153,7 @@ mod tests {
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = coven_database::StoreDatabase::new(&db.database);
+        let database = coven_database::StoreDatabase::new(db.database());
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -185,12 +183,12 @@ mod tests {
     async fn recovery_materialization_reopens_its_retained_introduced_author() {
         let (_store, db, registration, reference) = recovered_author().await;
         let registration = registration.clone();
-        db.database
+        db.database()
             .corrupt_store_device_registration_bytes_for_test(registration)
             .await
             .expect("corrupt activated recovery registration fixture");
 
-        let frontier = coven_database::StoreDatabase::new(&db.database)
+        let frontier = coven_database::StoreDatabase::new(db.database())
             .materialized_frontier()
             .await
             .expect("retained recovery author does not depend on mutable registration rows");
@@ -201,15 +199,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_bytes() {
         let (store, db, _registration, reference) = recovered_author().await;
-        db.database
+        db.database()
             .tamper_retained_recovery_registration_for_test(
                 &reference,
                 coven_database::RetainedRegistrationTamper::CanonicalRegistration,
             )
             .await;
 
-        let root = store.root.clone();
-        db.database
+        let root = store.root().clone();
+        db.database()
             .validate_retained_merge_replay_for_test(root)
             .await
             .expect_err(
@@ -220,15 +218,15 @@ mod tests {
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_authority() {
         let (store, db, _registration, reference) = recovered_author().await;
-        db.database
+        db.database()
             .tamper_retained_recovery_registration_for_test(
                 &reference,
                 coven_database::RetainedRegistrationTamper::ActivationAuthority,
             )
             .await;
 
-        let root = store.root.clone();
-        db.database
+        let root = store.root().clone();
+        db.database()
             .validate_retained_merge_replay_for_test(root)
             .await
             .expect_err(
@@ -242,23 +240,21 @@ mod tests {
             let signer = UserKeypair::generate();
             let db = open_test_db();
             let home = crate::sync::test_helpers::test_cloud_home();
-            let TestStoreFixture {
-                store,
-                storage: cloud_storage,
-            } = TestStoreFixture::create(
+            let (store, cloud_storage) = (TestStoreFixture::create(
                 &db,
                 &format!("recovery-prefix-{failed_call}"),
                 signer.clone(),
                 home.clone(),
             )
             .await
-            .expect("create recovery prefix Store");
+            .expect("create recovery prefix Store"))
+            .into_parts();
             let loaded = store
                 .bind_device(&db, &signer)
                 .await
                 .expect("load recovery Store");
             let authority = store.founder_recovery_authority().await;
-            let database = coven_database::StoreDatabase::new(&db.database);
+            let database = coven_database::StoreDatabase::new(db.database());
             let mut recovery = loaded
                 .owner_recovery_for_test()
                 .await
@@ -277,7 +273,7 @@ mod tests {
             let interrupted_node = if failed_call == 4 {
                 let registration = StoreDeviceRegistration::parse_at(
                     &interrupted.registration_bytes,
-                    &store.root,
+                    &store.root(),
                     interrupted.device_id,
                 )
                 .expect("parse interrupted recovery registration");
@@ -287,7 +283,7 @@ mod tests {
                     panic!("interrupted registration is not a Recovery registration");
                 };
                 let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                    store.root.store_root_hash,
+                    store.root().store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 Some(
@@ -344,7 +340,7 @@ mod tests {
             if let Some(interrupted_node) = interrupted_node {
                 let registration = StoreDeviceRegistration::parse_at(
                     &completed.registration_bytes,
-                    &store.root,
+                    &store.root(),
                     completed.device_id,
                 )
                 .expect("parse completed recovery registration");
@@ -354,7 +350,7 @@ mod tests {
                     panic!("completed registration is not a Recovery registration");
                 };
                 let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                    store.root.store_root_hash,
+                    store.root().store_root_hash,
                     ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 let completed_node = cloud_storage

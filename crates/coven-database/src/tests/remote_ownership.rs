@@ -143,7 +143,7 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     let closure_db = crate::synthetic_store::open_test_db();
     let saved_remote_for_insert = package_remote.clone();
     closure_db
-        .database
+        .database()
         .persist_exact_remote_object_for_test(
             saved_remote_for_insert,
             "reclaim closure fixture package".to_string(),
@@ -151,27 +151,27 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
         .await
         .expect("install solely-owned reclaim closure fixture");
     closure_db
-        .database
+        .database()
         .install_reclaimed_store_package_for_test(operation, absence.clone())
         .await
         .expect("close reclaimed package");
 
     let saved_remote_for_revival = package_remote.clone();
     assert!(closure_db
-        .database
+        .database()
         .remote_object_by_id_for_test(object_id)
         .await
         .is_err());
     assert_eq!(
         closure_db
-            .database
+            .database()
             .reclaimed_store_package_for_test(object_id)
             .await
             .expect("load reclaimed Store package"),
         Some(absence)
     );
     assert!(closure_db
-        .database
+        .database()
         .persist_exact_remote_object_for_test(
             saved_remote_for_revival,
             "revived Store package".to_string(),
@@ -192,13 +192,13 @@ async fn reclaimed_store_package_cannot_return_to_remote_ownership() {
     )
     .expect("valid receipt closure");
     closure_db
-        .database
+        .database()
         .record_reclaimed_store_package_for_test(receipted.clone())
         .await
         .expect("attach receipt to reclaimed package");
     assert_eq!(
         closure_db
-            .database
+            .database()
             .reclaimed_store_package_for_test(object_id)
             .await
             .expect("load receipted closure"),

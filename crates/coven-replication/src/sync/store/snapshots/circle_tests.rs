@@ -24,7 +24,7 @@ impl CircleSnapshotFixture {
             &crate::sync::test_helpers::test_migrations(),
         )
         .expect("open Circle snapshot test database");
-        let store_database = StoreDatabase::new(&database.database);
+        let store_database = StoreDatabase::new(database.database());
         let store = TestStore::create_browsable(
             &database,
             "circle-snapshot-store",
@@ -43,7 +43,7 @@ impl CircleSnapshotFixture {
 
     async fn apply_routing_schema(&self) {
         self.database
-            .database
+            .database()
             .apply_coven_routing_schema_for_test()
             .await
             .expect("apply routing schema");
@@ -66,7 +66,7 @@ impl CircleSnapshotFixture {
             .push_circle_snapshots(
                 &self.database,
                 self.directory.path().join("snap-temp"),
-                self.database.database.schema_version(),
+                self.database.database().schema_version(),
                 "2026-07-16T00:00:00Z",
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             )

@@ -37,7 +37,7 @@ async fn create_test_store_in_its_own_task(
 ) -> std::sync::Arc<TestStore> {
     create_test_store_fixture_in_its_own_task(db, name, signer, home)
         .await
-        .store
+        .store()
 }
 
 async fn create_test_store_fixture_in_its_own_task(
@@ -65,7 +65,7 @@ async fn persist_merge_operation(
     CircleOperationJournal,
 ) {
     let (fixture, home, signer, journal) = persist_merge_operation_fixture(db, name).await;
-    (fixture.store, home, signer, journal)
+    (fixture.store(), home, signer, journal)
 }
 
 async fn persist_merge_operation_fixture(
@@ -81,14 +81,14 @@ async fn persist_merge_operation_fixture(
     let home = crate::sync::test_helpers::test_cloud_home();
     let fixture = create_test_store_fixture_in_its_own_task(db, name, &signer, home.clone()).await;
     let prepared = fixture
-        .store
+        .store()
         .bind_device(db, &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-creator", "Household")
         .await
         .expect("prepare circle operation");
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
         .await
         .expect("persist circle operation");
@@ -97,7 +97,7 @@ async fn persist_merge_operation_fixture(
 
 /// The bytes an operation's durable row owns for one exact object.
 async fn stored_bytes(db: &SyntheticStoreFixture, object: &ExactObjectRef) -> Vec<u8> {
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .payload_for_test(object.stored_hash())
         .await
         .expect("read a prepared Circle object's payload")
@@ -122,7 +122,7 @@ async fn stored_objects(
     db: &SyntheticStoreFixture,
     journal: &CircleOperationJournal,
 ) -> Vec<String> {
-    let database = StoreDatabase::new(&db.database);
+    let database = StoreDatabase::new(db.database());
     let mut present = Vec::new();
     for (step, object) in &journal.operation().prepared_objects {
         if database
@@ -139,7 +139,7 @@ async fn stored_objects(
 /// Install a substituted object's bytes before a test gives its reference to a
 /// durable operation.
 async fn install_substituted_object(db: &SyntheticStoreFixture, prepared: &PreparedExactObject) {
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .install_payload_for_test(prepared.stored_bytes().to_vec())
         .await
         .expect("install a substituted Circle object");
@@ -219,7 +219,6 @@ fn circle_test_cloud_storage(
         store_id,
         identity.clone(),
     )
-    .expect("open Circle test cloud storage")
 }
 
 /// The initialized production sync components a Circle test's owner drives.
@@ -232,16 +231,16 @@ async fn prepare_owner_sync_components(
     store_id: &str,
 ) -> crate::sync::cycle::SyncComponents {
     crate::sync::cycle::PreparedSyncComponents::prepare(
-        coven_database::StoreDatabase::new(&db.database),
+        coven_database::StoreDatabase::new(db.database()),
         store_dir.clone(),
         crate::sync::test_owner_graph::local_blob_access(
-            coven_database::StoreDatabase::new(&db.database),
+            coven_database::StoreDatabase::new(db.database()),
             store_dir.clone(),
         ),
         circle_test_cloud_storage(home, store_id, signer),
         signer.clone(),
         crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root: store.root.clone(),
+            expected_store_root: store.root().clone(),
         },
         Some(EncryptionService::from_key([42; 32])),
     )

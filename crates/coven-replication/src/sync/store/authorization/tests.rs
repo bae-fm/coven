@@ -6,15 +6,14 @@ async fn loaded_store_authorization_retains_its_verified_root() {
     let db = open_test_db();
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: fixture,
-        storage,
-    } = TestStoreFixture::create(&db, "retained-root-authority", signer.clone(), home.clone())
-        .await
-        .expect("create Store");
+    let (fixture, storage) =
+        (TestStoreFixture::create(&db, "retained-root-authority", signer.clone(), home.clone())
+            .await
+            .expect("create Store"))
+        .into_parts();
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let store = Store::load(
-        coven_database::StoreDatabase::new(&db.database),
+        coven_database::StoreDatabase::new(db.database()),
         storage,
         store_dir,
         signer,
@@ -22,7 +21,7 @@ async fn loaded_store_authorization_retains_its_verified_root() {
     .await
     .expect("load Store");
 
-    home.remove_exact_object(fixture.root.object.slot());
+    home.remove_exact_object(fixture.root().object.slot());
 
     store
         .authorize()
@@ -44,7 +43,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
     .expect("create source Store");
     let target = open_test_db();
     target
-        .database
+        .database()
         .install_owner_anchor_failure_for_test()
         .await
         .expect("install owner anchor failure trigger");
@@ -58,7 +57,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         "unexpected owner anchor failure: {error}"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(&target.database)
+        coven_database::StoreDatabase::new(target.database())
             .local_store_root_ref()
             .await
             .expect("read Store root after rolled-back installation"),
@@ -67,7 +66,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
     );
 
     target
-        .database
+        .database()
         .remove_owner_anchor_failure_for_test()
         .await
         .expect("remove owner anchor failure trigger");
@@ -76,11 +75,11 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         .await
         .expect("retry Store loading after rollback");
     assert_eq!(
-        coven_database::StoreDatabase::new(&target.database)
+        coven_database::StoreDatabase::new(target.database())
             .local_store_root_ref()
             .await
             .expect("read Store root after committed retry"),
-        Some(fixture.root.clone()),
+        Some(fixture.root().clone()),
         "the connection must replace its earlier absent read with the committed authority",
     );
 }
@@ -88,7 +87,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
 #[tokio::test]
 async fn owner_anchor_install_verifies_the_stored_replay_image_payload() {
     let db = open_test_db();
-    db.database
+    db.database()
         .install_replay_image_corruption_for_test()
         .await
         .expect("install replay image corruption trigger");
@@ -121,10 +120,12 @@ async fn committed_owner_anchor_publishes_its_verified_replay_baseline() {
     .await
     .expect("create Store");
 
-    db.database.remove_retained_replay_baseline_for_test().await;
+    db.database()
+        .remove_retained_replay_baseline_for_test()
+        .await;
 
-    coven_database::StoreDatabase::new(&db.database)
-        .validated_store_owner(&fixture.root)
+    coven_database::StoreDatabase::new(db.database())
+        .validated_store_owner(&fixture.root())
         .await
         .expect("use replay baseline verified during owner installation");
 }
@@ -141,7 +142,7 @@ async fn repeated_store_initialization_reuses_its_verified_owner_anchor() {
     )
     .await
     .expect("create Store");
-    let database = coven_database::StoreDatabase::new(&db.database);
+    let database = coven_database::StoreDatabase::new(db.database());
     database
         .replace_generation_zero_replay_authority_for_test(
             b"invalid retained replay authority".to_vec(),
@@ -171,7 +172,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
     let target = open_test_db();
     let target_device = fixture.open_into(&target).await.expect("open target Store");
     let authority = fixture.founder_recovery_authority().await;
-    target.database.fail_next_merge_materialization_at(
+    target.database().fail_next_merge_materialization_at(
         coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
     );
 
@@ -188,7 +189,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
         "unexpected Owner recovery failure: {error}"
     );
 
-    let database = coven_database::StoreDatabase::new(&target.database);
+    let database = coven_database::StoreDatabase::new(target.database());
     let staged = database
         .latest_local_store_device_registration()
         .await
@@ -196,7 +197,7 @@ async fn failed_owner_recovery_materialization_does_not_publish_registration_aut
         .expect("recovery registration remains staged for retry");
     let registration = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
         &staged.registration_bytes,
-        &fixture.root,
+        &fixture.root(),
         staged.device_id,
     )
     .expect("parse staged recovery registration");

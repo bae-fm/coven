@@ -165,7 +165,6 @@ async fn publish_sealed_blob(
         store_id,
         UserKeypair::generate(),
     )
-    .expect("test cloud storage supports exact slots")
     .with_blob_chunking(chunking);
     let registration = storage.blob_write_registration(store_id).await;
     let authority = BlobWriteAuthority::new(&registration);
@@ -315,8 +314,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
         BlobPathScheme::Plain,
         "browsable-range",
         identity,
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let registration = storage.blob_write_registration("browsable-range").await;
     let authority = BlobWriteAuthority::new(&registration);
     let plaintext = ramp(4096);
@@ -779,8 +777,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
         BlobPathScheme::Hashed,
         "circle-blob-spool",
         identity,
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let registration = storage.blob_write_registration("circle-blob-spool").await;
     let authority = BlobWriteAuthority::new(&registration);
     let circle_key = EncryptionService::from_key([9u8; 32]);
@@ -842,8 +839,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
         BlobPathScheme::Hashed,
         "blob-spool-key-mismatch",
         identity,
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let registration = storage
         .blob_write_registration("blob-spool-key-mismatch")
         .await;
@@ -895,8 +891,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
         BlobPathScheme::Hashed,
         "verified-blob-download",
         identity,
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let registration = storage
         .blob_write_registration("verified-blob-download")
         .await;
@@ -969,8 +964,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
         BlobPathScheme::Hashed,
         "corrupt-blob-download",
         identity,
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let registration = storage
         .blob_write_registration("corrupt-blob-download")
         .await;
@@ -1042,8 +1036,7 @@ async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
         BlobPathScheme::Hashed,
         "reserved-slot-read",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
     let semantic = "store-v1/heads/device-a/1".to_string();
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -1085,8 +1078,7 @@ async fn protocol_publication_verifies_local_bytes_without_a_provider_body_read(
         BlobPathScheme::Hashed,
         "local-protocol-verification",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"local protocol verification root"),
         ProtocolObjectDomain::StoreHead,
@@ -1120,8 +1112,7 @@ async fn protocol_publication_refuses_local_semantic_mismatch_before_upload() {
         BlobPathScheme::Hashed,
         "local-protocol-mismatch",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"local protocol mismatch root"),
         ProtocolObjectDomain::StoreHead,
@@ -1181,8 +1172,7 @@ fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
         BlobPathScheme::Hashed,
         "prepare-domain-path",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(b"prepare domain root"),
         ProtocolObjectDomain::StoreHead,
@@ -1207,8 +1197,7 @@ async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
         BlobPathScheme::Hashed,
         "exact-delete-identity",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let root = ObjectHash::digest(b"exact delete root");
     let semantic = "store-v1/heads/device-a/1";
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -1247,8 +1236,7 @@ async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read()
         BlobPathScheme::Hashed,
         "reserved-slot-relocation",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports exact slots");
+    );
     let root = coven_protocol::store_commit::ObjectHash::digest(b"reserved slot root");
     let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
         root,
@@ -1278,8 +1266,7 @@ async fn protocol_object_read_rejects_domain_and_path_substitution() {
         BlobPathScheme::Hashed,
         "aad-store",
         UserKeypair::generate(),
-    )
-    .expect("test cloud storage supports immutable copies");
+    );
     let root = coven_protocol::store_commit::ObjectHash::digest(b"root-a");
     let other_root = coven_protocol::store_commit::ObjectHash::digest(b"root-b");
     let commit_hash = coven_protocol::store_commit::ObjectHash::digest(b"commit");
@@ -1354,16 +1341,14 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         BlobPathScheme::Hashed,
         "control-plane-rotation",
         UserKeypair::generate(),
-    )
-    .expect("writer storage");
+    );
     let stale_reader = CloudSyncConnection::new(
         home,
         CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32])),
         BlobPathScheme::Hashed,
         "control-plane-rotation",
         UserKeypair::generate(),
-    )
-    .expect("stale reader storage");
+    );
     let root = ObjectHash::digest(b"control plane root");
     let head_semantic = "store-v1/heads/device-a/1";
     let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(

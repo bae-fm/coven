@@ -2619,10 +2619,6 @@ impl GateCloudHome {
 
 #[async_trait]
 impl CloudHome for GateCloudHome {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.gate().await;
         self.inner.put_object(key, data).await

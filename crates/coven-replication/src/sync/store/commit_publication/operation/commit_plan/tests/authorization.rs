@@ -135,7 +135,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     assert!(!after_removal.can_write_now(&writer_pubkey));
 
     owner_db
-        .database
+        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('direct-removal-witness', 'witness', NULL, 1, \
@@ -147,7 +147,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         .prepare_pending_store_write(&store_dir)
         .await
         .expect("prepare removal-witnessing predecessor commit"));
-    let prepared = coven_database::StoreDatabase::new(&owner_db.database)
+    let prepared = coven_database::StoreDatabase::new(owner_db.database())
         .oldest_prepared_store_write()
         .await
         .expect("load removal-witnessing predecessor")
@@ -195,7 +195,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .await
         .expect("load predecessor membership");
     owner_db
-        .database
+        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('new-direct-witness', 'witness', NULL, 1, \
@@ -207,7 +207,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
         .prepare_pending_store_write(&store_dir)
         .await
         .expect("prepare predecessor commit"));
-    let predecessor = coven_database::StoreDatabase::new(&owner_db.database)
+    let predecessor = coven_database::StoreDatabase::new(owner_db.database())
         .oldest_prepared_store_write()
         .await
         .expect("load predecessor commit")
@@ -274,7 +274,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         .await
         .expect("load exact founder membership");
     let changeset = open_test_db()
-        .database
+        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('remote-device-authority', 'authority', NULL, 1, \
@@ -282,11 +282,16 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         ])
         .await;
     store
-        .publish_changeset("founder", 1, &changeset, owner_db.database.schema_version())
+        .publish_changeset(
+            "founder",
+            1,
+            &changeset,
+            owner_db.database().schema_version(),
+        )
         .await
         .expect("publish exact predecessor commit");
     let forged_device_id = coven_protocol::store_commit::StoreDeviceId::derive(
-        &store.root,
+        &store.root(),
         &coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder {
             creation_id: coven_protocol::store_commit::StoreCreationId::from_nonce(
                 "forged-local-projection",
@@ -294,7 +299,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         },
     );
     owner_db
-        .database
+        .database()
         .forge_device_in_state_snapshots_for_test(forged_device_id)
         .await
         .expect("tamper local Store device projection");

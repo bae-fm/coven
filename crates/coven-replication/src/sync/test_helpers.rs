@@ -170,7 +170,7 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
 pub struct TestStore {
     home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
-    pub root: coven_protocol::store_commit::StoreRootRef,
+    root: coven_protocol::store_commit::StoreRootRef,
     signer: UserKeypair,
     founder: TestDevice,
     producers: Arc<tokio::sync::Mutex<TestStoreProducers>>,
@@ -181,8 +181,8 @@ pub struct TestStore {
 /// Tests that exercise the storage boundary retain both explicitly; `TestStore`
 /// never returns the connection it owns.
 pub struct TestStoreFixture {
-    pub store: Arc<TestStore>,
-    pub storage: Arc<coven_storage::CloudSyncConnection>,
+    store: Arc<TestStore>,
+    storage: Arc<coven_storage::CloudSyncConnection>,
 }
 
 /// Why a test pull did not produce a result. Keeps the three steps a test pull
@@ -321,12 +321,16 @@ mod test_device {
         db: coven_database::StoreDatabase,
         store: std::sync::Arc<crate::sync::store::Store>,
         store_dir: StoreDir,
-        pub device_id: String,
+        device_id: String,
         storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
         identity: UserKeypair,
     }
 
     impl TestDevice {
+        pub fn device_id(&self) -> String {
+            self.device_id.clone()
+        }
+
         pub async fn create(
             db: &SyntheticStoreFixture,
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
@@ -334,8 +338,8 @@ mod test_device {
             identity: UserKeypair,
         ) -> Result<Self, String> {
             Self::create_with_database(
-                coven_database::StoreDatabase::new(&db.database),
-                db.store_dir.clone(),
+                coven_database::StoreDatabase::new(db.database()),
+                db.store_dir().clone(),
                 storage,
                 founder_timestamp,
                 identity,
@@ -401,10 +405,10 @@ mod test_device {
             identity: UserKeypair,
         ) -> Result<Self, crate::sync::store::StoreError> {
             Self::load_with_database(
-                coven_database::StoreDatabase::new(&db.database),
+                coven_database::StoreDatabase::new(db.database()),
                 storage,
                 identity,
-                db.store_dir.clone(),
+                db.store_dir().clone(),
             )
             .await
         }
@@ -613,12 +617,14 @@ mod test_device {
                 .await
         }
 
-        pub async fn blob_protection_for_test(
+        pub async fn blob_key_fingerprint_for_test(
             &self,
             authority: &coven_protocol::blob::RowBlobAuthority,
             stored: &coven_protocol::blob::locator::StoredBlobRef,
-        ) -> Result<coven_protocol::objects::BlobSpoolProtection, String> {
-            self.store.blob_protection_for_test(authority, stored).await
+        ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, String> {
+            self.store
+                .blob_key_fingerprint_for_test(authority, stored)
+                .await
         }
 
         pub async fn announcement_stream_id_for_test(
@@ -1776,10 +1782,8 @@ mod test_device {
             components.run_cycle(clock, master_keys, observer).await
         }
 
-        pub fn current_encryption_for_test(
-            &self,
-        ) -> Option<coven_keys::encryption::EncryptionService> {
-            self.storage.current_encryption()
+        pub fn current_keyring_for_test(&self) -> Option<coven_storage::CloudKeyringFacts> {
+            self.storage.keyring_facts_for_test()
         }
 
         pub fn mark_rotation_committed_for_test(&self, generation: u64) -> Result<(), String> {
@@ -2204,7 +2208,11 @@ mod test_device {
             authority: &coven_protocol::blob::RowBlobAuthority,
             stored: &coven_protocol::blob::locator::StoredBlobRef,
         ) -> String {
-            match self.store.blob_protection_for_test(authority, stored).await {
+            match self
+                .store
+                .blob_key_fingerprint_for_test(authority, stored)
+                .await
+            {
                 Ok(_) => panic!("invalid Circle blob authority must fail"),
                 Err(error) => error,
             }
@@ -2536,6 +2544,18 @@ struct TestStoreProducers {
 }
 
 impl TestStoreFixture {
+    pub fn store(&self) -> Arc<TestStore> {
+        self.store.clone()
+    }
+
+    pub fn storage(&self) -> Arc<coven_storage::CloudSyncConnection> {
+        self.storage.clone()
+    }
+
+    pub fn into_parts(self) -> (Arc<TestStore>, Arc<coven_storage::CloudSyncConnection>) {
+        (self.store, self.storage)
+    }
+
     pub async fn create(
         db: &SyntheticStoreFixture,
         store_id: &str,
@@ -2543,8 +2563,8 @@ impl TestStoreFixture {
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Self, String> {
         Box::pin(TestStore::create_fixture_with_protection_database(
-            coven_database::StoreDatabase::new(&db.database),
-            db.store_dir.clone(),
+            coven_database::StoreDatabase::new(db.database()),
+            db.store_dir().clone(),
             store_id,
             signer,
             home,
@@ -2564,8 +2584,8 @@ impl TestStoreFixture {
         encryption: coven_keys::encryption::EncryptionService,
     ) -> Result<Self, String> {
         TestStore::create_fixture_with_protection_database(
-            coven_database::StoreDatabase::new(&db.database),
-            db.store_dir.clone(),
+            coven_database::StoreDatabase::new(db.database()),
+            db.store_dir().clone(),
             store_id,
             signer,
             home,
@@ -2582,8 +2602,8 @@ impl TestStoreFixture {
         home: Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     ) -> Result<Self, String> {
         Box::pin(TestStore::create_fixture_with_protection_database(
-            coven_database::StoreDatabase::new(&db.database),
-            db.store_dir.clone(),
+            coven_database::StoreDatabase::new(db.database()),
+            db.store_dir().clone(),
             store_id,
             signer,
             home,
@@ -2595,6 +2615,10 @@ impl TestStoreFixture {
 }
 
 impl TestStore {
+    pub fn root(&self) -> coven_protocol::store_commit::StoreRootRef {
+        self.root.clone()
+    }
+
     pub async fn execute_unscoped_host_sql_for_test(
         &self,
         sql: impl Into<String>,
@@ -2618,7 +2642,7 @@ impl TestStore {
         identity: &UserKeypair,
     ) -> Result<crate::sync::store::Store, String> {
         self.open_store_with_storage(
-            coven_database::StoreDatabase::new(&database.database),
+            coven_database::StoreDatabase::new(database.database()),
             self.storage.clone(),
             store_dir,
             identity,
@@ -2653,8 +2677,21 @@ impl TestStore {
         self.home.deletes_seen()
     }
 
+    pub fn tombstone_provider_key(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> String {
+        coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(self.storage.as_ref()),
+        )
+    }
+
     pub fn stored_tombstone_bytes(&self, key: &str) -> Option<Vec<u8>> {
-        self.home.get(key)
+        let stored = self.home.get(key)?;
+        let aad_context = coven_storage::cloud_aad_context(self.storage.store_id(), key);
+        coven_storage::CloudSyncCipherStateAccess::open(self.storage.as_ref(), stored, &aad_context)
+            .ok()
     }
 
     pub async fn plant_tombstone_bytes(
@@ -2662,14 +2699,22 @@ impl TestStore {
         key: &str,
         bytes: Vec<u8>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.storage.write_provider_object(key, bytes).await
+        let aad_context = coven_storage::cloud_aad_context(self.storage.store_id(), key);
+        let stored = coven_storage::CloudSyncCipherStateAccess::seal(
+            self.storage.as_ref(),
+            bytes,
+            &aad_context,
+        );
+        self.storage
+            .write_provider_bytes_for_test(key, stored)
+            .await
     }
 
-    /// Plants a typed tombstone through the exact plaintext Store layout while
+    /// Plants a typed tombstone through the Store's exact cloud layout while
     /// bypassing the signing drain, so deletion tests can exercise rejected
     /// signatures and Store identities.
     pub async fn plant_tombstone(&self, tombstone: &crate::blob::delete::BlobTombstoneJson) {
-        let key = exact_tombstone_key(&tombstone.stored);
+        let key = self.tombstone_provider_key(&tombstone.stored);
         let bytes = serde_json::to_vec(tombstone).expect("serialize tombstone");
         self.plant_tombstone_bytes(&key, bytes)
             .await
@@ -2726,7 +2771,7 @@ impl TestStore {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<crate::sync::store::StorePullResult, crate::sync::cycle::SyncCycleFailure> {
         let store = crate::sync::store::Store::load(
-            coven_database::StoreDatabase::new(&database.database),
+            coven_database::StoreDatabase::new(database.database()),
             storage,
             store_dir.clone(),
             self.signer.clone(),
@@ -2889,15 +2934,24 @@ impl TestStore {
         if identity.public_key() == self.signer.public_key() {
             return Ok(self.storage.clone());
         }
-        coven_storage::CloudSyncConnection::new(
-            self.home.clone(),
-            self.storage.cipher_snapshot(),
-            self.storage.blob_path_scheme(),
-            self.storage.store_id(),
-            identity,
-        )
-        .map(std::sync::Arc::new)
-        .map_err(|error| error.to_string())
+        let cipher = match self.storage.keyring_facts_for_test() {
+            Some(keyring) => coven_storage::CloudCipher::Encrypted(
+                coven_keys::encryption::EncryptionService::from_keyring(
+                    keyring.entries().iter().copied(),
+                )
+                .map_err(|error| error.to_string())?,
+            ),
+            None => coven_storage::CloudCipher::Plaintext,
+        };
+        Ok(std::sync::Arc::new(
+            coven_storage::CloudSyncConnection::new(
+                self.home.clone(),
+                cipher,
+                self.storage.blob_path_scheme(),
+                self.storage.store_id(),
+                identity,
+            ),
+        ))
     }
 
     pub async fn create(
@@ -2989,8 +3043,8 @@ impl TestStore {
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<Arc<Self>, String> {
         Self::create_fixture_with_protection_database(
-            coven_database::StoreDatabase::new(&db.database),
-            db.store_dir.clone(),
+            coven_database::StoreDatabase::new(db.database()),
+            db.store_dir().clone(),
             store_id,
             signer,
             home,
@@ -3010,16 +3064,13 @@ impl TestStore {
         cipher: coven_storage::CloudCipher,
         blob_paths: coven_storage::BlobPathScheme,
     ) -> Result<TestStoreFixture, String> {
-        let storage = std::sync::Arc::new(
-            coven_storage::CloudSyncConnection::new(
-                home.clone(),
-                cipher,
-                blob_paths,
-                store_id,
-                signer.clone(),
-            )
-            .map_err(|error| error.to_string())?,
-        );
+        let storage = std::sync::Arc::new(coven_storage::CloudSyncConnection::new(
+            home.clone(),
+            cipher,
+            blob_paths,
+            store_id,
+            signer.clone(),
+        ));
         let founder_store_dir = store_dir.clone();
         let founder = TestDevice::create_with_database(
             database,
@@ -3126,8 +3177,10 @@ impl TestStore {
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, coven_storage::cloud::CloudHomeError> {
-        let key =
-            crate::blob::delete::tombstone_key_for_test(stored, &self.storage.cipher_snapshot());
+        let key = coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(self.storage.as_ref()),
+        );
         coven_storage::cloud::CloudHome::exists(self.home.as_ref(), &key).await
     }
 
@@ -3381,7 +3434,7 @@ impl TestStore {
         peer_db: &SyntheticStoreFixture,
         candidate: &coven_database::BlockedMergeCandidate,
     ) {
-        let registration = coven_database::StoreDatabase::new(&peer_db.database)
+        let registration = coven_database::StoreDatabase::new(peer_db.database())
             .activated_store_device_registration(
                 candidate.commit.value().author_registration.clone(),
             )
@@ -3398,7 +3451,7 @@ impl TestStore {
             candidate_family,
             candidate.commit.value().write_id.clone(),
             coord.clone(),
-            peer_db.database.schema_version(),
+            peer_db.database().schema_version(),
             b"third winner package".to_vec(),
             Vec::new(),
         )
@@ -3449,7 +3502,7 @@ impl TestStore {
             coven_protocol::store_commit::StoreCommitOperationsInput {
                 store_package: Some(coven_protocol::store_commit::StorePackageInput {
                     candidate_family,
-                    schema_version: peer_db.database.schema_version(),
+                    schema_version: peer_db.database().schema_version(),
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
@@ -3614,10 +3667,10 @@ impl TestStore {
         identity: &UserKeypair,
     ) -> Result<TestDevice, String> {
         TestDevice::load_with_database(
-            coven_database::StoreDatabase::new(&db.database),
+            coven_database::StoreDatabase::new(db.database()),
             self.storage_for_device(identity.clone())?,
             identity.clone(),
-            db.store_dir.clone(),
+            db.store_dir().clone(),
         )
         .await
         .map_err(|error| error.to_string())
@@ -3664,7 +3717,7 @@ impl TestStore {
         joining_identity: &UserKeypair,
         published_at: &str,
     ) -> Result<TestDevice, String> {
-        let joining_database = coven_database::StoreDatabase::new(&joining_db.database);
+        let joining_database = coven_database::StoreDatabase::new(joining_db.database());
         let activated_database = joining_database.clone();
         let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
@@ -3699,7 +3752,7 @@ impl TestStore {
             .publish_device_provider_challenge(provisional)
             .await
             .map_err(|error| format!("publish device provider challenge: {error}"))?;
-        let bootstrap_store_dir = joining_db.store_dir.clone();
+        let bootstrap_store_dir = joining_db.store_dir().clone();
         let mut joining = pending_join
             .begin_joining_store(joining_database, &bootstrap_store_dir)
             .await
@@ -3832,7 +3885,7 @@ impl TestStore {
     }
 
     pub async fn device_id(&self, name: &str) -> Result<String, String> {
-        Ok(self.ensure_producer(name).await?.device_id)
+        Ok(self.ensure_producer(name).await?.device_id())
     }
 
     pub async fn founder_device(&self) -> Result<TestDevice, String> {
@@ -3910,8 +3963,8 @@ impl TestStore {
 
     pub async fn open_into(&self, db: &SyntheticStoreFixture) -> Result<TestDevice, String> {
         TestDevice::open_with_database(
-            coven_database::StoreDatabase::new(&db.database),
-            db.store_dir.clone(),
+            coven_database::StoreDatabase::new(db.database()),
+            db.store_dir().clone(),
             self.storage_for_device(self.signer.clone())?,
             &self.root,
             &self.signer,
@@ -3939,7 +3992,7 @@ impl TestStore {
         store_dir: &StoreDir,
     ) -> Result<bool, String> {
         self.publish_pending_store_database(
-            &coven_database::StoreDatabase::new(&db.database),
+            &coven_database::StoreDatabase::new(db.database()),
             store_dir,
         )
         .await
@@ -3989,18 +4042,15 @@ impl TestStore {
                     .with_provider_binding(peer_binding),
             );
             let peer_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
-                std::sync::Arc::new(
-                    coven_storage::CloudSyncConnection::new(
-                        peer_home.clone(),
-                        coven_storage::CloudCipher::Encrypted(
-                            coven_keys::encryption::EncryptionService::from_key([42; 32]),
-                        ),
-                        coven_storage::BlobPathScheme::Hashed,
-                        "cross-principal-test-store",
-                        identity.clone(),
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
+                std::sync::Arc::new(coven_storage::CloudSyncConnection::new(
+                    peer_home.clone(),
+                    coven_storage::CloudCipher::Encrypted(
+                        coven_keys::encryption::EncryptionService::from_key([42; 32]),
+                    ),
+                    coven_storage::BlobPathScheme::Hashed,
+                    "cross-principal-test-store",
+                    identity.clone(),
+                ));
             let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
             let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
                 pending_dir.path().join("pending-device-join.sqlite"),
@@ -4240,7 +4290,7 @@ impl TestStore {
         );
         let prefix = coven_protocol::store_commit::circle_snapshot_slot_prefix(
             circle_id,
-            &self.founder.device_id,
+            &self.founder.device_id(),
             0,
         );
         let slot = coven_protocol::objects::ObjectSlot::logical(format!("{prefix}.json"))
@@ -4288,12 +4338,6 @@ impl TestStore {
 #[cfg(test)]
 pub fn plaintext_cipher() -> std::sync::RwLock<coven_storage::CloudCipher> {
     std::sync::RwLock::new(coven_storage::CloudCipher::Plaintext)
-}
-
-/// The cloud key a tombstone for `stored` is written under.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn exact_tombstone_key(stored: &coven_protocol::blob::locator::StoredBlobRef) -> String {
-    crate::blob::delete::tombstone_key_for_test(stored, &coven_storage::CloudCipher::Plaintext)
 }
 
 /// Which protocol read an interceptor hook is running ahead of.
@@ -4471,8 +4515,47 @@ where
     S::Target: coven_storage::CloudSyncCipherStateAccess,
     I: StorageInterceptor,
 {
-    fn snapshot(&self) -> coven_storage::CloudCipher {
-        self.inner.snapshot()
+    fn is_plaintext(&self) -> bool {
+        self.inner.is_plaintext()
+    }
+
+    fn suffix(&self) -> &'static str {
+        self.inner.suffix()
+    }
+
+    fn current_generation(&self) -> Option<u64> {
+        self.inner.current_generation()
+    }
+
+    fn current_fingerprint(&self) -> Option<String> {
+        self.inner.current_fingerprint()
+    }
+
+    fn open(
+        &self,
+        stored: Vec<u8>,
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, coven_keys::encryption::EncryptionError> {
+        self.inner.open(stored, aad_context)
+    }
+
+    fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
+        self.inner.seal(plaintext, aad_context)
+    }
+
+    fn open_sealed_blob_for_test(
+        &self,
+        stored: &[u8],
+        aad_context: &[u8],
+    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+        self.inner.open_sealed_blob_for_test(stored, aad_context)
+    }
+
+    fn merged_keyring(
+        &self,
+        new_encryption: &coven_keys::encryption::EncryptionService,
+    ) -> Result<coven_storage::CloudKeyringMerge, coven_keys::encryption::EncryptionError> {
+        self.inner.merged_keyring(new_encryption)
     }
 
     fn merge_key_rotation(
@@ -4535,9 +4618,9 @@ where
 
     fn check(
         &self,
-        cipher: &coven_storage::CloudCipher,
+        live_generation: Option<u64>,
     ) -> Result<(), coven_protocol::objects::RotationPending> {
-        self.inner.check(cipher)
+        self.inner.check(live_generation)
     }
 }
 
@@ -4569,7 +4652,7 @@ where
 impl<S, I> coven_storage::CloudSyncObjectStorage for InterceptedStorage<S, I>
 where
     S: std::ops::Deref + Send + Sync,
-    S::Target: coven_storage::CloudSyncObjectStorage,
+    S::Target: coven_storage::CloudSyncObjectStorage + coven_storage::CloudSyncCipherStateAccess,
     I: StorageInterceptor,
 {
     fn blob_path_scheme(&self) -> coven_storage::BlobPathScheme {
@@ -4588,51 +4671,108 @@ where
         self.inner.set_member_access(state).await
     }
 
-    async fn read_provider_object(
+    async fn read_blob_tombstone(
         &self,
-        key: &str,
-    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
-        self.interceptor.before_provider_object_read(key).await?;
-        self.inner.read_provider_object(key).await
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<Option<Vec<u8>>, coven_protocol::objects::StorageError> {
+        let key = coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
+        );
+        self.interceptor.before_provider_object_read(&key).await?;
+        self.inner.read_blob_tombstone(stored).await
     }
 
-    async fn write_provider_object(
+    async fn write_blob_tombstone(
         &self,
-        key: &str,
-        stored_bytes: Vec<u8>,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+        plaintext: Vec<u8>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.interceptor.before_provider_object_write(key).await?;
-        self.inner.write_provider_object(key, stored_bytes).await
+        let key = coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
+        );
+        self.interceptor.before_provider_object_write(&key).await?;
+        self.inner.write_blob_tombstone(stored, plaintext).await
     }
 
-    async fn list_provider_objects(
+    async fn list_blob_tombstones(
         &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
-        self.inner.list_provider_objects(prefix).await
+    ) -> Result<Vec<coven_storage::ListedBlobTombstone>, coven_protocol::objects::StorageError>
+    {
+        self.inner.list_blob_tombstones().await
     }
 
-    async fn provider_object_exists(
+    async fn blob_tombstone_exists(
         &self,
-        key: &str,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, coven_protocol::objects::StorageError> {
-        match self.interceptor.before_provider_object_exists(key).await? {
+        let key = coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
+        );
+        match self.interceptor.before_provider_object_exists(&key).await? {
             ProviderObjectExistsInterception::Proceed => {
-                self.inner.provider_object_exists(key).await
+                self.inner.blob_tombstone_exists(stored).await
             }
             ProviderObjectExistsInterception::DeleteAndReportAbsent => {
-                self.inner.delete_provider_object(key).await?;
+                self.inner.delete_blob_tombstone(stored).await?;
                 Ok(false)
             }
         }
     }
 
-    async fn delete_provider_object(
+    async fn delete_blob_tombstone(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
+        let key = coven_storage::blob_tombstone_key(
+            stored,
+            coven_storage::CloudSyncCipherStateAccess::suffix(&*self.inner),
+        );
+        self.interceptor.before_provider_object_delete(&key).await?;
+        self.inner.delete_blob_tombstone(stored).await
+    }
+
+    async fn read_provider_bytes_for_test(
         &self,
         key: &str,
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
+        self.interceptor.before_provider_object_read(key).await?;
+        self.inner.read_provider_bytes_for_test(key).await
+    }
+
+    async fn write_provider_bytes_for_test(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
     ) -> Result<(), coven_protocol::objects::StorageError> {
-        self.interceptor.before_provider_object_delete(key).await?;
-        self.inner.delete_provider_object(key).await
+        self.interceptor.before_provider_object_write(key).await?;
+        self.inner.write_provider_bytes_for_test(key, bytes).await
+    }
+
+    async fn list_provider_keys_for_test(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
+        self.inner.list_provider_keys_for_test(prefix).await
+    }
+
+    async fn provider_key_exists_for_test(
+        &self,
+        key: &str,
+    ) -> Result<bool, coven_protocol::objects::StorageError> {
+        match self.interceptor.before_provider_object_exists(key).await? {
+            ProviderObjectExistsInterception::Proceed => {
+                self.inner.provider_key_exists_for_test(key).await
+            }
+            ProviderObjectExistsInterception::DeleteAndReportAbsent => {
+                Err(coven_protocol::objects::StorageError::InvalidContent(
+                    "raw test-key interception cannot delete through the production API"
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     async fn reserve_cross_principal_response_slot(
@@ -4768,11 +4908,43 @@ where
         self.inner.delete_exact_slot_and_verify_absent(slot).await
     }
 
-    fn store_blob_protection(
+    fn store_blob_key_fingerprint(
         &self,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, coven_protocol::objects::StorageError>
     {
-        self.inner.store_blob_protection()
+        self.inner.store_blob_key_fingerprint()
+    }
+
+    async fn seal_store_blob_to_spool(
+        &self,
+        locator: &coven_protocol::blob::locator::BlobLocator,
+        authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
+        plaintext_file: &std::path::Path,
+        spool: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<coven_protocol::objects::BlobSpoolWrite, coven_protocol::objects::StorageError>
+    {
+        self.inner
+            .seal_store_blob_to_spool(locator, authority, plaintext_file, spool)
+            .await
+    }
+
+    async fn stage_verified_store_blob_plaintext(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+        stage: coven_foundation::local_file::AtomicStagedFile,
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, coven_protocol::objects::StorageError>
+    {
+        self.interceptor.before_blob_stage().await?;
+        self.inner
+            .stage_verified_store_blob_plaintext(blob, stage)
+            .await
+    }
+
+    async fn open_store_blob_range_reader(
+        &self,
+        blob: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<coven_storage::BlobRangeReader, coven_protocol::objects::StorageError> {
+        self.inner.open_store_blob_range_reader(blob).await
     }
 
     async fn provider_binding(

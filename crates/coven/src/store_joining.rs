@@ -67,7 +67,7 @@ impl StoreJoining {
         let owner_device = store.bind_store_device(&self.database, owner).await?;
         let snapshot = self
             .database
-            .capture_snapshot_image_for_test(store.root.clone(), snapshot_path, None)
+            .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
             .await
             .map_err(|error| error.to_string())?;
         let coverage =

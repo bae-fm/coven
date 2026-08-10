@@ -977,12 +977,6 @@ impl OAuthRestHome for DropboxCloudHome {
 
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let namespace_id = self.get_or_create_shared_folder_id().await?;
         let path_root = Self::path_root_header(&namespace_id);

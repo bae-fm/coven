@@ -247,12 +247,7 @@ impl CloudKitCloudHome {
         let scope = self.scope.clone();
         tokio::task::spawn_blocking(move || {
             let batch = ops.begin_atomic_create(&scope)?;
-            Ok(Arc::new(CloudKitStagingCleanup {
-                ops,
-                scope,
-                batch,
-                armed: std::sync::atomic::AtomicBool::new(true),
-            }))
+            Ok(Arc::new(CloudKitStagingCleanup::new(ops, scope, batch)))
         })
         .await
         .map_err(|error| {
@@ -430,10 +425,6 @@ where
 
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
@@ -456,16 +447,13 @@ impl CloudHome for CloudKitCloudHome {
                 "CloudKit object {key} is too large for this platform"
             ))
         })?;
-        Ok(Box::new(CloudKitPartSink {
-            ops: self.ops.clone(),
-            scope: self.scope.clone(),
-            key: key.to_string(),
-            upload_id: self.ids.new_id(),
-            index: 0,
+        Ok(Box::new(CloudKitPartSink::new(
+            self.ops.clone(),
+            self.scope.clone(),
+            key.to_string(),
+            self.ids.new_id(),
             total_len,
-            written_len: 0,
-            settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }))
+        )))
     }
 
     fn multipart_threshold(&self) -> u64 {

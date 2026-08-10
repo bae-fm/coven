@@ -106,17 +106,44 @@ use coven_storage::CloudSyncObjectStorage;
 /// authority; the cache only reads bytes with the supplied protection.
 pub(crate) struct RemoteBlobAccess<'a> {
     storage: &'a dyn CloudSyncObjectStorage,
-    protection: coven_protocol::objects::BlobSpoolProtection,
+    protection: RemoteBlobProtection,
+}
+
+enum RemoteBlobProtection {
+    Store,
+    Circle(coven_protocol::objects::BlobSpoolProtection),
 }
 
 impl<'a> RemoteBlobAccess<'a> {
-    pub(crate) fn new(
+    pub(crate) fn circle(
         storage: &'a dyn CloudSyncObjectStorage,
         protection: coven_protocol::objects::BlobSpoolProtection,
     ) -> Self {
         Self {
             storage,
-            protection,
+            protection: RemoteBlobProtection::Circle(protection),
+        }
+    }
+
+    pub(crate) fn store(storage: &'a dyn CloudSyncObjectStorage) -> Self {
+        Self {
+            storage,
+            protection: RemoteBlobProtection::Store,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn key_fingerprint(
+        &self,
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, StorageError> {
+        match &self.protection {
+            RemoteBlobProtection::Store => self.storage.store_blob_key_fingerprint(),
+            RemoteBlobProtection::Circle(coven_protocol::objects::BlobSpoolProtection::Opaque(
+                encryption,
+            )) => Ok(Some(encryption.seal_key_fingerprint())),
+            RemoteBlobProtection::Circle(
+                coven_protocol::objects::BlobSpoolProtection::Browsable,
+            ) => Ok(None),
         }
     }
 
@@ -125,20 +152,34 @@ impl<'a> RemoteBlobAccess<'a> {
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
-        self.storage
-            .stage_verified_blob_plaintext(stored, self.protection.clone(), stage)
-            .await
-            .map_err(Into::into)
+        match &self.protection {
+            RemoteBlobProtection::Store => {
+                self.storage
+                    .stage_verified_store_blob_plaintext(stored, stage)
+                    .await
+            }
+            RemoteBlobProtection::Circle(protection) => {
+                self.storage
+                    .stage_verified_blob_plaintext(stored, protection.clone(), stage)
+                    .await
+            }
+        }
+        .map_err(Into::into)
     }
 
     pub(super) async fn open_range_reader(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<coven_storage::BlobRangeReader, BlobCacheError> {
-        self.storage
-            .open_blob_range_reader(stored, self.protection.clone())
-            .await
-            .map_err(Into::into)
+        match &self.protection {
+            RemoteBlobProtection::Store => self.storage.open_store_blob_range_reader(stored).await,
+            RemoteBlobProtection::Circle(protection) => {
+                self.storage
+                    .open_blob_range_reader(stored, protection.clone())
+                    .await
+            }
+        }
+        .map_err(Into::into)
     }
 }
 

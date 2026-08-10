@@ -22,20 +22,17 @@ fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
 }
 
 fn store_database(database: &SyntheticStoreFixture) -> StoreDatabase {
-    StoreDatabase::new(&database.database)
+    StoreDatabase::new(database.database())
 }
 
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
-    Arc::new(
-        CloudSyncConnection::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "snapshot-exact-store",
-            signer.clone(),
-        )
-        .expect("construct snapshot test storage"),
-    )
+    Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "snapshot-exact-store",
+        signer.clone(),
+    ))
 }
 
 async fn initialize(
@@ -188,7 +185,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
     let storage = storage(&home, &signer);
     let db = open(Path::new(":memory:"), "snapshot-test-device");
     let device = initialize(&db, &storage, &signer).await;
-    assert!(coven_database::StoreDatabase::new(&db.database)
+    assert!(coven_database::StoreDatabase::new(db.database())
         .export_activated_device_continuation(&signer)
         .await
         .expect("export continuation before any snapshot")
@@ -208,7 +205,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         .expect("load continued snapshot journal")
         .expect("continued snapshot journal exists");
     assert_eq!(
-        coven_database::StoreDatabase::new(&db.database)
+        coven_database::StoreDatabase::new(db.database())
             .export_activated_device_continuation(&signer)
             .await
             .expect("export continuation after snapshot")
@@ -416,7 +413,7 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("publish first snapshot");
     assert_eq!(first.generation, 0);
     let image_ownership = db
-        .database
+        .database()
         .remote_object_for_test(first.image.object.clone())
         .await
         .expect("load published snapshot image ownership");
@@ -466,7 +463,7 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("resume second snapshot publication")
         .expect("publish staged second snapshot");
     let published_generations = db
-        .database
+        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "published_store_snapshot",
         ))

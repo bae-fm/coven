@@ -11,6 +11,40 @@ use coven_protocol::blob::{Provenance, RowBlobAuthority};
 use coven_protocol::objects::{BlobSpoolProtection, BlobWriteAuthority};
 use coven_storage::CloudSyncObjectStorage;
 
+enum BlobMoveDestination {
+    Store {
+        key_fingerprint: Option<coven_keys::encryption::KeyFingerprint>,
+    },
+    Circle {
+        circle_id: coven_protocol::CircleId,
+        protection: BlobSpoolProtection,
+    },
+}
+
+impl BlobMoveDestination {
+    fn audience(&self) -> RemoteAudience {
+        match self {
+            Self::Store { .. } => RemoteAudience::Store,
+            Self::Circle { circle_id, .. } => RemoteAudience::Circle(*circle_id),
+        }
+    }
+
+    fn key_fingerprint(&self) -> Option<coven_keys::encryption::KeyFingerprint> {
+        match self {
+            Self::Store { key_fingerprint } => *key_fingerprint,
+            Self::Circle { protection, .. } => match protection {
+                BlobSpoolProtection::Opaque(encryption) => Some(encryption.seal_key_fingerprint()),
+                BlobSpoolProtection::Browsable => None,
+            },
+        }
+    }
+}
+
+enum BlobMoveOpening {
+    Store,
+    Circle(BlobSpoolProtection),
+}
+
 #[doc(hidden)]
 pub struct HostWriteBlobStaging {
     runtime: tokio::runtime::Handle,
@@ -102,13 +136,14 @@ impl HostWriteBlobStaging {
                         .as_ref()
                         .expect("remote destination loads authority");
                     let authority = BlobWriteAuthority::new(registration);
-                    let (audience, protection) =
+                    let destination =
                         self.destination_protection(transaction, destination, partitions, fact)?;
+                    let audience = destination.audience();
                     let locator =
                         crate::sync::store::commit_publication::prepare_partition_blob_locator(
                             fact,
                             audience.clone(),
-                            &protection,
+                            destination.key_fingerprint(),
                             &authority,
                         )
                         .map_err(|error| {
@@ -130,17 +165,31 @@ impl HostWriteBlobStaging {
                         .map_err(|error| {
                             move_materialization_error(fact, DbError::Message(error))
                         })?;
-                    let spool_write = self
-                        .storage
-                        .seal_blob_to_spool(
-                            &locator,
-                            &authority,
-                            protection,
-                            source_path.path(),
-                            spool,
-                        )
-                        .await
-                        .map_err(|error| move_materialization_error(fact, error))?;
+                    let sealed = match destination {
+                        BlobMoveDestination::Store { .. } => {
+                            self.storage
+                                .seal_store_blob_to_spool(
+                                    &locator,
+                                    &authority,
+                                    source_path.path(),
+                                    spool,
+                                )
+                                .await
+                        }
+                        BlobMoveDestination::Circle { protection, .. } => {
+                            self.storage
+                                .seal_blob_to_spool(
+                                    &locator,
+                                    &authority,
+                                    protection,
+                                    source_path.path(),
+                                    spool,
+                                )
+                                .await
+                        }
+                    };
+                    let spool_write =
+                        sealed.map_err(|error| move_materialization_error(fact, error))?;
                     if spool_write == coven_protocol::objects::BlobSpoolWrite::Created {
                         files
                             .created
@@ -163,12 +212,12 @@ impl HostWriteBlobStaging {
         destination: &coven_protocol::circle::Audience,
         partitions: &[AudiencePartition],
         fact: &StoreWriteBlobFact,
-    ) -> Result<(RemoteAudience, BlobSpoolProtection), DbError> {
+    ) -> Result<BlobMoveDestination, DbError> {
         match destination {
             coven_protocol::circle::Audience::Store => self
                 .storage
-                .store_blob_protection()
-                .map(|protection| (RemoteAudience::Store, protection))
+                .store_blob_key_fingerprint()
+                .map(|key_fingerprint| BlobMoveDestination::Store { key_fingerprint })
                 .map_err(|error| move_materialization_error(fact, error)),
             coven_protocol::circle::Audience::Circle(circle_id) => {
                 let partition = partitions
@@ -193,7 +242,10 @@ impl HostWriteBlobStaging {
                 let access = transaction
                     .circle_publication_context(*circle_id, control.coordinate())
                     .map_err(|error| move_materialization_error(fact, error))?;
-                Ok((RemoteAudience::Circle(*circle_id), access.blob_protection()))
+                Ok(BlobMoveDestination::Circle {
+                    circle_id: *circle_id,
+                    protection: access.blob_protection(),
+                })
             }
             coven_protocol::circle::Audience::Local => {
                 unreachable!("Local handled before protection")
@@ -207,15 +259,12 @@ impl HostWriteBlobStaging {
         fact: &StoreWriteBlobFact,
         source: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<BlobSpoolProtection, DbError> {
+    ) -> Result<BlobMoveOpening, DbError> {
         match source
             .opening_authority(stored)
             .map_err(|error| move_materialization_error(fact, error))?
         {
-            coven_protocol::blob::BlobOpeningAuthority::Store => self
-                .storage
-                .store_blob_protection()
-                .map_err(|error| move_materialization_error(fact, error)),
+            coven_protocol::blob::BlobOpeningAuthority::Store => Ok(BlobMoveOpening::Store),
             coven_protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
@@ -227,6 +276,7 @@ impl HostWriteBlobStaging {
                     control,
                     key_fingerprint,
                 )
+                .map(BlobMoveOpening::Circle)
                 .map_err(|error| move_materialization_error(fact, error)),
         }
     }
@@ -271,18 +321,26 @@ impl HostWriteBlobStaging {
                 DbError::Message("remote source has no exact prior blob locator".to_string()),
             )
         })?;
-        let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
+        let opening = self.opening_protection(transaction, fact, source, &previous.stored)?;
         let destination = spool_path.with_extension("move-plaintext");
         let stage = self
             .store_dir
             .stage_atomic_file(&destination)
             .await
             .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
-        let staged = self
-            .storage
-            .stage_verified_blob_plaintext(&previous.stored, protection, stage)
-            .await
-            .map_err(|error| move_materialization_error(fact, error))?;
+        let staged = match opening {
+            BlobMoveOpening::Store => {
+                self.storage
+                    .stage_verified_store_blob_plaintext(&previous.stored, stage)
+                    .await
+            }
+            BlobMoveOpening::Circle(protection) => {
+                self.storage
+                    .stage_verified_blob_plaintext(&previous.stored, protection, stage)
+                    .await
+            }
+        }
+        .map_err(|error| move_materialization_error(fact, error))?;
         Ok(MoveSourcePlaintext::Downloaded(staged))
     }
 
@@ -348,17 +406,25 @@ impl HostWriteBlobStaging {
                 DbError::Message("remote source has no exact prior blob locator".to_string()),
             )
         })?;
-        let protection = self.opening_protection(transaction, fact, source, &previous.stored)?;
+        let opening = self.opening_protection(transaction, fact, source, &previous.stored)?;
         let stage = self
             .store_dir
             .stage_atomic_file(&destination)
             .await
             .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
-        let staged = self
-            .storage
-            .stage_verified_blob_plaintext(&previous.stored, protection, stage)
-            .await
-            .map_err(|error| move_materialization_error(fact, error))?;
+        let staged = match opening {
+            BlobMoveOpening::Store => {
+                self.storage
+                    .stage_verified_store_blob_plaintext(&previous.stored, stage)
+                    .await
+            }
+            BlobMoveOpening::Circle(protection) => {
+                self.storage
+                    .stage_verified_blob_plaintext(&previous.stored, protection, stage)
+                    .await
+            }
+        }
+        .map_err(|error| move_materialization_error(fact, error))?;
         match fact.blob.provenance {
             Provenance::HostProvided => staged
                 .commit()

@@ -265,7 +265,10 @@ impl AuthorizedSyncCycle<'_, '_> {
         // is on sealing for the cloud, not on using the store. An unadoptable
         // rotation is marked pending by the refresh and pauses exactly this set; it
         // never aborts the cycle.
-        let rotation_pending = self.pending_rotation.check(&self.cipher.snapshot()).err();
+        let rotation_pending = self
+            .pending_rotation
+            .check(self.cipher.current_generation())
+            .err();
         if let Some(pending) = &rotation_pending {
             warn!(
                 rotation_state = ?pending.state,
@@ -277,7 +280,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         if rotation_pending.is_none() {
             let drained = self
                 .authorization
-                .drain_tombstones(self.cipher, self.pending_rotation, self.clock)
+                .drain_tombstones(self.clock)
                 .await
                 .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
             if drained > 0 {
@@ -286,7 +289,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         }
         let reclaimed = self
             .authorization
-            .gc_tombstones(self.cipher, self.clock)
+            .gc_tombstones(self.clock)
             .await
             .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
         if reclaimed > 0 {
@@ -720,10 +723,11 @@ impl SyncComponents {
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), String> {
         let encryption = self
-            .current_encryption()
+            .routing_encryption
+            .as_ref()
             .ok_or_else(|| "owner promotion requires an encrypted cloud home".to_string())?;
         self.store
-            .finalize_owner_promotion(&encryption, acceptance)
+            .finalize_owner_promotion(encryption, acceptance)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -880,15 +884,8 @@ impl SyncComponents {
         self.store.blob_path_scheme()
     }
 
-    fn current_encryption(&self) -> Option<coven_keys::encryption::EncryptionService> {
-        match self.storage.snapshot() {
-            coven_storage::CloudCipher::Encrypted(encryption) => Some(encryption),
-            coven_storage::CloudCipher::Plaintext => None,
-        }
-    }
-
     pub(crate) fn is_encrypted(&self) -> bool {
-        self.current_encryption().is_some()
+        !self.storage.is_plaintext()
     }
 
     pub(crate) async fn drain_uploads(
@@ -912,14 +909,15 @@ impl SyncComponents {
         store_name: &str,
     ) -> Result<crate::sync::store::MemberInvitation, super::store::MembershipOpsError> {
         let encryption = self
-            .current_encryption()
+            .routing_encryption
+            .as_ref()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .invite_member(
                 public_key_hex,
                 invitee_email,
                 role,
-                &encryption,
+                encryption,
                 &self.store_id,
                 store_name,
             )
@@ -932,12 +930,13 @@ impl SyncComponents {
         master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, super::store::MembershipOpsError> {
         let encryption = self
-            .current_encryption()
+            .routing_encryption
+            .as_ref()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
             .remove_member(
                 public_key_hex,
-                &encryption,
+                encryption,
                 master_keys,
                 self.storage.as_ref(),
                 self.storage.as_ref(),
@@ -1005,7 +1004,8 @@ impl SyncComponents {
         // an unscoped (browsable) Store cannot author one — the same refusal
         // `Store::add_circle_member` raises, surfaced here before the setup work.
         let routing_encryption = self
-            .current_encryption()
+            .routing_encryption
+            .as_ref()
             .ok_or(CircleOperationError::BrowsableStorage)?;
         let mut authorization = self
             .store
@@ -1019,10 +1019,10 @@ impl SyncComponents {
         let bootstrap = authorization
             .circles()
             .snapshots()
-            .capture_circle_snapshot_cut(&routing_encryption, circle_id)
+            .capture_circle_snapshot_cut(routing_encryption, circle_id)
             .await?;
         let routing_key = coven_protocol::circle::derive_row_routing_key(
-            &routing_encryption,
+            routing_encryption,
             self.store.store_root().store_root_hash,
         )
         .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
@@ -1145,7 +1145,7 @@ impl SyncComponents {
         &self,
         prefix: &str,
     ) -> Result<Vec<String>, coven_protocol::objects::StorageError> {
-        self.storage.list_provider_objects(prefix).await
+        self.storage.list_provider_keys_for_test(prefix).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1160,8 +1160,7 @@ impl SyncComponents {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn encryption_generation_for_test(&self) -> Option<u64> {
-        self.current_encryption()
-            .map(|encryption| encryption.current_generation())
+        self.storage.current_generation()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1170,10 +1169,7 @@ impl SyncComponents {
         stored: &[u8],
         aad_context: &[u8],
     ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
-        let encryption = self
-            .current_encryption()
-            .ok_or_else(|| "session is not encrypted".to_string())?;
-        coven_storage::open_sealed_blob(stored, &encryption, aad_context)
+        self.storage.open_sealed_blob_for_test(stored, aad_context)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -1187,5 +1183,6 @@ impl SyncComponents {
             &encryption,
             master_keys,
         )
+        .map(|adopted| adopted.fingerprint().to_string())
     }
 }

@@ -218,8 +218,6 @@ enum AuthorizationRefreshError {
     Membership(#[source] coven_protocol::membership::MembershipError),
     #[error("read this device's wrapped key: {0}")]
     WrappedKey(#[source] crate::sync::store::membership::InviteError),
-    #[error("refresh state is invalid: {0}")]
-    InvalidState(String),
     #[error("rotation gate database state: {0}")]
     Database(#[source] coven_database::DbError),
     #[error("merge this device's live and selected keyrings: {0}")]

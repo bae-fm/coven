@@ -47,23 +47,6 @@ pub fn require_exact_slot_capabilities_join_info(
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub fn require_exact_slot_capabilities_home(
-    home: std::sync::Arc<dyn super::CloudHome>,
-    provider: Option<CloudProvider>,
-) -> Result<(), StorageSetupError> {
-    if home.exact_slot_storage().is_some() {
-        Ok(())
-    } else if let Some(provider) = provider {
-        Err(StorageSetupError::ExactSlotsUnavailable { provider })
-    } else {
-        Err(super::CloudHomeError::Configuration(
-            "sync requires a cloud provider with exact-slot storage".to_string(),
-        )
-        .into())
-    }
-}
-
 fn exact_slot_capabilities_supported(
     provider: &CloudProvider,
     verification: coven_foundation::config::ExactUploadVerification,

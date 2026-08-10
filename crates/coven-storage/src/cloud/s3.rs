@@ -965,12 +965,6 @@ fn put_object_error(
 
 #[async_trait]
 impl CloudHome for S3CloudHome {
-    fn exact_slot_storage(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn probe(&self) -> Result<(), CloudHomeError> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();

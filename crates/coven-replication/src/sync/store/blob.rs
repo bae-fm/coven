@@ -480,17 +480,17 @@ enum RemoteBlobStorage<'storage> {
 }
 
 impl RemoteBlobStorage<'_> {
-    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
+    fn store_access(&self) -> ExactRemoteBlobAccess<'_> {
         match self {
-            Self::Borrowed(storage) => storage.store_blob_protection(),
-            Self::Shared(storage) => storage.store_blob_protection(),
+            Self::Borrowed(storage) => ExactRemoteBlobAccess::store(*storage),
+            Self::Shared(storage) => ExactRemoteBlobAccess::store(storage.as_ref()),
         }
     }
 
-    fn access(&self, protection: BlobSpoolProtection) -> ExactRemoteBlobAccess<'_> {
+    fn circle_access(&self, protection: BlobSpoolProtection) -> ExactRemoteBlobAccess<'_> {
         match self {
-            Self::Borrowed(storage) => ExactRemoteBlobAccess::new(*storage, protection),
-            Self::Shared(storage) => ExactRemoteBlobAccess::new(storage.as_ref(), protection),
+            Self::Borrowed(storage) => ExactRemoteBlobAccess::circle(*storage, protection),
+            Self::Shared(storage) => ExactRemoteBlobAccess::circle(storage.as_ref(), protection),
         }
     }
 }
@@ -570,10 +570,6 @@ impl<'storage> RemoteBlobSource<'storage> {
         }
     }
 
-    pub(super) fn store_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
-        self.inner.store_protection()
-    }
-
     pub(super) async fn stage_verified_plaintext(
         &self,
         authority: &RowBlobAuthority,
@@ -597,25 +593,17 @@ impl<'storage> RemoteBlobSource<'storage> {
             .await
     }
 
-    pub(super) async fn verify_plaintext_with_protection(
-        &self,
-        cache_owner: &StoreBlobCache,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-        retain: bool,
-    ) -> Result<(), BlobDownloadFailureCause> {
-        self.inner
-            .verify_plaintext_with_protection(cache_owner, stored, protection, retain)
-            .await
-    }
-
     #[cfg(any(test, feature = "test-utils"))]
-    pub(super) async fn protection_for_test(
+    pub(super) async fn key_fingerprint_for_test(
         &self,
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<BlobSpoolProtection, BlobCacheError> {
-        self.inner.protection(authority, stored).await
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, BlobCacheError> {
+        self.inner
+            .resolved_access(authority, stored)
+            .await?
+            .key_fingerprint()
+            .map_err(BlobCacheError::Storage)
     }
 }
 
@@ -641,35 +629,31 @@ impl RemoteBlobSourceInner<'_> {
             .map_err(Into::into)
     }
 
-    async fn protection(
+    async fn resolved_access(
         &self,
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<BlobSpoolProtection, BlobCacheError> {
+    ) -> Result<ExactRemoteBlobAccess<'_>, BlobCacheError> {
         match blob_opening_authority(authority, stored)? {
-            coven_protocol::blob::BlobOpeningAuthority::Store => self
-                .storage
-                .store_blob_protection()
-                .map_err(BlobCacheError::Storage),
+            coven_protocol::blob::BlobOpeningAuthority::Store => Ok(self.storage.store_access()),
             coven_protocol::blob::BlobOpeningAuthority::Circle {
                 circle_id,
                 control,
                 key_fingerprint,
-            } => self
-                .database
-                .circle_blob_opening_protection(
-                    self.exact_root().await?,
-                    circle_id,
-                    control.clone(),
-                    key_fingerprint,
-                )
-                .await
-                .map_err(BlobCacheError::Metadata),
+            } => {
+                let protection = self
+                    .database
+                    .circle_blob_opening_protection(
+                        self.exact_root().await?,
+                        circle_id,
+                        control.clone(),
+                        key_fingerprint,
+                    )
+                    .await
+                    .map_err(BlobCacheError::Metadata)?;
+                Ok(self.storage.circle_access(protection))
+            }
         }
-    }
-
-    pub(super) fn store_protection(&self) -> Result<BlobSpoolProtection, StorageError> {
-        self.storage.store_blob_protection()
     }
 
     pub(super) async fn stage_verified_plaintext(
@@ -678,9 +662,8 @@ impl RemoteBlobSourceInner<'_> {
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
-        let protection = self.protection(authority, stored).await?;
-        self.storage
-            .access(protection)
+        self.resolved_access(authority, stored)
+            .await?
             .stage_verified_plaintext(stored, stage)
             .await
     }
@@ -692,25 +675,11 @@ impl RemoteBlobSourceInner<'_> {
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
     ) -> Result<(), BlobDownloadFailureCause> {
-        let protection = self
-            .protection(authority, stored)
+        let remote = self
+            .resolved_access(authority, stored)
             .await
             .map_err(|error| BlobDownloadFailureCause::Metadata(error.to_string()))?;
-        self.verify_plaintext_with_protection(cache, stored, protection, retain)
-            .await
-    }
-
-    pub(super) async fn verify_plaintext_with_protection(
-        &self,
-        cache_owner: &StoreBlobCache,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        protection: BlobSpoolProtection,
-        retain: bool,
-    ) -> Result<(), BlobDownloadFailureCause> {
-        let remote = self.storage.access(protection);
-        cache_owner
-            .verify_remote_plaintext(&remote, stored, retain)
-            .await
+        cache.verify_remote_plaintext(&remote, stored, retain).await
     }
 
     async fn access(
@@ -722,8 +691,7 @@ impl RemoteBlobSourceInner<'_> {
             .ok_or_else(|| BlobCacheError::LocalityUnresolved {
                 id: reference.blob().id.clone(),
             })?;
-        let protection = self.protection(reference.authority(), stored).await?;
-        Ok(self.storage.access(protection))
+        self.resolved_access(reference.authority(), stored).await
     }
 }
 

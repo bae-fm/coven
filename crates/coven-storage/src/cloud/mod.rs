@@ -81,7 +81,6 @@ use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use futures_util::Stream;
 
@@ -500,10 +499,6 @@ pub trait ExactSlotStorage: Send + Sync {
 
 #[async_trait]
 pub trait CloudHome: Send + Sync {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        None
-    }
-
     /// Verify the backend is reachable with the configured credentials.
     /// Setup flows call this *before* persisting credentials, so a typo or
     /// missing bucket fails fast at setup time instead of via a delayed
@@ -577,6 +572,13 @@ pub trait CloudHome: Send + Sync {
         desired: CloudAccessState,
     ) -> Result<CloudAccessOutcome, CloudHomeError>;
 }
+
+/// A cloud home admitted to sync: raw object operations and exact immutable
+/// slots are one provider capability, so callers cannot open the home and then
+/// ask it to hand back a second provider object.
+pub trait ExactCloudHome: CloudHome + ExactSlotStorage {}
+
+impl<T> ExactCloudHome for T where T: CloudHome + ExactSlotStorage {}
 
 #[cfg(test)]
 mod object_slot_tests;

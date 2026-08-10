@@ -161,7 +161,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
         bytes: &[u8],
     ) -> coven_protocol::blob::RowBlobRef {
         self.bind_for_row(table, id, namespace, bytes).await;
-        coven_database::StoreDatabase::new(&self.database.database)
+        coven_database::StoreDatabase::new(self.database.database())
             .row_blob_ref(table, id)
             .await
             .expect("load exact row blob reference")
@@ -170,7 +170,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
     async fn bind_for_row(&self, table: &str, id: &str, namespace: &str, bytes: &[u8]) {
         let source_db = open_test_db();
         let changeset = source_db
-            .database
+            .database()
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
               VALUES ('cache-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -208,7 +208,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
             .create_exact_opaque_blob(namespace, id, bytes)
             .await;
         self.database
-            .database
+            .database()
             .bind_stored_blob_to_row_for_test(&stored, table, id, owner)
             .await
             .expect("install exact remote blob binding");
@@ -224,7 +224,7 @@ impl<'a> ExactRemoteBlobFixture<'a> {
             let blob = blob_ref(&format!("pinc{i:04}"), "audio", CacheFill::CacheLazy);
             let bytes: Vec<u8> = (0..1000u32).map(|x| ((x + i as u32) % 251) as u8).collect();
             self.database
-                .database
+                .database()
                 .plant_blob_row_for_test(&blob.id, true, &bytes)
                 .await;
             blobs.push(self.install(&blob.id, &blob.namespace, &bytes).await);
@@ -237,13 +237,11 @@ impl<'a> ExactRemoteBlobFixture<'a> {
 #[tokio::test]
 async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() {
     let db = remote_root_db(photo_decl());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
     let bytes = b"exact materialized plaintext";
-    db.database
+    db.database()
         .plant_blob_row_for_test("materialized-row", true, bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -259,7 +257,7 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
         .expect("exact cache path");
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .materialize_blob(Some(cloud_storage.clone()), &reference)
@@ -273,7 +271,7 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
     let corrupt = vec![b'!'; bytes.len()];
     std::fs::write(&destination, &corrupt).expect("replace fixture with same-length corruption");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .materialize_blob(Some(cloud_storage.clone()), &reference)
@@ -289,13 +287,11 @@ async fn materialize_row_blob_publishes_the_exact_locator_without_replacement() 
 #[tokio::test]
 async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
     let db = remote_root_db(photo_decl());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
     let bytes = b"exact pinned plaintext";
-    db.database
+    db.database()
         .plant_blob_row_for_test("pinned-corruption", true, bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -303,7 +299,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
         .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .pin_blobs(
@@ -318,7 +314,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
 
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             store_dir.clone()
         )
         .materialize_blob(Some(cloud_storage.clone()), &reference)
@@ -335,12 +331,10 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_pinned_cache() {
 #[tokio::test]
 async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
     let db = remote_root_db(photo_decl());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
-    db.database
+    db.database()
         .plant_blob_row_for_test("stale-materialized-row", true, b"stale source")
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -356,7 +350,7 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
                 .locator_hash(),
         )
         .expect("exact cache path");
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .replace_blob_row_stamp_for_test(
             "note_photos",
             "stale-materialized-row",
@@ -366,7 +360,7 @@ async fn materialize_row_blob_rejects_a_stale_reference_without_publishing() {
         .expect("replace row stamp");
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .materialize_blob(Some(cloud_storage.clone()), &reference)
@@ -384,23 +378,23 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     let external_db = read_test_db("audio");
     let external_bytes = b"external exact bytes";
     external_db
-        .database
+        .database()
         .plant_blob_row_for_test("external-corrupt", false, external_bytes)
         .await;
     let external_path = write_external_file(tmp.path(), "external-corrupt", external_bytes);
-    coven_database::StoreDatabase::new(&external_db.database)
+    coven_database::StoreDatabase::new(external_db.database())
         .register_external_blob_for_test("note_photos", "external-corrupt", &external_path)
         .await;
     std::fs::write(&external_path, vec![b'!'; external_bytes.len()])
         .expect("write same-length external corruption");
     let external = external_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "external-corrupt")
         .await
         .expect("load external row reference");
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&external_db.database),
+            StoreDatabase::new(external_db.database()),
             store_dir.clone()
         )
         .materialize_blob(None, &external)
@@ -411,7 +405,7 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     let host_db = open_test_db_with_blob(photo_decl());
     let host_bytes = b"host local exact bytes";
     host_db
-        .database
+        .database()
         .plant_blob_row_for_test("host-corrupt", false, host_bytes)
         .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
@@ -428,13 +422,13 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
     std::fs::write(&host_path, vec![b'?'; host_bytes.len()])
         .expect("write same-length host-local corruption");
     let host = host_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "host-corrupt")
         .await
         .expect("load host-local row reference");
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&host_db.database),
+            StoreDatabase::new(host_db.database()),
             store_dir.clone()
         )
         .materialize_blob(None, &host)
@@ -446,22 +440,20 @@ async fn materialize_row_blob_rejects_same_length_corruption_in_local_sources() 
 #[tokio::test]
 async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let db = remote_root_db(photo_decl());
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
     let id = "same-logical-id";
     let first_bytes = b"first exact version";
-    db.database
+    db.database()
         .plant_blob_row_for_test(id, true, first_bytes)
         .await;
     let first = ExactRemoteBlobFixture::new(&db, &storage)
         .install(id, "photos", first_bytes)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .materialize_blob(Some(cloud_storage.clone()), &first)
@@ -473,7 +465,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
     let second_hash = coven_protocol::blob::content_hash(second_bytes);
     let second_size = second_bytes.len() as i64;
     let id_for_update = id.to_string();
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .replace_blob_row_facts_for_test(
             "note_photos",
             &id_for_update,
@@ -487,7 +479,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
         .install(id, "photos", second_bytes)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .materialize_blob(Some(cloud_storage.clone()), &second)
@@ -506,7 +498,7 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
         .is_err());
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .pin_blobs(Some(cloud_storage.clone()), std::slice::from_ref(&second))
@@ -536,15 +528,13 @@ async fn two_locators_for_one_logical_id_keep_independent_cache_state() {
 #[tokio::test]
 async fn second_read_is_a_local_hit() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"THE-BLOB-BYTES".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -553,7 +543,7 @@ async fn second_read_is_a_local_hit() {
 
     // First read misses, fetches from the cloud, and populates the evictable cache.
     let first = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -573,7 +563,7 @@ async fn second_read_is_a_local_hit() {
         .await
         .expect("delete exact remote blob");
     let second = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -588,24 +578,22 @@ async fn second_read_is_a_local_hit() {
 #[tokio::test]
 async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
     let id = "budget01";
     let bytes = b"REMOTE-BLOB-WITH-INVALID-BUDGET";
-    db.database.plant_blob_row_for_test(id, true, bytes).await;
+    db.database().plant_blob_row_for_test(id, true, bytes).await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
         .install(id, "audio", bytes)
         .await;
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .set_invalid_cache_budget_for_test("audio", "invalid")
         .await
         .expect("store invalid cache budget metadata");
 
     let error = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         store_dir.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -624,15 +612,13 @@ async fn remote_cache_miss_surfaces_invalid_cache_budget_after_population() {
 #[tokio::test]
 async fn corrupt_cached_remote_blob_fails_without_replacement() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-torn", "audio", CacheFill::CacheLazy);
     let bytes = b"complete remote blob bytes".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -640,7 +626,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -652,7 +638,7 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
         .expect("simulate a torn cache file");
 
     let error = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -675,15 +661,12 @@ async fn corrupt_cached_remote_blob_fails_without_replacement() {
 async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
     let db = read_test_db("audio");
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-shrt", "audio", CacheFill::CacheLazy);
     let declared = b"the full declared blob bytes".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &declared)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -699,7 +682,7 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
     );
 
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -715,7 +698,7 @@ async fn tampered_exact_cloud_object_errors_and_caches_nothing() {
     );
 
     let again = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -744,15 +727,13 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
         "database open builds the blob declaration model once",
     );
 
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("blob-reuse", "audio", CacheFill::CacheLazy);
     let bytes = ramp(4096);
 
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -763,7 +744,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
 
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &reference)
@@ -773,7 +754,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     );
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &reference)
@@ -785,7 +766,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let len = 512;
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len,)
@@ -815,10 +796,8 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
 async fn cache_eager_lands_in_cache_on_pull() {
     // Source dev1 records a note + a (non-cover, so master-scoped) photo row.
     let db1 = open_test_db_with_blob(photo_decl());
-    let TestStoreFixture {
-        store: storage,
-        storage: _,
-    } = create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, _) =
+        (create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     storage
         .open_into(&db1)
         .await
@@ -833,7 +812,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
     )
     .await
     .expect("store source blob");
-    db1.database.execute_test_host_write(&format!(
+    db1.database().execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
@@ -860,7 +839,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     let reference = db2
-        .database
+        .database()
         .row_blob_ref("note_photos", "ph01abcd")
         .await
         .expect("load pulled exact row blob reference");
@@ -881,16 +860,14 @@ async fn cache_eager_lands_in_cache_on_pull() {
 #[tokio::test]
 async fn pin_survives_clear_cache_and_unpin_demotes() {
     let db = read_test_db("audio");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("ond-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"ON-DEMAND-AUDIO".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -899,7 +876,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
 
     // Read it on demand → it lands in the evictable cache.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -910,7 +887,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
 
     // Pin it → moves cache/ → pinned/.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(
@@ -967,7 +944,7 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     // demote.
     let eager = blob_ref("mir-aaaa", "audio", CacheFill::CacheEager);
     let eager_bytes = b"NEVER-PINNED";
-    db.database
+    db.database()
         .plant_blob_row_for_test(&eager.id, true, eager_bytes)
         .await;
     let eager_reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -987,15 +964,12 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
 async fn pin_downloads_remote_blob_straight_to_pinned_file() {
     let db = read_test_db("audio");
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("pin0aaaa", "audio", CacheFill::CacheLazy);
     let bytes: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1003,7 +977,7 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         .await;
 
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(
@@ -1037,17 +1011,14 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
 async fn pin_at_limit_one_pins_every_blob() {
     let db = read_test_db_with_download_limit("audio", 1);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let (blobs, bytes) = ExactRemoteBlobFixture::new(&db, &storage)
         .install_many(4)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(Some(cloud_storage.clone()), &blobs)
@@ -1072,10 +1043,7 @@ async fn pin_at_limit_one_pins_every_blob() {
 async fn pin_runs_downloads_concurrently_up_to_the_limit() {
     let db = read_test_db_with_download_limit("audio", 2);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     home.arm_exact_stream_read_concurrency_probe(2);
     let (_tmp, ld) = temp_store_dir();
 
@@ -1084,7 +1052,7 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
         .install_many(4)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(Some(cloud_storage.clone()), &blobs)
@@ -1110,10 +1078,8 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
 #[tokio::test]
 async fn pin_mid_batch_failure_surfaces_the_error() {
     let db = read_test_db_with_download_limit("audio", 2);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let (mut blobs, _bytes) = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1122,7 +1088,7 @@ async fn pin_mid_batch_failure_surfaces_the_error() {
     // A blob whose row resolves Remote but whose bytes were never uploaded: no
     // uploader is recorded and no cloud object exists, so its fetch fails.
     let missing = blob_ref("miss0aaa", "audio", CacheFill::CacheLazy);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&missing.id, true, b"never-uploaded")
         .await;
     let missing_reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1140,7 +1106,7 @@ async fn pin_mid_batch_failure_surfaces_the_error() {
     blobs.push(missing_reference);
 
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(Some(cloud_storage.clone()), &blobs)
@@ -1159,10 +1125,8 @@ async fn cache_lazy_fetches_on_first_read() {
     // Source dev1: a note + a photo row the puller's source treats as CacheLazy.
     let declaration = BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy);
     let db1 = open_test_db_with_blob(declaration.clone());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     storage
         .open_into(&db1)
         .await
@@ -1170,7 +1134,7 @@ async fn cache_lazy_fetches_on_first_read() {
     let source_tmp = tempfile::tempdir().expect("create external source directory");
     let bytes = b"AUDIO-PAYLOAD".to_vec();
     let external_path = write_external_file(source_tmp.path(), "audio.bin", &bytes);
-    db1.database
+    db1.database()
         .execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 0, '0000000001000-0000-dev1', '2026-01-01'); \
@@ -1179,7 +1143,7 @@ async fn cache_lazy_fetches_on_first_read() {
             coven_protocol::blob::content_hash(&bytes),
         ))
         .await;
-    coven_database::StoreDatabase::new(&db1.database)
+    coven_database::StoreDatabase::new(db1.database())
         .register_external_blob_for_test("note_photos", "aud01234", &external_path)
         .await;
     storage
@@ -1192,7 +1156,7 @@ async fn cache_lazy_fetches_on_first_read() {
         .expect("move the source row into the Store audience");
     assert!(
         storage
-            .publish_pending(&db1, &db1.store_dir)
+            .publish_pending(&db1, db1.store_dir())
             .await
             .expect("publish exact source write"),
         "source write publishes a Store commit",
@@ -1206,7 +1170,7 @@ async fn cache_lazy_fetches_on_first_read() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     let reference = db2
-        .database
+        .database()
         .row_blob_ref("note_photos", "aud01234")
         .await
         .expect("load pulled exact row blob reference");
@@ -1216,7 +1180,7 @@ async fn cache_lazy_fetches_on_first_read() {
     );
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db2.database),
+        StoreDatabase::new(db2.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1235,16 +1199,14 @@ async fn cache_lazy_fetches_on_first_read() {
 #[tokio::test]
 async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     let db = read_test_db("audio");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("stg-aaaa", "audio", CacheFill::CacheLazy);
     let bytes = b"CACHED-BYTES".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1273,7 +1235,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     // The blob is NOT in the cloud (nothing was ever put there). A pin that fetched
     // would fail; instead it must promote the staged file by renaming it.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .pin_blobs(
@@ -1292,7 +1254,7 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1327,15 +1289,13 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 #[tokio::test]
 async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-aaaa", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &full)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1345,7 +1305,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     // Populate the cache with the whole file, then remove the cloud copy so a
     // ranged read that tried to fetch would fail.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1361,7 +1321,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     // A window from the middle of the file.
     let (offset, len) = (1234u64, 1000u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -1377,7 +1337,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     let tail_off = 4000u64;
     let tail_len = full.len() as u64 - tail_off;
     let tail = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, tail_off, tail_len)
@@ -1410,15 +1370,12 @@ fn a_blob_stream_is_send_and_sync() {
 async fn ranges_off_an_uncached_stream_never_download_the_object() {
     let db = read_test_db("audio");
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-once", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &full)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1431,7 +1388,7 @@ async fn ranges_off_an_uncached_stream_never_download_the_object() {
 
     let whole_reads_before = (home.exact_stream_read_count(), home.exact_full_read_count());
     let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .open_blob_stream(Some(cloud_storage.clone()), &reference)
@@ -1496,27 +1453,25 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
             .with_cloud_path_column("kind"),
     );
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = TestStoreFixture::create_browsable(
+    let (storage, cloud_storage) = (TestStoreFixture::create_browsable(
         &db,
         "browsable-store",
         coven_keys::keys::UserKeypair::generate(),
         home.clone(),
     )
     .await
-    .expect("create a browsable test Store");
+    .expect("create a browsable test Store"))
+    .into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let full = ramp(5000);
-    db.database
+    db.database()
         .insert_browsable_blob_row_for_test("browsable-track", CLOUD_PATH, &full)
         .await
         .expect("plant the browsable blob row");
     let source_db = open_test_db();
     let changeset = source_db
-        .database
+        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
           VALUES ('browsable-owner', 'owner', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
@@ -1538,12 +1493,12 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     let stored = storage
         .create_exact_browsable_blob("audio", "browsable-track", CLOUD_PATH, &full)
         .await;
-    db.database
+    db.database()
         .bind_stored_blob_to_row_for_test(&stored, "note_photos", "browsable-track", owner)
         .await
         .expect("install exact browsable blob binding");
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", "browsable-track")
         .await
         .expect("load the browsable row blob reference");
@@ -1551,7 +1506,7 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     // Untampered, the stream serves ranges — through the whole-object path, so
     // the cache is populated (unlike a sealed blob's ranged read).
     let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .open_blob_stream(Some(cloud_storage.clone()), &reference)
@@ -1567,13 +1522,13 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
     );
 
     // Now tamper the stored object with same-length bytes and read it fresh.
-    StoreBlobCache::new(StoreDatabase::new(&db.database), ld.clone())
+    StoreBlobCache::new(StoreDatabase::new(db.database()), ld.clone())
         .clear_for_test()
         .await
         .expect("drop the populated cache");
     home.replace_exact_object(stored.object().slot(), vec![b'!'; full.len()]);
     let refused = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .open_blob_stream(Some(cloud_storage.clone()), &reference)
@@ -1601,15 +1556,12 @@ async fn a_stream_over_a_tampered_browsable_blob_is_refused() {
 async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
     let db = read_test_db("audio");
     let home = crate::sync::test_helpers::test_cloud_home();
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, home.clone()).await;
+    let (storage, cloud_storage) = (create_store(&db, home.clone()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-bbbb", "audio", CacheFill::CacheLazy);
     let full = ramp(5000);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &full)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1621,7 +1573,7 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
 
     let (offset, len) = (2000u64, 1500u64);
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -1641,7 +1593,7 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
     // The whole read is the operation that populates, and after it a stream over
     // the same blob is served from the cache file with no cloud read at all.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1655,7 +1607,7 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
         .expect("delete exact remote blob");
     let reads_before = home.exact_range_reads().len();
     let second = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -1674,15 +1626,13 @@ async fn opening_a_stream_over_a_remote_miss_leaves_the_cache_alone() {
 #[tokio::test]
 async fn full_read_blob_still_populates_the_cache() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("blob-cccc", "audio", CacheFill::CacheLazy);
     let bytes = b"WHOLE-FILE-PAYLOAD".to_vec();
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1690,7 +1640,7 @@ async fn full_read_blob_still_populates_the_cache() {
         .await;
 
     let first = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1709,7 +1659,7 @@ async fn full_read_blob_still_populates_the_cache() {
         .await
         .expect("delete exact remote blob");
     let second = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1726,10 +1676,8 @@ async fn full_read_blob_still_populates_the_cache() {
 #[tokio::test]
 async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let full = ramp(1000);
@@ -1737,7 +1685,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     // Non-cached blob: the stream opens over a cloud miss, then bounds the range
     // against the plaintext size it proved.
     let remote = blob_ref("blob-dddd", "audio", CacheFill::CacheLazy);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&remote.id, true, &full)
         .await;
     let remote_reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -1745,7 +1693,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
         .await;
     assert!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob_range(Some(cloud_storage.clone()), &remote_reference, 900, 200)
@@ -1755,7 +1703,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     );
     assert!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob_range(Some(cloud_storage.clone()), &remote_reference, 500, 0)
@@ -1768,14 +1716,14 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     // Cached blob: same contract on the local-file path. Populate the cache, drop
     // the cloud copy so only the local path can serve.
     let cached = blob_ref("blob-eeee", "audio", CacheFill::CacheLazy);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&cached.id, true, &full)
         .await;
     let cached_reference = ExactRemoteBlobFixture::new(&db, &storage)
         .install(&cached.id, &cached.namespace, &full)
         .await;
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &cached_reference)
@@ -1792,7 +1740,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
         .expect("delete exact remote blob");
     assert!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob_range(Some(cloud_storage.clone()), &cached_reference, 900, 200)
@@ -1802,7 +1750,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     );
     assert!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob_range(Some(cloud_storage.clone()), &cached_reference, 500, 0)
@@ -1822,31 +1770,29 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
 #[tokio::test]
 async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: _,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (_, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extr-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: the gate dispatches to the external file.
     let full = ramp(5000);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, &full)
         .await;
     let path = write_external_file(tmp.path(), "song.flac", &full);
 
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let whole = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -1859,7 +1805,7 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
 
     let (offset, len) = (1234u64, 1000u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -1909,20 +1855,20 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // Local + user-provided: the user's own external file, unlinked after open.
     let external_db = read_test_db("audio");
     external_db
-        .database
+        .database()
         .plant_blob_row_for_test("strm-ext1", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext1.flac", &full);
-    coven_database::StoreDatabase::new(&external_db.database)
+    coven_database::StoreDatabase::new(external_db.database())
         .register_external_blob_for_test("note_photos", "strm-ext1", &external_path)
         .await;
     let external = external_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-ext1")
         .await
         .expect("load external row reference");
     let external_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&external_db.database),
+        StoreDatabase::new(external_db.database()),
         ld.clone(),
     )
     .open_blob_stream(None, &external)
@@ -1944,7 +1890,7 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // and every download uses, which a per-range re-open by name would follow.
     let host_db = open_test_db_with_blob(photo_decl());
     host_db
-        .database
+        .database()
         .plant_blob_row_for_test("strm-hst1", false, &full)
         .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst1", &full)
@@ -1954,12 +1900,12 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
         .local_blob_path("photos", "strm-hst1")
         .expect("host-local path");
     let host = host_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-hst1")
         .await
         .expect("load host-local row reference");
     let host_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&host_db.database),
+        StoreDatabase::new(host_db.database()),
         ld.clone(),
     )
     .open_blob_stream(None, &host)
@@ -1986,26 +1932,24 @@ async fn a_stream_serves_proven_bytes_after_its_file_is_unlinked_or_replaced() {
     // Remote: the cache copy, evicted after open. Eviction moves and deletes cache
     // *names*; a stream holds the file, so a sweep cannot break a live read.
     let remote_db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&remote_db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&remote_db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     remote_db
-        .database
+        .database()
         .plant_blob_row_for_test("strm-rem1", true, &full)
         .await;
     let remote = ExactRemoteBlobFixture::new(&remote_db, &storage)
         .install("strm-rem1", "audio", &full)
         .await;
     let remote_stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&remote_db.database),
+        StoreDatabase::new(remote_db.database()),
         ld.clone(),
     )
     .open_blob_stream(Some(cloud_storage.clone()), &remote)
     .await
     .expect("open a stream over a Remote blob");
 
-    StoreBlobCache::new(StoreDatabase::new(&remote_db.database), ld.clone())
+    StoreBlobCache::new(StoreDatabase::new(remote_db.database()), ld.clone())
         .clear_for_test()
         .await
         .expect("evict the whole cache");
@@ -2039,21 +1983,21 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     let (offset, len) = (1234u64, 1000u64);
 
     let db = read_test_db("audio");
-    db.database
+    db.database()
         .plant_blob_row_for_test("strm-ext2", false, &full)
         .await;
     let path = write_external_file(tmp.path(), "strm-ext2.flac", &full);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", "strm-ext2", &path)
         .await;
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-ext2")
         .await
         .expect("load external row reference");
 
     let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .open_blob_stream(None, &reference)
@@ -2082,7 +2026,7 @@ async fn a_local_stream_serves_the_file_s_current_bytes() {
     // The whole read reads every byte anyway, so it still checks them.
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob(None, &reference)
@@ -2108,21 +2052,21 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
 
     let external_db = read_test_db("audio");
     external_db
-        .database
+        .database()
         .plant_blob_row_for_test("strm-ext3", false, &full)
         .await;
     let external_path = write_external_file(tmp.path(), "strm-ext3.flac", &full);
-    coven_database::StoreDatabase::new(&external_db.database)
+    coven_database::StoreDatabase::new(external_db.database())
         .register_external_blob_for_test("note_photos", "strm-ext3", &external_path)
         .await;
     std::fs::write(&external_path, &corrupt).expect("write same-length external corruption");
     let external = external_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-ext3")
         .await
         .expect("load external row reference");
     let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&external_db.database),
+        StoreDatabase::new(external_db.database()),
         ld.clone(),
     )
     .open_blob_stream(None, &external)
@@ -2135,7 +2079,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     // The whole read still refuses: it reads every byte, so it checks them.
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&external_db.database),
+            StoreDatabase::new(external_db.database()),
             ld.clone()
         )
         .read_blob(None, &external)
@@ -2145,7 +2089,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
 
     let host_db = open_test_db_with_blob(photo_decl());
     host_db
-        .database
+        .database()
         .plant_blob_row_for_test("strm-hst3", false, &full)
         .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(&ld, "photos", "strm-hst3", &full)
@@ -2157,12 +2101,12 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     std::fs::write(&host_path, vec![b'?'; full.len()])
         .expect("write same-length host-local corruption");
     let host = host_db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-hst3")
         .await
         .expect("load host-local row reference");
     let stream = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&host_db.database),
+        StoreDatabase::new(host_db.database()),
         ld.clone(),
     )
     .open_blob_stream(None, &host)
@@ -2171,7 +2115,7 @@ async fn a_local_stream_opens_over_a_file_that_no_longer_matches_its_row() {
     assert_eq!(stream.read_at(0, 4).await.expect("serve a range"), b"????");
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&host_db.database),
+            StoreDatabase::new(host_db.database()),
             ld.clone()
         )
         .read_blob(None, &host)
@@ -2189,23 +2133,23 @@ async fn a_relengthened_external_file_is_refused_at_open() {
     let full = ramp(5000);
 
     let db = read_test_db("audio");
-    db.database
+    db.database()
         .plant_blob_row_for_test("strm-ext4", false, &full)
         .await;
     let path = write_external_file(tmp.path(), "strm-ext4.flac", &full);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", "strm-ext4", &path)
         .await;
     std::fs::write(&path, &full[..full.len() - 1]).expect("truncate the external file");
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", "strm-ext4")
         .await
         .expect("load external row reference");
 
     assert!(matches!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .open_blob_stream(None, &reference)
@@ -2223,10 +2167,8 @@ async fn a_relengthened_external_file_is_refused_at_open() {
 #[tokio::test]
 async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     let cloud_bytes = b"CLOUD-FALLBACK-BYTES".to_vec();
@@ -2234,23 +2176,23 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     // Missing file: a ref pointing at a path that does not exist.
     let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
     let missing_hash = coven_protocol::blob::content_hash(&vec![0; 1234]);
-    db.database
+    db.database()
         .plant_blob_row_with_facts_for_test(&missing.id, false, 1234, Some(&missing_hash))
         .await;
     storage
         .create_exact_opaque_blob(&missing.namespace, &missing.id, &cloud_bytes)
         .await;
     let missing_path = tmp.path().join("external").join("gone.flac");
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &missing.id, &missing_path)
         .await;
     let missing_reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &missing.id)
         .await
         .expect("load missing Local row blob reference");
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &missing_reference)
@@ -2268,7 +2210,7 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
         .await;
     let actual = ramp(2000);
     let mism_hash = coven_protocol::blob::content_hash(&actual);
-    db.database
+    db.database()
         .plant_blob_row_with_facts_for_test(
             &mism.id,
             false,
@@ -2277,16 +2219,16 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
         )
         .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &mism.id, &mism_path)
         .await;
     let mism_reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &mism.id)
         .await
         .expect("load size-mismatched Local row blob reference");
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &mism_reference)
@@ -2306,30 +2248,28 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 #[tokio::test]
 async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extc-aaaa", "audio", CacheFill::CacheLazy);
     // Local + user-provided: serves the user's external file.
     let ext_bytes = ramp(1500);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, &ext_bytes)
         .await;
     let path = write_external_file(tmp.path(), "owned.flac", &ext_bytes);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let local_reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &local_reference)
@@ -2350,17 +2290,17 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
     // the Local source and flip the gate. No observer can see a Remote row without
     // its exact locator.
     let note_id = format!("note-{}", blob.id);
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .complete_note_blob_transition_to_remote_for_test(local_reference.clone(), note_id)
         .await
         .expect("commit exact Local-to-Remote transition");
     let remote_reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load exact Remote row blob reference");
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &remote_reference)
@@ -2382,17 +2322,15 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
 #[tokio::test]
 async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     let db = read_test_db("audio");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: _,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (_, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     // Local + user-provided.
     let blob = blob_ref("extp-aaaa", "audio", CacheFill::CacheLazy);
     let ext_bytes = ramp(2048);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, &ext_bytes)
         .await;
 
@@ -2416,17 +2354,17 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 
     // The real bytes: the user's external file.
     let path = write_external_file(tmp.path(), "precedence.flac", &ext_bytes);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2439,7 +2377,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 
     let (offset, len) = (100u64, 500u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -2462,17 +2400,15 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     // Local + host-provided: its bytes live in the local store, never the cloud.
     let blob = host_blob_ref("res0aaaa", "photos", CacheFill::CacheEager);
     let store_bytes = ramp(2048);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, &store_bytes)
         .await;
 
@@ -2490,7 +2426,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         .expect("write a same-id cache decoy");
     let ext_bytes = b"FROM-EXTERNAL".to_vec();
     let ext_path = write_external_file(tmp.path(), "res.bin", &ext_bytes);
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &blob.id, &ext_path)
         .await;
 
@@ -2504,13 +2440,13 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
     .await
     .expect("store the host-provided local copy");
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2523,7 +2459,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 
     let (offset, len) = (100u64, 500u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -2543,15 +2479,13 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 #[tokio::test]
 async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_store_file() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("rem0cccc", "audio", CacheFill::CacheLazy);
     let cloud_bytes = ramp(2048);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &cloud_bytes)
         .await;
 
@@ -2570,7 +2504,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
         .await;
 
     let whole = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2587,7 +2521,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 
     let (offset, len) = (100u64, 500u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -2603,15 +2537,13 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 #[tokio::test]
 async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
     let remote_bytes = b"REMOTE-CLOUD-BYTES";
 
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, remote_bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -2632,7 +2564,7 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
     .expect("write a stale local-store file");
 
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(None, &reference)
@@ -2644,7 +2576,7 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
     );
 
     let range_err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(None, &reference, 0, 5)
@@ -2663,15 +2595,13 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
     let blob = host_blob_ref("rrrr0001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"REMOTE-ROOT-CLOUD";
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, cloud_bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -2679,7 +2609,7 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
         .await;
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2695,10 +2625,8 @@ async fn remote_root_blob_reads_cache_cloud_even_without_a_gate_column() {
 async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     let declaration = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy);
     let db1 = remote_root_db(declaration.clone());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     storage
         .open_into(&db1)
         .await
@@ -2712,7 +2640,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     )
     .await
     .expect("store source blob");
-    db1.database
+    db1.database()
         .execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('n1', 'RemoteRoot', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
@@ -2735,7 +2663,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
 
     assert_eq!(result.changesets_applied, 1);
     let reference = db2
-        .database
+        .database()
         .row_blob_ref("note_photos", "lazy0001")
         .await
         .expect("load pulled exact row blob reference");
@@ -2747,7 +2675,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     );
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db2.database),
+        StoreDatabase::new(db2.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2767,15 +2695,13 @@ async fn plain_blob_table_uses_the_store_audience() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, store_dir) = temp_store_dir();
     let blob = host_blob_ref("plain001", "photos", CacheFill::CacheEager);
 
     let cloud_bytes = b"PLAIN-CLOUD";
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, cloud_bytes)
         .await;
 
@@ -2784,7 +2710,7 @@ async fn plain_blob_table_uses_the_store_audience() {
         .await;
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             store_dir.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2800,30 +2726,28 @@ async fn plain_blob_table_uses_the_store_audience() {
 #[tokio::test]
 async fn local_user_provided_blob_without_an_external_ref_errors() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = blob_ref("extn-aaaa", "audio", CacheFill::CacheLazy);
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
     // ref is registered. A cloud copy exists as a decoy a store-probing read would serve.
     let declared_hash = coven_protocol::blob::content_hash(b"CLOUD-DECOY");
-    db.database
+    db.database()
         .plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
     storage
         .create_exact_opaque_blob(&blob.namespace, &blob.id, b"CLOUD-DECOY")
         .await;
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2834,7 +2758,7 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
         "a missing external ref maps to NoExternalRef: {err:?}",
     );
     let range_err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, 0, 5)
@@ -2859,15 +2783,13 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
     let declared_hash = coven_protocol::blob::content_hash(b"CLOUD-DECOY");
-    db.database
+    db.database()
         .plant_blob_row_with_facts_for_test(&blob.id, false, 11, Some(&declared_hash))
         .await;
 
@@ -2877,13 +2799,13 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
         .create_exact_opaque_blob(&blob.namespace, &blob.id, b"CLOUD-DECOY")
         .await;
     let reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", &blob.id)
         .await
         .expect("load Local row blob reference");
 
     let err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2895,7 +2817,7 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
     );
 
     let range_err = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, 0, 5)
@@ -2917,10 +2839,8 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
 #[tokio::test]
 async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let db = read_test_db("audio");
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (tmp, ld) = temp_store_dir();
 
     // Remote + user-provided, with a stale external ref still registered.
@@ -2928,19 +2848,19 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     let stale_ext = ramp(1500);
     let path = write_external_file(tmp.path(), "stale.flac", &stale_ext);
     let cloud_bytes = ramp(2048);
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, false, &cloud_bytes)
         .await;
-    coven_database::StoreDatabase::new(&db.database)
+    coven_database::StoreDatabase::new(db.database())
         .register_external_blob_for_test("note_photos", &blob.id, &path)
         .await;
-    db.database.set_blob_remote_for_test(&blob.id, true).await;
+    db.database().set_blob_remote_for_test(&blob.id, true).await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
         .install(&blob.id, &blob.namespace, &cloud_bytes)
         .await;
 
     let whole = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -2953,7 +2873,7 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
 
     let (offset, len) = (100u64, 500u64);
     let mid = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob_range(Some(cloud_storage.clone()), &reference, offset, len)
@@ -2979,10 +2899,8 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
         BlobDecl::new("ns_local", Provenance::HostProvided, CacheFill::CacheEager),
         BlobDecl::new("ns_remote", Provenance::HostProvided, CacheFill::CacheEager),
     );
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     // One id carried by a row in each table, under different gates: note_photos
@@ -2990,7 +2908,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     let id = "dup0aaaa";
     let local_hash = coven_protocol::blob::content_hash(b"LOCAL-STORE-BYTES");
     let remote_hash = coven_protocol::blob::content_hash(b"REMOTE-CLOUD-BYTES");
-    StoreDatabase::new(&db.database)
+    StoreDatabase::new(db.database())
         .plant_blob_namespace_collision_for_test(id, &local_hash, &remote_hash)
         .await
         .expect("plant the colliding-id rows");
@@ -3008,7 +2926,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
         .install_for_row("note_covers", id, "ns_remote", b"REMOTE-CLOUD-BYTES")
         .await;
     let local_reference = db
-        .database
+        .database()
         .row_blob_ref("note_photos", id)
         .await
         .expect("load colliding Local row blob reference");
@@ -3016,7 +2934,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     // The ns_remote blob resolves note_covers' gate (Remote) → its cloud copy.
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &remote_reference)
@@ -3029,7 +2947,7 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
     // The ns_local blob resolves note_photos' gate (Local) → its local store.
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &local_reference)
@@ -3059,7 +2977,7 @@ fn set_path_mtime(path: &std::path::Path, secs: u64) {
 #[tokio::test]
 async fn eviction_drops_oldest_cache_files_until_under_budget() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3147,7 +3065,7 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
 #[tokio::test]
 async fn release_files_eviction_leaves_covers_intact() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3229,11 +3147,9 @@ async fn release_files_eviction_leaves_covers_intact() {
 #[tokio::test]
 async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     let db = read_test_db("covers");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     // Two 200-byte covers in the cloud, both `CacheEager`. The `covers` budget holds
@@ -3242,10 +3158,10 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     let cov2 = blob_ref("cov02bbb", "covers", CacheFill::CacheEager);
     let cov1_bytes = [1u8; 200];
     let cov2_bytes = [2u8; 200];
-    db.database
+    db.database()
         .plant_blob_row_for_test(&cov1.id, true, &cov1_bytes)
         .await;
-    db.database
+    db.database()
         .plant_blob_row_for_test(&cov2.id, true, &cov2_bytes)
         .await;
     let cov1_reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -3261,7 +3177,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
 
     // Read the first cover into the cache, then age it so it is the oldest.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &cov1_reference)
@@ -3272,7 +3188,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
     // read's own sweep evicts the oldest (the first cover), leaving only the second.
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &cov2_reference)
@@ -3289,7 +3205,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
 
     // A read of the evicted cover re-fetches it from the cloud back into the cache.
     let refetched = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &cov1_reference)
@@ -3314,10 +3230,8 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     // CacheEager blob in the evictable cache, then a pin promotes it to `pinned/`.
     let lazy_decl = BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy);
     let db1 = open_test_db_with_user_and_host_blobs(photo_decl(), lazy_decl.clone());
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await;
+    let (storage, cloud_storage) =
+        (create_store(&db1, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let source_device = storage
         .founder_device()
         .await
@@ -3335,7 +3249,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     )
     .await
     .expect("store source blob");
-    db1.database.execute_test_host_write(&format!(
+    db1.database().execute_test_host_write(&format!(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01'); \
              INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
@@ -3358,13 +3272,13 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .expect("published source has a Store position");
 
     let db2 = open_test_db_with_user_and_host_blobs(photo_decl(), lazy_decl);
-    let store_database2 = StoreDatabase::new(&db2.database);
+    let store_database2 = StoreDatabase::new(db2.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database2.clone(), ld.clone());
     let (_updated, result) = storage.pull_into(&db2, &ld).await;
     assert_eq!(result.changesets_applied, 1);
     let eager = db2
-        .database
+        .database()
         .row_blob_ref("note_photos", "mir0aaaa")
         .await
         .expect("load pulled exact row blob reference");
@@ -3373,7 +3287,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         "the CacheEager blob lands in the evictable cache on pull",
     );
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db2.database),
+        StoreDatabase::new(db2.database()),
         ld.clone(),
     )
     .pin_blobs(Some(cloud_storage.clone()), std::slice::from_ref(&eager))
@@ -3385,7 +3299,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
     let lazy_bytes = [7u8; 500];
     let lazy_hash = coven_protocol::blob::content_hash(&lazy_bytes);
-    StoreDatabase::new(&db2.database)
+    StoreDatabase::new(db2.database())
         .plant_note_cover_blob_row_for_test("usr0bbbb", "n1", 500, &lazy_hash)
         .await
         .expect("plant lazy blob row");
@@ -3399,7 +3313,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         )
         .await;
     let lazy_reference = db2
-        .database
+        .database()
         .row_blob_ref("note_covers", &lazy.id)
         .await
         .expect("load exact lazy row blob reference");
@@ -3408,7 +3322,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .await
         .expect("write the lazy blob into the cache");
     crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db2.database),
+        StoreDatabase::new(db2.database()),
         ld.clone(),
     )
     .pin_blobs(
@@ -3471,7 +3385,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         .expect("delete lazy cloud object");
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db2.database),
+            StoreDatabase::new(db2.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &eager)
@@ -3481,7 +3395,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     );
     assert_eq!(
         crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db2.database),
+            StoreDatabase::new(db2.database()),
             ld.clone()
         )
         .read_blob(Some(cloud_storage.clone()), &lazy_reference)
@@ -3505,7 +3419,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 #[tokio::test]
 async fn unset_namespace_budget_never_evicts() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3553,11 +3467,9 @@ async fn unset_namespace_budget_never_evicts() {
 #[tokio::test]
 async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
     let db = read_test_db("release_files");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3577,7 +3489,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .expect("set budget");
     let blob = blob_ref("newer2bb", "release_files", CacheFill::CacheLazy);
     let bytes = vec![2u8; 100];
-    db.database
+    db.database()
         .plant_blob_row_for_test(&blob.id, true, &bytes)
         .await;
     let reference = ExactRemoteBlobFixture::new(&db, &storage)
@@ -3585,7 +3497,7 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .await;
 
     let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        StoreDatabase::new(&db.database),
+        StoreDatabase::new(db.database()),
         ld.clone(),
     )
     .read_blob(Some(cloud_storage.clone()), &reference)
@@ -3618,11 +3530,9 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
 #[tokio::test]
 async fn budget_never_drifts_over_across_repeated_populates() {
     let db = read_test_db("release_files");
-    let store_database = StoreDatabase::new(&db.database);
-    let TestStoreFixture {
-        store: storage,
-        storage: cloud_storage,
-    } = create_store(&db, crate::sync::test_helpers::test_cloud_home()).await;
+    let store_database = StoreDatabase::new(db.database());
+    let (storage, cloud_storage) =
+        (create_store(&db, crate::sync::test_helpers::test_cloud_home()).await).into_parts();
     let (_tmp, ld) = temp_store_dir();
 
     // Budget of 250 bytes; each blob is 100 bytes, so at most two fit.
@@ -3636,7 +3546,9 @@ async fn budget_never_drifts_over_across_repeated_populates() {
     for i in 0..6u8 {
         let id = format!("seqr{i:04}"); // ≥4 chars, distinct per i, for the shard
         let bytes = vec![i; 100];
-        db.database.plant_blob_row_for_test(&id, true, &bytes).await;
+        db.database()
+            .plant_blob_row_for_test(&id, true, &bytes)
+            .await;
         let reference = ExactRemoteBlobFixture::new(&db, &storage)
             .install(&id, "release_files", &bytes)
             .await;
@@ -3649,7 +3561,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         }
 
         let got = crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(&db.database),
+            StoreDatabase::new(db.database()),
             ld.clone(),
         )
         .read_blob(Some(cloud_storage.clone()), &reference)
@@ -3692,7 +3604,7 @@ async fn budget_never_drifts_over_across_repeated_populates() {
 #[tokio::test]
 async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3755,7 +3667,7 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
 #[tokio::test]
 async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 
@@ -3820,7 +3732,7 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
 #[tokio::test]
 async fn eviction_skips_a_concurrent_populates_temp_file() {
     let db = open_test_db();
-    let store_database = StoreDatabase::new(&db.database);
+    let store_database = StoreDatabase::new(db.database());
     let (_tmp, ld) = temp_store_dir();
     let cache = StoreBlobCache::new(store_database.clone(), ld.clone());
 

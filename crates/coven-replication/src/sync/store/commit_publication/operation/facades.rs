@@ -365,7 +365,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<(), SyncCycleFailure> {
         let result = async {
-            if cipher.snapshot().is_plaintext() {
+            if cipher.is_plaintext() {
                 tracing::debug!("refresh: plaintext home, nothing to refresh");
                 return Ok(());
             }
@@ -375,14 +375,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .membership
                 .wrapped_key_authority_for(&recipient)
                 .map_err(AuthorizationRefreshError::Membership)?;
-            let live_keyring = match cipher.snapshot() {
-                coven_storage::CloudCipher::Encrypted(encryption) => encryption,
-                coven_storage::CloudCipher::Plaintext => {
-                    return Err(AuthorizationRefreshError::InvalidState(
-                        "plaintext home cannot enter encrypted key refresh".to_string(),
-                    ));
-                }
-            };
             if wrapped_keys.is_empty() {
                 tracing::debug!(
                     "refresh: no activated wrapped key for this device; keeping the live key"
@@ -392,14 +384,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
             match self.open_keyring().await {
                 Ok(new_encryption) => {
-                    let merged = live_keyring
-                        .merged_with(&new_encryption)
+                    let merged = cipher
+                        .merged_keyring(&new_encryption)
                         .map_err(AuthorizationRefreshError::InvalidKeyring)?;
-                    if merged.key_count() == live_keyring.key_count() {
+                    if merged.merged_key_count() == merged.live_key_count() {
                         if pending_rotation.gate().is_some() {
                             let gate = self
                                 .database
-                                .complete_peer_rotation_adoption(live_keyring.current_generation())
+                                .complete_peer_rotation_adoption(merged.merged_generation())
                                 .await
                                 .map_err(AuthorizationRefreshError::Database)?;
                             pending_rotation.install_durable_gate(gate);
@@ -410,41 +402,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     } else {
                         let gate = self
                             .database
-                            .record_peer_rotation(merged.current_generation())
+                            .record_peer_rotation(merged.merged_generation())
                             .await
                             .map_err(AuthorizationRefreshError::Database)?;
                         pending_rotation.install_durable_gate(Some(gate));
                         match master_keys {
                             None => {
                                 tracing::info!(
-                                    committed_generation = merged.current_generation(),
+                                    committed_generation = merged.merged_generation(),
                                     "refresh: found a rotated store key but this cycle has no \
                                      master-key custody to adopt it; sealing is paused until a \
                                      cycle with custody adopts it"
                                 );
                             }
                             Some(master_keys) => {
-                                let fingerprint = cipher
+                                let adopted = cipher
                                     .adopt_key_rotation(&new_encryption, master_keys)
                                     .map_err(AuthorizationRefreshError::KeyAdoption)?;
-                                let adopted_generation = match cipher.snapshot() {
-                                    coven_storage::CloudCipher::Encrypted(encryption) => {
-                                        encryption.current_generation()
-                                    }
-                                    coven_storage::CloudCipher::Plaintext => {
-                                        return Err(AuthorizationRefreshError::InvalidState(
-                                            "encrypted key refresh produced a plaintext cipher"
-                                                .to_string(),
-                                        ));
-                                    }
-                                };
                                 let gate = self
                                     .database
-                                    .complete_peer_rotation_adoption(adopted_generation)
+                                    .complete_peer_rotation_adoption(adopted.generation())
                                     .await
                                     .map_err(AuthorizationRefreshError::Database)?;
                                 pending_rotation.install_durable_gate(gate);
-                                tracing::info!(%fingerprint, "Adopted rotated store key");
+                                tracing::info!(
+                                    fingerprint = adopted.fingerprint(),
+                                    "Adopted rotated store key"
+                                );
                             }
                         }
                     }

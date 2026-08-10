@@ -97,7 +97,7 @@ impl TransportFixture {
         let owner = UserKeypair::generate();
         let owner_db = open_test_db();
         let owner_database =
-            coven_database::StoreDatabase::from_database(owner_db.database.clone());
+            coven_database::StoreDatabase::from_database(owner_db.database().clone());
         let create_store_db = owner_db.clone();
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();
@@ -129,8 +129,8 @@ impl TransportFixture {
         .await
         .expect("Store creation task")
         .expect("create Owner Store");
-        let store = fixture.store;
-        let owner_storage = fixture.storage;
+        let store = fixture.store();
+        let owner_storage = fixture.storage();
         let join_request =
             crate::joining::generate_join_request(None).expect("generate join request");
         let member_pubkey = crate::joining::decode_join_request(&join_request)
@@ -156,7 +156,7 @@ impl TransportFixture {
         let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
         let snapshot_path = snapshot_dir.path().to_path_buf();
         let snapshot = owner_database
-            .capture_snapshot_image_for_test(store.root.clone(), snapshot_path, None)
+            .capture_snapshot_image_for_test(store.root(), snapshot_path, None)
             .await
             .expect("create join snapshot");
         let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
@@ -219,7 +219,7 @@ impl TransportFixture {
         id: &str,
     ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         self.owner_db
-            .database
+            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('{id}', '{id}', 1, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z')"

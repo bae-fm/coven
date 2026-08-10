@@ -4,9 +4,9 @@ use crate::store_security::StoreSecurity;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_storage::cloud::setup::StorageSetupError;
-#[cfg(any(test, feature = "test-utils"))]
-use coven_storage::cloud::CloudHome;
 use coven_storage::cloud::CloudHomeFactory;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_storage::cloud::ExactCloudHome;
 use coven_storage::{BlobChunking, CloudCipher, CloudSyncConnection};
 
 #[derive(Clone)]
@@ -61,12 +61,8 @@ impl StoreCloudStorage {
     pub(crate) fn admit_home<'storage, 'config>(
         &'storage self,
         config: &'config Config,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
     ) -> Result<AdmittedStoreCloudHome<'storage, 'config>, StorageSetupError> {
-        coven_storage::cloud::setup::require_exact_slot_capabilities_home(
-            home.clone(),
-            config.cloud_home.provider.clone(),
-        )?;
         Ok(AdmittedStoreCloudHome {
             storage: self,
             config,
@@ -96,7 +92,7 @@ impl StoreCloudStorage {
     fn open_admitted_home(
         &self,
         config: &Config,
-        home: Arc<dyn CloudHome>,
+        home: Arc<dyn ExactCloudHome>,
         cipher: Option<CloudCipher>,
     ) -> Result<CloudSyncConnection, StorageSetupError> {
         self.security
@@ -125,7 +121,7 @@ impl AdmittedStoreCloudConfig<'_, '_> {
 pub(crate) struct AdmittedStoreCloudHome<'storage, 'config> {
     storage: &'storage StoreCloudStorage,
     config: &'config Config,
-    home: Arc<dyn CloudHome>,
+    home: Arc<dyn ExactCloudHome>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]

@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use crate::cloud::{CloudHomeError, ExactCreateOutcome, ExactSlotStorage, ExactUpload};
+use crate::cloud::{
+    CloudHomeError, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+};
 use coven_keys::keys::UserKeypair;
 use coven_protocol::objects::{ExactObjectRef, ObjectSlot, StorageError};
 use coven_protocol::provider::*;
@@ -16,13 +18,12 @@ use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::StoreProviderBinding;
 
 pub struct ProviderProbeStorage {
-    primary: Arc<dyn ExactSlotStorage>,
-    peer: Arc<dyn ExactSlotStorage>,
+    storage: Arc<dyn ExactCloudHome>,
 }
 
 impl ProviderProbeStorage {
-    pub fn new(primary: Arc<dyn ExactSlotStorage>, peer: Arc<dyn ExactSlotStorage>) -> Self {
-        Self { primary, peer }
+    pub fn new(storage: Arc<dyn ExactCloudHome>) -> Self {
+        Self { storage }
     }
 
     pub async fn reserve_cross_principal_response_slot(
@@ -31,7 +32,7 @@ impl ProviderProbeStorage {
     ) -> Result<ObjectSlot, ProviderProbeError> {
         let logical = cross_peer_logical_key(probe_id);
         let slot = self
-            .primary
+            .storage
             .allocate_slot(&logical)
             .await
             .map_err(StorageError::from)?;
@@ -50,7 +51,7 @@ impl ProviderProbeStorage {
         administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
     ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
         let administrator_live = self
-            .primary
+            .storage
             .provider_binding()
             .await
             .map_err(StorageError::from)?;
@@ -63,7 +64,7 @@ impl ProviderProbeStorage {
         let suffix = hex::encode(probe_id.as_bytes());
         let administrator_key = format!("__coven_probe__/cross/{suffix}/administrator");
         let administrator_slot = self
-            .primary
+            .storage
             .allocate_slot(&administrator_key)
             .await
             .map_err(StorageError::from)?;
@@ -111,7 +112,7 @@ impl ProviderProbeStorage {
         store: &StoreProviderBinding,
     ) -> Result<CrossPrincipalProbeChallenge, ProviderProbeError> {
         let live = self
-            .primary
+            .storage
             .provider_binding()
             .await
             .map_err(StorageError::from)?;
@@ -125,7 +126,7 @@ impl ProviderProbeStorage {
         self.settle_exact_create(&challenge.administrator_object.slot, &payload)
             .await?;
         let observed = self
-            .primary
+            .storage
             .read_at(&challenge.administrator_object.slot)
             .await
             .map_err(StorageError::from)?;
@@ -149,7 +150,7 @@ impl ProviderProbeStorage {
             return invalid("cross-principal peer signer is not the joining member");
         }
         let live = self
-            .primary
+            .storage
             .provider_binding()
             .await
             .map_err(StorageError::from)?;
@@ -157,7 +158,7 @@ impl ProviderProbeStorage {
             return invalid("cross-principal peer does not match the response context");
         }
         let evidence = self
-            .primary
+            .storage
             .cross_principal_evidence()
             .await
             .map_err(StorageError::from)?;
@@ -174,7 +175,7 @@ impl ProviderProbeStorage {
         let administrator_payload =
             probe_payload(&challenge.probe_id, ProbePayloadLabel::CrossAdministrator);
         let administrator_read = self
-            .primary
+            .storage
             .read_at(&challenge.administrator_object.slot)
             .await
             .map_err(StorageError::from)?;
@@ -185,7 +186,7 @@ impl ProviderProbeStorage {
         self.settle_exact_create(&context.response_slot, &peer_payload)
             .await?;
         let peer_read = self
-            .primary
+            .storage
             .read_at(&context.response_slot)
             .await
             .map_err(StorageError::from)?;
@@ -245,7 +246,7 @@ impl ProviderProbeStorage {
             peer_signing_pubkey,
         )?;
         let live = self
-            .primary
+            .storage
             .provider_binding()
             .await
             .map_err(StorageError::from)?;
@@ -283,7 +284,7 @@ impl ProviderProbeStorage {
         let peer_payload = probe_payload(&challenge.probe_id, ProbePayloadLabel::CrossPeer);
         if matches!(record.progress, CrossPrincipalCompletionProgress::Prepared) {
             let observed = self
-                .primary
+                .storage
                 .read_at(&response.peer_object.slot)
                 .await
                 .map_err(StorageError::from)?;
@@ -305,7 +306,7 @@ impl ProviderProbeStorage {
             record.progress,
             CrossPrincipalCompletionProgress::ReadsVerified { .. }
         ) {
-            self.primary
+            self.storage
                 .delete_and_verify_absent(&response.peer_object.slot)
                 .await
                 .map_err(StorageError::from)?;
@@ -323,7 +324,7 @@ impl ProviderProbeStorage {
             record.progress,
             CrossPrincipalCompletionProgress::PeerAbsent { .. }
         ) {
-            self.primary
+            self.storage
                 .delete_and_verify_absent(&challenge.administrator_object.slot)
                 .await
                 .map_err(StorageError::from)?;
@@ -361,11 +362,11 @@ impl ProviderProbeStorage {
         slot: &ObjectSlot,
         payload: &[u8],
     ) -> Result<(), ProviderProbeError> {
-        match self.primary.read_at(slot).await {
+        match self.storage.read_at(slot).await {
             Ok(bytes) if bytes == payload => Ok(()),
             Ok(_) => invalid("durable provider probe slot contains different bytes"),
             Err(CloudHomeError::NotFound(_)) => {
-                create_exact_bytes(self.primary.as_ref(), slot, payload)
+                create_exact_bytes(self.storage.as_ref(), slot, payload)
                     .await
                     .map(drop)
                     .map_err(StorageError::from)
@@ -381,8 +382,8 @@ impl ProviderProbeStorage {
         probe_id: ProviderProbeId,
         binding: &coven_protocol::objects::ResolvedProviderBinding,
     ) -> Result<ExactSlotProbeReceipt, ProviderProbeError> {
-        let first = self.primary.as_ref();
-        let second = self.peer.as_ref();
+        let first = self.storage.as_ref();
+        let second = self.storage.as_ref();
         binding.validate().map_err(ProviderProbeError::Storage)?;
         let first_binding = first.provider_binding().await.map_err(StorageError::from)?;
         let second_binding = second

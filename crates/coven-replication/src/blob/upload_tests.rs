@@ -110,10 +110,6 @@ impl InstrumentedHome {
 
 #[async_trait]
 impl CloudHome for InstrumentedHome {
-    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
-        Some(self)
-    }
-
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.inner.put_object(key, data).await
     }
@@ -290,16 +286,13 @@ impl UploadFixture {
         )
         .expect("open upload database");
         let owner = UserKeypair::generate();
-        let storage = Arc::new(
-            CloudSyncConnection::new(
-                home.clone(),
-                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
-                BlobPathScheme::Hashed,
-                "upload-store",
-                owner.clone(),
-            )
-            .expect("construct exact sync storage"),
-        );
+        let storage = Arc::new(CloudSyncConnection::new(
+            home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            BlobPathScheme::Hashed,
+            "upload-store",
+            owner.clone(),
+        ));
         let device = crate::sync::test_helpers::TestDevice::create(
             &db,
             storage.clone(),
@@ -309,7 +302,7 @@ impl UploadFixture {
         .await
         .expect("initialize exact local blob authority");
         home.reset_observations();
-        let database = coven_database::StoreDatabase::new(&db.database);
+        let database = coven_database::StoreDatabase::new(db.database());
         Self {
             db,
             database,
@@ -331,7 +324,7 @@ impl UploadFixture {
     }
 
     async fn journal(&self, blob_id: &str) -> coven_database::OutboxEntry {
-        coven_database::StoreDatabase::new(&self.db.database)
+        coven_database::StoreDatabase::new(self.db.database())
             .pending_blob_uploads()
             .await
             .expect("read upload journals")
@@ -349,7 +342,7 @@ impl UploadFixture {
     async fn journal_attempt(&self, blob_id: &str) -> coven_database::OutboxAttempt {
         let blob_id = blob_id.to_string();
         self.db
-            .database
+            .database()
             .upload_outbox_attempt_for_test(&blob_id)
             .await
             .expect("read journal attempt")
@@ -362,7 +355,7 @@ impl UploadFixture {
         rows: &[(&str, &[u8])],
     ) -> Vec<std::path::PathBuf> {
         self.db
-            .database
+            .database()
             .insert_local_upload_rows_for_test(ROOT_ID, rows)
             .await
             .expect("plant exact Local blob rows");
@@ -376,7 +369,7 @@ impl UploadFixture {
             coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
-            coven_database::StoreDatabase::new(&self.db.database)
+            coven_database::StoreDatabase::new(self.db.database())
                 .register_external_blob_for_test("note_photos", id, &path)
                 .await;
             paths.push(path);
@@ -719,7 +712,7 @@ async fn backoff_skips_item_inside_window() {
         .await;
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
-    coven_database::StoreDatabase::new(&fixture.db.database)
+    coven_database::StoreDatabase::new(fixture.db.database())
         .record_outbox_failure(&entry, "prior", T0)
         .await
         .unwrap();
@@ -767,7 +760,7 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     let entry_id = entry.id;
     fixture
         .db
-        .database
+        .database()
         .corrupt_upload_outbox_attempt_time_for_test(entry_id)
         .await
         .expect("corrupt last_attempt_at");
@@ -883,7 +876,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await;
     let row = fixture
         .db
-        .database
+        .database()
         .row_blob_ref("note_photos", "transact")
         .await
         .unwrap();
@@ -892,11 +885,11 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     let rollback_path = paths[0].clone();
     fixture
         .db
-        .database
+        .database()
         .roll_back_blob_upload_for_test("notes", ROOT_ID, rollback_row, rollback_path, T0)
         .await
         .unwrap();
-    assert!(coven_database::StoreDatabase::new(&fixture.db.database)
+    assert!(coven_database::StoreDatabase::new(fixture.db.database())
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -904,7 +897,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
 
     fixture
         .db
-        .database
+        .database()
         .enqueue_blob_upload_with_retention_for_test(
             "notes",
             ROOT_ID,
@@ -916,7 +909,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await
         .unwrap();
     assert_eq!(
-        coven_database::StoreDatabase::new(&fixture.db.database)
+        coven_database::StoreDatabase::new(fixture.db.database())
             .pending_blob_uploads()
             .await
             .unwrap()

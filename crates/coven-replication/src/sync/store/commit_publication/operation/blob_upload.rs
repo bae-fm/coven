@@ -167,18 +167,17 @@ impl AuthorizedWriterOperation<'_> {
             .await
     }
 
-    fn blob_upload_protection(
+    fn store_blob_key_fingerprint(
         &self,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, coven_protocol::objects::StorageError>
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, coven_protocol::objects::StorageError>
     {
-        self.storage.store_blob_protection()
+        self.storage.store_blob_key_fingerprint()
     }
 
     async fn prepare_blob_upload(
         &self,
         locator: &BlobLocator,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
-        protection: coven_protocol::objects::BlobSpoolProtection,
         source_path: &std::path::Path,
     ) -> Result<(StoredBlobRef, std::path::PathBuf), coven_protocol::objects::StorageError> {
         let spool_path = self
@@ -190,7 +189,7 @@ impl AuthorizedWriterOperation<'_> {
             .await
             .map_err(coven_protocol::objects::StorageError::LocalFilesystem)?;
         self.storage
-            .seal_blob_to_spool(locator, authority, protection, source_path, spool)
+            .seal_store_blob_to_spool(locator, authority, source_path, spool)
             .await?;
         let slot = self.storage.allocate_blob_slot(locator, authority).await?;
         let stored = self
@@ -357,24 +356,22 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         let mut created_this_pass = false;
         let (stored, spool_path) = match state {
             OutboxUploadState::Pending => {
-                let protection = match self.writer.blob_upload_protection() {
-                    Ok(protection) => protection,
+                let key_fingerprint = match self.writer.store_blob_key_fingerprint() {
+                    Ok(fingerprint) => fingerprint,
                     Err(error) => return self.storage_failure(&file_id, error).await,
                 };
-                let locator = match &protection {
-                    coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-                        BlobLocator::opaque(
-                            row.blob().namespace.clone(),
-                            row.blob().id.clone(),
-                            self.authority.reference.clone(),
-                            RemoteAudience::Store,
-                            row.blob().scope.clone(),
-                            encryption.seal_key_fingerprint(),
-                            row.plaintext_size(),
-                            row.plaintext_hash(),
-                        )
-                    }
-                    coven_protocol::objects::BlobSpoolProtection::Browsable => {
+                let locator = match key_fingerprint {
+                    Some(key_fingerprint) => BlobLocator::opaque(
+                        row.blob().namespace.clone(),
+                        row.blob().id.clone(),
+                        self.authority.reference.clone(),
+                        RemoteAudience::Store,
+                        row.blob().scope.clone(),
+                        key_fingerprint,
+                        row.plaintext_size(),
+                        row.plaintext_hash(),
+                    ),
+                    None => {
                         let Some(cloud_path) = row.blob().cloud_path.clone() else {
                             let message = format!(
                                 "Browsable blob {}/{} has no readable path",
@@ -403,7 +400,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 };
                 let (stored, spool_path) = match self
                     .writer
-                    .prepare_blob_upload(&locator, self.authority, protection, &source_path)
+                    .prepare_blob_upload(&locator, self.authority, &source_path)
                     .await
                 {
                     Ok(prepared) => prepared,
