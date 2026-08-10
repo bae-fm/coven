@@ -31,6 +31,23 @@ pub struct LocalCommitBase {
 }
 
 impl StoreSession<'_> {
+    fn local_commit_ledger_base(
+        &self,
+        stream_id: &AuthorStreamId,
+    ) -> Result<
+        (
+            Option<StoreBatchCommitRef>,
+            BTreeMap<String, StoreBatchCommitRef>,
+        ),
+        DbError,
+    > {
+        let stream_id = stream_id.to_string();
+        Ok((
+            StoreDatabase::latest_position_for_device_on(self.records.conn, &stream_id)?,
+            StoreDatabase::materialized_frontier_on(self.records.conn, None)?,
+        ))
+    }
+
     fn latest_local_store_position(
         &self,
         stream_id: &str,
@@ -316,14 +333,7 @@ impl StoreDatabase {
         let authorship = self.author_own_stream().await;
         let (predecessor, frontier) = self
             .connection
-            .call_database(move |session| {
-                let conn = session.conn;
-                let stream_id = stream_id.to_string();
-                Ok((
-                    StoreDatabase::latest_position_for_device_on(conn, &stream_id)?,
-                    StoreDatabase::materialized_frontier_on(conn, None)?,
-                ))
-            })
+            .call_store(move |session| session.local_commit_ledger_base(&stream_id))
             .await?;
         Ok(LocalCommitBase {
             authorship,
