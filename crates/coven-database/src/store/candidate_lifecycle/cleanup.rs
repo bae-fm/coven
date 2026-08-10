@@ -4,7 +4,7 @@ use crate::store::StoreSession;
 
 impl StoreSession<'_> {
     fn merge_candidate_cleanup_pending(&mut self, write_id: &WriteId) -> Result<bool, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let (raw_status, raw_prepared): (String, Option<String>) = conn
@@ -106,7 +106,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: &WriteId,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let (raw_status, raw_prepared): (String, Option<String>) = conn
@@ -221,7 +221,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: &WriteId,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -254,7 +254,7 @@ impl StoreSession<'_> {
     }
 
     fn pending_merge_retraction_cleanups(&mut self) -> Result<Vec<StoreBatchCommitRef>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let rows = query_mapped_rows(
@@ -294,7 +294,7 @@ impl StoreSession<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         candidate: &StoreBatchCommitRef,
     ) -> Result<TerminalCandidateCleanupVerification, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
@@ -366,7 +366,7 @@ impl StoreSession<'_> {
         &mut self,
         candidate: &StoreBatchCommitRef,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
@@ -384,7 +384,7 @@ impl StoreSession<'_> {
         durable: &coven_protocol::remote_object::CandidateNonactivation,
         head_nonactivation: &coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let prepared = crate::StoreDatabase::load_merge_retraction_cleanup_on(
@@ -448,7 +448,7 @@ impl StoreSession<'_> {
         &mut self,
         candidate: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;

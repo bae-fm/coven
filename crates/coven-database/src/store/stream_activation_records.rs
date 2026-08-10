@@ -10,7 +10,6 @@ impl StoreSession<'_> {
     ) -> Result<Option<coven_protocol::store_commit::RegisteredStreamActivation>, DbError> {
         let key = activation_id.as_hash().to_string();
         let stored = self
-            .records
             .conn
             .query_row(
                 "SELECT activation_id, author_stream_id, activation, activating_commit

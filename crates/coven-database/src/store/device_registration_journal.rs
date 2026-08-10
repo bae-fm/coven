@@ -142,7 +142,7 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(records)?;
@@ -205,7 +205,7 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -334,7 +334,7 @@ impl StoreSession<'_> {
         activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
         subject: &str,
     ) -> Result<bool, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -432,7 +432,7 @@ impl StoreSession<'_> {
         &mut self,
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         records
             .conn
             .query_row(sql, [], |row| {
@@ -514,11 +514,7 @@ impl StoreSession<'_> {
         initial_ack: StoreAckRef,
         initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration.value,
             registration.prepared.reference().clone(),

@@ -81,7 +81,6 @@ pub struct HostWriteBlobTransaction<'transaction, 'connection> {
 impl StoreSession<'_> {
     fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
         let stored = self
-            .records
             .conn
             .query_row(
                 "SELECT write_id, base, blob_facts FROM store_writes
@@ -110,7 +109,10 @@ impl StoreSession<'_> {
         let Some((write_id, base, blob_facts)) = stored else {
             return Ok(None);
         };
-        let partitions = StoreDatabase::store_write_partitions_on(self.records, &write_id)?;
+        let partitions = StoreDatabase::store_write_partitions_on(
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            &write_id,
+        )?;
         Ok(Some(PreparedStoreWrite {
             write_id: WriteId::from_generated(write_id),
             partitions,

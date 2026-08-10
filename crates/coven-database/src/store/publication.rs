@@ -32,7 +32,7 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let state = &mut *self.verified_store_authority;
         let gates = self.gates;
         let synced_tables = self.synced_tables;
@@ -520,7 +520,7 @@ impl StoreSession<'_> {
         winner_head: StoreDeviceHeadRef,
         nonactivations: std::collections::BTreeMap<StoreBatchCommitRef, CandidateNonactivation>,
     ) -> Result<WriteStatus, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;

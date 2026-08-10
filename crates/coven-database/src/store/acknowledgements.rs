@@ -11,11 +11,7 @@ impl StoreSession<'_> {
         candidate: PreparedStoreOperationCommit,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
             &authority,
@@ -43,7 +39,7 @@ impl StoreSession<'_> {
         {
             persist_exact_remote_object_on(
                 &tx,
-                self.records.store_dir,
+                self.store_dir,
                 &remote,
                 "Merge Store acknowledgement activation object",
             )?;
@@ -55,7 +51,7 @@ impl StoreSession<'_> {
             {
                 persist_exact_remote_object_on(
                     &tx,
-                    self.records.store_dir,
+                    self.store_dir,
                     &remote,
                     "Merge Circle acknowledgement activation object",
                 )?;
@@ -77,11 +73,7 @@ impl StoreSession<'_> {
         nonactivation: CandidateNonactivation,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
             &authority,
@@ -196,7 +188,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
         let outbound = load_expected_outbound_store_ack_on(
-            self.records.conn,
+            self.conn,
             &authority,
             expected,
             "alternate Merge head names another Store acknowledgement",
@@ -220,15 +212,11 @@ impl StoreSession<'_> {
                 "alternate Merge head changed during exact verification".to_string(),
             ));
         }
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let current = candidate.head_ref();
         replace_prepared_merge_head_remote_on(
             &tx,
-            self.records.store_dir,
+            self.store_dir,
             &current.object,
             &winner,
             winner_prepared.reference(),
@@ -252,7 +240,7 @@ impl StoreSession<'_> {
         expected: &StoreAckRef,
     ) -> Result<Option<CandidateCleanupObject>, DbError> {
         let authority = self.local_store_authority()?;
-        let conn = self.records.conn;
+        let conn = self.conn;
         let outbound = load_expected_outbound_store_ack_on(
             conn,
             &authority,
@@ -278,11 +266,7 @@ impl StoreSession<'_> {
         expected: &StoreAckRef,
     ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
             &tx,
             &authority,

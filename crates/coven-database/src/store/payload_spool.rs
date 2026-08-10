@@ -503,11 +503,11 @@ impl StoreDatabase {
 #[cfg(any(test, feature = "test-utils"))]
 impl super::StoreSession<'_> {
     fn owed_payload_spool_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        payload_spool_cleanup_hashes_on(self.records.conn)
+        payload_spool_cleanup_hashes_on(self.conn)
     }
 
     fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
-        Ok(payload_owner_claims_on(self.records.conn, owner_key)?
+        Ok(payload_owner_claims_on(self.conn, owner_key)?
             .into_iter()
             .collect())
     }

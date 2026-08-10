@@ -3,7 +3,7 @@ use crate::store::StoreSession;
 
 impl StoreSession<'_> {
     fn mark_candidate_cleanup_absent(&mut self, object: ExactObjectRef) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let object_id = remote_object_id(&object);
         let mut remote = load_remote_object_on(conn, object_id)?;
         if remote.cleanup_target() != Some(&object) {
@@ -21,7 +21,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Option<BlockedMergeCandidate>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let row: Option<(String, Option<String>)> = conn
@@ -67,7 +67,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Option<PreparedMergeAbandonmentCandidates>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let raw_prepared: Option<String> = conn
@@ -123,7 +123,7 @@ impl StoreSession<'_> {
         candidate: StoreBatchCommitRef,
         author: StoreDeviceRegistrationRef,
     ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         author_exclusion_activation_for_candidate_on(
             records,
             self.verified_store_authority,
@@ -139,7 +139,7 @@ impl StoreSession<'_> {
         write_id: WriteId,
         nonactivation: BlockedMergeCandidateNonactivation,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -189,7 +189,7 @@ impl StoreSession<'_> {
         candidate_nonactivation: BlockedMergeCandidateNonactivation,
         authority_nonactivation: BlockedMergeCandidateNonactivation,
     ) -> Result<WriteStatus, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -295,7 +295,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<MergeAbandonmentState, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let raw_prepared: Option<String> = conn
@@ -341,7 +341,7 @@ impl StoreSession<'_> {
     }
 
     fn resume_winning_merge_candidate(&mut self, write_id: WriteId) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -427,7 +427,7 @@ impl StoreSession<'_> {
     }
 
     fn finish_lost_merge_abandonment(&mut self, write_id: WriteId) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -513,7 +513,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;

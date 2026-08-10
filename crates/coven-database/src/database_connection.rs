@@ -59,9 +59,9 @@ impl DatabaseConnection {
     {
         self.on_connection_thread(move |core| {
             let outcome = {
-                let records = crate::payload_spool::StoreRecords::new(&core.conn, &core.store_dir);
                 let mut session = crate::store::StoreSession::new(
-                    records,
+                    &core.conn,
+                    &core.store_dir,
                     &mut core.verified_store_authority,
                     &core.gates,
                     &core.synced_tables,

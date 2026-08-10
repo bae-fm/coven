@@ -10,7 +10,7 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -61,7 +61,10 @@ impl StoreSession<'_> {
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let retained = self
             .verified_store_authority
-            .retained_materialization_by_ref_on(self.records, reference)?;
+            .retained_materialization_by_ref_on(
+                crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                reference,
+            )?;
         if retained.root() != root {
             return Err(DbError::Message(
                 "retained Merge materialization belongs to another Store root".to_string(),
@@ -74,10 +77,13 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        self.verified_store_authority
-            .retained_replay_inputs_on(self.records, root)?;
-        self.verified_store_authority
-            .circle_replay_epoch_index_on(self.records)
+        self.verified_store_authority.retained_replay_inputs_on(
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            root,
+        )?;
+        self.verified_store_authority.circle_replay_epoch_index_on(
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+        )
     }
 }
 

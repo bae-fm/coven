@@ -12,11 +12,7 @@ impl StoreSession<'_> {
         value: &str,
         prepared: &coven_protocol::provider::DeviceJoinChallengePublicationRecord,
     ) -> Result<coven_protocol::provider::DeviceJoinChallengePublicationRecord, DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         tx.execute(
             "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
             (key, value),
@@ -46,11 +42,7 @@ impl StoreSession<'_> {
             DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
         };
 
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let previous_json = crate::required_protocol_state_on(&tx, key)?;
         let previous: DeviceJoinChallengePublicationRecord = serde_json::from_str(&previous_json)
             .map_err(|error| {

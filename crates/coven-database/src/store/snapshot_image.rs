@@ -633,7 +633,7 @@ impl StoreSession<'_> {
         ),
         DbError,
     > {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         require_no_unpublished_store_writes(records.conn)?;
         let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| image.capture(records, root, tables, routing_encryption, &audience))
@@ -656,7 +656,7 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let transaction = records
             .conn
             .unchecked_transaction()
@@ -704,7 +704,7 @@ impl StoreSession<'_> {
         SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
                 image.capture(
-                    self.records,
+                    crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
                     root,
                     self.synced_tables,
                     routing_encryption,

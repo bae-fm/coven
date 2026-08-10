@@ -9,18 +9,14 @@ use super::*;
 
 impl StoreSession<'_> {
     fn membership_head_cursors(&mut self) -> Result<InitialStoreMembershipAuthority, DbError> {
-        InitialStoreMembershipAuthority::load_on(self.records.conn)
+        InitialStoreMembershipAuthority::load_on(self.conn)
     }
 
     fn persist_membership_head_cursors(
         &mut self,
         head_refs: Vec<coven_protocol::membership::MembershipHeadRef>,
     ) -> Result<(), DbError> {
-        let transaction = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         InitialStoreMembershipAuthority { head_refs }.install_on(&transaction)?;
         transaction.commit().map_err(DbError::from)
     }
@@ -29,7 +25,7 @@ impl StoreSession<'_> {
         &mut self,
         expected_root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<String, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let (root, protocol_root) = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -104,7 +100,7 @@ impl StoreSession<'_> {
         owner: String,
         membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -142,18 +138,14 @@ impl StoreSession<'_> {
     }
 
     fn local_store_founder_graph(&mut self) -> Result<Option<Box<DurableFounderGraph>>, DbError> {
-        load_local_store_founder_graph_on(self.records.conn)
+        load_local_store_founder_graph_on(self.conn)
     }
 
     fn reset_store_founder_graph_publication(
         &mut self,
         expected_identity: coven_protocol::store_commit::ObjectHash,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let durable = load_local_store_founder_graph_on(&tx)?
             .ok_or_else(|| DbError::Message("local Store founder graph is absent".to_string()))?;
         if founder_graph_identity(&durable) != expected_identity {
@@ -193,7 +185,7 @@ impl StoreSession<'_> {
         &mut self,
         graph: Box<DurableFounderGraph>,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         if let Some(existing) = load_local_store_founder_graph_on(&tx)? {
             existing.validate()?;
@@ -344,7 +336,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let tx = records
             .conn

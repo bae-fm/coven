@@ -24,7 +24,6 @@ pub enum BlockedWriteDiscard {
 impl StoreSession<'_> {
     fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
         let mut statement = self
-            .records
             .conn
             .prepare(
                 "SELECT write_id, status, affected_rows FROM store_writes
@@ -56,7 +55,7 @@ impl StoreSession<'_> {
     }
 
     fn set_write_status(&self, write_id: &WriteId, status: &WriteStatus) -> Result<(), DbError> {
-        Database::set_write_status_on(self.records.conn, write_id, status)
+        Database::set_write_status_on(self.conn, write_id, status)
     }
 
     fn block_write_if_unresolved(
@@ -65,7 +64,6 @@ impl StoreSession<'_> {
         block: coven_protocol::write::WriteBlock,
     ) -> Result<Option<WriteStatus>, DbError> {
         let raw: String = self
-            .records
             .conn
             .query_row(
                 "SELECT status FROM store_writes WHERE write_id = ?1",
@@ -80,7 +78,7 @@ impl StoreSession<'_> {
             WriteStatus::Resolved(_) => Ok(None),
             WriteStatus::Pending | WriteStatus::Publishing | WriteStatus::Blocked(_) => {
                 let blocked = WriteStatus::Blocked(block);
-                Database::set_write_status_on(self.records.conn, write_id, &blocked)?;
+                Database::set_write_status_on(self.conn, write_id, &blocked)?;
                 Ok(Some(blocked))
             }
             state @ (WriteStatus::LocalOnly | WriteStatus::Published(_)) => Err(DbError::Message(
@@ -93,7 +91,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -167,7 +165,7 @@ impl StoreSession<'_> {
     }
 
     fn discard_blocked_write(&mut self, write_id: WriteId) -> Result<BlockedWriteDiscard, DbError> {
-        let session_records = self.records;
+        let session_records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = session_records
             .conn
             .unchecked_transaction()

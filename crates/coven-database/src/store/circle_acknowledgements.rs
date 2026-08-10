@@ -38,7 +38,7 @@ impl StoreSession<'_> {
     fn circle_acknowledgement_publication_inputs(
         &self,
     ) -> Result<Vec<CircleAckPublicationInput>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let mut inputs = Vec::new();
         for state in StoreDatabase::circle_current_states_on(conn)? {
             let circle_id = state.circle_id();
@@ -69,8 +69,7 @@ impl StoreSession<'_> {
         circle_id: CircleId,
         device_id: StoreDeviceId,
     ) -> Result<Option<CircleAckRef>, DbError> {
-        self.records
-            .conn
+        self.conn
             .query_row(
                 "SELECT ack_ref FROM activated_circle_acks
                  WHERE circle_id = ?1 AND device_id = ?2",
@@ -87,8 +86,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: CircleId,
     ) -> Result<BTreeSet<String>, DbError> {
-        let Some(state) = StoreDatabase::circle_current_state_on(self.records.conn, circle_id)?
-        else {
+        let Some(state) = StoreDatabase::circle_current_state_on(self.conn, circle_id)? else {
             return Err(DbError::Message(format!(
                 "Circle {circle_id} has no current state"
             )));
@@ -101,7 +99,7 @@ impl StoreSession<'_> {
 
     fn activated_circle_acks(&self, circle_id: CircleId) -> Result<Vec<CircleAckRef>, DbError> {
         query_mapped_rows(
-            self.records.conn,
+            self.conn,
             "SELECT ack_ref FROM activated_circle_acks
              WHERE circle_id = ?1 ORDER BY device_id",
             [circle_id.to_string()],
@@ -117,7 +115,6 @@ impl StoreSession<'_> {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleAck>, DbError> {
         let row: Option<(String, String, String, String)> = self
-            .records
             .conn
             .query_row(
                 "SELECT ack_ref, successor_slot, store_cut, control_coord
@@ -179,11 +176,7 @@ impl StoreSession<'_> {
         let prepared = serde_json::to_string(&prepared).map_err(|error| {
             DbError::context("serialize prepared Circle acknowledgement", error)
         })?;
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         tx.execute(
             "INSERT INTO outbound_circle_acks (circle_id, ack_ref, ack_bytes, prepared_object)
              VALUES (?1, ?2, ?3, ?4)",

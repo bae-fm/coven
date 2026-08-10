@@ -35,7 +35,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -67,7 +67,7 @@ impl StoreSession<'_> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -110,13 +110,13 @@ impl StoreSession<'_> {
         &mut self,
         operation_id: String,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
-        load_circle_operation_on(self.records.conn, &operation_id)
+        load_circle_operation_on(self.conn, &operation_id)
     }
 
     fn oldest_pending_circle_operation(
         &mut self,
     ) -> Result<Option<CircleOperationJournal>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let Some(operation_id) = circle_operation_ids_in_phase_on(conn, |progress| {
             matches!(
                 progress,
@@ -131,7 +131,7 @@ impl StoreSession<'_> {
     }
 
     fn waiting_circle_operations(&mut self) -> Result<Vec<CircleOperationJournal>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let waiting = circle_operation_ids_in_phase_on(conn, |progress| {
             matches!(progress, CircleOperationProgress::WaitingForCloseResponses)
         })?;
@@ -152,11 +152,7 @@ impl StoreSession<'_> {
         operation_id: String,
         step: String,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!(
                 "Circle operation {operation_id} disappeared before its upload step"
@@ -206,7 +202,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -266,7 +262,6 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let updated = self
-            .records
             .conn
             .execute(
                 "UPDATE circle_operations SET prepared = ?3
@@ -288,11 +283,7 @@ impl StoreSession<'_> {
         operation_id: String,
         block: coven_protocol::circle::CircleOperationBlock,
     ) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
@@ -304,11 +295,7 @@ impl StoreSession<'_> {
     }
 
     fn unblock_circle_operation(&mut self, operation_id: String) -> Result<(), DbError> {
-        let tx = self
-            .records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
@@ -323,7 +310,7 @@ impl StoreSession<'_> {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let gates = self.gates;
         let conn = records.conn;

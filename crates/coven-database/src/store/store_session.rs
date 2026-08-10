@@ -1,4 +1,4 @@
-use super::{payload_spool::StoreRecords, StoreSession, VerifiedStoreAuthority};
+use super::{StoreSession, VerifiedStoreAuthority};
 use crate::DbError;
 use coven_protocol::store_commit::{
     ReferencedStoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
@@ -6,7 +6,8 @@ use coven_protocol::store_commit::{
 
 impl<'session> StoreSession<'session> {
     pub(crate) fn new(
-        records: StoreRecords<'session>,
+        conn: &'session rusqlite::Connection,
+        store_dir: &'session coven_foundation::store_dir::StoreDir,
         verified_store_authority: &'session mut VerifiedStoreAuthority,
         gates: &'session crate::Gates,
         synced_tables: &'session [coven_protocol::synced_schema::SyncedTable],
@@ -16,7 +17,8 @@ impl<'session> StoreSession<'session> {
         blob_decls: &'session crate::BlobDecls,
     ) -> Self {
         Self {
-            records,
+            conn,
+            store_dir,
             verified_store_authority,
             gates,
             synced_tables,
@@ -28,8 +30,9 @@ impl<'session> StoreSession<'session> {
     }
 
     pub(super) fn required_root_authority(&mut self) -> Result<StoreRootRef, DbError> {
-        self.verified_store_authority
-            .required_root_authority_on(self.records)
+        self.verified_store_authority.required_root_authority_on(
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+        )
     }
 
     pub(super) fn root_authority(
@@ -42,7 +45,10 @@ impl<'session> StoreSession<'session> {
         DbError,
     > {
         self.verified_store_authority
-            .root_authority_on(self.records)
+            .root_authority_on(crate::payload_spool::StoreRecords::new(
+                self.conn,
+                self.store_dir,
+            ))
     }
 
     pub(super) fn activated_registration(
@@ -51,7 +57,7 @@ impl<'session> StoreSession<'session> {
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         let root = self.required_root_authority()?;
         let registration = self.verified_store_authority.activated_registration_on(
-            self.records,
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
             &root,
             reference,
         )?;
@@ -62,7 +68,8 @@ impl<'session> StoreSession<'session> {
     pub(super) fn local_store_authority(
         &mut self,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
-        self.verified_store_authority
-            .local_store_authority_on(self.records)
+        self.verified_store_authority.local_store_authority_on(
+            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+        )
     }
 }

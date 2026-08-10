@@ -21,7 +21,7 @@ impl StoreSession<'_> {
         materialization_failure: crate::MergeMaterializationFailureInjection,
     ) -> Result<super::merge_materialization_transaction::AppliedMergeMaterialization, DbError>
     {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let blob_decls = self.blob_decls;
         let gates = self.gates;
@@ -239,7 +239,7 @@ impl StoreSession<'_> {
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let reference = verified_commit.reference().clone();
         let tx = records
             .conn
@@ -296,7 +296,7 @@ impl StoreSession<'_> {
         activation_head_object: ExactObjectRef,
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let expected_ref = verified_commit.reference().clone();
         let stream_id = expected_ref.coord.stream_id.to_string();
         let sequence = expected_ref.coord.sequence();
@@ -355,7 +355,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         plan: crate::DeviceJoinBootstrapPlan,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -498,7 +498,7 @@ impl StoreSession<'_> {
         history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
         registration: ActivatedStoreDeviceRegistration,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()

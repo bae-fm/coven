@@ -336,7 +336,7 @@ impl StoreSession<'_> {
         blob_staging: Option<Box<dyn crate::AudienceBlobMoveStaging>>,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<Result<WriteReceipt<R>, HostWriteError<E>>, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let mut staged = staged;
         let stamper = coven_protocol::hlc::UpdatedAtStamper::new(self.hlc.clone());

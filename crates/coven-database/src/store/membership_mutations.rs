@@ -14,7 +14,7 @@ impl StoreSession<'_> {
     fn outbound_membership_mutation(
         &mut self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         conn.query_row(
             "SELECT intent_hash, plan_bytes, progress_bytes \
              FROM outbound_membership_mutation WHERE singleton = 1",
@@ -53,7 +53,7 @@ impl StoreSession<'_> {
         reusable: &std::collections::BTreeSet<coven_protocol::membership::AuthorStreamId>,
         candidate: coven_protocol::membership::AuthorStreamId,
     ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let existing = crate::get_protocol_state_on(conn, key)?
             .map(|value| {
                 value.parse().map_err(|error| {
@@ -79,7 +79,7 @@ impl StoreSession<'_> {
         progress_bytes: Vec<u8>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let intent_hash = ObjectHash::digest(&plan_bytes);
         let existing = tx
@@ -128,7 +128,7 @@ impl StoreSession<'_> {
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let intent_hash = ObjectHash::digest(&plan_bytes);
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -203,7 +203,7 @@ impl StoreSession<'_> {
         intent_hash: ObjectHash,
         progress_bytes: Vec<u8>,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let updated = conn
             .execute(
                 "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
@@ -228,7 +228,7 @@ impl StoreSession<'_> {
         rotation_generation: Option<u64>,
         replacement_hash: ObjectHash,
     ) -> Result<ObjectHash, DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let previous_id = previous.object_id();
@@ -288,7 +288,7 @@ impl StoreSession<'_> {
         progress_bytes: Vec<u8>,
         nonactivation: coven_protocol::remote_object::CandidateNonactivation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let exists: bool = tx
             .query_row(
@@ -336,7 +336,7 @@ impl StoreSession<'_> {
         retained_authorities: Vec<ExactObjectRef>,
         rotation_generation: Option<u64>,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let mut unique = BTreeSet::new();
         for object in &candidate_objects {
@@ -463,7 +463,7 @@ impl StoreSession<'_> {
         candidate: &StoreBatchCommitRef,
         objects: &[ExactObjectRef],
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(
@@ -488,7 +488,7 @@ impl StoreSession<'_> {
         progress_bytes: Vec<u8>,
         generation: u64,
     ) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         if tx
             .execute(
@@ -508,7 +508,7 @@ impl StoreSession<'_> {
     }
 
     fn complete_membership_mutation(&mut self, intent_hash: ObjectHash) -> Result<(), DbError> {
-        let conn = self.records.conn;
+        let conn = self.conn;
         let deleted = conn
             .execute(
                 "DELETE FROM outbound_membership_mutation \

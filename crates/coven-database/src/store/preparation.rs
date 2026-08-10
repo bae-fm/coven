@@ -19,7 +19,7 @@ use rusqlite::OptionalExtension;
 
 impl StoreSession<'_> {
     fn table_schema_for_apply(&mut self) -> Result<crate::TableSchema, DbError> {
-        crate::TableSchema::for_apply(self.records.conn, self.synced_tables, self.gates)
+        crate::TableSchema::for_apply(self.conn, self.synced_tables, self.gates)
     }
 
     fn prepare_store_write_commit(&mut self, stage: StoreWritePreparation) -> Result<(), DbError> {
@@ -29,7 +29,7 @@ impl StoreSession<'_> {
                 "prepared Store write belongs to another verified Store root".to_string(),
             ));
         }
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -317,7 +317,7 @@ impl StoreSession<'_> {
         &mut self,
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let tx = records
             .conn
@@ -495,7 +495,7 @@ impl StoreSession<'_> {
         write_id: coven_protocol::write::WriteId,
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
-        let records = self.records;
+        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
