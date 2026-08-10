@@ -15,12 +15,550 @@ use coven_protocol::store_commit::{StoreBatchCommitRef, StorePackageRef};
 
 pub mod journal;
 
+impl StoreSession<'_> {
+    fn begin_store_reclaim_operation(
+        &mut self,
+        operation: DurableStoreReclaimOperation,
+        remotes: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let operation_id = operation.operation_id();
+        if let Some(existing) = load_store_reclaim_operation_on(&tx, operation_id)? {
+            if existing != operation {
+                return Err(DbError::Message(format!(
+                    "Store reclaim operation {operation_id} already has different durable state"
+                )));
+            }
+            return Ok(existing);
+        }
+        for remote in &remotes {
+            persist_exact_remote_object_on(
+                &tx,
+                self.records.store_dir,
+                remote,
+                "Store reclaim candidate object",
+            )?;
+        }
+        insert_store_reclaim_operation_on(&tx, &operation)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(operation)
+    }
+
+    fn store_package_is_retained_for_replay(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        target: &StorePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<bool, DbError> {
+        let object_id = remote_object_id(&target.object);
+        let exists: bool = self
+            .records
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !exists {
+            return Ok(false);
+        }
+        let remote = load_remote_object_on(self.records.conn, object_id)?;
+        let retained = remote
+            .store_package_is_retained_for_replay(target, activation)
+            .map_err(|error| {
+                DbError::context(
+                    format!("validate Store package {object_id} replay ownership"),
+                    error,
+                )
+            })?;
+        if !retained {
+            return Ok(false);
+        }
+        for owner in remote.retained_replay_owners() {
+            let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+            let retained = self
+                .verified_store_authority
+                .validate_retained_materialization_by_ref_on(self.records, commit)?;
+            if retained.root() != root || retained.input_hash() != *input_hash {
+                return Err(DbError::Message(
+                    "Store package replay owner differs from retained materialization".to_string(),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    fn circle_package_is_retained_for_replay(
+        &mut self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        target: &coven_protocol::store_commit::CirclePackageRef,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<bool, DbError> {
+        let object_id = remote_object_id(&target.package.object);
+        let exists: bool = self
+            .records
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !exists {
+            return Ok(false);
+        }
+        let remote = load_remote_object_on(self.records.conn, object_id)?;
+        let retained = remote
+            .circle_package_is_retained_for_replay(target, activation)
+            .map_err(|error| {
+                DbError::context(
+                    format!("validate Circle package {object_id} replay ownership"),
+                    error,
+                )
+            })?;
+        if !retained {
+            return Ok(false);
+        }
+        for owner in remote.retained_replay_owners() {
+            let RetainedReplayOwner::Commit { commit, input_hash } = owner;
+            let retained = self
+                .verified_store_authority
+                .validate_retained_materialization_by_ref_on(self.records, commit)?;
+            if retained.root() != root || retained.input_hash() != *input_hash {
+                return Err(DbError::Message(
+                    "Circle package replay owner differs from retained materialization".to_string(),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    fn circle_image_is_retained_for_replay(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+        image: &coven_protocol::store_commit::SnapshotImageRef,
+    ) -> Result<bool, DbError> {
+        let row: Option<Vec<u8>> = self
+            .records
+            .conn
+            .query_row(
+                "SELECT bootstrap_ref FROM circle_bootstrap_coverage WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let Some(bootstrap_ref) = row else {
+            return Ok(false);
+        };
+        let bootstrap: coven_protocol::circle::CircleBootstrapRef =
+            serde_json::from_slice(&bootstrap_ref).map_err(|error| {
+                DbError::context("parse retained Circle bootstrap reference", error)
+            })?;
+        Ok(bootstrap.image == *image)
+    }
+
+    fn stored_blob_reclaim_candidates(
+        &self,
+    ) -> Result<
+        Vec<(
+            coven_protocol::blob::locator::StoredBlobRef,
+            Vec<StoreBatchCommitRef>,
+        )>,
+        DbError,
+    > {
+        let conn = self.records.conn;
+        let mut statement = conn
+            .prepare("SELECT remote_object_id FROM blob_locators ORDER BY remote_object_id")
+            .map_err(DbError::from)?;
+        let object_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut candidates = Vec::new();
+        for object_id in object_ids {
+            let parsed = object_id.parse().map_err(|error| {
+                DbError::context(format!("stored blob object id {object_id:?}"), error)
+            })?;
+            let remote = load_remote_object_on(conn, parsed)?;
+            if !remote.is_activated_stored_blob() {
+                continue;
+            }
+            let Some(locator_bytes) = remote.payloads().carried_locator_bytes() else {
+                return Err(DbError::Message(format!(
+                    "stored blob {object_id} carries no locator"
+                )));
+            };
+            let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
+                .map_err(|error| {
+                    DbError::context(format!("stored blob {object_id} locator"), error)
+                })?;
+            let stored =
+                coven_protocol::blob::locator::StoredBlobRef::new(locator, remote.object().clone())
+                    .map_err(|error| {
+                        DbError::context(format!("stored blob {object_id} reference"), error)
+                    })?;
+            candidates.push((stored, remote.stored_blob_commit_owners()));
+        }
+        Ok(candidates)
+    }
+
+    fn stored_blob_is_row_orphaned(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        match crate::Database::stored_blob_reference_state_on(
+            self.records.conn,
+            self.gates,
+            self.synced_tables,
+            stored,
+        )? {
+            crate::StoredBlobReferenceState::NotLiveRemote => Ok(true),
+            crate::StoredBlobReferenceState::LiveRemote => Ok(false),
+            crate::StoredBlobReferenceState::Unresolved => Err(DbError::Message(format!(
+                "stored blob {} has a live reference whose locality is unresolved",
+                remote_object_id(stored.object())
+            ))),
+        }
+    }
+
+    fn audience_blob_is_retained_for_replay(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        let conn = self.records.conn;
+        let object_id = remote_object_id(stored.object());
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if exists {
+            let remote = load_remote_object_on(conn, object_id)?;
+            if remote.snapshot_owners().next().is_some()
+                || remote.retained_replay_owners().next().is_some()
+            {
+                return Ok(true);
+            }
+        }
+        let mut statement = conn
+            .prepare("SELECT bootstrap_ref FROM circle_bootstrap_coverage")
+            .map_err(DbError::from)?;
+        let coverages = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for bytes in coverages {
+            let bootstrap: coven_protocol::circle::CircleBootstrapRef =
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    DbError::context("parse retained Circle bootstrap reference", error)
+                })?;
+            if bootstrap
+                .blobs
+                .iter()
+                .any(|blob| blob.stored() == Some(stored))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn store_reclaim_operations(&self) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
+        let mut statement = self
+            .records
+            .conn
+            .prepare(
+                "SELECT authorization_hash, state FROM store_reclaim_operations
+                 ORDER BY authorization_hash",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        rows.into_iter()
+            .map(|(raw_id, raw)| {
+                let id = raw_id
+                    .parse()
+                    .map_err(|error| DbError::context("Store reclaim operation id", error))?;
+                parse_store_reclaim_operation(id, &raw)
+            })
+            .collect()
+    }
+
+    fn begin_store_reclaim_receipt(
+        &mut self,
+        expected: DurableStoreReclaimOperation,
+        next: DurableStoreReclaimOperation,
+        remotes: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before receipt preparation".to_string(),
+            ));
+        }
+        for remote in &remotes {
+            persist_exact_remote_object_on(
+                &tx,
+                self.records.store_dir,
+                remote,
+                "Store reclaim receipt candidate",
+            )?;
+        }
+        update_store_reclaim_operation_on(&tx, &expected, &next)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn mark_store_reclaim_target_absent(
+        &mut self,
+        expected: DurableStoreReclaimOperation,
+        next: DurableStoreReclaimOperation,
+        reclaimed: ReclaimedStorePackage,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let root = self.required_root_authority()?;
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before absence recording".to_string(),
+            ));
+        }
+        record_reclaimed_store_package_on(&tx, Some(root.store_root_hash), &reclaimed)?;
+        update_store_reclaim_operation_on(&tx, &expected, &next)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn replace_store_reclaim_candidate(
+        &mut self,
+        expected: DurableStoreReclaimOperation,
+        current_candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+        next: DurableStoreReclaimOperation,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before candidate replacement".to_string(),
+            ));
+        }
+        let next_candidate = next.candidate().expect("constructed candidate state");
+        match (current_candidate.head_ref(), next_candidate.head_ref()) {
+            (current, replacement) if current != replacement => {
+                let (winner, prepared) = next_candidate.publication();
+                replace_prepared_merge_head_remote_on(
+                    &tx,
+                    self.records.store_dir,
+                    &current.object,
+                    winner,
+                    prepared,
+                    &current_candidate.reference,
+                )?;
+            }
+            _ => {}
+        }
+        update_store_reclaim_operation_on(&tx, &expected, &next)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn begin_store_reclaim_candidate_replacement(
+        &mut self,
+        expected: DurableStoreReclaimOperation,
+        next: DurableStoreReclaimOperation,
+        replacement_remotes: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+        losing_candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before candidate replacement".to_string(),
+            ));
+        }
+        let authority_ids = replacement_remotes
+            .iter()
+            .filter(|remote| matches!(
+                remote.record(),
+                RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        record.identity.domain,
+                        coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
+                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
+                            | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
+                    )
+            ))
+            .map(|remote| remote.object_id())
+            .collect::<BTreeSet<_>>();
+        for remote in replacement_remotes
+            .iter()
+            .filter(|remote| !authority_ids.contains(&remote.object_id()))
+        {
+            persist_exact_remote_object_on(
+                &tx,
+                self.records.store_dir,
+                remote,
+                "replacement Store reclaim candidate object",
+            )?;
+        }
+        for authority_id in authority_ids {
+            let mut authority = load_remote_object_on(&tx, authority_id)?;
+            authority
+                .add_retained_authority_candidate(
+                    next.candidate()
+                        .expect("constructed candidate state")
+                        .reference
+                        .clone(),
+                )
+                .map_err(|error| {
+                    DbError::context("attach replacement reclaim authority candidate", error)
+                })?;
+            update_remote_object_on(&tx, authority_id, &authority)?;
+            if begin_remote_candidate_nonactivation_on(&tx, authority_id, nonactivation.clone())?
+                .is_some()
+            {
+                return Err(DbError::Message(
+                    "reusable reclaim authority became a deletion target".to_string(),
+                ));
+            }
+        }
+        let head = losing_candidate.head_ref();
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&head.object),
+            nonactivation.clone(),
+        )?
+        .is_some()
+        {
+            return Err(DbError::Message(
+                "losing reclaim activation head became a deletion target".to_string(),
+            ));
+        }
+        if begin_remote_candidate_nonactivation_on(
+            &tx,
+            remote_object_id(&losing_candidate.reference.object),
+            nonactivation,
+        )?
+        .is_none()
+        {
+            return Err(DbError::Message(
+                "losing reclaim commit has no exact deletion target".to_string(),
+            ));
+        }
+        update_store_reclaim_operation_on(&tx, &expected, &next)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    fn store_reclaim_replacement_cleanup_targets(
+        &self,
+        expected: &DurableStoreReclaimOperation,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        let current = load_store_reclaim_operation_on(self.records.conn, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if &current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before cleanup".to_string(),
+            ));
+        }
+        let losing = current.losing_candidate().ok_or_else(|| {
+            DbError::Message("Store reclaim operation has no losing candidate".to_string())
+        })?;
+        super::candidate_records::candidate_cleanup_targets_on(
+            self.records.conn,
+            &losing.candidate.reference,
+            std::slice::from_ref(&losing.candidate.reference.object),
+        )
+    }
+
+    fn complete_store_reclaim_candidate_replacement(
+        &mut self,
+        expected: DurableStoreReclaimOperation,
+        losing: StoreReclaimCandidateLoss,
+        next: DurableStoreReclaimOperation,
+    ) -> Result<DurableStoreReclaimOperation, DbError> {
+        let tx = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
+            .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
+        if current != expected {
+            return Err(DbError::Message(
+                "Store reclaim operation changed before replacement completion".to_string(),
+            ));
+        }
+        let object_id = remote_object_id(&losing.candidate.reference.object);
+        if !super::candidate_records::candidate_cleanup_targets_on(
+            &tx,
+            &losing.candidate.reference,
+            std::slice::from_ref(&losing.candidate.reference.object),
+        )?
+        .is_empty()
+        {
+            return Err(DbError::Message(
+                "losing reclaim commit cleanup is incomplete".to_string(),
+            ));
+        }
+        super::candidate_records::delete_remote_objects_on(&tx, [object_id], "losing reclaim")?;
+        update_store_reclaim_operation_on(&tx, &expected, &next)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn stored_blob_has_snapshot_owner_for_test(
+        &self,
+        stored: &coven_protocol::blob::locator::StoredBlobRef,
+    ) -> Result<bool, DbError> {
+        let remote = load_remote_object_on(self.records.conn, remote_object_id(stored.object()))?;
+        let pinned = remote.snapshot_owners().next().is_some();
+        Ok(pinned)
+    }
+}
+
 impl StoreDatabase {
     pub async fn begin_store_reclaim_operation(
         &self,
         operation: DurableStoreReclaimOperation,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
-        let store_dir = self.store_dir.clone();
         operation.validate().map_err(store_reclaim_journal_error)?;
         let DurableStoreReclaimOperation::AuthorizationCandidate { .. } = &operation else {
             return Err(DbError::Message(
@@ -34,30 +572,7 @@ impl StoreDatabase {
             _ => unreachable!("matched reclaim candidate"),
         };
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let operation_id = operation.operation_id();
-                if let Some(existing) = load_store_reclaim_operation_on(&tx, operation_id)? {
-                    if existing != operation {
-                        return Err(DbError::Message(format!(
-                        "Store reclaim operation {operation_id} already has different durable state"
-                    )));
-                    }
-                    return Ok(existing);
-                }
-                for remote in &remotes {
-                    persist_exact_remote_object_on(
-                        &tx,
-                        &store_dir,
-                        remote,
-                        "Store reclaim candidate object",
-                    )?;
-                }
-                insert_store_reclaim_operation_on(&tx, &operation)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(operation)
-            })
+            .call_store(move |session| session.begin_store_reclaim_operation(operation, remotes))
             .await
     }
 
@@ -69,44 +584,7 @@ impl StoreDatabase {
     ) -> Result<bool, DbError> {
         self.connection
             .call_store(move |session| {
-                let records = session.records;
-                let authority = &mut *session.verified_store_authority;
-                let conn = records.conn;
-                let object_id = remote_object_id(&target.object);
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Ok(false);
-                }
-                let remote = load_remote_object_on(conn, object_id)?;
-                let retained = remote
-                    .store_package_is_retained_for_replay(&target, &activation)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("validate Store package {object_id} replay ownership"),
-                            error,
-                        )
-                    })?;
-                if !retained {
-                    return Ok(false);
-                }
-                for owner in remote.retained_replay_owners() {
-                    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-                    let retained =
-                        authority.validate_retained_materialization_by_ref_on(records, commit)?;
-                    if retained.root() != &root || retained.input_hash() != *input_hash {
-                        return Err(DbError::Message(
-                            "Store package replay owner differs from retained materialization"
-                                .to_string(),
-                        ));
-                    }
-                }
-                Ok(true)
+                session.store_package_is_retained_for_replay(&root, &target, &activation)
             })
             .await
     }
@@ -119,44 +597,7 @@ impl StoreDatabase {
     ) -> Result<bool, DbError> {
         self.connection
             .call_store(move |session| {
-                let records = session.records;
-                let authority = &mut *session.verified_store_authority;
-                let conn = records.conn;
-                let object_id = remote_object_id(&target.package.object);
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if !exists {
-                    return Ok(false);
-                }
-                let remote = load_remote_object_on(conn, object_id)?;
-                let retained = remote
-                    .circle_package_is_retained_for_replay(&target, &activation)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("validate Circle package {object_id} replay ownership"),
-                            error,
-                        )
-                    })?;
-                if !retained {
-                    return Ok(false);
-                }
-                for owner in remote.retained_replay_owners() {
-                    let RetainedReplayOwner::Commit { commit, input_hash } = owner;
-                    let retained =
-                        authority.validate_retained_materialization_by_ref_on(records, commit)?;
-                    if retained.root() != &root || retained.input_hash() != *input_hash {
-                        return Err(DbError::Message(
-                            "Circle package replay owner differs from retained materialization"
-                                .to_string(),
-                        ));
-                    }
-                }
-                Ok(true)
+                session.circle_package_is_retained_for_replay(&root, &target, &activation)
             })
             .await
     }
@@ -189,23 +630,7 @@ impl StoreDatabase {
     ) -> Result<bool, DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let row: Option<Vec<u8>> = conn
-                    .query_row(
-                        "SELECT bootstrap_ref FROM circle_bootstrap_coverage WHERE circle_id = ?1",
-                        [circle_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let Some(bootstrap_ref) = row else {
-                    return Ok(false);
-                };
-                let bootstrap: coven_protocol::circle::CircleBootstrapRef =
-                    serde_json::from_slice(&bootstrap_ref).map_err(|error| {
-                        DbError::context("parse retained Circle bootstrap reference", error)
-                    })?;
-                Ok(bootstrap.image == image)
+                session.circle_image_is_retained_for_replay(circle_id, &image)
             })
             .await
     }
@@ -224,46 +649,7 @@ impl StoreDatabase {
         DbError,
     > {
         self.connection
-            .call_store(|session| {
-                let conn = session.records.conn;
-                let mut statement = conn
-                    .prepare("SELECT remote_object_id FROM blob_locators ORDER BY remote_object_id")
-                    .map_err(DbError::from)?;
-                let object_ids = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                drop(statement);
-                let mut candidates = Vec::new();
-                for object_id in object_ids {
-                    let parsed = object_id.parse().map_err(|error| {
-                        DbError::context(format!("stored blob object id {object_id:?}"), error)
-                    })?;
-                    let remote = load_remote_object_on(conn, parsed)?;
-                    if !remote.is_activated_stored_blob() {
-                        continue;
-                    }
-                    let Some(locator_bytes) = remote.payloads().carried_locator_bytes() else {
-                        return Err(DbError::Message(format!(
-                            "stored blob {object_id} carries no locator"
-                        )));
-                    };
-                    let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
-                        .map_err(|error| {
-                            DbError::context(format!("stored blob {object_id} locator"), error)
-                        })?;
-                    let stored = coven_protocol::blob::locator::StoredBlobRef::new(
-                        locator,
-                        remote.object().clone(),
-                    )
-                    .map_err(|error| {
-                        DbError::context(format!("stored blob {object_id} reference"), error)
-                    })?;
-                    candidates.push((stored, remote.stored_blob_commit_owners()));
-                }
-                Ok(candidates)
-            })
+            .call_store(|session| session.stored_blob_reclaim_candidates())
             .await
     }
 
@@ -276,22 +662,8 @@ impl StoreDatabase {
         &self,
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
-        let gates = self.gates.clone();
-        let tables = self.synced_tables().to_vec();
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                match crate::Database::stored_blob_reference_state_on(
-                    conn, &gates, &tables, &stored,
-                )? {
-                    crate::StoredBlobReferenceState::NotLiveRemote => Ok(true),
-                    crate::StoredBlobReferenceState::LiveRemote => Ok(false),
-                    crate::StoredBlobReferenceState::Unresolved => Err(DbError::Message(format!(
-                        "stored blob {} has a live reference whose locality is unresolved",
-                        remote_object_id(stored.object())
-                    ))),
-                }
-            })
+            .call_store(move |session| session.stored_blob_is_row_orphaned(&stored))
             .await
     }
 
@@ -310,50 +682,7 @@ impl StoreDatabase {
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let object_id = remote_object_id(stored.object());
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                        [object_id.to_string()],
-                        |row| row.get(0),
-                    )
-                    .map_err(DbError::from)?;
-                if exists {
-                    let remote = load_remote_object_on(conn, object_id)?;
-                    // A published snapshot generation pinned this blob into its image,
-                    // or an accepted merge still replays the package that carried it.
-                    if remote.snapshot_owners().next().is_some()
-                        || remote.retained_replay_owners().next().is_some()
-                    {
-                        return Ok(true);
-                    }
-                }
-                let mut statement = conn
-                    .prepare("SELECT bootstrap_ref FROM circle_bootstrap_coverage")
-                    .map_err(DbError::from)?;
-                let coverages = statement
-                    .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                drop(statement);
-                for bytes in coverages {
-                    let bootstrap: coven_protocol::circle::CircleBootstrapRef =
-                        serde_json::from_slice(&bytes).map_err(|error| {
-                            DbError::context("parse retained Circle bootstrap reference", error)
-                        })?;
-                    if bootstrap
-                        .blobs
-                        .iter()
-                        .any(|blob| blob.stored() == Some(&stored))
-                    {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            })
+            .call_store(move |session| session.audience_blob_is_retained_for_replay(&stored))
             .await
     }
 
@@ -361,30 +690,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<Vec<DurableStoreReclaimOperation>, DbError> {
         self.connection
-            .call_store(|session| {
-                let conn = session.records.conn;
-                let mut statement = conn
-                    .prepare(
-                        "SELECT authorization_hash, state FROM store_reclaim_operations
-                     ORDER BY authorization_hash",
-                    )
-                    .map_err(DbError::from)?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from)?;
-                rows.into_iter()
-                    .map(|(raw_id, raw)| {
-                        let id = raw_id.parse().map_err(|error| {
-                            DbError::context("Store reclaim operation id", error)
-                        })?;
-                        parse_store_reclaim_operation(id, &raw)
-                    })
-                    .collect()
-            })
+            .call_store(|session| session.store_reclaim_operations())
             .await
     }
 
@@ -394,7 +700,6 @@ impl StoreDatabase {
         object: DurableStoreReclaimObject,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreReclaimOperation, DbError> {
-        let store_dir = self.store_dir.clone();
         let DurableStoreReclaimOperation::AbsentVerified {
             authorization,
             authorization_activation,
@@ -421,30 +726,7 @@ impl StoreDatabase {
             _ => unreachable!("constructed receipt candidate"),
         };
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before receipt preparation".to_string(),
-                    ));
-                }
-                for remote in &remotes {
-                    persist_exact_remote_object_on(
-                        &tx,
-                        &store_dir,
-                        remote,
-                        "Store reclaim receipt candidate",
-                    )?;
-                }
-                update_store_reclaim_operation_on(&tx, &expected, &next)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
-            })
+            .call_store(move |session| session.begin_store_reclaim_receipt(expected, next, remotes))
             .await
     }
 
@@ -478,22 +760,7 @@ impl StoreDatabase {
         next.validate().map_err(store_reclaim_journal_error)?;
         self.connection
             .call_store(move |session| {
-                let root = session.required_root_authority()?;
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before absence recording".to_string(),
-                    ));
-                }
-                record_reclaimed_store_package_on(&tx, Some(root.store_root_hash), &reclaimed)?;
-                update_store_reclaim_operation_on(&tx, &expected, &next)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
+                session.mark_store_reclaim_target_absent(expected, next, reclaimed)
             })
             .await
     }
@@ -540,36 +807,7 @@ impl StoreDatabase {
         next.validate().map_err(store_reclaim_journal_error)?;
         self.connection
             .call_store(move |session| {
-                let records = session.records;
-                let conn = records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before candidate replacement".to_string(),
-                    ));
-                }
-                let next_candidate = next.candidate().expect("constructed candidate state");
-                match (current_candidate.head_ref(), next_candidate.head_ref()) {
-                    (current, replacement) if current != replacement => {
-                        let (winner, prepared) = next_candidate.publication();
-                        replace_prepared_merge_head_remote_on(
-                            &tx,
-                            records.store_dir,
-                            &current.object,
-                            winner,
-                            prepared,
-                            &current_candidate.reference,
-                        )?;
-                    }
-                    _ => {}
-                }
-                update_store_reclaim_operation_on(&tx, &expected, &next)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
+                session.replace_store_reclaim_candidate(expected, current_candidate, next)
             })
             .await
     }
@@ -635,90 +873,17 @@ impl StoreDatabase {
         let replacement_remotes = object
             .remote_objects(&replacement)
             .map_err(store_reclaim_journal_error)?;
-        let store_dir = self.store_dir.clone();
-        self.connection.call_store(move |session| {
-                let conn = session.records.conn;
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                .ok_or_else(|| DbError::Message("Store reclaim operation disappeared".to_string()))?;
-            if current != expected {
-                return Err(DbError::Message(
-                    "Store reclaim operation changed before candidate replacement".to_string(),
-                ));
-            }
-            let authority_ids = replacement_remotes
-                .iter()
-                .filter(|remote| matches!(
-                    remote.record(),
-                    RemoteObjectRecord::RetainedAuthority(record)
-                        if matches!(
-                            record.identity.domain,
-                            coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimEvidence { .. }
-                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimAuthorization { .. }
-                                | coven_protocol::remote_object::RetainedAuthorityObjectDomain::ReclaimReceipt { .. }
-                        )
-                ))
-                .map(|remote| remote.object_id())
-                .collect::<BTreeSet<_>>();
-            for remote in replacement_remotes
-                .iter()
-                .filter(|remote| !authority_ids.contains(&remote.object_id()))
-            {
-                persist_exact_remote_object_on(
-                    &tx,
-                    &store_dir,
-                    remote,
-                    "replacement Store reclaim candidate object",
-                )?;
-            }
-            for authority_id in authority_ids {
-                let mut authority = load_remote_object_on(&tx, authority_id)?;
-                authority
-                    .add_retained_authority_candidate(replacement.reference.clone())
-                    .map_err(|error| {
-                        DbError::context("attach replacement reclaim authority candidate", error)
-                    })?;
-                update_remote_object_on(&tx, authority_id, &authority)?;
-                if begin_remote_candidate_nonactivation_on(
-                    &tx,
-                    authority_id,
-                    nonactivation.clone(),
-                )?
-                .is_some()
-                {
-                    return Err(DbError::Message(
-                        "reusable reclaim authority became a deletion target".to_string(),
-                    ));
-                }
-            }
-            let head = losing_candidate.head_ref();
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&head.object),
-                nonactivation.clone(),
-            )?
-            .is_some()
-            {
-                return Err(DbError::Message(
-                    "losing reclaim activation head became a deletion target".to_string(),
-                ));
-            }
-            if begin_remote_candidate_nonactivation_on(
-                &tx,
-                remote_object_id(&losing_candidate.reference.object),
-                nonactivation,
-            )?
-            .is_none()
-            {
-                return Err(DbError::Message(
-                    "losing reclaim commit has no exact deletion target".to_string(),
-                ));
-            }
-            update_store_reclaim_operation_on(&tx, &expected, &next)?;
-            tx.commit().map_err(DbError::from)?;
-            Ok(next)
-        })
-        .await
+        self.connection
+            .call_store(move |session| {
+                session.begin_store_reclaim_candidate_replacement(
+                    expected,
+                    next,
+                    replacement_remotes,
+                    nonactivation,
+                    losing_candidate,
+                )
+            })
+            .await
     }
 
     pub async fn store_reclaim_replacement_cleanup_targets(
@@ -726,26 +891,7 @@ impl StoreDatabase {
         expected: DurableStoreReclaimOperation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let current = load_store_reclaim_operation_on(conn, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before cleanup".to_string(),
-                    ));
-                }
-                let losing = current.losing_candidate().ok_or_else(|| {
-                    DbError::Message("Store reclaim operation has no losing candidate".to_string())
-                })?;
-                super::candidate_records::candidate_cleanup_targets_on(
-                    conn,
-                    &losing.candidate.reference,
-                    std::slice::from_ref(&losing.candidate.reference.object),
-                )
-            })
+            .call_store(move |session| session.store_reclaim_replacement_cleanup_targets(&expected))
             .await
     }
 
@@ -784,37 +930,7 @@ impl StoreDatabase {
         next.validate().map_err(store_reclaim_journal_error)?;
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let current = load_store_reclaim_operation_on(&tx, expected.operation_id())?
-                    .ok_or_else(|| {
-                        DbError::Message("Store reclaim operation disappeared".to_string())
-                    })?;
-                if current != expected {
-                    return Err(DbError::Message(
-                        "Store reclaim operation changed before replacement completion".to_string(),
-                    ));
-                }
-                let object_id = remote_object_id(&losing.candidate.reference.object);
-                if !super::candidate_records::candidate_cleanup_targets_on(
-                    &tx,
-                    &losing.candidate.reference,
-                    std::slice::from_ref(&losing.candidate.reference.object),
-                )?
-                .is_empty()
-                {
-                    return Err(DbError::Message(
-                        "losing reclaim commit cleanup is incomplete".to_string(),
-                    ));
-                }
-                super::candidate_records::delete_remote_objects_on(
-                    &tx,
-                    [object_id],
-                    "losing reclaim",
-                )?;
-                update_store_reclaim_operation_on(&tx, &expected, &next)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(next)
+                session.complete_store_reclaim_candidate_replacement(expected, losing, next)
             })
             .await
     }
@@ -827,12 +943,7 @@ impl StoreDatabase {
         stored: coven_protocol::blob::locator::StoredBlobRef,
     ) -> Result<bool, DbError> {
         self.connection
-            .call_store(move |session| {
-                let conn = session.records.conn;
-                let remote = load_remote_object_on(conn, remote_object_id(stored.object()))?;
-                let pinned = remote.snapshot_owners().next().is_some();
-                Ok(pinned)
-            })
+            .call_store(move |session| session.stored_blob_has_snapshot_owner_for_test(&stored))
             .await
     }
 
