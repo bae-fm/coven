@@ -44,7 +44,7 @@ impl CircleSnapshotFixture {
     async fn apply_routing_schema(&self) {
         self.database
             .database
-            .test_sql(|database| database.apply_coven_routing_schema())
+            .apply_coven_routing_schema_for_test()
             .await
             .expect("apply routing schema");
     }
@@ -55,9 +55,8 @@ impl CircleSnapshotFixture {
         coven_protocol::circle::CircleId,
         coven_protocol::circle::CircleControlCoord,
     ) {
-        self.database
-            .database
-            .test_sql(|database| Ok(database.install_test_active_circle("snap")))
+        self.store_database
+            .install_test_active_circle_with_control("snap".to_string())
             .await
             .expect("install active Circle")
     }

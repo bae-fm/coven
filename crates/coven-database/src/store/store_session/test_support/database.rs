@@ -164,6 +164,20 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn install_test_active_circle_with_control(
+        &self,
+        label: String,
+    ) -> Result<
+        (
+            coven_protocol::circle::CircleId,
+            coven_protocol::circle::CircleControlCoord,
+        ),
+        DbError,
+    > {
+        self.call_store(move |session| Ok(session.install_test_active_circle_with_control(&label)))
+            .await
+    }
+
     pub async fn insert_write_status_for_test(
         &self,
         write_id: WriteId,

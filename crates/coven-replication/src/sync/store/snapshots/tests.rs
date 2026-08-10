@@ -467,11 +467,9 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("publish staged second snapshot");
     let published_generations = db
         .database
-        .test_sql(|database| {
-            database.table_row_count(coven_database::DatabaseTestTable::named(
-                "published_store_snapshot",
-            ))
-        })
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+            "published_store_snapshot",
+        ))
         .await
         .expect("count published Store snapshot generations");
     assert_eq!(published_generations, 2);

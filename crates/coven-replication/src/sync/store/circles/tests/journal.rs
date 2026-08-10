@@ -60,9 +60,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
     db.database
-        .test_sql(move |database| {
-            database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
-        })
+        .replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
         .await
         .expect("install mismatched Circle operation payload");
 
@@ -84,9 +82,7 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
     replacement.circle_id = replacement_circle_id;
     replacement.operation_mut().creation.circle_id = replacement_circle_id;
     db.database
-        .test_sql(move |database| {
-            database.replace_circle_operation_prepared(&expected_operation_id, &replacement)
-        })
+        .replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
         .await
         .expect("install mismatched Circle operation payload");
 

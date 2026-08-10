@@ -379,9 +379,18 @@ impl StoreSession<'_> {
     }
 
     fn install_test_active_circle(&self, label: &str) -> coven_protocol::circle::CircleId {
+        self.install_test_active_circle_with_control(label).0
+    }
+
+    fn install_test_active_circle_with_control(
+        &self,
+        label: &str,
+    ) -> (
+        coven_protocol::circle::CircleId,
+        coven_protocol::circle::CircleControlCoord,
+    ) {
         let database = crate::DatabaseTestSql::new(self.conn);
-        let (circle_id, _) = database.install_test_active_circle(label);
-        circle_id
+        database.install_test_active_circle(label)
     }
 
     fn install_test_inactive_circle(&self, label: &str) -> coven_protocol::circle::CircleId {

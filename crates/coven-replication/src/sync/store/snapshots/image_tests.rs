@@ -290,15 +290,8 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     )
     .await
     .expect("create Circle bootstrap unscoped-row Store");
-    let circle_id = source
-        .database
-        .test_sql(|connection| {
-            Ok::<_, coven_database::DbError>(
-                connection
-                    .install_test_active_circle("circle-bootstrap-unscoped")
-                    .0,
-            )
-        })
+    let circle_id = StoreDatabase::new(&source.database)
+        .install_test_active_circle("circle-bootstrap-unscoped".to_string())
         .await
         .expect("install Circle bootstrap unscoped Circle");
     let image_dir = tempfile::tempdir().expect("Circle bootstrap unscoped image directory");
@@ -412,9 +405,7 @@ impl PublishedScopedSnapshot {
             ScopedSnapshotImage::CircleRow => {
                 let route = source
                     .database
-                    .test_sql(|database| {
-                        database.document_circle_route("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
-                    })
+                    .document_circle_route_for_test("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
                     .await
                     .expect("load Circle row route");
                 edit_snapshot_image(image_dir.path(), image, |connection| {
@@ -790,9 +781,7 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
     seed_scoped_snapshot_rows(&source).await;
     source
         .database
-        .test_sql(|connection| {
-            connection.corrupt_live_document_route_id("01890a5d-ac96-774b-bcce-b302099c3f74")
-        })
+        .corrupt_live_document_route_id_for_test("01890a5d-ac96-774b-bcce-b302099c3f74")
         .await
         .expect("corrupt live private route");
 
@@ -1316,19 +1305,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
         .expect("publish snapshot materialization fixture");
     let live_counts = source
         .database
-        .test_sql(|database| {
-            Ok((
-                database.table_row_count(coven_database::DatabaseTestTable::named(
-                    "materialized_commits",
-                ))?,
-                database.table_row_count(coven_database::DatabaseTestTable::named(
-                    "retained_merge_materializations",
-                ))?,
-                database.table_row_count(coven_database::DatabaseTestTable::named(
-                    "retained_replay_objects",
-                ))?,
-            ))
-        })
+        .materialization_graph_counts_for_test()
         .await
         .expect("count live materialization graph");
     assert!(live_counts.0 > 0);

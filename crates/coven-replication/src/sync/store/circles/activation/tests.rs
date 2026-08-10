@@ -504,24 +504,16 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
     }
 
     let db = crate::sync::test_helpers::open_test_db();
-    let circle_id = db
-        .database
-        .test_sql(|conn| {
-            Ok(conn
-                .install_test_active_circle("current-control-conflict")
-                .0)
-        })
+    let circle_id = coven_database::StoreDatabase::new(&db.database)
+        .install_test_active_circle("current-control-conflict".to_string())
         .await
         .expect("install founder current state");
     let founder = db
         .database
-        .test_sql(move |database| {
-            database.circle_current_state(circle_id)?.ok_or_else(|| {
-                coven_database::DbError::Message("test Circle current state is absent".to_string())
-            })
-        })
+        .circle_current_state_for_test(circle_id)
         .await
-        .expect("load founder current state");
+        .expect("load founder current state")
+        .expect("test Circle current state exists");
     let owner = coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
     let first = branch(
         founder.clone(),

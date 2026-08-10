@@ -770,7 +770,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .is_err());
     let (public_circle_state, private_circle_state): (i64, i64) = member_database
         .database
-        .test_sql(|database| database.circle_state_table_counts())
+        .circle_state_table_counts_for_test()
         .await
         .expect("count Circle state after Store membership removal");
     assert_eq!(public_circle_state, 1);
@@ -833,11 +833,9 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .is_empty());
     let reopened_public_circle_state: i64 = reopened
         .database
-        .test_sql(|database| {
-            database.table_row_count(coven_database::DatabaseTestTable::named(
-                "circle_current_state",
-            ))
-        })
+        .table_row_count_for_test(coven_database::DatabaseTestTable::named(
+            "circle_current_state",
+        ))
         .await
         .expect("count reopened public Circle state");
     assert_eq!(reopened_public_circle_state, 1);

@@ -346,4 +346,63 @@ impl Database {
         self.test_sql(move |database| database.store_write_partition_changesets(write_id.as_str()))
             .await
     }
+
+    pub async fn apply_coven_routing_schema_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| database.apply_coven_routing_schema())
+            .await
+    }
+
+    pub async fn circle_current_state_for_test(
+        &self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
+        self.test_sql(move |database| database.circle_current_state(circle_id))
+            .await
+    }
+
+    pub async fn replace_circle_operation_prepared_for_test(
+        &self,
+        operation_id: coven_protocol::circle::CircleOperationId,
+        substitute: coven_protocol::circle_journal::CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        self.test_sql(move |database| {
+            database.replace_circle_operation_prepared(&operation_id, &substitute)
+        })
+        .await
+    }
+
+    pub async fn circle_state_table_counts_for_test(&self) -> Result<(i64, i64), DbError> {
+        self.test_sql(|database| database.circle_state_table_counts())
+            .await
+    }
+
+    pub async fn document_circle_route_for_test(
+        &self,
+        row_id: &str,
+    ) -> Result<(String, String, String), DbError> {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| database.document_circle_route(&row_id))
+            .await
+    }
+
+    pub async fn corrupt_live_document_route_id_for_test(
+        &self,
+        row_id: &str,
+    ) -> Result<(), DbError> {
+        let row_id = row_id.to_string();
+        self.test_sql(move |database| database.corrupt_live_document_route_id(&row_id))
+            .await
+    }
+
+    pub async fn materialization_graph_counts_for_test(&self) -> Result<(i64, i64, i64), DbError> {
+        self.test_sql(|database| {
+            Ok((
+                database.table_row_count(DatabaseTestTable::named("materialized_commits"))?,
+                database
+                    .table_row_count(DatabaseTestTable::named("retained_merge_materializations"))?,
+                database.table_row_count(DatabaseTestTable::named("retained_replay_objects"))?,
+            ))
+        })
+        .await
+    }
 }
