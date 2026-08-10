@@ -175,6 +175,7 @@ impl DatabaseCore {
     pub(crate) fn open(
         path: &Path,
         store_dir: StoreDir,
+        connection_durability: crate::connection_io::ConnectionDurability,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
@@ -182,7 +183,7 @@ impl DatabaseCore {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Self, OpenError> {
-        let mut conn = open_connection(path)?;
+        let mut conn = open_connection(path, connection_durability)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
         let initialized = match &metadata_open {

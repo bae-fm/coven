@@ -98,7 +98,17 @@ pub(crate) fn serialize_database_image(connection: &Connection) -> Result<Vec<u8
         .map_err(DbError::from)
 }
 
-pub(crate) fn open_connection(path: &Path) -> Result<Connection, DbError> {
+#[derive(Clone, Copy)]
+pub(crate) enum ConnectionDurability {
+    Full,
+    #[cfg(any(test, feature = "test-utils"))]
+    Disabled,
+}
+
+pub(crate) fn open_connection(
+    path: &Path,
+    durability: ConnectionDurability,
+) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
     // WAL so a read-only connection in another process can read committed rows while
     // this writer commits. The mode is stored in the db header and persists, so a
@@ -106,10 +116,16 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection, DbError> {
     conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
         .map_err(DbError::from)?;
     // The operation journal is the durable side of the local-intent →
-    // idempotent-remote-step bridge. Pin FULL rather than inheriting SQLite's
-    // compiled default so a successful journal commit reaches the OS before an
-    // external step can begin.
-    conn.pragma_update(None, "synchronous", "FULL")
+    // idempotent-remote-step bridge. Production construction selects FULL so a
+    // successful journal commit reaches the OS before an external step begins;
+    // test construction can suppress physical durability with its file-sync
+    // dependency.
+    let synchronous = match durability {
+        ConnectionDurability::Full => "FULL",
+        #[cfg(any(test, feature = "test-utils"))]
+        ConnectionDurability::Disabled => "OFF",
+    };
+    conn.pragma_update(None, "synchronous", synchronous)
         .map_err(DbError::from)?;
     Ok(conn)
 }
@@ -133,8 +149,11 @@ mod tests {
     #[test]
     fn writable_connection_pins_wal_commit_durability() {
         let directory = tempfile::tempdir().expect("create database directory");
-        let connection =
-            open_connection(&directory.path().join("store.db")).expect("open database");
+        let connection = open_connection(
+            &directory.path().join("store.db"),
+            ConnectionDurability::Full,
+        )
+        .expect("open database");
 
         let synchronous: i64 = connection
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
@@ -145,6 +164,22 @@ mod tests {
 
         assert_eq!(synchronous, 2);
         assert_eq!(journal_mode, "wal");
+    }
+
+    #[test]
+    fn writable_connection_can_disable_commit_durability() {
+        let directory = tempfile::tempdir().expect("create database directory");
+        let connection = open_connection(
+            &directory.path().join("store.db"),
+            ConnectionDurability::Disabled,
+        )
+        .expect("open database");
+
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous setting");
+
+        assert_eq!(synchronous, 0);
     }
 
     #[test]

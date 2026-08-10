@@ -249,6 +249,7 @@ impl Database {
         Self::open_with_hlc_and_coven_metadata_in_store_dir(
             path,
             store_dir,
+            crate::connection_io::ConnectionDurability::Full,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
@@ -261,6 +262,7 @@ impl Database {
     fn open_with_hlc_and_coven_metadata_in_store_dir(
         path: &Path,
         store_dir: coven_foundation::store_dir::StoreDir,
+        connection_durability: crate::connection_io::ConnectionDurability,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
@@ -271,6 +273,7 @@ impl Database {
         let core = DatabaseCore::open(
             path,
             store_dir,
+            connection_durability,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
@@ -318,6 +321,7 @@ impl Database {
         Self::open_with_hlc_and_coven_metadata_in_store_dir(
             path,
             store_dir,
+            crate::connection_io::ConnectionDurability::Disabled,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
