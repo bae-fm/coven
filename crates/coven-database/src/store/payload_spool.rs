@@ -3,9 +3,9 @@
 //!
 //! A payload is written before the row that references it commits, and deleted
 //! by the flow that deletes that row. The file is named for the digest of the
-//! bytes it holds, so a retry of a failed insert rewrites the same path with
-//! the same contents and a file whose insert never committed is inert garbage
-//! bounded by that one operation's content.
+//! bytes it holds, so a retry of a failed insert confirms the existing bytes
+//! under that path or atomically replaces different bytes. A file whose insert
+//! never committed is inert garbage bounded by that one operation's content.
 //!
 //! Deletion rides row deletion, counted by owner. Rows of different kinds can
 //! name the same payload — a Circle operation and the remote object it prepared
@@ -124,12 +124,24 @@ impl<'store> PayloadSpool<'store> {
     }
 
     /// Install `bytes` as one payload and return the hash naming the file they
-    /// were installed as. The bytes go to a temporary sibling that is flushed
-    /// to disk and then renamed onto the hash-named path, so the only thing a
-    /// reader can ever find under that name is the whole payload.
+    /// were installed as. Identical bytes already under that name need no
+    /// replacement. Absent or different bytes are written to a temporary
+    /// sibling, flushed, and renamed onto the hash-named path, so a reader can
+    /// only find a whole payload under that name.
     pub async fn write(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         let hash = ObjectHash::digest(bytes);
         let path = self.store_dir.payload_spool_path(hash);
+        match tokio::fs::read(&path).await {
+            Ok(installed) if installed == bytes => return Ok(hash),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PayloadSpoolError::File {
+                    path,
+                    error: error.to_string(),
+                });
+            }
+        }
         let mut staged = self
             .store_dir
             .stage_atomic_file(&path)
@@ -202,15 +214,40 @@ pub fn write_payload_blocking(
     store_dir: &StoreDir,
     bytes: &[u8],
 ) -> Result<ObjectHash, PayloadSpoolError> {
-    let mut writer = PayloadSpoolWriter::create(store_dir)?;
-    writer
+    let hash = ObjectHash::digest(bytes);
+    let path = store_dir.payload_spool_path(hash);
+    match std::fs::read(&path) {
+        Ok(installed) if installed == bytes => return Ok(hash),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(PayloadSpoolError::File {
+                path,
+                error: error.to_string(),
+            });
+        }
+    }
+
+    let directory = store_dir.payload_spool_dir();
+    let mut staged =
+        store_dir
+            .create_payload_spool_stage()
+            .map_err(|error| PayloadSpoolError::File {
+                path: directory.clone(),
+                error: error.to_string(),
+            })?;
+    staged
         .write_all(bytes)
         .map_err(|error| PayloadSpoolError::File {
-            path: store_dir.payload_spool_dir(),
+            path: directory,
             error: error.to_string(),
         })?;
-    let (hash, size) = writer.commit()?;
-    debug_assert_eq!(size, bytes.len() as u64);
+    staged
+        .commit(&path)
+        .map_err(|error| PayloadSpoolError::File {
+            path,
+            error: error.to_string(),
+        })?;
     Ok(hash)
 }
 
@@ -579,8 +616,10 @@ mod tests {
     /// Both write paths install the same file, so the blocking one a database
     /// transaction uses agrees with the async one a task uses.
     #[tokio::test]
-    async fn rewriting_the_same_payload_installs_the_same_single_file() {
-        let (_directory, store_dir) = temp_store_dir();
+    async fn reinstalling_the_same_payload_reuses_the_verified_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (store_dir, sync_requests) =
+            StoreDir::new_with_file_sync_observer_for_test(directory.path());
         let spool = PayloadSpool::new(&store_dir);
         let bytes = payload(5, 8192);
 
@@ -592,6 +631,27 @@ mod tests {
         assert_eq!(first, third);
         assert_eq!(spool_entries(&store_dir), vec![first.to_string()]);
         assert_eq!(spool.read(first).await.expect("read payload"), bytes);
+        assert_eq!(
+            sync_requests.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "rewrites of proven-identical content perform no durability work"
+        );
+
+        std::fs::write(store_dir.payload_spool_path(first), b"changed")
+            .expect("change installed payload");
+        assert_eq!(
+            write_payload_blocking(&store_dir, &bytes).expect("replace changed payload"),
+            first
+        );
+        assert_eq!(
+            spool.read(first).await.expect("read repaired payload"),
+            bytes
+        );
+        assert_eq!(
+            sync_requests.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "different bytes under the content hash are atomically replaced"
+        );
     }
 
     #[tokio::test]
