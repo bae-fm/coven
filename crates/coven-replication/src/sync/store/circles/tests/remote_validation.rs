@@ -10,7 +10,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         .await
         .expect("bind invented-access Circle object Store");
     let old_commit = journal.commit().expect("parse prepared Store commit");
-    publish_prepared_objects(&store, &device, &journal).await;
+    publish_prepared_objects(&store, &db.store_dir, &journal).await;
     let mut objects = old_commit
         .operations()
         .expect("Circle commit carries operations")
@@ -478,11 +478,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let (baseline_store, _home, baseline_signer, baseline) =
         persist_merge_operation(&baseline_db, "circle-remote-metadata-baseline").await;
     let baseline_commit = baseline.commit().expect("parse baseline Store commit");
-    let baseline_device = baseline_store
-        .bind_device(&baseline_db, &baseline_signer)
-        .await
-        .expect("bind baseline Circle preparation Store");
-    publish_prepared_objects(&baseline_store, &baseline_device, &baseline).await;
+    publish_prepared_objects(&baseline_store, &baseline_db.store_dir, &baseline).await;
     let baseline_author = StoreDatabase::new(&baseline_db.database)
         .activated_store_device_registration(baseline_commit.author_registration.clone())
         .await

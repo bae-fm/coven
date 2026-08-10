@@ -779,7 +779,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(
-        spooled_objects(&device, &activating).await,
+        spooled_objects(&db.store_dir, &activating).await,
         prepared_steps,
         "preparation spools every object the operation names"
     );
@@ -807,7 +807,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         Vec::new(),
         "activation drops the operation's own claim on every payload it prepared"
     );
-    let surviving = spooled_objects(&device, &activating).await;
+    let surviving = spooled_objects(&db.store_dir, &activating).await;
     let mut kept_a_row = false;
     for (step, object) in &activating.operation().prepared_objects {
         let row_exists = db
@@ -827,7 +827,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         "activation must both keep some objects and let the rest of the spool go"
     );
     assert_eq!(
-        spooled_objects(&device, &pending).await,
+        spooled_objects(&db.store_dir, &pending).await,
         pending
             .operation()
             .prepared_objects
@@ -856,7 +856,9 @@ async fn discard_releases_its_payload_claims() {
         .await
         .expect("bind Circle test Store");
     assert!(
-        !spooled_objects(&device, &journal).await.is_empty(),
+        !spooled_objects(&revoked.db.store_dir, &journal)
+            .await
+            .is_empty(),
         "the operation's payloads are spooled before it is discarded"
     );
     device
@@ -894,7 +896,7 @@ async fn discard_releases_its_payload_claims() {
         Vec::new(),
         "discard drops the operation's own claim on every payload it prepared"
     );
-    let surviving = spooled_objects(&device, &journal).await;
+    let surviving = spooled_objects(&revoked.db.store_dir, &journal).await;
     for (step, object) in &journal.operation().prepared_objects {
         let row_exists = revoked
             .db

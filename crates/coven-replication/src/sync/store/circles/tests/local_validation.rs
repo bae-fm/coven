@@ -454,7 +454,7 @@ async fn local_successor_rejects_an_unreserved_circle_predecessor() {
         )
         .await
         .expect("prepare forged control head");
-    spool_substituted_object(&forging_device, &prepared_head).await;
+    spool_substituted_object(&db.store_dir, &prepared_head).await;
     journal.operation_mut().prepared_objects.insert(
         "control-head".to_string(),
         prepared_head.reference().clone(),
@@ -617,14 +617,10 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
         .get("roster-entry")
         .expect("the operation carries its sealed roster entry");
     assert_eq!(entry_reference, &entry_object);
-    let device = store
-        .bind_device(&db, &signer)
-        .await
-        .expect("bind the roster entry's own Store");
     store
         .publish_exact_protocol_object(
             entry_reference,
-            spooled_bytes(&device, entry_reference).await,
+            spooled_bytes(&db.store_dir, entry_reference).await,
         )
         .await
         .expect("publish the founder roster entry");
