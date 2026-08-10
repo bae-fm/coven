@@ -331,7 +331,7 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     let founder = UserKeypair::generate();
     let storage = Arc::new(
         CloudSyncConnection::new(
-            Arc::new(home),
+            Arc::new(home.clone()),
             CloudCipher::Encrypted(coven_keys::encryption::EncryptionService::from_key(
                 [41; 32],
             )),
@@ -367,6 +367,26 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     )
     .await
     .expect("open exact opaque root");
+    let founder_slot = opened
+        .store
+        .protocol_root_for_test()
+        .descriptor
+        .founder_registration
+        .clone();
+    home.clear_exact_reads();
+    opened
+        .store
+        .load_founder_registration_twice_for_test()
+        .await
+        .expect("open the founder registration twice in one verifier");
+    assert_eq!(
+        home.exact_reads()
+            .into_iter()
+            .filter(|slot| slot == &founder_slot)
+            .count(),
+        1,
+        "one verifier must reuse its exact founder registration"
+    );
     let registration = opened
         .store
         .load_founder_registration_for_test()

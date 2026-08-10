@@ -213,6 +213,15 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(self.history_verifier.load_founder_registration().await?)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn load_founder_registration_twice_for_test(
+        &mut self,
+    ) -> Result<(), StoreError> {
+        self.history_verifier.load_founder_registration().await?;
+        self.history_verifier.load_founder_registration().await?;
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_merge_history_successor_for_test(
         &mut self,

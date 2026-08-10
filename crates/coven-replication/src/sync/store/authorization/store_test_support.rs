@@ -839,6 +839,15 @@ impl Store {
         history.load_founder_registration_for_test().await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn load_founder_registration_twice_for_test(&self) -> Result<(), StoreError> {
+        let mut history = self
+            .authorize_history()
+            .await
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        history.load_founder_registration_twice_for_test().await
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_merge_history_successor_for_test(
         &self,
