@@ -102,6 +102,7 @@ pub(crate) struct StoreCommitVerifier<'a> {
         BTreeMap<StoreDeviceRegistrationRef, VerifiedObject<StoreDeviceRegistration>>,
     >,
     founder_registration: std::sync::OnceLock<VerifiedObject<StoreDeviceRegistration>>,
+    verified_heads: std::sync::Mutex<BTreeMap<StoreDeviceHeadRef, VerifiedObject<StoreDeviceHead>>>,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
@@ -122,10 +123,23 @@ impl VerifiedMergeMembershipClosure {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct VerifiedAcceptedStoreAnnouncement {
     commit: StoreBatchCommitRef,
     head: StoreDeviceHeadRef,
     next_slot: coven_protocol::objects::ObjectSlot,
+}
+
+pub(crate) struct VerifiedAcceptedStoreAnnouncementPrefix {
+    pub(crate) commits: Vec<(
+        StoreDeviceHeadRef,
+        StoreDeviceHead,
+        StoreBatchCommitRef,
+        StoreBatchCommit,
+    )>,
+    pub(crate) next_slot: coven_protocol::objects::ObjectSlot,
+    pub(crate) predecessor: Option<ExactObjectRef>,
+    pub(crate) next_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -246,6 +260,7 @@ impl<'a> StoreCommitVerifier<'a> {
             commits: BTreeMap::new(),
             registrations: std::sync::Mutex::new(BTreeMap::new()),
             founder_registration: std::sync::OnceLock::new(),
+            verified_heads: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }
     }

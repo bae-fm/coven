@@ -1,6 +1,152 @@
 use super::*;
 
 impl<'a> StoreCommitVerifier<'a> {
+    pub(crate) fn remember_verified_head(
+        &self,
+        reference: &StoreDeviceHeadRef,
+        verified: VerifiedObject<StoreDeviceHead>,
+    ) -> Result<VerifiedObject<StoreDeviceHead>, StoreProtocolError> {
+        if verified.semantic_hash != reference.head_hash
+            || verified.object != reference.object
+            || verified.value.head_hash() != reference.head_hash
+        {
+            return Err(StoreProtocolError::Malformed(
+                "verified Store head differs from its exact reference".to_string(),
+            ));
+        }
+        let mut heads = self
+            .verified_heads
+            .lock()
+            .expect("verified Store device head cache mutex is not poisoned");
+        if let Some(existing) = heads.get(reference) {
+            if existing.semantic_hash != verified.semantic_hash
+                || existing.object != verified.object
+                || existing.bytes != verified.bytes
+                || existing.value != verified.value
+            {
+                return Err(StoreProtocolError::Malformed(
+                    "one exact Store head reference produced different verified objects"
+                        .to_string(),
+                ));
+            }
+            return Ok(existing.clone());
+        }
+        heads.insert(reference.clone(), verified.clone());
+        Ok(verified)
+    }
+
+    pub(crate) fn remember_accepted_announcement(
+        &mut self,
+        registration: &StoreDeviceRegistrationRef,
+        sequence: u64,
+        commit: StoreBatchCommitRef,
+        head: StoreDeviceHeadRef,
+        next_slot: coven_protocol::objects::ObjectSlot,
+    ) -> Result<(), StoreProtocolError> {
+        let accepted = VerifiedAcceptedStoreAnnouncement {
+            commit,
+            head,
+            next_slot,
+        };
+        let index = sequence
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "Store announcement sequence exceeds the platform address space".to_string(),
+                )
+            })?;
+        let path = self
+            .accepted_announcements
+            .entry(registration.clone())
+            .or_default();
+        match path.get(index) {
+            Some(existing) if existing == &accepted => Ok(()),
+            Some(_) => Err(StoreProtocolError::Malformed(
+                "verified Store announcement path disagrees at one coordinate".to_string(),
+            )),
+            None if index == path.len() => {
+                path.push(accepted);
+                Ok(())
+            }
+            None => Err(StoreProtocolError::Malformed(
+                "verified Store announcement path has a sequence gap".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn accepted_announcement_prefix(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+        first_slot: &coven_protocol::objects::ObjectSlot,
+        maximum_sequence: Option<u64>,
+    ) -> Result<VerifiedAcceptedStoreAnnouncementPrefix, StorePullError> {
+        let Some(path) = self.accepted_announcements.get(registration) else {
+            return Ok(VerifiedAcceptedStoreAnnouncementPrefix {
+                commits: Vec::new(),
+                next_slot: first_slot.clone(),
+                predecessor: None,
+                next_sequence: 1,
+            });
+        };
+        let heads = self
+            .verified_heads
+            .lock()
+            .expect("verified Store device head cache mutex is not poisoned");
+        let mut commits = Vec::new();
+        let mut next_slot = first_slot.clone();
+        let mut predecessor = None;
+        for (index, accepted) in path.iter().enumerate() {
+            let sequence = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "verified Store announcement path exceeds the protocol sequence range"
+                            .to_string(),
+                    )
+                })?;
+            if maximum_sequence.is_some_and(|maximum| sequence > maximum) {
+                break;
+            }
+            let head = heads.get(&accepted.head).ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "verified Store announcement path is missing its authenticated head"
+                        .to_string(),
+                )
+            })?;
+            let commit = self.commits.get(&accepted.commit).ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "verified Store announcement path is missing its authenticated commit"
+                        .to_string(),
+                )
+            })?;
+            commits.push((
+                accepted.head.clone(),
+                head.value.clone(),
+                accepted.commit.clone(),
+                commit.value().clone(),
+            ));
+            next_slot = accepted.next_slot.clone();
+            predecessor = Some(accepted.head.object.clone());
+        }
+        let next_sequence = u64::try_from(commits.len())
+            .ok()
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "verified Store announcement path exceeds the protocol sequence range"
+                        .to_string(),
+                )
+            })?;
+        Ok(VerifiedAcceptedStoreAnnouncementPrefix {
+            commits,
+            next_slot,
+            predecessor,
+            next_sequence,
+        })
+    }
+
     pub(crate) async fn exact_next_announcement_slot(
         &mut self,
         registration_ref: &StoreDeviceRegistrationRef,
@@ -48,6 +194,9 @@ impl<'a> StoreCommitVerifier<'a> {
                 "local predecessor uses Store announcement sequence zero".to_string(),
             ));
         }
+        self.commits
+            .entry(target.clone())
+            .or_insert_with(|| previous.clone());
         let target_index = usize::try_from(target.coord.sequence() - 1).map_err(|_| {
             StoreError::InvalidOutbound(
                 "local predecessor announcement sequence exceeds the platform address space"
@@ -170,18 +319,28 @@ impl<'a> StoreCommitVerifier<'a> {
             }
             let reference = StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
-                object,
+                object: object.clone(),
             };
+            self.remember_verified_head(
+                &reference,
+                VerifiedObject {
+                    value: head.clone(),
+                    bytes,
+                    semantic_hash: reference.head_hash,
+                    object,
+                },
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
             slot = head.successor.next_slot.clone();
             predecessor = Some(reference.clone());
-            self.accepted_announcements
-                .entry(registration_ref.clone())
-                .or_default()
-                .push(VerifiedAcceptedStoreAnnouncement {
-                    commit: head.commit.clone(),
-                    head: reference,
-                    next_slot: slot.clone(),
-                });
+            self.remember_accepted_announcement(
+                registration_ref,
+                sequence,
+                head.commit.clone(),
+                reference,
+                slot.clone(),
+            )
+            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         }
         let accepted = self
             .accepted_announcements

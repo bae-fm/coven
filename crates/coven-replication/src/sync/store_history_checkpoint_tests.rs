@@ -309,7 +309,7 @@ async fn merge_successor_publication_does_not_reread_materialized_history() {
 }
 
 #[tokio::test]
-async fn retained_history_verification_does_not_restart_the_announcement_path() {
+async fn retained_history_reuses_each_verified_device_head_within_a_cycle() {
     let fixture = PublishedHistory::publish(12).await;
     let head_slots = fixture
         .retained_history()
@@ -333,10 +333,9 @@ async fn retained_history_verification_does_not_restart_the_announcement_path() 
             (slot, count)
         })
         .collect::<Vec<_>>();
-    let minimum = counts.iter().map(|(_, count)| *count).min().unwrap_or(0);
     let maximum = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
     assert!(
-        maximum.saturating_sub(minimum) <= 1,
+        maximum <= 1,
         "retained history verification restarted accepted announcement paths: {counts:?}",
     );
 }

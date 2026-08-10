@@ -47,13 +47,22 @@ impl<'a> MergeHistoryVerifier<'a> {
             root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
-        let mut slot = first_slot.clone();
-        let mut predecessor = None;
-        let mut sequence = 1_u64;
-        let mut latest_head = None;
-        let mut commits = Vec::new();
+        let accepted = self.commit_verifier.accepted_announcement_prefix(
+            registration_ref,
+            first_slot,
+            maximum_sequence,
+        )?;
+        let mut visited = accepted
+            .commits
+            .iter()
+            .map(|(head, _, _, _)| head.object.slot().clone())
+            .collect::<BTreeSet<_>>();
+        let mut slot = accepted.next_slot;
+        let mut predecessor = accepted.predecessor;
+        let mut sequence = accepted.next_sequence;
+        let mut latest_head = accepted.commits.last().map(|(_, head, _, _)| head.clone());
+        let mut commits = accepted.commits;
         let mut block = None;
-        let mut visited = BTreeSet::new();
 
         loop {
             if maximum_sequence.is_some_and(|maximum| sequence > maximum) {
@@ -169,6 +178,26 @@ impl<'a> MergeHistoryVerifier<'a> {
                 head_hash: head.head_hash(),
                 object: object.clone(),
             };
+            self.commit_verifier
+                .remember_verified_head(
+                    &head_ref,
+                    VerifiedObject {
+                        value: head.clone(),
+                        bytes,
+                        semantic_hash: head_ref.head_hash,
+                        object: object.clone(),
+                    },
+                )
+                .map_err(StorePullError::Protocol)?;
+            self.commit_verifier
+                .remember_accepted_announcement(
+                    registration_ref,
+                    sequence,
+                    head.commit.clone(),
+                    head_ref.clone(),
+                    next_slot.clone(),
+                )
+                .map_err(StorePullError::Protocol)?;
             predecessor = Some(object);
             sequence = sequence.checked_add(1).ok_or_else(|| {
                 StorePullError::InvalidState(format!(

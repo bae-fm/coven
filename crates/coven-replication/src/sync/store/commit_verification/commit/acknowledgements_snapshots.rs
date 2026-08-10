@@ -410,6 +410,32 @@ impl<'a> StoreCommitVerifier<'a> {
     ) -> Result<VerifiedObject<StoreDeviceHead>, StoreObjectError> {
         let semantic_prefix =
             head_slot_prefix(&registration.device_id.to_string(), commit.coord.sequence());
+        if let Some(head) = self
+            .verified_heads
+            .lock()
+            .expect("verified Store device head cache mutex is not poisoned")
+            .get(reference)
+            .cloned()
+        {
+            head.value
+                .author_registration
+                .verify_registration(registration)
+                .and_then(|()| {
+                    if &head.value.commit == commit {
+                        Ok(())
+                    } else {
+                        Err(StoreProtocolError::Malformed(
+                            "Store head activates a different exact commit".to_string(),
+                        ))
+                    }
+                })
+                .map_err(|source| StoreObjectError::InvalidObject {
+                    semantic_prefix,
+                    key: reference.object.slot().logical_key().to_string(),
+                    source: Box::new(source),
+                })?;
+            return Ok(head);
+        }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreHead,
@@ -418,28 +444,35 @@ impl<'a> StoreCommitVerifier<'a> {
         let expected_registration = registration.clone();
         let expected_commit = commit.clone();
         let store_root_hash = self.root.reference().store_root_hash;
-        self.load_exact_object(
-            &context,
-            &reference.object,
-            &semantic_prefix,
-            reference.head_hash,
-            move |bytes| {
-                let head = StoreDeviceHead::parse_at(
-                    bytes,
-                    store_root_hash,
-                    &expected_registration,
-                    &expected_commit,
-                )?;
-                let actual = head.head_hash();
-                if actual != expected.head_hash {
-                    return Err(StoreProtocolError::ObjectHashMismatch {
-                        expected: expected.head_hash,
-                        actual,
-                    });
-                }
-                Ok(head)
-            },
-        )
-        .await
+        let verified = self
+            .load_exact_object(
+                &context,
+                &reference.object,
+                &semantic_prefix,
+                reference.head_hash,
+                move |bytes| {
+                    let head = StoreDeviceHead::parse_at(
+                        bytes,
+                        store_root_hash,
+                        &expected_registration,
+                        &expected_commit,
+                    )?;
+                    let actual = head.head_hash();
+                    if actual != expected.head_hash {
+                        return Err(StoreProtocolError::ObjectHashMismatch {
+                            expected: expected.head_hash,
+                            actual,
+                        });
+                    }
+                    Ok(head)
+                },
+            )
+            .await?;
+        self.remember_verified_head(reference, verified)
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix,
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })
     }
 }
