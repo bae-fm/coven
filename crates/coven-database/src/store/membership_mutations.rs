@@ -2,6 +2,7 @@ use super::candidate_records::{
     begin_candidate_nonactivation_targets_on, candidate_cleanup_targets_on,
 };
 use super::*;
+use crate::store::StoreSession;
 use crate::*;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::remote_object::RemoteObjectRecord;
@@ -9,15 +10,200 @@ use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef};
 use rusqlite::OptionalExtension;
 use std::collections::BTreeSet;
 
+impl StoreSession<'_> {
+    fn load_rotation_gate(
+        &mut self,
+    ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
+        StoreDatabase::load_rotation_gate_on(self.records.conn)
+            .map(|gate| gate.map(|(_, gate)| gate))
+    }
+
+    fn outbound_membership_mutation(
+        &mut self,
+    ) -> Result<Option<DurableMembershipMutation>, DbError> {
+        let conn = self.records.conn;
+        conn.query_row(
+            "SELECT intent_hash, plan_bytes, progress_bytes \
+             FROM outbound_membership_mutation WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .map(|(hash, plan_bytes, progress_bytes)| {
+            let intent_hash: ObjectHash = hash
+                .parse()
+                .map_err(|error| DbError::context("membership intent hash", error))?;
+            if ObjectHash::digest(&plan_bytes) != intent_hash {
+                return Err(DbError::Message(
+                    "membership intent hash differs from its exact plan bytes".to_string(),
+                ));
+            }
+            Ok(DurableMembershipMutation {
+                intent_hash,
+                plan_bytes,
+                progress_bytes,
+            })
+        })
+        .transpose()
+    }
+
+    fn select_causal_author_stream(
+        &mut self,
+        key: &str,
+        reusable: &std::collections::BTreeSet<coven_protocol::membership::AuthorStreamId>,
+        candidate: coven_protocol::membership::AuthorStreamId,
+    ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
+        let conn = self.records.conn;
+        let existing = crate::get_protocol_state_on(conn, key)?
+            .map(|value| {
+                value.parse().map_err(|error| {
+                    DbError::Message(format!(
+                        "membership author stream state is malformed: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(existing) = existing {
+            if reusable.contains(&existing) {
+                return Ok(existing);
+            }
+        }
+        let selected = reusable.iter().next_back().copied().unwrap_or(candidate);
+        crate::set_protocol_state_on(conn, key, &selected.to_string())?;
+        Ok(selected)
+    }
+
+    fn stage_membership_mutation(
+        &mut self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        pending_rotation_generation: Option<u64>,
+    ) -> Result<ObjectHash, DbError> {
+        let conn = self.records.conn;
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let intent_hash = ObjectHash::digest(&plan_bytes);
+        let existing = tx
+            .query_row(
+                "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
+                 WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if let Some((existing_hash, existing_plan)) = existing {
+            if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
+                StoreDatabase::stage_pending_rotation_on(
+                    &tx,
+                    pending_rotation_generation,
+                    intent_hash,
+                )?;
+                tx.commit().map_err(DbError::from)?;
+                return Ok(intent_hash);
+            }
+            return Err(DbError::Message(
+                "a different membership mutation is already pending".to_string(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO outbound_membership_mutation \
+             (singleton, intent_hash, plan_bytes, progress_bytes) \
+             VALUES (1, ?1, ?2, ?3)",
+            rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+        )
+        .map_err(DbError::from)?;
+        StoreDatabase::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(intent_hash)
+    }
+
+    fn stage_membership_candidate_mutation(
+        &mut self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+        pending_rotation_generation: Option<u64>,
+    ) -> Result<ObjectHash, DbError> {
+        let records = self.records;
+        let conn = records.conn;
+        let intent_hash = ObjectHash::digest(&plan_bytes);
+        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+        let existing = tx
+            .query_row(
+                "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
+                 WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if let Some((existing_hash, existing_plan)) = existing {
+            if existing_hash != intent_hash.to_string() || existing_plan != plan_bytes {
+                return Err(DbError::Message(
+                    "a different membership mutation is already pending".to_string(),
+                ));
+            }
+            for remote in &remote_objects {
+                let stored = load_remote_object_on(&tx, remote.object_id())?;
+                if stored != **remote {
+                    return Err(DbError::Message(
+                        "persisted membership ownership differs from its durable plan".to_string(),
+                    ));
+                }
+            }
+            StoreDatabase::stage_pending_rotation_on(
+                &tx,
+                pending_rotation_generation,
+                intent_hash,
+            )?;
+            tx.commit().map_err(DbError::from)?;
+            return Ok(intent_hash);
+        }
+        if remote_objects.is_empty() {
+            return Err(DbError::Message(
+                "membership candidate mutation has no remote ownership graph".to_string(),
+            ));
+        }
+        let mut object_ids = BTreeSet::new();
+        for remote in &remote_objects {
+            if !object_ids.insert(remote.object_id()) {
+                return Err(DbError::Message(
+                    "membership candidate mutation repeats a remote object".to_string(),
+                ));
+            }
+            persist_exact_remote_object_on(
+                &tx,
+                records.store_dir,
+                remote,
+                "membership candidate object",
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO outbound_membership_mutation \
+             (singleton, intent_hash, plan_bytes, progress_bytes) \
+             VALUES (1, ?1, ?2, ?3)",
+            rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+        )
+        .map_err(DbError::from)?;
+        StoreDatabase::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
+        tx.commit().map_err(DbError::from)?;
+        Ok(intent_hash)
+    }
+}
+
 impl StoreDatabase {
     pub async fn load_rotation_gate(
         &self,
     ) -> Result<Option<coven_protocol::objects::RotationGate>, DbError> {
         self.connection
-            .call_store(|session| {
-                let connection = session.records.conn;
-                Self::load_rotation_gate_on(connection).map(|gate| gate.map(|(_, gate)| gate))
-            })
+            .call_store(|session| session.load_rotation_gate())
             .await
     }
 
@@ -25,39 +211,7 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<DurableMembershipMutation>, DbError> {
         self.connection
-            .call_store(|session| {
-                let conn = session.records.conn;
-                conn.query_row(
-                    "SELECT intent_hash, plan_bytes, progress_bytes \
-                 FROM outbound_membership_mutation WHERE singleton = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, Vec<u8>>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|(hash, plan_bytes, progress_bytes)| {
-                    let intent_hash: ObjectHash = hash
-                        .parse()
-                        .map_err(|error| DbError::context("membership intent hash", error))?;
-                    if ObjectHash::digest(&plan_bytes) != intent_hash {
-                        return Err(DbError::Message(
-                            "membership intent hash differs from its exact plan bytes".to_string(),
-                        ));
-                    }
-                    Ok(DurableMembershipMutation {
-                        intent_hash,
-                        plan_bytes,
-                        progress_bytes,
-                    })
-                })
-                .transpose()
-            })
+            .call_store(|session| session.outbound_membership_mutation())
             .await
     }
 
@@ -84,24 +238,7 @@ impl StoreDatabase {
         );
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let existing = crate::get_protocol_state_on(conn, &key)?
-                    .map(|value| {
-                        value.parse().map_err(|error| {
-                            DbError::Message(format!(
-                                "membership author stream state is malformed: {error}"
-                            ))
-                        })
-                    })
-                    .transpose()?;
-                if let Some(existing) = existing {
-                    if reusable.contains(&existing) {
-                        return Ok(existing);
-                    }
-                }
-                let selected = reusable.iter().next_back().copied().unwrap_or(candidate);
-                crate::set_protocol_state_on(conn, &key, &selected.to_string())?;
-                Ok(selected)
+                session.select_causal_author_stream(&key, &reusable, candidate)
             })
             .await
     }
@@ -114,42 +251,11 @@ impl StoreDatabase {
     ) -> Result<ObjectHash, DbError> {
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let intent_hash = ObjectHash::digest(&plan_bytes);
-                let existing = tx
-                    .query_row(
-                        "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
-                     WHERE singleton = 1",
-                        [],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                if let Some((existing_hash, existing_plan)) = existing {
-                    if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
-                        Self::stage_pending_rotation_on(
-                            &tx,
-                            pending_rotation_generation,
-                            intent_hash,
-                        )?;
-                        tx.commit().map_err(DbError::from)?;
-                        return Ok(intent_hash);
-                    }
-                    return Err(DbError::Message(
-                        "a different membership mutation is already pending".to_string(),
-                    ));
-                }
-                tx.execute(
-                    "INSERT INTO outbound_membership_mutation \
-                 (singleton, intent_hash, plan_bytes, progress_bytes) \
-                 VALUES (1, ?1, ?2, ?3)",
-                    rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+                session.stage_membership_mutation(
+                    plan_bytes,
+                    progress_bytes,
+                    pending_rotation_generation,
                 )
-                .map_err(DbError::from)?;
-                Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(intent_hash)
             })
             .await
     }
@@ -161,69 +267,14 @@ impl StoreDatabase {
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        let store_dir = self.store_dir.clone();
         self.connection
             .call_store(move |session| {
-                let conn = session.records.conn;
-                let intent_hash = ObjectHash::digest(&plan_bytes);
-                let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-                let existing = tx
-                    .query_row(
-                        "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
-                     WHERE singleton = 1",
-                        [],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                if let Some((existing_hash, existing_plan)) = existing {
-                    if existing_hash != intent_hash.to_string() || existing_plan != plan_bytes {
-                        return Err(DbError::Message(
-                            "a different membership mutation is already pending".to_string(),
-                        ));
-                    }
-                    for remote in &remote_objects {
-                        let stored = load_remote_object_on(&tx, remote.object_id())?;
-                        if stored != **remote {
-                            return Err(DbError::Message(
-                                "persisted membership ownership differs from its durable plan"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-                    Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
-                    tx.commit().map_err(DbError::from)?;
-                    return Ok(intent_hash);
-                }
-                if remote_objects.is_empty() {
-                    return Err(DbError::Message(
-                        "membership candidate mutation has no remote ownership graph".to_string(),
-                    ));
-                }
-                let mut object_ids = BTreeSet::new();
-                for remote in &remote_objects {
-                    if !object_ids.insert(remote.object_id()) {
-                        return Err(DbError::Message(
-                            "membership candidate mutation repeats a remote object".to_string(),
-                        ));
-                    }
-                    persist_exact_remote_object_on(
-                        &tx,
-                        &store_dir,
-                        remote,
-                        "membership candidate object",
-                    )?;
-                }
-                tx.execute(
-                    "INSERT INTO outbound_membership_mutation \
-                 (singleton, intent_hash, plan_bytes, progress_bytes) \
-                 VALUES (1, ?1, ?2, ?3)",
-                    rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+                session.stage_membership_candidate_mutation(
+                    plan_bytes,
+                    progress_bytes,
+                    remote_objects,
+                    pending_rotation_generation,
                 )
-                .map_err(DbError::from)?;
-                Self::stage_pending_rotation_on(&tx, pending_rotation_generation, intent_hash)?;
-                tx.commit().map_err(DbError::from)?;
-                Ok(intent_hash)
             })
             .await
     }
