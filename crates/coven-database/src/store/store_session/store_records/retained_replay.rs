@@ -308,7 +308,7 @@ impl StoreRecords<'_> {
         authority: crate::RetainedReplayGenesisAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         let image_bytes = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
-        let baseline = crate::RetainedReplayBaseline {
+        Ok(crate::RetainedReplayBaseline {
             generation: crate::GENERATION_ZERO,
             exact_cut: coven_protocol::store_commit::CommitFrontier(Default::default()),
             schema_version,
@@ -317,9 +317,7 @@ impl StoreRecords<'_> {
                 DbError::Message(format!("install retained replay image: {error}"))
             })?,
             authority: crate::RetainedReplayAuthority::Genesis(authority),
-        };
-        baseline.validate_image(self.conn, self.store_dir)?;
-        Ok(baseline)
+        })
     }
 
     pub(crate) fn create_stable_snapshot_replay_baseline(
@@ -330,7 +328,7 @@ impl StoreRecords<'_> {
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         authority.validate()?;
         let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
-        let baseline = crate::RetainedReplayBaseline {
+        Ok(crate::RetainedReplayBaseline {
             generation: crate::GENERATION_ZERO,
             exact_cut: authority.metadata.coverage.clone(),
             schema_version,
@@ -339,9 +337,7 @@ impl StoreRecords<'_> {
                 DbError::Message(format!("install retained replay image: {error}"))
             })?,
             authority: crate::RetainedReplayAuthority::StableSnapshot(authority),
-        };
-        baseline.validate_image(self.conn, self.store_dir)?;
-        Ok(baseline)
+        })
     }
 
     pub(crate) fn validate_replay_baseline_image(
