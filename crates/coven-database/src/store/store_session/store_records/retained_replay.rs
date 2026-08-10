@@ -16,7 +16,7 @@ pub(crate) struct RetainedReplayBaselineRow {
     pub(crate) exact_cut: String,
     pub(crate) schema_version: i64,
     pub(crate) routing_hash: String,
-    pub(crate) image_hash: String,
+    pub(crate) image_payload_hash: String,
     pub(crate) authority_hash: String,
 }
 
@@ -231,7 +231,7 @@ impl StoreRecords<'_> {
         self.conn
             .query_row(
                 "SELECT generation, exact_cut, schema_version,
-                        routing_hash, image_hash, authority_hash
+                        routing_hash, image_payload_hash, authority_hash
                  FROM retained_replay_baselines WHERE singleton = 1",
                 [],
                 |row| {
@@ -240,7 +240,7 @@ impl StoreRecords<'_> {
                         exact_cut: row.get(1)?,
                         schema_version: row.get(2)?,
                         routing_hash: row.get(3)?,
-                        image_hash: row.get(4)?,
+                        image_payload_hash: row.get(4)?,
                         authority_hash: row.get(5)?,
                     })
                 },
@@ -265,7 +265,7 @@ impl StoreRecords<'_> {
             .execute(
                 "INSERT INTO retained_replay_baselines
                  (singleton, generation, exact_cut, schema_version,
-                  routing_hash, image_hash, authority_hash)
+                  routing_hash, image_payload_hash, authority_hash)
                  VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     i64::try_from(baseline.generation).map_err(|_| {
@@ -278,7 +278,7 @@ impl StoreRecords<'_> {
                     })?,
                     i64::from(baseline.schema_version),
                     baseline.routing_hash.to_string(),
-                    baseline.image_hash.to_string(),
+                    baseline.image_payload_hash.to_string(),
                     authority_hash.to_string(),
                 ],
             )
@@ -286,7 +286,7 @@ impl StoreRecords<'_> {
         crate::payload_store::set_payload_owner_claims_on(
             self.conn,
             crate::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
-            &BTreeSet::from([baseline.image_hash, authority_hash]),
+            &BTreeSet::from([baseline.image_payload_hash, authority_hash]),
         )
     }
 
@@ -308,12 +308,13 @@ impl StoreRecords<'_> {
         authority: crate::RetainedReplayGenesisAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         let image_bytes = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
+        let image_payload = crate::store::retained_replay::encode_replay_image(&image_bytes)?;
         Ok(crate::RetainedReplayBaseline {
             generation: crate::GENERATION_ZERO,
             exact_cut: coven_protocol::store_commit::CommitFrontier(Default::default()),
             schema_version,
             routing_hash,
-            image_hash: self.install_payload(&image_bytes).map_err(|error| {
+            image_payload_hash: self.install_payload(&image_payload).map_err(|error| {
                 DbError::Message(format!("install retained replay image: {error}"))
             })?,
             authority: crate::RetainedReplayAuthority::Genesis(authority),
@@ -328,12 +329,13 @@ impl StoreRecords<'_> {
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         authority.validate()?;
         let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
+        let image_payload = crate::store::retained_replay::encode_replay_image(&image_bytes)?;
         Ok(crate::RetainedReplayBaseline {
             generation: crate::GENERATION_ZERO,
             exact_cut: authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
-            image_hash: self.install_payload(&image_bytes).map_err(|error| {
+            image_payload_hash: self.install_payload(&image_payload).map_err(|error| {
                 DbError::Message(format!("install retained replay image: {error}"))
             })?,
             authority: crate::RetainedReplayAuthority::StableSnapshot(authority),

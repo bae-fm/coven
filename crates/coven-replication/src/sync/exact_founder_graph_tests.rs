@@ -222,17 +222,17 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
         .retained_replay_payload_claims_for_test()
         .await
         .expect("read baseline payload claims");
-    let mut expected = vec![baseline.image_hash, authority_hash];
+    let mut expected = vec![baseline.image_payload_hash, authority_hash];
     expected.sort();
     assert_eq!(claimed, expected);
 
     let image_bytes = database
-        .payload_for_test(baseline.image_hash)
+        .payload_for_test(baseline.image_payload_hash)
         .await
         .expect("read image payload");
     assert_eq!(
         coven_protocol::store_commit::ObjectHash::digest(&image_bytes),
-        baseline.image_hash
+        baseline.image_payload_hash
     );
     assert_eq!(
         database
@@ -243,7 +243,7 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
     );
 
     database
-        .remove_payload_bytes_for_test(baseline.image_hash)
+        .remove_payload_bytes_for_test(baseline.image_payload_hash)
         .await
         .expect("remove image payload");
     let error = database
@@ -304,7 +304,7 @@ async fn replacing_the_replay_authority_deletes_the_superseded_payload() {
         .await
         .expect("check removed authority payload"));
     assert!(database
-        .has_payload_for_test(baseline.image_hash)
+        .has_payload_for_test(baseline.image_payload_hash)
         .await
         .expect("check retained image payload"));
     assert_eq!(

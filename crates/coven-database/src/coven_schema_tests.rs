@@ -476,7 +476,7 @@ fn retained_replay_baseline_has_one_closed_active_row() {
         conn.execute(
             "INSERT INTO retained_replay_baselines
                  (singleton, generation, exact_cut, schema_version,
-                  routing_hash, image_hash, authority_hash)
+                  routing_hash, image_payload_hash, authority_hash)
                  VALUES (?1, ?2, '{}', 1, ?3, ?4, ?5)",
             rusqlite::params![
                 singleton,

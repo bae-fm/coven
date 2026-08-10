@@ -640,9 +640,9 @@ impl<'store> StoreRecords<'store> {
                 [authority_hash.to_string()],
             )
             .map_err(DbError::from)?;
-        let image_hash: String = transaction
+        let image_payload_hash: String = transaction
             .query_row(
-                "SELECT image_hash FROM retained_replay_baselines WHERE singleton = 1",
+                "SELECT image_payload_hash FROM retained_replay_baselines WHERE singleton = 1",
                 [],
                 |row| row.get(0),
             )
@@ -650,7 +650,7 @@ impl<'store> StoreRecords<'store> {
         super::payload_store::set_payload_owner_claims_on(
             &transaction,
             super::payload_store::RETAINED_REPLAY_BASELINE_OWNER_KEY,
-            &std::collections::BTreeSet::from([image_hash.parse()?, authority_hash]),
+            &std::collections::BTreeSet::from([image_payload_hash.parse()?, authority_hash]),
         )?;
         transaction.commit().map_err(DbError::from)
     }
