@@ -86,6 +86,29 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
 }
 
 #[tokio::test]
+async fn owner_anchor_install_verifies_the_stored_replay_image_payload() {
+    let db = open_test_db();
+    db.database
+        .install_replay_image_corruption_for_test()
+        .await
+        .expect("install replay image corruption trigger");
+
+    let result = TestStore::create(
+        &db,
+        "owner-anchor-image-readback",
+        UserKeypair::generate(),
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("owner anchor installation must reject altered stored image bytes"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("invalid compressed bytes"), "{error}");
+}
+
+#[tokio::test]
 async fn committed_owner_anchor_publishes_its_verified_replay_baseline() {
     let db = open_test_db();
     let signer = UserKeypair::generate();

@@ -3,7 +3,6 @@
 use crate::query_mapped_rows;
 use crate::store::store_session::StoreRecords;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
 
 use rusqlite::{types::Value, Connection};
 use serde::{Deserialize, Serialize};
@@ -25,6 +24,17 @@ pub const GENERATION_ZERO: u64 = 0;
 pub(crate) fn load_generation_zero_replay_baseline_on(
     records: StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
+    let Some(baseline) = load_replay_baseline_metadata_on(records)? else {
+        return Ok(None);
+    };
+    records.validate_replay_baseline_image(&baseline)?;
+    records.validate_replay_authority(&baseline)?;
+    Ok(Some(baseline))
+}
+
+pub(super) fn load_replay_baseline_metadata_on(
+    records: StoreRecords<'_>,
+) -> Result<Option<RetainedReplayBaseline>, DbError> {
     let stored = records.retained_replay_baseline_row()?;
     let Some(stored) = stored else {
         return Ok(None);
@@ -40,7 +50,7 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
         .parse()
         .map_err(|error| DbError::context("retained replay authority hash", error))?;
     let authority_bytes = records
-        .payload(authority_hash)
+        .verified_payload(authority_hash)
         .map_err(|error| DbError::Message(format!("read retained replay authority: {error}")))?;
     let authority: RetainedReplayAuthority = serde_json::from_slice(&authority_bytes)
         .map_err(|error| DbError::context("retained replay authority", error))?;
@@ -55,7 +65,7 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
             "retained replay baseline metadata is not canonical".to_string(),
         ));
     }
-    let baseline = RetainedReplayBaseline {
+    Ok(Some(RetainedReplayBaseline {
         generation,
         exact_cut: parsed_exact_cut,
         schema_version,
@@ -68,10 +78,7 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
             .parse()
             .map_err(|error| DbError::context("retained replay image hash", error))?,
         authority,
-    };
-    records.validate_replay_baseline_image(&baseline)?;
-    records.validate_replay_authority(&baseline)?;
-    Ok(Some(baseline))
+    }))
 }
 
 pub(crate) fn install_generation_zero_replay_baseline_on(
@@ -85,9 +92,7 @@ pub(crate) fn install_generation_zero_replay_baseline_on(
             "retained replay baseline already exists before founder activation".to_string(),
         ));
     }
-    let baseline =
-        records.create_generation_zero_replay_baseline(schema_version, routing_hash, authority)?;
-    insert_retained_replay_baseline_on(records, &baseline)
+    records.install_generation_zero_replay_baseline(schema_version, routing_hash, authority)
 }
 
 pub(crate) fn install_snapshot_replay_baseline_on(
@@ -101,29 +106,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
             "retained replay baseline already exists before snapshot bootstrap".to_string(),
         ));
     }
-    let baseline =
-        records.create_stable_snapshot_replay_baseline(schema_version, routing_hash, authority)?;
-    insert_retained_replay_baseline_on(records, &baseline)
-}
-
-fn insert_retained_replay_baseline_on(
-    records: StoreRecords<'_>,
-    baseline: &RetainedReplayBaseline,
-) -> Result<RetainedReplayBaseline, DbError> {
-    records.validate_replay_authority(baseline)?;
-    let authority_hash = records
-        .install_payload(&baseline.canonical_authority_bytes()?)
-        .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
-    records.insert_retained_replay_baseline_row(baseline, authority_hash)?;
-    let installed = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
-        DbError::Message("installed retained replay baseline is absent".to_string())
-    })?;
-    if &installed != baseline {
-        return Err(DbError::Message(
-            "installed retained replay baseline differs from its verified image".to_string(),
-        ));
-    }
-    Ok(installed)
+    records.install_snapshot_replay_baseline(schema_version, routing_hash, authority)
 }
 
 pub(crate) fn ensure_founder_replay_baseline_on(
@@ -503,7 +486,7 @@ fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommit
 /// The database image a replay starts from, and the authority that says which
 /// history it covers.
 ///
-/// `image_payload_hash` names the compressed image in the payload store, as
+/// `image_payload_hash` names the image bytes in the payload store, as
 /// `authority_hash` on the row names the authority's canonical bytes. The row
 /// holds the facts without carrying either payload in its own columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -529,10 +512,12 @@ impl RetainedReplayBaseline {
         conn: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<Vec<u8>, DbError> {
-        let payload =
-            crate::payload_store::read_payload_blocking(conn, store_dir, self.image_payload_hash)
-                .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))?;
-        decode_replay_image(&payload)
+        crate::payload_store::read_verified_payload_blocking(
+            conn,
+            store_dir,
+            self.image_payload_hash,
+        )
+        .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))
     }
 
     pub(crate) fn validate_image(
@@ -540,17 +525,25 @@ impl RetainedReplayBaseline {
         conn: &Connection,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<(), DbError> {
-        if self.generation != GENERATION_ZERO {
-            return Err(DbError::Message(
-                "generation-zero retained replay baseline metadata is inconsistent".to_string(),
-            ));
-        }
         let mut image = Connection::open_in_memory().map_err(DbError::from)?;
         crate::connection_io::deserialize_database_image_into(
             &mut image,
             &self.image_bytes(conn, store_dir)?,
         )
         .map_err(|error| DbError::context("open retained replay database image", error))?;
+        self.validate_open_image(&image, store_dir)
+    }
+
+    pub(super) fn validate_open_image(
+        &self,
+        image: &Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), DbError> {
+        if self.generation != GENERATION_ZERO {
+            return Err(DbError::Message(
+                "generation-zero retained replay baseline metadata is inconsistent".to_string(),
+            ));
+        }
         match &self.authority {
             RetainedReplayAuthority::Genesis(_) => {
                 if !self.exact_cut.0.is_empty() {
@@ -558,9 +551,9 @@ impl RetainedReplayBaseline {
                         "genesis retained replay baseline has a non-genesis cut".to_string(),
                     ));
                 }
-                self.validate_image_metadata(&image)?;
-                let protocol_keys = protocol_state_keys(&image)?;
-                let founder_membership_cursor = founder_membership_cursor_key(&image)?;
+                self.validate_image_metadata(image)?;
+                let protocol_keys = protocol_state_keys(image)?;
+                let founder_membership_cursor = founder_membership_cursor_key(image)?;
                 if protocol_keys.iter().any(|key| {
                     !generation_zero_protocol_key(founder_membership_cursor.as_deref(), key)
                 }) || !required_generation_zero_protocol_keys()
@@ -575,7 +568,7 @@ impl RetainedReplayBaseline {
                             .to_string(),
                     ));
                 }
-                for table in crate::user_table_names(&image).map_err(DbError::from)? {
+                for table in crate::user_table_names(image).map_err(DbError::from)? {
                     let count: i64 = image
                         .query_row(
                             &format!("SELECT COUNT(*) FROM {}", crate::quote_ident(&table)),
@@ -595,7 +588,7 @@ impl RetainedReplayBaseline {
                         )));
                     }
                 }
-                validate_replay_image_foreign_keys(&image)?;
+                validate_replay_image_foreign_keys(image)?;
             }
             RetainedReplayAuthority::StableSnapshot(authority) => {
                 authority.validate()?;
@@ -604,10 +597,10 @@ impl RetainedReplayBaseline {
                         "snapshot retained replay cut differs from its signed metadata".to_string(),
                     ));
                 }
-                self.validate_image_metadata(&image)?;
+                self.validate_image_metadata(image)?;
                 let mut actual = BTreeMap::new();
                 let rows = query_mapped_rows(
-                    &image,
+                    image,
                     "SELECT device_id, seq, commit_ref FROM snapshot_coverage ORDER BY device_id",
                     [],
                     |row| {
@@ -654,24 +647,21 @@ impl RetainedReplayBaseline {
                 }
                 let mut verified_authority = super::VerifiedStoreAuthority::default();
                 crate::StoreDatabase::validate_snapshot_retained_inputs_on(
-                    StoreRecords::new(&image, store_dir),
+                    StoreRecords::new(image, store_dir),
                     &mut verified_authority,
                     &authority.store_root,
                 )?;
-                validate_replay_image_foreign_keys(&image)?;
+                validate_replay_image_foreign_keys(image)?;
             }
         }
-        let routing = crate::database_open::load_coven_metadata(&image)?;
+        let routing = crate::database_open::load_coven_metadata(image)?;
         if routing.hash() != self.routing_hash {
             return Err(DbError::Message(
                 "retained replay image routing contract differs from its baseline".to_string(),
             ));
         }
-        crate::database_open::validate_initialized_coven_schema(
-            &image,
-            routing.has_scoped_graph(),
-        )?;
-        crate::store_authority_records::validate_replay_authority_on(&image, self)
+        crate::database_open::validate_initialized_coven_schema(image, routing.has_scoped_graph())?;
+        crate::store_authority_records::validate_replay_authority_on(image, self)
     }
 
     fn validate_image_metadata(&self, image: &Connection) -> Result<(), DbError> {
@@ -695,25 +685,22 @@ impl RetainedReplayBaseline {
     }
 }
 
-pub(super) fn encode_replay_image(image: &[u8]) -> Result<Vec<u8>, DbError> {
-    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
-    encoder
-        .write_all(image)
-        .map_err(|error| DbError::context("compress retained replay image", error))?;
-    encoder.finish().map_err(|error| {
-        DbError::context(
-            "finish retained replay image compression",
-            std::io::Error::from(error),
-        )
-    })
+pub(super) struct GenerationZeroReplayImage {
+    image: Connection,
 }
 
-fn decode_replay_image(payload: &[u8]) -> Result<Vec<u8>, DbError> {
-    let mut image = Vec::new();
-    lz4_flex::frame::FrameDecoder::new(payload)
-        .read_to_end(&mut image)
-        .map_err(|error| DbError::context("decompress retained replay image", error))?;
-    Ok(image)
+impl GenerationZeroReplayImage {
+    pub(super) fn database_bytes(&self) -> Result<Vec<u8>, DbError> {
+        crate::connection_io::serialize_database_image(&self.image)
+    }
+
+    pub(super) fn validate(
+        &self,
+        baseline: &RetainedReplayBaseline,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) -> Result<(), DbError> {
+        baseline.validate_open_image(&self.image, store_dir)
+    }
 }
 
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
@@ -765,7 +752,9 @@ pub(crate) fn copy_table_with_conflicts(
     Ok(())
 }
 
-pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
+pub(super) fn project_generation_zero_image(
+    source: &Connection,
+) -> Result<GenerationZeroReplayImage, DbError> {
     let source_bytes = crate::connection_io::serialize_database_image(source)?;
     let mut image = Connection::open_in_memory().map_err(DbError::from)?;
     crate::connection_io::deserialize_database_image_into(&mut image, &source_bytes)
@@ -809,7 +798,7 @@ pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u
             "generation-zero retained replay image violates foreign keys".to_string(),
         ));
     }
-    crate::connection_io::serialize_database_image(&image)
+    Ok(GenerationZeroReplayImage { image })
 }
 
 fn validate_replay_image_foreign_keys(image: &Connection) -> Result<(), DbError> {

@@ -26,6 +26,33 @@ pub(crate) struct SnapshotRetentionRows {
     pub(crate) materialization_refs: Vec<String>,
 }
 
+struct PreparedRetainedReplayBaseline {
+    baseline: crate::RetainedReplayBaseline,
+    image_bytes: Vec<u8>,
+}
+
+impl PreparedRetainedReplayBaseline {
+    fn new(
+        exact_cut: coven_protocol::store_commit::CommitFrontier,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: crate::RetainedReplayAuthority,
+        image_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            baseline: crate::RetainedReplayBaseline {
+                generation: crate::GENERATION_ZERO,
+                exact_cut,
+                schema_version,
+                routing_hash,
+                image_payload_hash: ObjectHash::digest(&image_bytes),
+                authority,
+            },
+            image_bytes,
+        }
+    }
+}
+
 impl StoreRecords<'_> {
     pub(crate) fn snapshot_retention_rows(self) -> Result<SnapshotRetentionRows, DbError> {
         let exclusions = crate::query_mapped_rows(
@@ -301,45 +328,95 @@ impl StoreRecords<'_> {
             .map_err(DbError::from)
     }
 
-    pub(crate) fn create_generation_zero_replay_baseline(
+    pub(super) fn install_generation_zero_replay_baseline_records(
         self,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: crate::RetainedReplayGenesisAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        let image_bytes = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
-        let image_payload = crate::store::retained_replay::encode_replay_image(&image_bytes)?;
-        Ok(crate::RetainedReplayBaseline {
-            generation: crate::GENERATION_ZERO,
-            exact_cut: coven_protocol::store_commit::CommitFrontier(Default::default()),
+        let image = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
+        let prepared = PreparedRetainedReplayBaseline::new(
+            coven_protocol::store_commit::CommitFrontier(Default::default()),
             schema_version,
             routing_hash,
-            image_payload_hash: self.install_payload(&image_payload).map_err(|error| {
-                DbError::Message(format!("install retained replay image: {error}"))
-            })?,
-            authority: crate::RetainedReplayAuthority::Genesis(authority),
-        })
+            crate::RetainedReplayAuthority::Genesis(authority),
+            image.database_bytes()?,
+        );
+        image.validate(&prepared.baseline, self.store_dir)?;
+        self.install_prepared_replay_baseline(prepared)
     }
 
-    pub(crate) fn create_stable_snapshot_replay_baseline(
+    pub(super) fn install_snapshot_replay_baseline_records(
         self,
         schema_version: u32,
         routing_hash: ObjectHash,
         authority: crate::RetainedReplaySnapshotAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        authority.validate()?;
         let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
-        let image_payload = crate::store::retained_replay::encode_replay_image(&image_bytes)?;
-        Ok(crate::RetainedReplayBaseline {
-            generation: crate::GENERATION_ZERO,
-            exact_cut: authority.metadata.coverage.clone(),
+        let prepared = PreparedRetainedReplayBaseline::new(
+            authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
-            image_payload_hash: self.install_payload(&image_payload).map_err(|error| {
-                DbError::Message(format!("install retained replay image: {error}"))
-            })?,
-            authority: crate::RetainedReplayAuthority::StableSnapshot(authority),
-        })
+            crate::RetainedReplayAuthority::StableSnapshot(authority),
+            image_bytes,
+        );
+        prepared
+            .baseline
+            .validate_open_image(self.conn, self.store_dir)?;
+        self.install_prepared_replay_baseline(prepared)
+    }
+
+    fn install_prepared_replay_baseline(
+        self,
+        prepared: PreparedRetainedReplayBaseline,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        let PreparedRetainedReplayBaseline {
+            baseline,
+            image_bytes,
+        } = prepared;
+        self.validate_replay_authority(&baseline)?;
+        let installed_image_hash = self
+            .install_payload(&image_bytes)
+            .map_err(|error| DbError::Message(format!("install retained replay image: {error}")))?;
+        if installed_image_hash != baseline.image_payload_hash {
+            return Err(DbError::Message(
+                "installed retained replay image has a different content address".to_string(),
+            ));
+        }
+        let authority_bytes = baseline.canonical_authority_bytes()?;
+        let authority_hash = self.install_payload(&authority_bytes).map_err(|error| {
+            DbError::Message(format!("install retained replay authority: {error}"))
+        })?;
+        self.insert_retained_replay_baseline_row(&baseline, authority_hash)?;
+        let installed_image = self
+            .verified_payload(installed_image_hash)
+            .map_err(|error| {
+                DbError::Message(format!("read installed retained replay image: {error}"))
+            })?;
+        if installed_image != image_bytes {
+            return Err(DbError::Message(
+                "installed retained replay image differs from its prepared bytes".to_string(),
+            ));
+        }
+        let installed_authority = self.verified_payload(authority_hash).map_err(|error| {
+            DbError::Message(format!("read installed retained replay authority: {error}"))
+        })?;
+        if installed_authority != authority_bytes {
+            return Err(DbError::Message(
+                "installed retained replay authority differs from its canonical bytes".to_string(),
+            ));
+        }
+        let installed = crate::store::retained_replay::load_replay_baseline_metadata_on(self)?
+            .ok_or_else(|| {
+                DbError::Message("installed retained replay baseline is absent".to_string())
+            })?;
+        self.validate_replay_authority(&installed)?;
+        if installed != baseline {
+            return Err(DbError::Message(
+                "installed retained replay baseline differs from its verified image".to_string(),
+            ));
+        }
+        Ok(installed)
     }
 
     pub(crate) fn validate_replay_baseline_image(

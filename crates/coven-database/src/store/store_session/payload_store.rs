@@ -1,8 +1,8 @@
 //! Content-addressed payloads owned by Store database rows.
 //!
-//! Protocol-sized payloads live in SQLite. Larger and streamed payloads live in
-//! files beside it. The catalog on the same connection is the sole authority
-//! for which representation a hash uses.
+//! Every payload is compressed. Compressed values through 64 KiB live in SQLite;
+//! larger values live in files beside it. The catalog on the same connection is
+//! the sole authority for which representation a hash uses.
 //!
 //! Deletion rides row deletion, counted by owner. Rows of different kinds can
 //! name the same payload — a Circle operation and the remote object it prepared
@@ -18,7 +18,7 @@
 //! the deletion rather than losing it.
 
 use std::collections::BTreeSet;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use coven_foundation::atomic_file::AtomicFileStage;
@@ -26,7 +26,9 @@ use coven_foundation::store_dir::StoreDir;
 use rusqlite::{Connection, OptionalExtension};
 use tracing::debug;
 
-use super::{StoreDatabase, StoreTransaction};
+use super::StoreTransaction;
+#[cfg(any(test, feature = "test-utils"))]
+use super::{StoreDatabase, StoreSession};
 use crate::DbError;
 use coven_protocol::store_commit::ObjectHash;
 
@@ -55,13 +57,21 @@ pub enum PayloadStoreError {
         expected: ObjectHash,
         actual: ObjectHash,
     },
+    #[error("payload {hash} has invalid compressed bytes: {error}")]
+    Compression { hash: ObjectHash, error: String },
 }
 
 const INLINE_PAYLOAD_LIMIT: usize = 64 * 1024;
 
 enum StoredPayload {
-    Inline(Vec<u8>),
-    File { size: u64 },
+    Inline {
+        compressed: Vec<u8>,
+        payload_size: u64,
+    },
+    File {
+        compressed_size: u64,
+        payload_size: u64,
+    },
 }
 
 /// One database connection's closed access to the payload bytes its rows own.
@@ -81,89 +91,122 @@ impl<'store> PayloadStore<'store> {
     pub(crate) fn install(self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
         let hash = ObjectHash::digest(bytes);
         self.require_transaction(hash)?;
+        let compressed = compress_payload(hash, bytes)?;
         match self.stored(hash)? {
-            Some(StoredPayload::Inline(installed)) => {
-                if installed == bytes {
+            Some(StoredPayload::Inline {
+                compressed: installed,
+                payload_size,
+            }) => {
+                if installed == compressed && payload_size == bytes.len() as u64 {
                     Ok(hash)
                 } else {
-                    Err(PayloadStoreError::InlineContentMismatch {
-                        expected: hash,
-                        actual: ObjectHash::digest(&installed),
+                    Err(PayloadStoreError::Storage {
+                        hash,
+                        error: "installed inline representation differs from the payload"
+                            .to_string(),
                     })
                 }
             }
             Some(StoredPayload::File { .. }) => {
-                write_payload_file_bytes_blocking(self.store_dir, hash, bytes)?;
+                self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
+                write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
                 Ok(hash)
             }
-            None if bytes.len() <= INLINE_PAYLOAD_LIMIT => {
-                self.conn
-                    .execute(
-                        "INSERT INTO payload_storage
-                         (payload_hash, storage, inline_bytes, file_size)
-                         VALUES (?1, 'inline', ?2, NULL)",
-                        rusqlite::params![hash.to_string(), bytes],
-                    )
-                    .map_err(|error| PayloadStoreError::Storage {
-                        hash,
-                        error: error.to_string(),
-                    })?;
+            None if compressed.len() <= INLINE_PAYLOAD_LIMIT => {
+                self.record_inline(hash, bytes.len() as u64, &compressed)?;
                 Ok(hash)
             }
             None => {
-                write_payload_file_bytes_blocking(self.store_dir, hash, bytes)?;
-                self.record_file(hash, bytes.len() as u64)?;
+                self.record_file(hash, bytes.len() as u64, compressed.len() as u64)?;
+                write_payload_file_bytes_blocking(self.store_dir, hash, &compressed)?;
                 Ok(hash)
             }
         }
     }
 
     pub(crate) fn read(self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        match self.stored(hash)? {
-            Some(StoredPayload::Inline(bytes)) => Ok(bytes),
-            Some(StoredPayload::File { size }) => {
-                let bytes = read_payload_file_blocking(self.store_dir, hash)?;
-                if bytes.len() as u64 != size {
+        let stored = self
+            .stored(hash)?
+            .ok_or_else(|| PayloadStoreError::Storage {
+                hash,
+                error: "no catalog row".to_string(),
+            })?;
+        self.decode_stored(hash, stored)
+    }
+
+    fn decode_stored(
+        self,
+        hash: ObjectHash,
+        stored: StoredPayload,
+    ) -> Result<Vec<u8>, PayloadStoreError> {
+        let (compressed, payload_size) = match stored {
+            StoredPayload::Inline {
+                compressed,
+                payload_size,
+            } => (compressed, payload_size),
+            StoredPayload::File {
+                compressed_size,
+                payload_size,
+            } => {
+                let compressed = read_payload_file_blocking(self.store_dir, hash)?;
+                if compressed.len() as u64 != compressed_size {
                     return Err(PayloadStoreError::Storage {
                         hash,
                         error: format!(
-                            "catalog records {size} file bytes, but the spool contains {}",
-                            bytes.len()
+                            "catalog records {compressed_size} compressed file bytes, but the spool contains {}",
+                            compressed.len()
                         ),
                     });
                 }
-                Ok(bytes)
+                (compressed, payload_size)
             }
-            None => Err(PayloadStoreError::Storage {
+        };
+        let bytes = decompress_payload(hash, &compressed, payload_size)?;
+        if bytes.len() as u64 != payload_size {
+            return Err(PayloadStoreError::Storage {
                 hash,
-                error: "no catalog row".to_string(),
-            }),
+                error: format!(
+                    "catalog records {payload_size} payload bytes, but decompression produced {}",
+                    bytes.len()
+                ),
+            });
         }
+        Ok(bytes)
     }
 
     pub(crate) fn read_verified(self, hash: ObjectHash) -> Result<Vec<u8>, PayloadStoreError> {
-        let bytes = self.read(hash)?;
+        let stored = self
+            .stored(hash)?
+            .ok_or_else(|| PayloadStoreError::Storage {
+                hash,
+                error: "no catalog row".to_string(),
+            })?;
+        let inline = matches!(stored, StoredPayload::Inline { .. });
+        let bytes = self.decode_stored(hash, stored)?;
         let actual = ObjectHash::digest(&bytes);
         if actual == hash {
             return Ok(bytes);
         }
-        match self.stored(hash)? {
-            Some(StoredPayload::Inline(_)) => Err(PayloadStoreError::InlineContentMismatch {
+        if inline {
+            Err(PayloadStoreError::InlineContentMismatch {
                 expected: hash,
                 actual,
-            }),
-            Some(StoredPayload::File { .. }) | None => Err(PayloadStoreError::ContentMismatch {
+            })
+        } else {
+            Err(PayloadStoreError::ContentMismatch {
                 expected: hash,
                 actual,
                 path: self.store_dir.payload_spool_path(hash),
-            }),
+            })
         }
     }
 
     fn writer(self) -> PayloadWriter<'store> {
         PayloadWriter {
             payloads: self,
-            target: PayloadWriterTarget::Inline(Vec::new()),
+            encoder: lz4_flex::frame::FrameEncoder::new(CompressedPayloadTarget::new(
+                self.store_dir,
+            )),
             hasher: coven_protocol::blob::ContentHasher::new(),
             size: 0,
         }
@@ -183,14 +226,15 @@ impl<'store> PayloadStore<'store> {
         let row = self
             .conn
             .query_row(
-                "SELECT storage, inline_bytes, file_size
+                "SELECT storage, payload_size, compressed_bytes, compressed_size
                  FROM payload_storage WHERE payload_hash = ?1",
                 [hash.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, Option<Vec<u8>>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
@@ -201,17 +245,29 @@ impl<'store> PayloadStore<'store> {
             })?;
         match row {
             None => Ok(None),
-            Some((storage, Some(bytes), None)) if storage == "inline" => {
-                Ok(Some(StoredPayload::Inline(bytes)))
+            Some((storage, payload_size, Some(compressed), compressed_size))
+                if storage == "inline"
+                    && payload_size >= 0
+                    && compressed_size == compressed.len() as i64 =>
+            {
+                Ok(Some(StoredPayload::Inline {
+                    compressed,
+                    payload_size: payload_size as u64,
+                }))
             }
-            Some((storage, None, Some(size))) if storage == "file" && size >= 0 => {
-                Ok(Some(StoredPayload::File { size: size as u64 }))
+            Some((storage, payload_size, None, compressed_size))
+                if storage == "file" && payload_size >= 0 && compressed_size > 0 =>
+            {
+                Ok(Some(StoredPayload::File {
+                    compressed_size: compressed_size as u64,
+                    payload_size: payload_size as u64,
+                }))
             }
-            Some((storage, inline, size)) => Err(PayloadStoreError::Storage {
+            Some((storage, payload_size, compressed, compressed_size)) => Err(PayloadStoreError::Storage {
                 hash,
                 error: format!(
-                    "tag {storage:?}, inline bytes {}, file size {size:?}",
-                    inline
+                    "tag {storage:?}, payload size {payload_size}, compressed bytes {}, compressed size {compressed_size}",
+                    compressed
                         .as_ref()
                         .map_or("absent".to_string(), |bytes| format!(
                             "{} bytes",
@@ -222,31 +278,96 @@ impl<'store> PayloadStore<'store> {
         }
     }
 
-    fn record_file(self, hash: ObjectHash, size: u64) -> Result<(), PayloadStoreError> {
-        let size = i64::try_from(size).map_err(|error| PayloadStoreError::Storage {
-            hash,
-            error: error.to_string(),
-        })?;
+    fn record_inline(
+        self,
+        hash: ObjectHash,
+        payload_size: u64,
+        compressed: &[u8],
+    ) -> Result<(), PayloadStoreError> {
+        let payload_size =
+            i64::try_from(payload_size).map_err(|error| PayloadStoreError::Storage {
+                hash,
+                error: error.to_string(),
+            })?;
+        let compressed_size =
+            i64::try_from(compressed.len()).map_err(|error| PayloadStoreError::Storage {
+                hash,
+                error: error.to_string(),
+            })?;
         match self.stored(hash)? {
             None => self
                 .conn
                 .execute(
                     "INSERT INTO payload_storage
-                     (payload_hash, storage, inline_bytes, file_size)
-                     VALUES (?1, 'file', NULL, ?2)",
-                    rusqlite::params![hash.to_string(), size],
+                     (payload_hash, payload_size, storage, compressed_bytes, compressed_size)
+                     VALUES (?1, ?2, 'inline', ?3, ?4)",
+                    rusqlite::params![hash.to_string(), payload_size, compressed, compressed_size],
                 )
                 .map(|_| ())
                 .map_err(|error| PayloadStoreError::Storage {
                     hash,
                     error: error.to_string(),
                 }),
-            Some(StoredPayload::File { size: stored }) if stored == size as u64 => Ok(()),
-            Some(StoredPayload::File { size: stored }) => Err(PayloadStoreError::Storage {
+            Some(StoredPayload::Inline {
+                compressed: stored,
+                payload_size: stored_payload_size,
+            }) if stored == compressed && stored_payload_size == payload_size as u64 => Ok(()),
+            Some(StoredPayload::Inline { .. }) => Err(PayloadStoreError::Storage {
                 hash,
-                error: format!("catalog file size {stored} differs from installed size {size}"),
+                error: "installed inline representation differs from the payload".to_string(),
             }),
-            Some(StoredPayload::Inline(_)) => Err(PayloadStoreError::Storage {
+            Some(StoredPayload::File { .. }) => Err(PayloadStoreError::Storage {
+                hash,
+                error: "an inline installation conflicts with file storage".to_string(),
+            }),
+        }
+    }
+
+    fn record_file(
+        self,
+        hash: ObjectHash,
+        payload_size: u64,
+        compressed_size: u64,
+    ) -> Result<(), PayloadStoreError> {
+        let payload_size =
+            i64::try_from(payload_size).map_err(|error| PayloadStoreError::Storage {
+                hash,
+                error: error.to_string(),
+            })?;
+        let compressed_size =
+            i64::try_from(compressed_size).map_err(|error| PayloadStoreError::Storage {
+                hash,
+                error: error.to_string(),
+            })?;
+        match self.stored(hash)? {
+            None => self
+                .conn
+                .execute(
+                    "INSERT INTO payload_storage
+                     (payload_hash, payload_size, storage, compressed_bytes, compressed_size)
+                     VALUES (?1, ?2, 'file', NULL, ?3)",
+                    rusqlite::params![hash.to_string(), payload_size, compressed_size],
+                )
+                .map(|_| ())
+                .map_err(|error| PayloadStoreError::Storage {
+                    hash,
+                    error: error.to_string(),
+                }),
+            Some(StoredPayload::File {
+                compressed_size: stored_compressed_size,
+                payload_size: stored_payload_size,
+            }) if stored_compressed_size == compressed_size as u64
+                && stored_payload_size == payload_size as u64 => Ok(()),
+            Some(StoredPayload::File {
+                compressed_size: stored_compressed_size,
+                payload_size: stored_payload_size,
+            }) => Err(PayloadStoreError::Storage {
+                hash,
+                error: format!(
+                    "catalog sizes ({stored_payload_size} payload, {stored_compressed_size} compressed) differ from installed sizes ({payload_size} payload, {compressed_size} compressed)"
+                ),
+            }),
+            Some(StoredPayload::Inline { .. }) => Err(PayloadStoreError::Storage {
                 hash,
                 error: "a file installation conflicts with inline storage".to_string(),
             }),
@@ -258,7 +379,7 @@ impl<'store> PayloadStore<'store> {
 /// is computed from the bytes the file accepted.
 pub(crate) struct PayloadWriter<'store> {
     payloads: PayloadStore<'store>,
-    target: PayloadWriterTarget,
+    encoder: lz4_flex::frame::FrameEncoder<CompressedPayloadTarget<'store>>,
     hasher: coven_protocol::blob::ContentHasher,
     size: u64,
 }
@@ -266,6 +387,22 @@ pub(crate) struct PayloadWriter<'store> {
 enum PayloadWriterTarget {
     Inline(Vec<u8>),
     File(AtomicFileStage),
+}
+
+struct CompressedPayloadTarget<'store> {
+    store_dir: &'store StoreDir,
+    target: PayloadWriterTarget,
+    size: u64,
+}
+
+impl<'store> CompressedPayloadTarget<'store> {
+    fn new(store_dir: &'store StoreDir) -> Self {
+        Self {
+            store_dir,
+            target: PayloadWriterTarget::Inline(Vec::new()),
+            size: 0,
+        }
+    }
 }
 
 impl<'store> PayloadWriter<'store> {
@@ -276,25 +413,27 @@ impl<'store> PayloadWriter<'store> {
             .parse::<ObjectHash>()
             .expect("SHA-256 hex is an ObjectHash");
         self.payloads.require_transaction(hash)?;
-        match self.target {
+        let compressed = self
+            .encoder
+            .finish()
+            .map_err(|error| PayloadStoreError::Compression {
+                hash,
+                error: error.to_string(),
+            })?;
+        match compressed.target {
             PayloadWriterTarget::Inline(bytes) => {
-                let installed = self.payloads.install(&bytes)?;
-                if installed != hash {
-                    return Err(PayloadStoreError::Storage {
-                        hash,
-                        error: format!("streamed bytes installed as {installed}"),
-                    });
-                }
+                self.payloads.record_inline(hash, self.size, &bytes)?;
             }
             PayloadWriterTarget::File(staged) => {
                 let path = self.payloads.store_dir.payload_spool_path(hash);
+                self.payloads
+                    .record_file(hash, self.size, compressed.size)?;
                 staged
                     .commit(&path)
                     .map_err(|error| PayloadStoreError::File {
                         path,
                         error: error.to_string(),
                     })?;
-                self.payloads.record_file(hash, self.size)?;
             }
         }
         Ok((hash, self.size))
@@ -309,6 +448,22 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
 
 impl std::io::Write for PayloadWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.encoder.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        self.size = self
+            .size
+            .checked_add(written as u64)
+            .ok_or_else(|| std::io::Error::other("payload size overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.encoder.flush()
+    }
+}
+
+impl std::io::Write for CompressedPayloadTarget<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = match &mut self.target {
             PayloadWriterTarget::Inline(buffer)
                 if buffer.len().saturating_add(bytes.len()) <= INLINE_PAYLOAD_LIMIT =>
@@ -317,9 +472,8 @@ impl std::io::Write for PayloadWriter<'_> {
                 bytes.len()
             }
             PayloadWriterTarget::Inline(buffer) => {
-                let directory = self.payloads.store_dir.payload_spool_dir();
+                let directory = self.store_dir.payload_spool_dir();
                 let mut staged = self
-                    .payloads
                     .store_dir
                     .create_payload_spool_stage()
                     .map_err(|error| {
@@ -335,11 +489,10 @@ impl std::io::Write for PayloadWriter<'_> {
             }
             PayloadWriterTarget::File(staged) => staged.write(bytes)?,
         };
-        self.hasher.update(&bytes[..written]);
         self.size = self
             .size
             .checked_add(written as u64)
-            .ok_or_else(|| std::io::Error::other("payload size overflow"))?;
+            .ok_or_else(|| std::io::Error::other("compressed payload size overflow"))?;
         Ok(written)
     }
 
@@ -349,6 +502,38 @@ impl std::io::Write for PayloadWriter<'_> {
             PayloadWriterTarget::File(staged) => staged.flush(),
         }
     }
+}
+
+fn compress_payload(hash: ObjectHash, bytes: &[u8]) -> Result<Vec<u8>, PayloadStoreError> {
+    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+    encoder
+        .write_all(bytes)
+        .map_err(|error| PayloadStoreError::Compression {
+            hash,
+            error: error.to_string(),
+        })?;
+    encoder
+        .finish()
+        .map_err(|error| PayloadStoreError::Compression {
+            hash,
+            error: error.to_string(),
+        })
+}
+
+fn decompress_payload(
+    hash: ObjectHash,
+    compressed: &[u8],
+    payload_size: u64,
+) -> Result<Vec<u8>, PayloadStoreError> {
+    let mut bytes = Vec::new();
+    lz4_flex::frame::FrameDecoder::new(compressed)
+        .take(payload_size.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| PayloadStoreError::Compression {
+            hash,
+            error: error.to_string(),
+        })?;
+    Ok(bytes)
 }
 
 /// Delete the payload behind every committed cleanup obligation, clearing each
@@ -366,7 +551,7 @@ pub(crate) fn pay_owed_payload_deletions_on(
     for hash in payload_cleanup_hashes_on(conn)? {
         let payloads = PayloadStore::new(conn, store_dir);
         match payloads.stored(hash).map_err(DbError::from)? {
-            Some(StoredPayload::Inline(_)) => {}
+            Some(StoredPayload::Inline { .. }) => {}
             Some(StoredPayload::File { .. }) => {
                 delete_payload_file_blocking(store_dir, hash).map_err(DbError::from)?;
             }
@@ -669,182 +854,6 @@ pub(crate) fn remote_object_owner_key(object_id: ObjectHash) -> String {
     format!("remote-object:{object_id}")
 }
 
-impl StoreDatabase {
-    /// The payloads still owed a deletion. Empty once every obligation this
-    /// store committed has been discharged.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn owed_payload_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        self.call_store(|session| session.owed_payload_cleanup())
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn store_write_payload_claims_for_test(
-        &self,
-        write_id: &coven_protocol::write::WriteId,
-    ) -> Result<Vec<ObjectHash>, DbError> {
-        let owner_key = store_write_owner_key(write_id);
-        self.call_store(move |session| session.payload_owner_claims(&owner_key))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn circle_operation_payload_claims_for_test(
-        &self,
-        operation_id: &coven_protocol::circle::CircleOperationId,
-    ) -> Result<Vec<ObjectHash>, DbError> {
-        let owner_key = circle_operation_owner_key(operation_id.as_str());
-        self.call_store(move |session| session.payload_owner_claims(&owner_key))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn retained_replay_payload_claims_for_test(
-        &self,
-    ) -> Result<Vec<ObjectHash>, DbError> {
-        self.call_store(|session| session.payload_owner_claims(RETAINED_REPLAY_BASELINE_OWNER_KEY))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn outbound_store_snapshot_payload_claims_for_test(
-        &self,
-    ) -> Result<Vec<ObjectHash>, DbError> {
-        self.call_store(|session| session.payload_owner_claims(OUTBOUND_STORE_SNAPSHOT_OWNER_KEY))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn install_payload_for_test(&self, bytes: Vec<u8>) -> Result<ObjectHash, DbError> {
-        self.call_store(move |session| session.install_payload_for_test(&bytes))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn payload_for_test(&self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
-        self.call_store(move |session| session.payload_for_test(hash))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn has_payload_for_test(&self, hash: ObjectHash) -> Result<bool, DbError> {
-        self.call_store(move |session| session.has_payload_for_test(hash))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn corrupt_payload_for_test(
-        &self,
-        hash: ObjectHash,
-        bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        self.call_store(move |session| session.corrupt_payload_for_test(hash, &bytes))
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
-        self.call_store(move |session| session.remove_payload_bytes_for_test(hash))
-            .await
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl super::StoreSession<'_> {
-    fn owed_payload_cleanup(&self) -> Result<Vec<ObjectHash>, DbError> {
-        payload_cleanup_hashes_on(self.conn)
-    }
-
-    fn payload_owner_claims(&self, owner_key: &str) -> Result<Vec<ObjectHash>, DbError> {
-        Ok(payload_owner_claims_on(self.conn, owner_key)?
-            .into_iter()
-            .collect())
-    }
-
-    fn install_payload_for_test(&self, bytes: &[u8]) -> Result<ObjectHash, DbError> {
-        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let hash = PayloadStore::new(&transaction, self.store_dir)
-            .install(bytes)
-            .map_err(DbError::from)?;
-        transaction.commit().map_err(DbError::from)?;
-        Ok(hash)
-    }
-
-    fn payload_for_test(&self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
-        crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
-            .payload(hash)
-            .map_err(DbError::from)
-    }
-
-    fn has_payload_for_test(&self, hash: ObjectHash) -> Result<bool, DbError> {
-        Ok(PayloadStore::new(self.conn, self.store_dir)
-            .stored(hash)
-            .map_err(DbError::from)?
-            .is_some())
-    }
-
-    fn corrupt_payload_for_test(&self, hash: ObjectHash, bytes: &[u8]) -> Result<(), DbError> {
-        match PayloadStore::new(self.conn, self.store_dir)
-            .stored(hash)
-            .map_err(DbError::from)?
-        {
-            Some(StoredPayload::Inline(_)) => {
-                self.conn
-                    .execute(
-                        "UPDATE payload_storage SET inline_bytes = ?2 WHERE payload_hash = ?1",
-                        rusqlite::params![hash.to_string(), bytes],
-                    )
-                    .map_err(DbError::from)?;
-            }
-            Some(StoredPayload::File { .. }) => {
-                std::fs::write(self.store_dir.payload_spool_path(hash), bytes)
-                    .map_err(|error| DbError::context("corrupt test payload file", error))?;
-            }
-            None => {
-                return Err(DbError::Message(format!(
-                    "cannot corrupt absent test payload {hash}"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_payload_bytes_for_test(&self, hash: ObjectHash) -> Result<(), DbError> {
-        match PayloadStore::new(self.conn, self.store_dir)
-            .stored(hash)
-            .map_err(DbError::from)?
-        {
-            Some(StoredPayload::Inline(bytes)) => {
-                self.conn
-                    .execute(
-                        "UPDATE payload_storage
-                         SET storage = 'file', inline_bytes = NULL, file_size = ?2
-                         WHERE payload_hash = ?1",
-                        rusqlite::params![hash.to_string(), bytes.len() as i64],
-                    )
-                    .map_err(DbError::from)?;
-                match std::fs::remove_file(self.store_dir.payload_spool_path(hash)) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(DbError::context("remove test payload file", error));
-                    }
-                }
-            }
-            Some(StoredPayload::File { .. }) => {
-                std::fs::remove_file(self.store_dir.payload_spool_path(hash))
-                    .map_err(|error| DbError::context("remove test payload file", error))?;
-            }
-            None => {
-                return Err(DbError::Message(format!(
-                    "cannot remove absent test payload {hash}"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 pub(crate) fn payload_cleanup_hashes_on(conn: &Connection) -> Result<Vec<ObjectHash>, DbError> {
     crate::query_mapped_rows(
         conn,
@@ -857,6 +866,10 @@ pub(crate) fn payload_cleanup_hashes_on(conn: &Connection) -> Result<Vec<ObjectH
     .map(|hash| hash.parse::<ObjectHash>().map_err(DbError::from))
     .collect()
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "payload_store_test_support.rs"]
+mod test_support;
 
 #[cfg(test)]
 #[path = "payload_store_tests.rs"]

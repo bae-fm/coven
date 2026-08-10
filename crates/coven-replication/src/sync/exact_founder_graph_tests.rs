@@ -265,6 +265,41 @@ async fn generation_zero_replay_baseline_names_its_owned_payloads() {
         .expect("baseline loads again once its image payload is back");
 }
 
+#[tokio::test]
+async fn generation_zero_replay_baseline_rejects_an_image_payload_under_the_wrong_hash() {
+    let db = open_test_db();
+    TestStore::create(
+        &db,
+        "retained-replay-content-address",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let database = coven_database::StoreDatabase::new(&db.database);
+    let baseline = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("load installed replay baseline");
+
+    database
+        .corrupt_payload_for_test(
+            baseline.image_payload_hash,
+            b"not the content-addressed replay image".to_vec(),
+        )
+        .await
+        .expect("replace replay image payload bytes");
+
+    let error = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect_err("a replay image payload under the wrong hash must be rejected");
+    assert!(
+        error.to_string().contains("contains bytes hashing to"),
+        "{error}"
+    );
+}
+
 /// Replacing the baseline's authority replaces its claim set, and the flow that
 /// drops the last claim on the superseded payload pays for it before returning:
 /// the old authority payload is gone, the image the row still names is not.

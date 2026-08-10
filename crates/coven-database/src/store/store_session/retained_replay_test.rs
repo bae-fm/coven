@@ -93,7 +93,10 @@ fn generation_zero_projection_accepts_a_wal_database() {
     assert_eq!(journal_mode, "wal");
     populate_fixture(&connection);
 
-    let bytes = project_generation_zero_image(&connection).expect("project WAL database");
+    let bytes = project_generation_zero_image(&connection)
+        .expect("project WAL database")
+        .database_bytes()
+        .expect("serialize projected WAL database");
     let mut image = Connection::open_in_memory().expect("open projected WAL image");
     crate::connection_io::deserialize_database_image_into(&mut image, &bytes)
         .expect("load projected WAL image");
@@ -134,8 +137,10 @@ fn generation_zero_projection_reads_uncommitted_founder_state_and_removes_local_
         )
         .expect("insert uncommitted founder");
 
-    let bytes =
-        project_generation_zero_image(&transaction).expect("project uncommitted founder state");
+    let bytes = project_generation_zero_image(&transaction)
+        .expect("project uncommitted founder state")
+        .database_bytes()
+        .expect("serialize projected founder state");
     assert!(!bytes
         .windows(b"projection-secret-marker".len())
         .any(|window| window == b"projection-secret-marker"));

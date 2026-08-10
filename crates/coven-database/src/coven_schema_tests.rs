@@ -73,7 +73,7 @@ fn bookkeeping_blob_columns_are_the_explicit_payload_allowlist() {
         ("outbound_membership_mutation", "progress_bytes".to_string()),
         ("outbound_store_snapshot", "meta_bytes".to_string()),
         ("published_store_snapshot", "meta_bytes".to_string()),
-        ("payload_storage", "inline_bytes".to_string()),
+        ("payload_storage", "compressed_bytes".to_string()),
         ("outbound_circle_snapshot", "meta_bytes".to_string()),
         ("published_circle_snapshot", "meta_bytes".to_string()),
         ("outbound_store_acks", "ack_bytes".to_string()),

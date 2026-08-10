@@ -8,7 +8,9 @@ use super::payload_store::{
     PayloadStoreError,
 };
 use super::StoreTransaction;
-use crate::{AudiencePartition, CirclePartitionControl, Database, DbError, StoreDatabase};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::StoreDatabase;
+use crate::{AudiencePartition, CirclePartitionControl, Database, DbError};
 
 mod circle_bootstrap;
 mod retained_replay;
@@ -39,6 +41,28 @@ impl<'store> StoreRecords<'store> {
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadStoreError> {
         write_payload_blocking(self.conn, self.store_dir, bytes)
+    }
+
+    pub(super) fn install_generation_zero_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: crate::RetainedReplayGenesisAuthority,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        self.install_generation_zero_replay_baseline_records(
+            schema_version,
+            routing_hash,
+            authority,
+        )
+    }
+
+    pub(super) fn install_snapshot_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: crate::RetainedReplaySnapshotAuthority,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        self.install_snapshot_replay_baseline_records(schema_version, routing_hash, authority)
     }
 
     pub(crate) fn store_write_partitions(

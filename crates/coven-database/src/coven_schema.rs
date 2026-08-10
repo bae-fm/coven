@@ -350,23 +350,24 @@ macro_rules! coven_tables {
     path TEXT PRIMARY KEY
 "
         );
-        // Content-addressed payload bytes owned by bookkeeping rows. Protocol
-        // values stay in SQLite; large and streamed values name a file in the
-        // payload file area. `storage` is the authoritative dispatch tag, so a
-        // reader never probes both representations.
+        // Content-addressed payload bytes owned by bookkeeping rows. Every
+        // payload is compressed; the compressed size selects SQLite or a file
+        // in the payload area. `storage` is the authoritative dispatch tag, so
+        // a reader never probes both representations.
         $visit!(
             payload_storage,
             "
     payload_hash TEXT PRIMARY KEY CHECK (length(payload_hash) = 64),
+    payload_size INTEGER NOT NULL CHECK (payload_size >= 0),
     storage TEXT NOT NULL CHECK (storage IN ('inline', 'file')),
-    inline_bytes BLOB,
-    file_size INTEGER,
+    compressed_bytes BLOB,
+    compressed_size INTEGER NOT NULL CHECK (compressed_size > 0),
     CHECK (
-        (storage = 'inline' AND inline_bytes IS NOT NULL AND file_size IS NULL
-         AND length(inline_bytes) <= 65536)
+        (storage = 'inline' AND compressed_bytes IS NOT NULL
+         AND compressed_size = length(compressed_bytes)
+         AND compressed_size <= 65536)
         OR
-        (storage = 'file' AND inline_bytes IS NULL AND file_size IS NOT NULL
-         AND file_size >= 0)
+        (storage = 'file' AND compressed_bytes IS NULL)
     )
 "
         );

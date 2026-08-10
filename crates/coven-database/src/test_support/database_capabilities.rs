@@ -259,6 +259,24 @@ impl Database {
         .await
     }
 
+    pub async fn install_replay_image_corruption_for_test(&self) -> Result<(), DbError> {
+        self.test_sql(|database| {
+            database
+                .execute_batch(
+                    "CREATE TEMP TRIGGER corrupt_owner_anchor_replay_image
+                     AFTER INSERT ON retained_replay_baselines
+                     BEGIN
+                         UPDATE payload_storage
+                         SET compressed_bytes = X'00', compressed_size = 1
+                         WHERE payload_hash = NEW.image_payload_hash
+                           AND storage = 'inline';
+                     END",
+                )
+                .map_err(DbError::from)
+        })
+        .await
+    }
+
     pub async fn remove_owner_anchor_failure_for_test(&self) -> Result<(), DbError> {
         self.test_sql(|database| {
             database
