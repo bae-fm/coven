@@ -69,3 +69,33 @@ fn staged_database_creation_refuses_an_existing_target() {
         b"existing database"
     );
 }
+
+#[test]
+fn blob_graph_installation_does_not_require_sqlite_sidecar_paths() {
+    let source = Connection::open_in_memory().expect("open source database");
+    source
+        .execute_batch("CREATE TABLE marker (value TEXT NOT NULL) STRICT;")
+        .expect("create source schema");
+    let bytes =
+        crate::connection_io::serialize_database_image(&source).expect("serialize source database");
+    let directory = tempfile::tempdir().expect("snapshot directory");
+    let path = directory.path().join("snapshot.db");
+    let image = SnapshotDatabaseImage::create(path.clone(), &bytes).expect("create staged image");
+    let journal_path = PathBuf::from(format!("{}-journal", path.display()));
+    std::fs::create_dir(&journal_path).expect("reserve SQLite journal path");
+
+    let result = image.install_blob_graph(&[]);
+
+    std::fs::remove_dir(journal_path).expect("remove journal-path reservation");
+    let image = result.expect("install without opening the staged image as a disk database");
+    let installed = image.read_and_discard().expect("read installed image");
+    let connection = crate::open_database_image(&installed).expect("open installed image");
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'marker')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read installed schema");
+    assert!(table_exists);
+}

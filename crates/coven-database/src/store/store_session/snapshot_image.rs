@@ -430,9 +430,9 @@ impl SnapshotDatabaseImage {
         blobs: &[crate::PreparedSnapshotBlob],
     ) -> Result<Self, SnapshotImageError> {
         let result = (|| {
-            let mut connection = Connection::open(self.path()).map_err(|error| {
-                SnapshotImageError::Projection(format!("open snapshot closure image: {error}"))
-            })?;
+            let source = std::fs::read(self.path()).map_err(SnapshotImageError::Io)?;
+            let mut connection = crate::open_database_image(&source)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             connection
                 .pragma_update(None, "foreign_keys", "ON")
                 .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
@@ -463,9 +463,17 @@ impl SnapshotDatabaseImage {
             connection.execute_batch("VACUUM").map_err(|error| {
                 SnapshotImageError::Projection(format!("vacuum snapshot closure: {error}"))
             })?;
+            let image = crate::connection_io::serialize_database_image(&connection)
+                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             connection.close().map_err(|(_, error)| {
                 SnapshotImageError::Projection(format!("close snapshot closure image: {error}"))
             })?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(self.path())
+                .map_err(SnapshotImageError::Io)?;
+            std::io::Write::write_all(&mut file, &image).map_err(SnapshotImageError::Io)?;
             Ok(())
         })();
         match result {
