@@ -503,35 +503,37 @@ impl StoreSession<'_> {
         late_id: &str,
     ) -> Result<(i64, i64, i64, i64), DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let retained = self.verified_store_authority.replay_projection_on(
-            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
-            root,
-            self.blob_decls,
-            self.gates,
-            self.synced_tables,
-            Some(routing_key),
-            &BTreeSet::new(),
-            None,
-            false,
-            coven_protocol::membership::LocalStoreMembership::Current,
-        )?;
+        let retained = crate::store::StoreRecordTransaction::new(&transaction, self.store_dir)
+            .replay_projection_with_authority(
+                self.verified_store_authority,
+                root,
+                self.blob_decls,
+                self.gates,
+                self.synced_tables,
+                Some(routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                coven_protocol::membership::LocalStoreMembership::Current,
+            )?;
         let retained_count = retained.document_count(historical_id)?;
         let retained_late_count = retained.document_count(late_id)?;
         transaction
             .execute("DELETE FROM circle_bootstrap_coverage", [])
             .map_err(DbError::from)?;
-        let sabotaged = self.verified_store_authority.replay_projection_on(
-            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
-            root,
-            self.blob_decls,
-            self.gates,
-            self.synced_tables,
-            Some(routing_key),
-            &BTreeSet::new(),
-            None,
-            false,
-            coven_protocol::membership::LocalStoreMembership::Current,
-        )?;
+        let sabotaged = crate::store::StoreRecordTransaction::new(&transaction, self.store_dir)
+            .replay_projection_with_authority(
+                self.verified_store_authority,
+                root,
+                self.blob_decls,
+                self.gates,
+                self.synced_tables,
+                Some(routing_key),
+                &BTreeSet::new(),
+                None,
+                false,
+                coven_protocol::membership::LocalStoreMembership::Current,
+            )?;
         let sabotaged_count = sabotaged.document_count(historical_id)?;
         let sabotaged_late_count = sabotaged.document_count(late_id)?;
         transaction.rollback().map_err(DbError::from)?;
@@ -601,14 +603,14 @@ impl StoreSession<'_> {
             self.verified_store_authority,
             activation_commit,
         )?;
-        let error = StoreDatabase::record_circle_bootstrap_coverage_on(
-            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
-            self.verified_store_authority,
-            root,
-            activation_commit,
-            retained.circle_activations(),
-        )
-        .expect_err("changed image hash must conflict with its exact reference");
+        let error = crate::store::StoreRecordTransaction::new(&transaction, self.store_dir)
+            .record_circle_bootstrap_coverage(
+                self.verified_store_authority,
+                root,
+                activation_commit,
+                retained.circle_activations(),
+            )
+            .expect_err("changed image hash must conflict with its exact reference");
         transaction.rollback().map_err(DbError::from)?;
         Ok(error.to_string())
     }

@@ -317,15 +317,12 @@ impl SnapshotDatabaseImage {
             if matches!(audience, coven_protocol::circle::Audience::Store) {
                 let records = crate::store::StoreRecordTransaction::new(&transaction, store_dir);
                 let mut authority = super::VerifiedStoreAuthority::default();
-                StoreDatabase::retain_snapshot_replay_inputs_on(records, &mut authority, root)
+                records
+                    .retain_snapshot_replay_inputs(&mut authority, root)
                     .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-                StoreDatabase::retain_snapshot_device_states_on(
-                    records,
-                    &mut authority,
-                    root,
-                    coverage,
-                )
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                records
+                    .retain_snapshot_device_states(&mut authority, root, coverage)
+                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
             }
             let preserved_non_synced_tables = match audience {
                 coven_protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
@@ -660,18 +657,19 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let replay = self.verified_store_authority.replay_projection_on(
-            crate::store::StoreRecordTransaction::new(&transaction, records.store_dir),
-            root,
-            self.blob_decls,
-            self.gates,
-            tables,
-            Some(routing_key),
-            &std::collections::BTreeSet::new(),
-            Some(cutoff),
-            false,
-            coven_protocol::membership::LocalStoreMembership::Current,
-        )?;
+        let replay = crate::store::StoreRecordTransaction::new(&transaction, records.store_dir)
+            .replay_projection_with_authority(
+                self.verified_store_authority,
+                root,
+                self.blob_decls,
+                self.gates,
+                tables,
+                Some(routing_key),
+                &std::collections::BTreeSet::new(),
+                Some(cutoff),
+                false,
+                coven_protocol::membership::LocalStoreMembership::Current,
+            )?;
         transaction.rollback().map_err(DbError::from)?;
         let replay_frontier = replay.materialized_frontier()?;
         if replay_frontier != *cutoff {

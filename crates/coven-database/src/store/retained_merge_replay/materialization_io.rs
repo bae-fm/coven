@@ -1,6 +1,6 @@
 use super::*;
 use crate::query_mapped_rows;
-use crate::store::{StoreRecordTransaction, StoreRecords};
+use crate::store::StoreRecords;
 
 /// The plaintext one record names, read from the spool.
 ///
@@ -26,6 +26,26 @@ fn spooled_semantic_payload(
 }
 
 impl StoreDatabase {
+    pub(crate) fn open_retained_merge_materialization_input_with_verified_commit_on(
+        records: StoreRecords<'_>,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        registration_lookup: &mut dyn VerifiedRegistrationLookup,
+        commit_ref: &StoreBatchCommitRef,
+        input: &RetainedMergeMaterializationInput,
+        input_hash: ObjectHash,
+        verified: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
+    ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
+        Self::open_retained_merge_materialization_input_with_authority_on(
+            records,
+            root,
+            registration_lookup,
+            commit_ref,
+            input,
+            input_hash,
+            RetainedCommitAuthority::Operation(verified),
+        )
+    }
+
     fn open_retained_merge_materialization_input_with_authority_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
@@ -243,148 +263,6 @@ impl StoreDatabase {
             input.activation.package_application,
             input_hash,
         )
-    }
-
-    pub(crate) fn retain_merge_materialization_on(
-        records: StoreRecordTransaction<'_, '_>,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        materialization: &VerifiedMergeMaterialization<'_>,
-    ) -> Result<
-        (
-            RetainedMergeMaterializationKey,
-            OwnedVerifiedMergeMaterialization,
-        ),
-        DbError,
-    > {
-        Self::retain_merge_materialization_with_authority_on(
-            records,
-            registrations,
-            root,
-            materialization,
-            RetainedCommitAuthority::Operation(materialization.verified_commit()),
-        )
-    }
-
-    fn retain_merge_materialization_with_authority_on(
-        records: StoreRecordTransaction<'_, '_>,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        materialization: &VerifiedMergeMaterialization<'_>,
-        authority: RetainedCommitAuthority<'_>,
-    ) -> Result<
-        (
-            RetainedMergeMaterializationKey,
-            OwnedVerifiedMergeMaterialization,
-        ),
-        DbError,
-    > {
-        let packages = Self::canonical_retained_merge_packages(
-            materialization.commit(),
-            materialization.commit_ref(),
-            materialization.packages(),
-        )?;
-        let input = RetainedMergeMaterializationInput {
-            commit: PreparedExactObject::new(
-                materialization.commit_ref().object.clone(),
-                materialization.commit().to_bytes(),
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?,
-            activation_head: PreparedExactObject::new(
-                materialization.activation_head_object().clone(),
-                materialization.activation_head().to_bytes(),
-            )
-            .map_err(|error| DbError::Message(error.to_string()))?,
-            history_evidence: materialization.history_evidence().clone(),
-            membership_objects: materialization.membership_objects().cloned(),
-            packages,
-            activation: RetainedCommitActivationInput {
-                registrations: RetainedStoreDeviceRegistrationActivations::from_verified(
-                    root,
-                    materialization.commit(),
-                    materialization.registrations(),
-                )
-                .map_err(|error| DbError::Message(error.to_string()))?,
-                device_operations: materialization.device_operations().to_retained(),
-                circle_activations: materialization
-                    .circle_activations()
-                    .to_retained()
-                    .map_err(|error| DbError::Message(error.to_string()))?,
-                package_application: materialization.package_application(),
-            },
-        };
-        let canonical_input = serde_json::to_vec(&input)
-            .map_err(|error| DbError::context("serialize retained Merge materialization", error))?;
-        let input_hash = ObjectHash::digest(&canonical_input);
-        let verified = Self::open_retained_merge_materialization_input_with_authority_on(
-            StoreRecords::new(records.transaction, records.store_dir),
-            root,
-            registrations,
-            materialization.commit_ref(),
-            &input,
-            input_hash,
-            authority,
-        )?;
-        let conn = records.transaction;
-        let StoreCommitCoord {
-            stream_id,
-            sequence,
-        } = &materialization.commit_ref().coord;
-        let stream_id = stream_id.to_string();
-        let sequence = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let commit_ref_json = serde_json::to_string(materialization.commit_ref())
-            .map_err(|error| DbError::context("serialize retained Merge commit ref", error))?;
-        let inserted = conn
-            .execute(
-                "INSERT INTO retained_merge_materializations
-                 (device_id, seq, commit_ref, input_hash, canonical_input)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(device_id, seq) DO NOTHING",
-                rusqlite::params![
-                    &stream_id,
-                    sequence,
-                    &commit_ref_json,
-                    input_hash.to_string(),
-                    &canonical_input
-                ],
-            )
-            .map_err(DbError::from)?;
-        if inserted == 0 {
-            let stored: (String, String, Vec<u8>) = conn
-                .query_row(
-                    "SELECT commit_ref, input_hash, canonical_input
-                     FROM retained_merge_materializations
-                     WHERE device_id = ?1 AND seq = ?2",
-                    rusqlite::params![&stream_id, sequence],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .map_err(DbError::from)?;
-            if stored
-                != (
-                    commit_ref_json.clone(),
-                    input_hash.to_string(),
-                    canonical_input,
-                )
-            {
-                return Err(DbError::Message(format!(
-                    "retained Merge coordinate {stream_id}/{} already contains different exact input",
-                    materialization.commit_ref().coord.sequence()
-                )));
-            }
-        }
-        let replay_owner = RetainedReplayOwner::Commit {
-            commit: materialization.commit_ref().clone(),
-            input_hash,
-        };
-        Self::pin_retained_merge_objects_on(conn, &input, &replay_owner)?;
-        Self::validate_retained_merge_pin_closure_on(conn, &input, &replay_owner)?;
-        Ok((
-            RetainedMergeMaterializationKey {
-                commit_ref: commit_ref_json,
-                input_hash,
-            },
-            verified,
-        ))
     }
 
     pub(crate) fn load_retained_merge_materialization_on(

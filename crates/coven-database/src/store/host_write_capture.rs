@@ -2,19 +2,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::warn;
 
 use crate::BlobDecls;
 use crate::PublicationBlob;
+use crate::WriteId;
 use crate::{attach_session, capture_changeset, *};
 use crate::{
-    audience_moves, capture_routing_changes, is_routing_table, partition_outbound,
+    audience_moves, capture_routing_changes, partition_outbound,
     validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
     Gates, RoutingChanges,
 };
-use crate::{WriteId, WriteStatus};
-
-use coven_protocol::write::AffectedRow;
 
 use coven_protocol::blob::Provenance;
 
@@ -488,146 +485,6 @@ impl StoreDatabase {
         Self::store_write_routing(&self.gates, routing_encryption).map(drop)
     }
 
-    pub(crate) fn insert_store_write_on(
-        records: crate::store::StoreRecordTransaction<'_, '_>,
-        write_id: &WriteId,
-        partitions: &[AudiencePartition],
-        changeset_hash: ObjectHash,
-        base: &StoreWriteBase,
-        blob_facts: &StoreWriteBlobFacts,
-        rows_changed: u64,
-    ) -> Result<WriteStatus, DbError> {
-        let tx = records.transaction;
-        let remote_partitions = partitions
-            .iter()
-            .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
-            .collect::<Vec<_>>();
-        let affected_rows = if remote_partitions.is_empty() {
-            // A tripwire, not a routine event. An empty capture from a transaction
-            // that also CHANGED NO ROWS is a pure read left on the write path —
-            // warn so it gets moved to the journal-free read path
-            // (`CovenHandle::sql_read`). An empty capture
-            // from a transaction that DID change rows is a device-local-table
-            // write (those tables aren't in the session) — a supported, routine
-            // pattern that stays on `sql()` silently. The one case this misses:
-            // a conditional write to a synced table that no-op'd this cycle (an
-            // idempotent INSERT OR IGNORE re-run) also changed no rows and warns;
-            // legitimate but rare, tolerated.
-            if partitions.is_empty() && rows_changed == 0 {
-                warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
-                // Debug builds name the offender: the backtrace runs through the
-                // host's monomorphized closure, whose symbol carries the call
-                // site's module path. Captured only when the warn fires.
-                #[cfg(debug_assertions)]
-                warn!(
-                    "zero-change sql transaction backtrace:\n{}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-            }
-            Vec::new()
-        } else {
-            let mut affected = Vec::new();
-            for partition in &remote_partitions {
-                affected.extend(
-                    crate::walk_changeset(&partition.changeset)
-                        .map_err(|error| {
-                            DbError::Message(format!("read affected write rows: {error}"))
-                        })?
-                        .into_iter()
-                        .filter(|row| !is_routing_table(&row.table))
-                        .map(|row| {
-                            let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
-                                DbError::Message(format!(
-                                    "shared write row in {:?} has no primary key",
-                                    row.table
-                                ))
-                            })?;
-                            Ok(AffectedRow {
-                                table: row.table,
-                                primary_key,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, DbError>>()?,
-                );
-            }
-            affected.sort();
-            affected.dedup();
-            affected
-        };
-        let status = if remote_partitions.is_empty() {
-            WriteStatus::LocalOnly
-        } else {
-            WriteStatus::Pending
-        };
-        let base = serde_json::to_string(base)
-            .map_err(|error| DbError::context("serialize pending Store base", error))?;
-        let status_json = serde_json::to_string(&status)
-            .map_err(|error| DbError::context("serialize write status", error))?;
-        let affected_rows = serde_json::to_string(&affected_rows)
-            .map_err(|error| DbError::context("serialize affected rows", error))?;
-        let blob_facts_json = serde_json::to_string(blob_facts)
-            .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
-        tx.execute(
-            "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                write_id.as_str(),
-                status_json,
-                affected_rows,
-                changeset_hash.to_string(),
-                base,
-                blob_facts_json,
-            ],
-        )
-        .map_err(DbError::from)?;
-        let mut payloads = std::collections::BTreeSet::from([changeset_hash]);
-        for partition in partitions {
-            let audience = match partition.audience {
-                coven_protocol::circle::Audience::Store => "store".to_string(),
-                coven_protocol::circle::Audience::Local => "local".to_string(),
-                coven_protocol::circle::Audience::Circle(circle_id) => circle_id.to_string(),
-            };
-            let control = partition
-                .control
-                .as_ref()
-                .map(CirclePartitionControl::stored_json);
-            let partition_hash = records.install_payload(&partition.changeset)?;
-            payloads.insert(partition_hash);
-            tx.execute(
-                "INSERT INTO store_write_partitions
-                 (write_id, audience, control_coord, changeset_hash)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    write_id.as_str(),
-                    audience,
-                    control,
-                    partition_hash.to_string()
-                ],
-            )
-            .map_err(DbError::from)?;
-        }
-        crate::payload_spool::set_payload_owner_claims_on(
-            tx,
-            &crate::payload_spool::store_write_owner_key(write_id),
-            &payloads,
-        )?;
-        if status == WriteStatus::Pending {
-            for fact in &blob_facts.blobs {
-                if fact.blob.provenance != Provenance::HostProvided {
-                    continue;
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO store_write_blob_leases
-                     (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
-                    (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
-                )
-                .map_err(DbError::from)?;
-            }
-        }
-        Ok(status)
-    }
-
     pub async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
         self.connection
             .call_store(|session| session.prepare_store_write())
@@ -972,15 +829,15 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         local_stream_id.as_deref(),
                     )?,
                 };
-                let status = StoreDatabase::insert_store_write_on(
-                    crate::store::StoreRecordTransaction::new(&tx, store_dir),
-                    &write_id,
-                    &partitioned.partitions,
-                    changeset_hash,
-                    &base,
-                    &blob_facts,
-                    rows_changed,
-                )?;
+                let status = crate::store::StoreRecordTransaction::new(&tx, store_dir)
+                    .insert_store_write(
+                        &write_id,
+                        &partitioned.partitions,
+                        changeset_hash,
+                        &base,
+                        &blob_facts,
+                        rows_changed,
+                    )?;
                 tx.commit().map_err(DbError::from)?;
                 Ok::<_, DbError>(status)
             })();

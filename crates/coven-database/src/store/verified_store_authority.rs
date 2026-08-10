@@ -475,10 +475,10 @@ impl VerifiedStoreAuthority {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn replay_projection_on(
+    pub(super) fn replay_projection_for_root_on(
         &mut self,
         records: crate::store::StoreRecordTransaction<'_, '_>,
-        expected_root: &StoreRootRef,
+        root: &StoreRootRef,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -488,19 +488,10 @@ impl VerifiedStoreAuthority {
         include_local_write_overlays: bool,
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
     ) -> Result<ReplayProjection, DbError> {
-        let root = self.required_root_authority_on(crate::store::StoreRecords::new(
-            records.transaction,
-            records.store_dir,
-        ))?;
-        if &root != expected_root {
-            return Err(DbError::Message(
-                "retained replay projection belongs to another Store root".to_string(),
-            ));
-        }
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
         self.retained_replay.replay_projection_on(
             records,
-            &root,
+            root,
             &mut registrations,
             blob_decls,
             gates,

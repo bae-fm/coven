@@ -21,7 +21,6 @@ use super::candidate_records::{
     validate_terminal_nonactivation_authority_on,
 };
 use super::membership_rotation::commit_rotation_candidate_on;
-use super::owner_promotion::advance_owner_promotion_journal_on;
 use super::store_device_state::{
     load_store_device_exclusion_freezes_on, replace_store_device_exclusion_freezes_on,
     store_device_state_for_history_cut_on,

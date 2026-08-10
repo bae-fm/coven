@@ -1,8 +1,9 @@
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use coven_protocol::store_commit::ObjectHash;
-use coven_protocol::write::{WriteId, WriteResolution, WriteStatus};
+use coven_protocol::write::{AffectedRow, WriteId, WriteResolution, WriteStatus};
 use rusqlite::Connection;
+use tracing::warn;
 
 use super::candidate_records::{
     load_merge_candidate_head_cleanup_on, parse_prepared_merge_candidate_on,
@@ -13,7 +14,14 @@ use super::payload_spool::{
     PayloadSpoolError,
 };
 use super::publication_state::PreparedStoreWriteState;
-use crate::{candidate_graph_exact_objects, load_remote_object_on, Database, DbError};
+use crate::{
+    candidate_graph_exact_objects, is_routing_table, load_remote_object_on, AudiencePartition,
+    CirclePartitionControl, Database, DbError, StoreWriteBase, StoreWriteBlobFacts,
+};
+
+mod circle_bootstrap;
+mod retained_replay;
+mod snapshot_install;
 
 /// One Store's row connection and matching payload directory.
 ///
@@ -51,8 +59,8 @@ impl<'store> StoreRecords<'store> {
 /// mutation from using another Store's payload directory.
 #[derive(Clone, Copy)]
 pub(crate) struct StoreRecordTransaction<'store, 'connection> {
-    pub(crate) transaction: &'store rusqlite::Transaction<'connection>,
-    pub(crate) store_dir: &'store StoreDir,
+    transaction: &'store rusqlite::Transaction<'connection>,
+    store_dir: &'store StoreDir,
 }
 
 struct UnpublishedWriteCleanup {
@@ -73,6 +81,217 @@ impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         write_payload_blocking(self.store_dir, bytes)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn begin_blocked_merge_candidate_nonactivation(
+        self,
+        retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        write_id: &WriteId,
+        candidate: &super::candidate_records::PreparedMergeCandidate,
+        nonactivation: &super::candidate_records::BlockedMergeCandidateNonactivation,
+        include_indexed_blobs: bool,
+        extra_objects: &[coven_protocol::objects::ExactObjectRef],
+    ) -> Result<(), DbError> {
+        if let super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
+            durable,
+            ..
+        } = nonactivation
+        {
+            super::candidate_records::validate_terminal_candidate_authority_on(
+                StoreRecords::new(self.transaction, self.store_dir),
+                retained,
+                root,
+                candidate,
+                durable,
+            )?;
+        }
+        match nonactivation {
+            super::candidate_records::BlockedMergeCandidateNonactivation::Merge(durable) => {
+                super::candidate_records::begin_merge_candidate_nonactivation_on(
+                    self.transaction,
+                    write_id,
+                    candidate,
+                    durable,
+                    include_indexed_blobs,
+                    extra_objects,
+                )
+            }
+            super::candidate_records::BlockedMergeCandidateNonactivation::Terminal {
+                durable,
+                head_nonactivation,
+            } => {
+                super::candidate_records::begin_merge_candidate_nonactivation_with_verified_head_on(
+                    self.transaction,
+                    write_id,
+                    candidate,
+                    durable,
+                    include_indexed_blobs,
+                    extra_objects,
+                    head_nonactivation,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_owner_promotion_journal(
+        self,
+        journal_key: String,
+        target_key: String,
+        previous_value: String,
+        next_value: String,
+        remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
+    ) -> Result<(), DbError> {
+        super::owner_promotion::advance_owner_promotion_journal_on(
+            self.transaction,
+            self.store_dir,
+            journal_key,
+            target_key,
+            previous_value,
+            next_value,
+            remote_objects,
+        )
+    }
+
+    pub(super) fn replace_tables_from_projection(
+        self,
+        source: &super::ReplayProjection,
+        tables: &[String],
+    ) -> Result<(), DbError> {
+        super::replay_projection::replace_tables_from_projection_on(
+            source,
+            self.transaction,
+            tables,
+        )
+    }
+
+    pub(crate) fn insert_store_write(
+        self,
+        write_id: &WriteId,
+        partitions: &[AudiencePartition],
+        changeset_hash: ObjectHash,
+        base: &StoreWriteBase,
+        blob_facts: &StoreWriteBlobFacts,
+        rows_changed: u64,
+    ) -> Result<WriteStatus, DbError> {
+        let tx = self.transaction;
+        let remote_partitions = partitions
+            .iter()
+            .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
+            .collect::<Vec<_>>();
+        let affected_rows = if remote_partitions.is_empty() {
+            if partitions.is_empty() && rows_changed == 0 {
+                warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
+                #[cfg(debug_assertions)]
+                warn!(
+                    "zero-change sql transaction backtrace:\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+            Vec::new()
+        } else {
+            let mut affected = Vec::new();
+            for partition in &remote_partitions {
+                affected.extend(
+                    crate::walk_changeset(&partition.changeset)
+                        .map_err(|error| {
+                            DbError::Message(format!("read affected write rows: {error}"))
+                        })?
+                        .into_iter()
+                        .filter(|row| !is_routing_table(&row.table))
+                        .map(|row| {
+                            let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
+                                DbError::Message(format!(
+                                    "shared write row in {:?} has no primary key",
+                                    row.table
+                                ))
+                            })?;
+                            Ok(AffectedRow {
+                                table: row.table,
+                                primary_key,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, DbError>>()?,
+                );
+            }
+            affected.sort();
+            affected.dedup();
+            affected
+        };
+        let status = if remote_partitions.is_empty() {
+            WriteStatus::LocalOnly
+        } else {
+            WriteStatus::Pending
+        };
+        let base = serde_json::to_string(base)
+            .map_err(|error| DbError::context("serialize pending Store base", error))?;
+        let status_json = serde_json::to_string(&status)
+            .map_err(|error| DbError::context("serialize write status", error))?;
+        let affected_rows = serde_json::to_string(&affected_rows)
+            .map_err(|error| DbError::context("serialize affected rows", error))?;
+        let blob_facts_json = serde_json::to_string(blob_facts)
+            .map_err(|error| DbError::context("serialize Store write blob facts", error))?;
+        tx.execute(
+            "INSERT INTO store_writes
+             (write_id, status, affected_rows, changeset_hash, base, blob_facts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                write_id.as_str(),
+                status_json,
+                affected_rows,
+                changeset_hash.to_string(),
+                base,
+                blob_facts_json,
+            ],
+        )
+        .map_err(DbError::from)?;
+        let mut payloads = std::collections::BTreeSet::from([changeset_hash]);
+        for partition in partitions {
+            let audience = match partition.audience {
+                coven_protocol::circle::Audience::Store => "store".to_string(),
+                coven_protocol::circle::Audience::Local => "local".to_string(),
+                coven_protocol::circle::Audience::Circle(circle_id) => circle_id.to_string(),
+            };
+            let control = partition
+                .control
+                .as_ref()
+                .map(CirclePartitionControl::stored_json);
+            let partition_hash = self.install_payload(&partition.changeset)?;
+            payloads.insert(partition_hash);
+            tx.execute(
+                "INSERT INTO store_write_partitions
+                 (write_id, audience, control_coord, changeset_hash)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    write_id.as_str(),
+                    audience,
+                    control,
+                    partition_hash.to_string()
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
+        crate::payload_spool::set_payload_owner_claims_on(
+            tx,
+            &crate::payload_spool::store_write_owner_key(write_id),
+            &payloads,
+        )?;
+        if status == WriteStatus::Pending {
+            for fact in &blob_facts.blobs {
+                if fact.blob.provenance != coven_protocol::blob::Provenance::HostProvided {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO store_write_blob_leases
+                     (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
+                    (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
+                )
+                .map_err(DbError::from)?;
+            }
+        }
+        Ok(status)
     }
 
     fn unpublished_write_cleanup(

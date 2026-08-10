@@ -515,8 +515,7 @@ impl StoreSession<'_> {
             StoreDatabase::capture_partition_blob_facts_on(&tx, &partitions, self.blob_decls)?;
         let changeset_hash =
             crate::payload_spool::write_payload_blocking(records.store_dir, &changeset)?;
-        StoreDatabase::insert_store_write_on(
-            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
+        crate::store::StoreRecordTransaction::new(&tx, records.store_dir).insert_store_write(
             &write_id,
             &partitions,
             changeset_hash,

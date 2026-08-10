@@ -1,25 +1,14 @@
 use super::*;
-use crate::store::{StoreRecordTransaction, StoreRecords};
+use crate::store::StoreRecords;
 
 /// A replay-owned SQLite image. Callers can apply or inspect the projection,
 /// but cannot obtain the connection that implements it.
-pub(super) struct ReplayProjection {
+pub(crate) struct ReplayProjection {
     pub(super) connection: rusqlite::Connection,
     pub(super) store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl ReplayProjection {
-    pub(super) fn replace_tables_on(
-        &self,
-        target: StoreRecordTransaction<'_, '_>,
-        tables: &[String],
-    ) -> Result<(), DbError> {
-        for table in tables {
-            crate::copy_table_with_conflicts(&self.connection, target.transaction, table, false)?;
-        }
-        Ok(())
-    }
-
     pub(super) fn materialized_frontier(
         &self,
     ) -> Result<coven_protocol::store_commit::CommitFrontier, DbError> {
@@ -56,4 +45,15 @@ impl ReplayProjection {
             )
             .map_err(DbError::from)
     }
+}
+
+pub(super) fn replace_tables_from_projection_on(
+    source: &ReplayProjection,
+    target: &rusqlite::Transaction<'_>,
+    tables: &[String],
+) -> Result<(), DbError> {
+    for table in tables {
+        crate::copy_table_with_conflicts(&source.connection, target, table, false)?;
+    }
+    Ok(())
 }

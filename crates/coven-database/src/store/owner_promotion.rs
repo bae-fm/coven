@@ -63,14 +63,14 @@ impl StoreSession<'_> {
         let (journal_key, target_key, previous_value, next_value, remote_objects) =
             transition.into_values();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        advance_owner_promotion_journal_on(
-            crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
-            journal_key,
-            target_key,
-            previous_value,
-            next_value,
-            remote_objects,
-        )?;
+        crate::store::StoreRecordTransaction::new(&tx, self.store_dir)
+            .advance_owner_promotion_journal(
+                journal_key,
+                target_key,
+                previous_value,
+                next_value,
+                remote_objects,
+            )?;
         tx.commit().map_err(DbError::from)
     }
 
@@ -90,14 +90,14 @@ impl StoreSession<'_> {
             &objects,
             &nonactivation,
         )?;
-        advance_owner_promotion_journal_on(
-            crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
-            journal_key,
-            target_key,
-            previous_value,
-            next_value,
-            remote_objects,
-        )?;
+        crate::store::StoreRecordTransaction::new(&tx, self.store_dir)
+            .advance_owner_promotion_journal(
+                journal_key,
+                target_key,
+                previous_value,
+                next_value,
+                remote_objects,
+            )?;
         tx.commit().map_err(DbError::from)?;
         Ok(cleanup)
     }
@@ -350,14 +350,14 @@ impl StoreDatabase {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance_owner_promotion_journal_on(
-    records: crate::store::StoreRecordTransaction<'_, '_>,
+    tx: &rusqlite::Transaction<'_>,
+    store_dir: &coven_foundation::store_dir::StoreDir,
     journal_key: String,
     target_key: String,
     previous_value: String,
     next_value: String,
     remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
 ) -> Result<(), DbError> {
-    let tx = records.transaction;
     let mut object_ids = BTreeSet::new();
     for remote in &remote_objects {
         if !object_ids.insert(remote.object_id()) {
@@ -365,12 +365,7 @@ pub(super) fn advance_owner_promotion_journal_on(
                 "Owner-promotion journal repeats a remote object".to_string(),
             ));
         }
-        persist_exact_remote_object_on(
-            tx,
-            records.store_dir,
-            remote,
-            "Owner-promotion candidate object",
-        )?;
+        persist_exact_remote_object_on(tx, store_dir, remote, "Owner-promotion candidate object")?;
     }
     let by_id = tx
         .execute(

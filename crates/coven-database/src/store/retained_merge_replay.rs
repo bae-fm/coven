@@ -10,13 +10,12 @@ use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::blob::locator::{RemoteAudience, StoredBlobRef};
 use coven_protocol::circle_activation::VerifiedCircleActivations;
 use coven_protocol::membership::{AuthorHead, MembershipEntry};
-use coven_protocol::objects::PreparedExactObject;
 use coven_protocol::remote_object::{
     remote_object_id, RemoteObjectRecord, RetainedReplayOwner, SharedLiveSetObjectDomain,
 };
 use coven_protocol::store_commit::{
-    CommitFrontier, ObjectHash, RetainedStoreDeviceRegistrationActivations, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistrationRef,
+    CommitFrontier, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceHead, StoreDeviceRegistrationRef,
 };
 use coven_protocol::write::{WriteId, WriteStatus};
 use rusqlite::{Connection, OptionalExtension};
@@ -24,8 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::candidate_records::PreparedMergeCandidate;
 use super::materialization_models::{
-    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedCommitActivationInput,
-    RetainedMergeMaterializationInput,
+    MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedMergeMaterializationInput,
 };
 use super::store_device_state::load_store_device_snapshot_on;
 use super::verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup};

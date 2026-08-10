@@ -8,10 +8,10 @@
 //! (instead of the write row) when cleanup completes.
 
 use super::candidate_records::{
-    begin_blocked_merge_candidate_nonactivation_on, blocked_merge_candidate_from_prepared,
-    blocked_merge_candidate_nonactivation, merge_candidate_cleanup_targets_on,
-    parse_prepared_merge_candidate_parts_on, terminal_candidate_verification_on,
-    validate_terminal_candidate_authority_on, CandidateCleanupObject, PreparedMergeCandidate,
+    blocked_merge_candidate_from_prepared, blocked_merge_candidate_nonactivation,
+    merge_candidate_cleanup_targets_on, parse_prepared_merge_candidate_parts_on,
+    terminal_candidate_verification_on, validate_terminal_candidate_authority_on,
+    CandidateCleanupObject, PreparedMergeCandidate,
 };
 use super::{StoreDatabase, StoreSession};
 use crate::{
@@ -143,16 +143,16 @@ impl StoreSession<'_> {
             self.verified_store_authority,
             journal.operation(),
         )?;
-        begin_blocked_merge_candidate_nonactivation_on(
-            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
-            self.verified_store_authority,
-            &root,
-            &candidate.commit.write_id,
-            &candidate,
-            &nonactivation,
-            false,
-            &bootstrap_blobs,
-        )?;
+        crate::store::StoreRecordTransaction::new(&tx, records.store_dir)
+            .begin_blocked_merge_candidate_nonactivation(
+                self.verified_store_authority,
+                &root,
+                &candidate.commit.write_id,
+                &candidate,
+                &nonactivation,
+                false,
+                &bootstrap_blobs,
+            )?;
         journal
             .begin_discard()
             .map_err(|error| crate::DbError::Message(error.to_string()))?;

@@ -156,10 +156,8 @@ impl StoreSession<'_> {
                     tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                         .map_err(DbError::from)?;
                 }
-                replay.replace_tables_on(
-                    crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
-                    &tables,
-                )?;
+                crate::store::StoreRecordTransaction::new(&tx, records.store_dir)
+                    .replace_tables_from_projection(&replay, &tables)?;
                 let violations: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",

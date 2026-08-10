@@ -536,53 +536,6 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn begin_blocked_merge_candidate_nonactivation_on(
-    records: crate::store::StoreRecordTransaction<'_, '_>,
-    retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
-    root: &coven_protocol::store_commit::StoreRootRef,
-    write_id: &WriteId,
-    candidate: &PreparedMergeCandidate,
-    nonactivation: &BlockedMergeCandidateNonactivation,
-    include_indexed_blobs: bool,
-    extra_objects: &[ExactObjectRef],
-) -> Result<(), DbError> {
-    let tx = records.transaction;
-    if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
-        validate_terminal_candidate_authority_on(
-            crate::store::StoreRecords::new(records.transaction, records.store_dir),
-            retained,
-            root,
-            candidate,
-            durable,
-        )?;
-    }
-    match nonactivation {
-        BlockedMergeCandidateNonactivation::Merge(durable) => {
-            begin_merge_candidate_nonactivation_on(
-                tx,
-                write_id,
-                candidate,
-                durable,
-                include_indexed_blobs,
-                extra_objects,
-            )
-        }
-        BlockedMergeCandidateNonactivation::Terminal {
-            durable,
-            head_nonactivation,
-        } => begin_merge_candidate_nonactivation_with_verified_head_on(
-            tx,
-            write_id,
-            candidate,
-            durable,
-            include_indexed_blobs,
-            extra_objects,
-            head_nonactivation,
-        ),
-    }
-}
-
 pub fn begin_merge_candidate_nonactivation_on(
     conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,

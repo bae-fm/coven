@@ -169,16 +169,16 @@ impl StoreSession<'_> {
             verified_authority,
             &prepared,
         )?;
-        begin_blocked_merge_candidate_nonactivation_on(
-            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
-            verified_authority,
-            &root,
-            &write_id,
-            &candidate,
-            &nonactivation,
-            true,
-            &[],
-        )?;
+        crate::store::StoreRecordTransaction::new(&tx, records.store_dir)
+            .begin_blocked_merge_candidate_nonactivation(
+                verified_authority,
+                &root,
+                &write_id,
+                &candidate,
+                &nonactivation,
+                true,
+                &[],
+            )?;
         tx.commit().map_err(DbError::from)
     }
 
@@ -243,26 +243,26 @@ impl StoreSession<'_> {
             authority_head.semantic_bytes(),
             authority_head.prepared().reference(),
         )?;
-        begin_blocked_merge_candidate_nonactivation_on(
-            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
-            verified_authority,
-            &root,
-            &write_id,
-            &candidate,
-            &candidate_nonactivation,
-            true,
-            &[],
-        )?;
-        begin_blocked_merge_candidate_nonactivation_on(
-            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
-            verified_authority,
-            &root,
-            &write_id,
-            &authority,
-            &authority_nonactivation,
-            false,
-            &[],
-        )?;
+        crate::store::StoreRecordTransaction::new(&tx, records.store_dir)
+            .begin_blocked_merge_candidate_nonactivation(
+                verified_authority,
+                &root,
+                &write_id,
+                &candidate,
+                &candidate_nonactivation,
+                true,
+                &[],
+            )?;
+        crate::store::StoreRecordTransaction::new(&tx, records.store_dir)
+            .begin_blocked_merge_candidate_nonactivation(
+                verified_authority,
+                &root,
+                &write_id,
+                &authority,
+                &authority_nonactivation,
+                false,
+                &[],
+            )?;
         *outcome = MergeAbandonmentOutcome::AuthorExcluded;
         let replacement = serde_json::to_string(&prepared).map_err(|error| {
             DbError::context("serialize excluded Merge abandonment preparation", error)
