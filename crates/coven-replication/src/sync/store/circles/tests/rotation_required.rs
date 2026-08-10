@@ -922,22 +922,20 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
             .any(|reference| reference == &published),
         "the removed member cannot advance into the successor-epoch commit"
     );
-    let received = fixture
-        .member_db
-        .database
-        .test_sql(|connection| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(
+    let received = StoreDatabase::new(&fixture.member_db.database)
+        .read(|sql| {
+            sql.query_row(
+                "SELECT EXISTS(
                         SELECT 1 FROM documents
                         WHERE id = '00000000-0000-4000-8000-000000000040'
                      )",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)
         })
         .await
+        .expect("access the removed member's documents projection")
         .expect("read the removed member's documents projection");
     assert!(
         !received,
@@ -977,16 +975,14 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
     // Cut the successor bootstrap at the accepted frontier while the unpublished
     // write is present. The cut no longer refuses, and the image is the accepted
     // projection: the accepted row is present, the unpublished row is absent.
-    let cutoff = fixture
-        .db
-        .database
-        .test_sql(|database| {
-            let refs = database.materialized_frontier()?;
-            coven_protocol::store_commit::CommitFrontier::from_refs(refs)
-                .map_err(|error| DbError::Message(error.to_string()))
-        })
-        .await
-        .expect("read the accepted materialized frontier");
+    let cutoff = coven_protocol::store_commit::CommitFrontier::from_refs(
+        StoreDatabase::new(&fixture.db.database)
+            .materialized_frontier()
+            .await
+            .expect("read the accepted materialized frontier"),
+    )
+    .map_err(|error| DbError::Message(error.to_string()))
+    .expect("shape the accepted materialized frontier");
     let loaded_store = fixture
         .store
         .bind_device(&fixture.db, &fixture.signer)
@@ -2126,10 +2122,8 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     // real coverage row the install recorded.
     let member_view = &fixture.member_device;
     member_view.pull().await;
-    let member_coverage = fixture
-        .member_db
-        .database
-        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
+    let member_coverage = StoreDatabase::new(&fixture.member_db.database)
+        .circle_bootstrap_coverage_ref(circle_id)
         .await
         .expect("read member Circle bootstrap coverage")
         .expect("the member's projection seeded from a real bootstrap coverage row");
@@ -2962,18 +2956,20 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
             .expect("read Circle package replay retention after reclaim"),
         "the reclaimed Circle package no longer has an ownership record"
     );
-    let row_present = fixture
-        .db
-        .database.test_sql(|connection| {
-            connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM documents WHERE id = '00000000-0000-4000-8000-0000000000c1')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)
+    let row_present = StoreDatabase::new(&fixture.db.database)
+        .read(|sql| {
+            sql.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM documents
+                     WHERE id = '00000000-0000-4000-8000-0000000000c1'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)
         })
         .await
+        .expect("access the owner's documents projection")
         .expect("read the owner's documents projection");
     assert!(
         row_present,
@@ -3035,10 +3031,8 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
 
     // The member's projection seeds from a real bootstrap coverage row the install
     // recorded — the coverage its acknowledgements will name.
-    let member_coverage = fixture
-        .member_db
-        .database
-        .test_sql(move |database| database.circle_bootstrap_coverage(circle_id))
+    let member_coverage = StoreDatabase::new(&fixture.member_db.database)
+        .circle_bootstrap_coverage_ref(circle_id)
         .await
         .expect("read member Circle bootstrap coverage")
         .expect("the member's projection seeded from a real bootstrap coverage row");
