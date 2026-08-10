@@ -946,7 +946,7 @@ impl Database {
         .await
     }
 
-    pub async fn test_sql<F, R>(&self, operation: F) -> Result<R, DbError>
+    pub(super) async fn test_sql<F, R>(&self, operation: F) -> Result<R, DbError>
     where
         F: for<'connection> FnOnce(DatabaseTestSql<'connection>) -> Result<R, DbError>
             + Send

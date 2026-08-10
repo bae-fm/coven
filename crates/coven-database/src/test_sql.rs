@@ -1,6 +1,5 @@
 use super::test_support::{
-    author_exclusion_activation_evidence, clear_table, table_row_count, OutboxAttempt,
-    RetainedRegistrationTamper,
+    clear_table, table_row_count, OutboxAttempt, RetainedRegistrationTamper,
 };
 use super::{Connection, DatabaseTestTable, DatabaseTestTransaction, DbError, ExternalBlobRecords};
 use rusqlite::OptionalExtension;
@@ -14,7 +13,7 @@ use rusqlite::OptionalExtension;
 /// control coordinate it was captured under, and its changeset bytes.
 pub(crate) type StoreWritePartitionRow = (String, Option<String>, Vec<u8>);
 
-pub struct DatabaseTestSql<'connection> {
+pub(crate) struct DatabaseTestSql<'connection> {
     connection: &'connection Connection,
     store_dir: Option<&'connection coven_foundation::store_dir::StoreDir>,
 }
@@ -37,7 +36,7 @@ impl DatabaseTestSql<'_> {
         }
     }
 
-    pub fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
+    pub(crate) fn payload(&self, encoded_hash: String) -> Result<Vec<u8>, DbError> {
         let store_dir = self.required_store_dir()?;
         let hash = encoded_hash
             .parse()
@@ -46,7 +45,11 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_payload(&self, bytes: &[u8]) -> Result<coven_protocol::ObjectHash, DbError> {
+    #[cfg(test)]
+    pub(crate) fn install_payload(
+        &self,
+        bytes: &[u8],
+    ) -> Result<coven_protocol::ObjectHash, DbError> {
         let store_dir = self.required_store_dir()?;
         let transaction = self
             .connection
@@ -64,18 +67,18 @@ impl DatabaseTestSql<'_> {
         })
     }
 
-    pub fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
+    pub(crate) fn execute<P>(&self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
         P: rusqlite::Params,
     {
         self.connection.execute(sql, params)
     }
 
-    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+    pub(crate) fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
         self.connection.execute_batch(sql)
     }
 
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    pub(crate) fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
     where
         P: rusqlite::Params,
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
@@ -83,7 +86,7 @@ impl DatabaseTestSql<'_> {
         self.connection.query_row(sql, params, map)
     }
 
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    pub(crate) fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
     where
         P: rusqlite::Params,
         F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
@@ -93,20 +96,8 @@ impl DatabaseTestSql<'_> {
         values
     }
 
-    pub fn pay_owed_payload_deletions(&self) -> Result<(), DbError> {
-        crate::payload_store::pay_owed_payload_deletions_on(
-            self.connection,
-            self.required_store_dir()?,
-        )
-    }
-
-    pub fn payload_cleanup_hashes(
-        &self,
-    ) -> Result<Vec<coven_protocol::store_commit::ObjectHash>, DbError> {
-        crate::payload_store::payload_cleanup_hashes_on(self.connection)
-    }
-
-    pub fn set_payload_owner_claims(
+    #[cfg(test)]
+    pub(crate) fn set_payload_owner_claims(
         &self,
         owner_key: &str,
         payloads: &std::collections::BTreeSet<coven_protocol::store_commit::ObjectHash>,
@@ -114,15 +105,7 @@ impl DatabaseTestSql<'_> {
         crate::payload_store::set_payload_owner_claims_on(self.connection, owner_key, payloads)
     }
 
-    pub fn record_obsolete_copy_intents(
-        &self,
-        decls: &crate::BlobDecls,
-        intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,
-    ) -> Result<(), DbError> {
-        crate::store::record_obsolete_copy_intents_on(self.connection, decls, intent)
-    }
-
-    pub fn persist_exact_remote_object(
+    pub(crate) fn persist_exact_remote_object(
         &self,
         remote: &coven_protocol::remote_object::ClosedRemoteObject,
         subject: &str,
@@ -140,21 +123,21 @@ impl DatabaseTestSql<'_> {
         transaction.commit().map_err(DbError::from)
     }
 
-    pub fn load_remote_object(
+    pub(crate) fn load_remote_object(
         &self,
         object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
         crate::load_remote_object_on(self.connection, object_id)
     }
 
-    pub fn load_reclaimed_store_package(
+    pub(crate) fn load_reclaimed_store_package(
         &self,
         object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<Option<crate::ReclaimedStorePackage>, DbError> {
         crate::remote_object_records::load_reclaimed_store_package_on(self.connection, object_id)
     }
 
-    pub fn record_reclaimed_store_package(
+    pub(crate) fn record_reclaimed_store_package(
         &self,
         package: &crate::ReclaimedStorePackage,
     ) -> Result<(), DbError> {
@@ -162,7 +145,7 @@ impl DatabaseTestSql<'_> {
     }
 
     /// Every durable write partition, Store audience first and Local last.
-    pub fn store_write_partitions_in_audience_order(
+    pub(crate) fn store_write_partitions_in_audience_order(
         &self,
     ) -> Result<Vec<StoreWritePartitionRow>, DbError> {
         self.query(
@@ -186,7 +169,7 @@ impl DatabaseTestSql<'_> {
     }
 
     /// One write's partitions as `(audience, changeset)`, ordered by audience.
-    pub fn store_write_partition_changesets(
+    pub(crate) fn store_write_partition_changesets(
         &self,
         write_id: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, DbError> {
@@ -203,7 +186,7 @@ impl DatabaseTestSql<'_> {
     }
 
     /// The single partition a local-only write records.
-    pub fn only_store_write_partition(
+    pub(crate) fn only_store_write_partition(
         &self,
         write_id: &str,
     ) -> Result<StoreWritePartitionRow, DbError> {
@@ -223,7 +206,7 @@ impl DatabaseTestSql<'_> {
         .and_then(|(audience, control, hash)| Ok((audience, control, self.payload(hash)?)))
     }
 
-    pub fn first_store_write_partition_hash(
+    pub(crate) fn first_store_write_partition_hash(
         &self,
         write_id: &str,
     ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
@@ -240,7 +223,7 @@ impl DatabaseTestSql<'_> {
             .map_err(|error| DbError::context("parse Store write partition hash", error))
     }
 
-    pub fn row_and_private_routing_presence(
+    pub(crate) fn row_and_private_routing_presence(
         &self,
         table: &str,
         row_id: &str,
@@ -267,7 +250,7 @@ impl DatabaseTestSql<'_> {
     }
 
     /// A write's recorded affected rows and Store changeset.
-    pub fn store_write_row(&self, write_id: &str) -> Result<(String, Vec<u8>), DbError> {
+    pub(crate) fn store_write_row(&self, write_id: &str) -> Result<(String, Vec<u8>), DbError> {
         self.query_row(
             "SELECT affected_rows, changeset_hash FROM store_writes WHERE write_id = ?1",
             [write_id],
@@ -280,7 +263,7 @@ impl DatabaseTestSql<'_> {
     /// Give the Local partition a Circle control coordinate, which the schema's
     /// own check constraint forbids — the durable shape a preparation must
     /// refuse when it reloads.
-    pub fn plant_control_on_the_local_partition(&self) -> Result<(), DbError> {
+    pub(crate) fn plant_control_on_the_local_partition(&self) -> Result<(), DbError> {
         self.execute_batch("PRAGMA ignore_check_constraints = true;")
             .map_err(DbError::from)?;
         self.execute(
@@ -292,21 +275,15 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn set_foreign_keys(&self, enabled: bool) -> rusqlite::Result<()> {
+    pub(crate) fn set_foreign_keys(&self, enabled: bool) -> rusqlite::Result<()> {
         self.connection.pragma_update(None, "foreign_keys", enabled)
     }
 
-    pub fn author_exclusion_activation_evidence(
-        &self,
-    ) -> Result<(String, String, String, String), DbError> {
-        author_exclusion_activation_evidence(self.connection)
-    }
-
-    pub fn table_row_count(&self, table: DatabaseTestTable) -> Result<i64, DbError> {
+    pub(crate) fn table_row_count(&self, table: DatabaseTestTable) -> Result<i64, DbError> {
         table_row_count(self.connection, table)
     }
 
-    pub fn scoped_store_state_counts(&self) -> Result<[i64; 4], DbError> {
+    pub(crate) fn scoped_store_state_counts(&self) -> Result<[i64; 4], DbError> {
         Ok([
             self.table_row_count(DatabaseTestTable::named("store_writes"))?,
             self.table_row_count(DatabaseTestTable::named("store_write_partitions"))?,
@@ -315,7 +292,7 @@ impl DatabaseTestSql<'_> {
         ])
     }
 
-    pub fn table_has_rows(&self, table: DatabaseTestTable) -> Result<bool, DbError> {
+    pub(crate) fn table_has_rows(&self, table: DatabaseTestTable) -> Result<bool, DbError> {
         self.connection
             .query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM {})", table.0),
@@ -325,11 +302,11 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn clear_table(&self, table: DatabaseTestTable) -> Result<(), DbError> {
+    pub(crate) fn clear_table(&self, table: DatabaseTestTable) -> Result<(), DbError> {
         clear_table(self.connection, table)
     }
 
-    pub fn remote_object(
+    pub(crate) fn remote_object(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
@@ -345,7 +322,7 @@ impl DatabaseTestSql<'_> {
         serde_json::from_str(&state).map_err(|error| DbError::Message(error.to_string()))
     }
 
-    pub fn remote_objects(
+    pub(crate) fn remote_objects(
         &self,
     ) -> Result<Vec<coven_protocol::remote_object::RemoteObjectRecord>, DbError> {
         self.query(
@@ -361,7 +338,7 @@ impl DatabaseTestSql<'_> {
         .collect()
     }
 
-    pub fn replace_remote_object(
+    pub(crate) fn replace_remote_object(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
         remote: &coven_protocol::remote_object::RemoteObjectRecord,
@@ -384,7 +361,7 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn remote_object_exists(
+    pub(crate) fn remote_object_exists(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<bool, DbError> {
@@ -398,7 +375,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn remote_object_id_exists(
+    pub(crate) fn remote_object_id_exists(
         &self,
         object_id: coven_protocol::store_commit::ObjectHash,
     ) -> Result<bool, DbError> {
@@ -411,7 +388,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn delete_remote_object(
+    pub(crate) fn delete_remote_object(
         &self,
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<(), DbError> {
@@ -432,7 +409,7 @@ impl DatabaseTestSql<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn install_blob_binding(
+    pub(crate) fn install_blob_binding(
         &self,
         object_id: &str,
         remote_state: &str,
@@ -476,7 +453,7 @@ impl DatabaseTestSql<'_> {
         })
     }
 
-    pub fn row_blob_binding_count(&self, row_id: &str) -> Result<i64, DbError> {
+    pub(crate) fn row_blob_binding_count(&self, row_id: &str) -> Result<i64, DbError> {
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM row_blob_locators WHERE row_id = ?1",
@@ -486,7 +463,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn circle_control_activation_count(
+    pub(crate) fn circle_control_activation_count(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<i64, DbError> {
@@ -499,7 +476,10 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn document_circle_route(&self, row_id: &str) -> Result<(String, String, String), DbError> {
+    pub(crate) fn document_circle_route(
+        &self,
+        row_id: &str,
+    ) -> Result<(String, String, String), DbError> {
         self.connection
             .query_row(
                 "SELECT document.audience, route.routing_id, route._updated_at
@@ -513,7 +493,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn corrupt_live_document_route_id(&self, row_id: &str) -> Result<(), DbError> {
+    pub(crate) fn corrupt_live_document_route_id(&self, row_id: &str) -> Result<(), DbError> {
         self.connection
             .execute(
                 "UPDATE _coven_row_routes
@@ -529,7 +509,7 @@ impl DatabaseTestSql<'_> {
     /// Store one operation's prepared payload under another operation's row,
     /// bypassing the identity checks every writing path applies, so a test can
     /// hand a reader a row whose columns and payload name different operations.
-    pub fn replace_circle_operation_prepared(
+    pub(crate) fn replace_circle_operation_prepared(
         &self,
         operation_id: &coven_protocol::circle::CircleOperationId,
         substitute: &coven_protocol::circle_journal::CircleOperationJournal,
@@ -545,7 +525,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn circle_bootstrap_failure_state(
+    pub(crate) fn circle_bootstrap_failure_state(
         &self,
         blob_id: &str,
         circle_id: coven_protocol::circle::CircleId,
@@ -573,7 +553,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn forge_circle_close_exclusion(
+    pub(crate) fn forge_circle_close_exclusion(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(), DbError> {
@@ -594,7 +574,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn circle_state_table_counts(&self) -> Result<(i64, i64), DbError> {
+    pub(crate) fn circle_state_table_counts(&self) -> Result<(i64, i64), DbError> {
         Ok((
             table_row_count(
                 self.connection,
@@ -608,7 +588,7 @@ impl DatabaseTestSql<'_> {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn scoped_note_routing_state(
+    pub(crate) fn scoped_note_routing_state(
         &self,
         row_id: &str,
         generation_one_key: [u8; 32],
@@ -654,7 +634,7 @@ impl DatabaseTestSql<'_> {
         Ok((row, route, mirror))
     }
 
-    pub fn row_routing_id(
+    pub(crate) fn row_routing_id(
         &self,
         generation_one_key: [u8; 32],
         table: &str,
@@ -667,7 +647,7 @@ impl DatabaseTestSql<'_> {
         Ok(coven_protocol::circle::row_routing_id(&key, table, row_id))
     }
 
-    pub fn retained_merge_input(
+    pub(crate) fn retained_merge_input(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -695,7 +675,7 @@ impl DatabaseTestSql<'_> {
         ))
     }
 
-    pub fn tamper_retained_recovery_registration(
+    pub(crate) fn tamper_retained_recovery_registration(
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
         tamper: RetainedRegistrationTamper,
@@ -774,7 +754,7 @@ impl DatabaseTestSql<'_> {
         })
     }
 
-    pub fn replace_retained_merge_input(
+    pub(crate) fn replace_retained_merge_input(
         &self,
         stream_id: &str,
         canonical_input: &[u8],
@@ -893,7 +873,7 @@ impl DatabaseTestSql<'_> {
         })
     }
 
-    pub fn corrupt_store_device_registration_bytes(
+    pub(crate) fn corrupt_store_device_registration_bytes(
         &self,
         reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<(), DbError> {
@@ -911,7 +891,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn insert_invalid_materialized_commit(&self) -> Result<(), DbError> {
+    pub(crate) fn insert_invalid_materialized_commit(&self) -> Result<(), DbError> {
         self.connection
             .execute(
                 "INSERT INTO materialized_commits (device_id, seq, commit_ref)
@@ -922,7 +902,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn retained_materialization_input(
+    pub(crate) fn retained_materialization_input(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -940,7 +920,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn corrupt_retained_materialization_input(
+    pub(crate) fn corrupt_retained_materialization_input(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -957,7 +937,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn insert_retained_replay_object(
+    pub(crate) fn insert_retained_replay_object(
         &self,
         owner: &coven_protocol::remote_object::RetainedReplayOwner,
         object: &coven_protocol::objects::ExactObjectRef,
@@ -984,7 +964,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn materialized_commit_exists(
+    pub(crate) fn materialized_commit_exists(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -1002,7 +982,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn scoped_routing_counts(
+    pub(crate) fn scoped_routing_counts(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(i64, i64), DbError> {
@@ -1018,7 +998,7 @@ impl DatabaseTestSql<'_> {
         Ok((routes, mirrors))
     }
 
-    pub fn cleanup_intent_copy_identities(&self) -> Result<Vec<String>, DbError> {
+    pub(crate) fn cleanup_intent_copy_identities(&self) -> Result<Vec<String>, DbError> {
         self.query(
             "SELECT copy_identity FROM local_cleanup_intents ORDER BY copy_identity",
             [],
@@ -1027,7 +1007,7 @@ impl DatabaseTestSql<'_> {
         .map_err(DbError::from)
     }
 
-    pub fn insert_cleanup_intent(
+    pub(crate) fn insert_cleanup_intent(
         &self,
         namespace: &str,
         blob_id: &str,
@@ -1043,7 +1023,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_retracted_device_state_failure_trigger(&self) -> Result<(), DbError> {
+    pub(crate) fn install_retracted_device_state_failure_trigger(&self) -> Result<(), DbError> {
         self.connection
             .execute_batch(
                 "CREATE TRIGGER delete_retracted_device_state_early
@@ -1055,7 +1035,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn latest_local_write_facts(&self) -> Result<(String, i64, i64), DbError> {
+    pub(crate) fn latest_local_write_facts(&self) -> Result<(String, i64, i64), DbError> {
         let (write_id, status): (String, String) = self
             .connection
             .query_row(
@@ -1082,7 +1062,7 @@ impl DatabaseTestSql<'_> {
         Ok((status, partition_count, payload_size))
     }
 
-    pub fn prepared_write_count(
+    pub(crate) fn prepared_write_count(
         &self,
         write_id: &coven_protocol::write::WriteId,
     ) -> Result<i64, DbError> {
@@ -1095,7 +1075,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_indexed_shared_blobs(
+    pub(crate) fn install_indexed_shared_blobs(
         &self,
         write_id: &coven_protocol::write::WriteId,
         records: Vec<coven_protocol::remote_object::RemoteObjectRecord>,
@@ -1133,7 +1113,7 @@ impl DatabaseTestSql<'_> {
         })
     }
 
-    pub fn staged_circle_acknowledgement_object(
+    pub(crate) fn staged_circle_acknowledgement_object(
         &self,
     ) -> Result<coven_protocol::objects::PreparedExactObject, DbError> {
         let encoded: String = self
@@ -1147,7 +1127,7 @@ impl DatabaseTestSql<'_> {
         serde_json::from_str(&encoded).map_err(|error| DbError::Message(error.to_string()))
     }
 
-    pub fn forge_device_in_state_snapshots(
+    pub(crate) fn forge_device_in_state_snapshots(
         &self,
         forged_device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<(), DbError> {
@@ -1187,14 +1167,14 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn remove_store_protocol_root(&self) -> Result<(), DbError> {
+    pub(crate) fn remove_store_protocol_root(&self) -> Result<(), DbError> {
         clear_table(
             self.connection,
             DatabaseTestTable::named("store_protocol_root_authority"),
         )
     }
 
-    pub fn retained_canonical_input(
+    pub(crate) fn retained_canonical_input(
         &self,
         stream_id: &str,
         sequence: u64,
@@ -1203,7 +1183,7 @@ impl DatabaseTestSql<'_> {
             .map(|value| value.0)
     }
 
-    pub fn write_retains_prepared(
+    pub(crate) fn write_retains_prepared(
         &self,
         write_id: &coven_protocol::write::WriteId,
     ) -> Result<bool, DbError> {
@@ -1216,7 +1196,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_outbound_completion_failure_trigger(&self) -> Result<(), DbError> {
+    pub(crate) fn install_outbound_completion_failure_trigger(&self) -> Result<(), DbError> {
         self.connection
             .execute_batch(
                 "CREATE TEMP TRIGGER fail_outbound_completion
@@ -1227,7 +1207,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn replace_store_root_hash(&self, value: Option<&str>) -> Result<(), DbError> {
+    pub(crate) fn replace_store_root_hash(&self, value: Option<&str>) -> Result<(), DbError> {
         match value {
             Some(value) => self.connection.execute(
                 "UPDATE store_protocol_root_authority SET store_root_hash = ?1",
@@ -1241,7 +1221,7 @@ impl DatabaseTestSql<'_> {
         .map_err(DbError::from)
     }
 
-    pub fn delete_exact_materialized_commit(
+    pub(crate) fn delete_exact_materialized_commit(
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
@@ -1265,7 +1245,7 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn delete_retained_materialization_without_foreign_keys(
+    pub(crate) fn delete_retained_materialization_without_foreign_keys(
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<(), DbError> {
@@ -1284,7 +1264,7 @@ impl DatabaseTestSql<'_> {
         result
     }
 
-    pub fn delete_device_state_snapshot(&self, commit_ref: &str) -> Result<(), DbError> {
+    pub(crate) fn delete_device_state_snapshot(&self, commit_ref: &str) -> Result<(), DbError> {
         let deleted = self
             .connection
             .execute(
@@ -1300,7 +1280,7 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn replace_device_state_snapshot(
+    pub(crate) fn replace_device_state_snapshot(
         &self,
         commit_ref: &str,
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
@@ -1322,7 +1302,7 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn register_external_blob(
+    pub(crate) fn register_external_blob(
         &self,
         reference: &coven_protocol::blob::RowBlobRef,
         path: &std::path::Path,
@@ -1330,14 +1310,7 @@ impl DatabaseTestSql<'_> {
         ExternalBlobRecords::new(self.connection).register(reference, path)
     }
 
-    pub fn clear_external_blob(
-        &self,
-        reference: &coven_protocol::blob::RowBlobRef,
-    ) -> Result<(), DbError> {
-        ExternalBlobRecords::new(self.connection).clear(reference)
-    }
-
-    pub fn make_remote_intent_exists(
+    pub(crate) fn make_remote_intent_exists(
         &self,
         root_table: &str,
         root_id: &str,
@@ -1354,7 +1327,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn enqueue_blob_upload(
+    pub(crate) fn enqueue_blob_upload(
         &self,
         root_table: &str,
         root_id: &str,
@@ -1373,7 +1346,7 @@ impl DatabaseTestSql<'_> {
         )
     }
 
-    pub fn enqueue_blob_delete(
+    pub(crate) fn enqueue_blob_delete(
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         created_at: &str,
@@ -1381,7 +1354,7 @@ impl DatabaseTestSql<'_> {
         crate::CloudOutboxRecords::new(self.connection).enqueue_delete(stored, created_at)
     }
 
-    pub fn delete_outbox_attempt(&self, id: i64) -> Result<Option<OutboxAttempt>, DbError> {
+    pub(crate) fn delete_outbox_attempt(&self, id: i64) -> Result<Option<OutboxAttempt>, DbError> {
         self.connection
             .query_row(
                 "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox
@@ -1393,7 +1366,10 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn upload_outbox_attempt(&self, row_id: &str) -> Result<Option<OutboxAttempt>, DbError> {
+    pub(crate) fn upload_outbox_attempt(
+        &self,
+        row_id: &str,
+    ) -> Result<Option<OutboxAttempt>, DbError> {
         self.connection
             .query_row(
                 "SELECT attempt_count, last_error, last_attempt_at
@@ -1405,7 +1381,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn corrupt_delete_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
+    pub(crate) fn corrupt_delete_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
         self.connection
             .execute(
                 "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
@@ -1416,7 +1392,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn corrupt_upload_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
+    pub(crate) fn corrupt_upload_outbox_attempt_time(&self, id: i64) -> Result<(), DbError> {
         self.connection
             .execute(
                 "UPDATE cloud_outbox SET last_attempt_at = 'not-a-timestamp', attempt_count = 1
@@ -1427,7 +1403,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn store_partition_changesets(&self) -> Result<Vec<Vec<u8>>, DbError> {
+    pub(crate) fn store_partition_changesets(&self) -> Result<Vec<Vec<u8>>, DbError> {
         self.query(
             "SELECT partition.changeset_hash
              FROM store_write_partitions AS partition
@@ -1443,7 +1419,7 @@ impl DatabaseTestSql<'_> {
         .collect()
     }
 
-    pub fn has_store_partition(&self) -> Result<bool, DbError> {
+    pub(crate) fn has_store_partition(&self) -> Result<bool, DbError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(
@@ -1457,7 +1433,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn insert_published_blob_drop_intent(
+    pub(crate) fn insert_published_blob_drop_intent(
         &self,
         seq: u64,
         drop: &coven_protocol::blob::DeferredLocalBlobDrop,
@@ -1486,7 +1462,13 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn insert_blob_row(&self, row_id: &str, stamp: &str, bytes: &[u8]) -> Result<(), DbError> {
+    #[cfg(test)]
+    pub(crate) fn insert_blob_row(
+        &self,
+        row_id: &str,
+        stamp: &str,
+        bytes: &[u8],
+    ) -> Result<(), DbError> {
         let size = i64::try_from(bytes.len())
             .map_err(|error| DbError::context("test blob size is invalid", error))?;
         self.connection
@@ -1505,7 +1487,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn published_blob_drop_intent_count(
+    pub(crate) fn published_blob_drop_intent_count(
         &self,
         seq: i64,
         namespace: &str,
@@ -1521,7 +1503,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn published_blob_drop_intent_exists(&self, blob_id: &str) -> Result<bool, DbError> {
+    pub(crate) fn published_blob_drop_intent_exists(&self, blob_id: &str) -> Result<bool, DbError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(
@@ -1533,18 +1515,18 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn apply_coven_routing_schema(&self) -> Result<(), DbError> {
+    pub(crate) fn apply_coven_routing_schema(&self) -> Result<(), DbError> {
         crate::apply_coven_routing_schema(self.connection).map_err(DbError::from)
     }
 
-    pub fn circle_current_state(
+    pub(crate) fn circle_current_state(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<Option<coven_protocol::circle_activation::CircleCurrentState>, DbError> {
         crate::store::circle_current_state_on(self.connection, circle_id)
     }
 
-    pub fn circle_state_counts(
+    pub(crate) fn circle_state_counts(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<(i64, i64, i64), DbError> {
@@ -1568,7 +1550,7 @@ impl DatabaseTestSql<'_> {
         Ok((activated, active_access, pending))
     }
 
-    pub fn circle_access_owner(
+    pub(crate) fn circle_access_owner(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<String, DbError> {
@@ -1581,7 +1563,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn store_device_registration_activation(
+    pub(crate) fn store_device_registration_activation(
         &self,
         device_id: &str,
     ) -> Result<coven_protocol::store_commit::StoreDeviceRegistrationActivation, DbError> {
@@ -1597,7 +1579,7 @@ impl DatabaseTestSql<'_> {
         serde_json::from_str(&authority).map_err(|error| DbError::Message(error.to_string()))
     }
 
-    pub fn latest_published_store_snapshot(&self) -> Result<(i64, Vec<u8>), DbError> {
+    pub(crate) fn latest_published_store_snapshot(&self) -> Result<(i64, Vec<u8>), DbError> {
         self.connection
             .query_row(
                 "SELECT generation, meta_bytes FROM published_store_snapshot
@@ -1608,7 +1590,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn latest_published_store_snapshot_bytes(&self) -> Result<Vec<u8>, DbError> {
+    pub(crate) fn latest_published_store_snapshot_bytes(&self) -> Result<Vec<u8>, DbError> {
         self.connection
             .query_row(
                 "SELECT meta_bytes FROM published_store_snapshot
@@ -1619,7 +1601,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn materialized_commits_without_device_state_count(&self) -> Result<i64, DbError> {
+    pub(crate) fn materialized_commits_without_device_state_count(&self) -> Result<i64, DbError> {
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM materialized_commits AS commits
@@ -1632,7 +1614,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn store_device_state_snapshot_refs(
+    pub(crate) fn store_device_state_snapshot_refs(
         &self,
     ) -> Result<Vec<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
         let encoded = self.query(
@@ -1651,7 +1633,7 @@ impl DatabaseTestSql<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn install_circle_current_state(
+    pub(crate) fn install_circle_current_state(
         &self,
         circle_id: coven_protocol::circle::CircleId,
         control_coord: &str,
@@ -1694,7 +1676,9 @@ impl DatabaseTestSql<'_> {
         Ok(())
     }
 
-    pub fn store_root_hash(&self) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
+    pub(crate) fn store_root_hash(
+        &self,
+    ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
         let encoded = self
             .connection
             .query_row(
@@ -1708,11 +1692,11 @@ impl DatabaseTestSql<'_> {
             .map_err(|error| DbError::context("stored Store root hash", error))
     }
 
-    pub fn required_protocol_state(&self, key: &str) -> Result<String, DbError> {
+    pub(crate) fn required_protocol_state(&self, key: &str) -> Result<String, DbError> {
         crate::required_protocol_state_on(self.connection, key)
     }
 
-    pub fn protocol_state_prefix_count(&self, prefix: &str) -> Result<i64, DbError> {
+    pub(crate) fn protocol_state_prefix_count(&self, prefix: &str) -> Result<i64, DbError> {
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM protocol_state WHERE key LIKE (?1 || '%')",
@@ -1722,7 +1706,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn exact_row_blob_locator_count(
+    pub(crate) fn exact_row_blob_locator_count(
         &self,
         table: &str,
         row_id: &str,
@@ -1739,7 +1723,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn exact_upload_outbox_count(
+    pub(crate) fn exact_upload_outbox_count(
         &self,
         table: &str,
         row_id: &str,
@@ -1757,7 +1741,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_outbound_preparation_failure_trigger(&self) -> Result<(), DbError> {
+    pub(crate) fn install_outbound_preparation_failure_trigger(&self) -> Result<(), DbError> {
         self.connection
             .execute_batch(
                 "CREATE TEMP TRIGGER fail_outbound_preparation
@@ -1768,7 +1752,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_protocol_state_insert_failure_trigger(&self) -> Result<(), DbError> {
+    pub(crate) fn install_protocol_state_insert_failure_trigger(&self) -> Result<(), DbError> {
         self.connection
             .execute_batch(
                 "CREATE TRIGGER block_protocol_state_insert
@@ -1778,7 +1762,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_test_store_root_authority(
+    pub(crate) fn install_test_store_root_authority(
         &self,
         label: &str,
     ) -> Result<coven_protocol::store_commit::ObjectHash, DbError> {
@@ -1849,7 +1833,7 @@ impl DatabaseTestSql<'_> {
         Ok(hash)
     }
 
-    pub fn install_store_root_authority(
+    pub(crate) fn install_store_root_authority(
         &self,
         hash: coven_protocol::store_commit::ObjectHash,
         bytes: &[u8],
@@ -1873,7 +1857,7 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)
     }
 
-    pub fn install_exact_store_root_authority(
+    pub(crate) fn install_exact_store_root_authority(
         &self,
         reference: &coven_protocol::store_commit::StoreRootRef,
         bytes: &[u8],
@@ -1881,14 +1865,7 @@ impl DatabaseTestSql<'_> {
         crate::install_store_root_authority_on(self.connection, reference, bytes).map(|_| ())
     }
 
-    pub fn circle_bootstrap_coverage(
-        &self,
-        circle_id: coven_protocol::circle::CircleId,
-    ) -> Result<Option<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        crate::store::circle_bootstrap_coverage_ref_on(self.connection, circle_id)
-    }
-
-    pub fn circle_bootstrap_replay_inputs(
+    pub(crate) fn circle_bootstrap_replay_inputs(
         &self,
     ) -> Result<
         Vec<(
@@ -1903,16 +1880,7 @@ impl DatabaseTestSql<'_> {
         crate::store::circle_bootstrap_replay_inputs_for_test(self.connection, store_dir)
     }
 
-    pub fn materialized_frontier(
-        &self,
-    ) -> Result<
-        std::collections::BTreeMap<String, coven_protocol::store_commit::StoreBatchCommitRef>,
-        DbError,
-    > {
-        crate::store::materialized_frontier_on(self.connection, None)
-    }
-
-    pub fn load_retained_merge_replay_inputs(
+    pub(crate) fn load_retained_merge_replay_inputs(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<crate::OwnedVerifiedMergeMaterialization>, DbError> {
@@ -1923,7 +1891,7 @@ impl DatabaseTestSql<'_> {
         )
     }
 
-    pub fn record_verified_circle_activations(
+    pub(crate) fn record_verified_circle_activations(
         &self,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         activations: &[coven_protocol::circle_activation::VerifiedCircleReference],
@@ -1941,7 +1909,7 @@ impl DatabaseTestSql<'_> {
         transaction.commit().map_err(DbError::from)
     }
 
-    pub fn apply_changeset(
+    pub(crate) fn apply_changeset(
         &self,
         bytes: &[u8],
         tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -1956,7 +1924,7 @@ impl DatabaseTestSql<'_> {
         )
     }
 
-    pub fn apply_changesets_atomically(
+    pub(crate) fn apply_changesets_atomically(
         &self,
         changesets: Vec<Vec<u8>>,
         tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -1989,7 +1957,7 @@ impl DatabaseTestSql<'_> {
         Ok((results, foreign_key_violations))
     }
 
-    pub fn capture_changeset(
+    pub(crate) fn capture_changeset(
         &self,
         tables: &[String],
         statements: &[String],
@@ -2011,7 +1979,7 @@ impl DatabaseTestSql<'_> {
         Ok(bytes)
     }
 
-    pub fn transaction<R>(
+    pub(crate) fn transaction<R>(
         &self,
         operation: impl FnOnce(DatabaseTestTransaction<'_, '_>) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
@@ -2024,7 +1992,7 @@ impl DatabaseTestSql<'_> {
         Ok(result)
     }
 
-    pub fn rolled_back_transaction<R>(
+    pub(crate) fn rolled_back_transaction<R>(
         &self,
         operation: impl FnOnce(DatabaseTestTransaction<'_, '_>) -> Result<R, DbError>,
     ) -> Result<R, DbError> {

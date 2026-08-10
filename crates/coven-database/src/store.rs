@@ -33,13 +33,9 @@ pub mod local_blob_cleanup_intents;
 pub mod materialization_models;
 use activated_registration_records::record_activated_store_device_registrations_on;
 #[cfg(any(test, feature = "test-utils"))]
-pub(crate) use materialized_commit_index::materialized_frontier_on;
-#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use store_session::prepared_remote_objects::persist_prepared_audience_objects_on;
 pub mod publication_state;
 use replay_projection::ReplayProjection;
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use retained_merge_replay::circle_bootstrap_coverage_ref_on;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use retained_merge_replay::remove_retained_replay_ownership_from_snapshot_on;
 mod store_database;
@@ -83,8 +79,6 @@ pub use host_write_capture::{
 pub use host_write_operation::StoreRowWrites;
 pub use host_write_operation::{BlobFileFailure, BlobFileFailures, WriteBatch};
 pub use host_write_operation::{HostWriteError, HostWriteOperation};
-#[cfg(any(test, feature = "test-utils"))]
-pub(crate) use local_blob_cleanup::record_obsolete_copy_intents_on;
 pub use local_blob_cleanup::LocalBlobCleanup;
 pub use materialization_models::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
@@ -96,13 +90,14 @@ pub use materialization_models::{
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::test_install_winning_blob_bindings;
+#[cfg(test)]
+pub(crate) use merge_materialization_transaction::test_retire_circle_bootstrap_coverage;
 pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
 #[cfg(any(test, feature = "test-utils"))]
 pub use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use merge_materialization_transaction::{
     test_apply_changeset, test_record_verified_circle_activations,
-    test_retire_circle_bootstrap_coverage,
 };
 pub use merge_materialization_transaction::{
     IncomingTimestampPolicy, TableSchema, ValidatedChangeset, WinningRow,

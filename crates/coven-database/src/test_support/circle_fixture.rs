@@ -1,7 +1,7 @@
 use crate::DatabaseTestSql;
 
 impl DatabaseTestSql<'_> {
-    pub fn install_test_active_circle(
+    pub(crate) fn install_test_active_circle(
         &self,
         label: &str,
     ) -> (
@@ -11,7 +11,7 @@ impl DatabaseTestSql<'_> {
         self.install_test_circle_current_state(label, true)
     }
 
-    pub fn install_test_inactive_circle(
+    pub(crate) fn install_test_inactive_circle(
         &self,
         label: &str,
     ) -> (

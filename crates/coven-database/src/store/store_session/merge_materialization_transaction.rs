@@ -389,7 +389,7 @@ pub(crate) fn test_apply_changeset<B: AsRef<[u8]>>(
     .apply_changeset(changeset, policy)
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub(crate) fn test_retire_circle_bootstrap_coverage(
     transaction: &rusqlite::Transaction<'_>,
     store_dir: &coven_foundation::store_dir::StoreDir,

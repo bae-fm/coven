@@ -148,7 +148,7 @@ mod test_transaction;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_schema::DatabaseTestTable;
 #[cfg(any(test, feature = "test-utils"))]
-pub use test_sql::DatabaseTestSql;
+pub(crate) use test_sql::DatabaseTestSql;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::synthetic_store;
 #[cfg(any(test, feature = "test-utils"))]
@@ -157,7 +157,7 @@ pub use test_support::{
     RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(any(test, feature = "test-utils"))]
-pub use test_transaction::DatabaseTestTransaction;
+pub(crate) use test_transaction::DatabaseTestTransaction;
 mod write_lifecycle;
 mod write_models;
 
