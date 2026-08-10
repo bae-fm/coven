@@ -186,7 +186,7 @@ mod tests {
         let (_store, db, registration, reference) = recovered_author().await;
         let registration = registration.clone();
         db.database
-            .test_sql(move |conn| conn.corrupt_store_device_registration_bytes(&registration))
+            .corrupt_store_device_registration_bytes_for_test(registration)
             .await
             .expect("corrupt activated recovery registration fixture");
 
@@ -209,15 +209,12 @@ mod tests {
             .await;
 
         let root = store.root.clone();
-        db.database.test_sql(move |database| {
-            database
-                .load_retained_merge_replay_inputs(&root)
-                .map(drop)
-        })
-        .await
-        .expect_err(
-            "tampered retained recovery registration bytes must fail durable history verification",
-        );
+        db.database
+            .validate_retained_merge_replay_for_test(root)
+            .await
+            .expect_err(
+                "tampered retained recovery registration bytes must fail durable history verification",
+            );
     }
 
     #[tokio::test]
@@ -231,11 +228,8 @@ mod tests {
             .await;
 
         let root = store.root.clone();
-        db.database.test_sql(move |database| {
-            database
-                .load_retained_merge_replay_inputs(&root)
-                .map(drop)
-        })
+        db.database
+            .validate_retained_merge_replay_for_test(root)
             .await
             .expect_err(
                 "tampered retained recovery registration authority must fail durable history verification",

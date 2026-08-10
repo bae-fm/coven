@@ -384,6 +384,12 @@ impl StoreSession<'_> {
         circle_id
     }
 
+    fn install_test_inactive_circle(&self, label: &str) -> coven_protocol::circle::CircleId {
+        let database = crate::DatabaseTestSql::new(self.conn);
+        let (circle_id, _) = database.install_test_inactive_circle(label);
+        circle_id
+    }
+
     fn insert_write_status_for_test(
         &self,
         write_id: &WriteId,

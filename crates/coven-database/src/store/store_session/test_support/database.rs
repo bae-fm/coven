@@ -143,6 +143,14 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn install_test_inactive_circle(
+        &self,
+        label: String,
+    ) -> Result<coven_protocol::circle::CircleId, DbError> {
+        self.call_store(move |session| Ok(session.install_test_inactive_circle(&label)))
+            .await
+    }
+
     pub async fn insert_write_status_for_test(
         &self,
         write_id: WriteId,

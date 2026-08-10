@@ -45,16 +45,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
     let target = open_test_db();
     target
         .database
-        .test_sql(|sql| {
-            sql.execute_batch(
-                "CREATE TEMP TRIGGER fail_owner_anchor_baseline
-                 BEFORE INSERT ON retained_replay_baselines
-                 BEGIN
-                     SELECT RAISE(ABORT, 'injected owner anchor failure');
-                 END",
-            )
-            .map_err(coven_database::DbError::from)
-        })
+        .install_owner_anchor_failure_for_test()
         .await
         .expect("install owner anchor failure trigger");
 
@@ -77,10 +68,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
 
     target
         .database
-        .test_sql(|sql| {
-            sql.execute_batch("DROP TRIGGER fail_owner_anchor_baseline")
-                .map_err(coven_database::DbError::from)
-        })
+        .remove_owner_anchor_failure_for_test()
         .await
         .expect("remove owner anchor failure trigger");
     fixture

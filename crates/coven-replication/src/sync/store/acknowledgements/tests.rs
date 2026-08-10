@@ -249,12 +249,7 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
                 .expect("temporary database path is UTF-8")
                 .to_string();
             seed.database
-                .test_sql(move |connection| {
-                    connection
-                        .execute("VACUUM INTO ?1", [destination])
-                        .map(|_| ())
-                        .map_err(coven_database::DbError::from)
-                })
+                .vacuum_into_for_test(destination)
                 .await
                 .expect("copy acknowledgement database");
         }
@@ -833,9 +828,8 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-device");
     let device = initialize(&db, &storage, &signer).await;
-    let (circle_id, _control) = db
-        .database
-        .test_sql(|conn| Ok(conn.install_test_active_circle("ack-circle")))
+    let circle_id = store_database(&db)
+        .install_test_active_circle("ack-circle".to_string())
         .await
         .expect("install active Circle");
 
@@ -876,9 +870,8 @@ async fn inactive_circle_stages_no_acknowledgement() {
     let storage = storage(&home, &signer);
     let db = open(&path, "inactive-circle-device");
     let device = initialize(&db, &storage, &signer).await;
-    let (circle_id, _control) = db
-        .database
-        .test_sql(|conn| Ok(conn.install_test_inactive_circle("inactive-circle")))
+    let circle_id = store_database(&db)
+        .install_test_inactive_circle("inactive-circle".to_string())
         .await
         .expect("install inactive Circle");
 
@@ -916,9 +909,8 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-restart");
     let device = initialize(&db, &storage, &signer).await;
-    let (circle_id, _control) = db
-        .database
-        .test_sql(|conn| Ok(conn.install_test_active_circle("restart-circle")))
+    let circle_id = store_database(&db)
+        .install_test_active_circle("restart-circle".to_string())
         .await
         .expect("install active Circle");
 
@@ -985,8 +977,8 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     let storage = storage(&home, &signer);
     let db = open(&path, "circle-ack-collision");
     let device = initialize(&db, &storage, &signer).await;
-    db.database
-        .test_sql(|conn| Ok(conn.install_test_active_circle("collision-circle")))
+    store_database(&db)
+        .install_test_active_circle("collision-circle".to_string())
         .await
         .expect("install active Circle");
 
@@ -1007,7 +999,7 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     // it with different bytes before the drain uploads its object.
     let prepared = db
         .database
-        .test_sql(|database| database.staged_circle_acknowledgement_object())
+        .staged_circle_acknowledgement_object_for_test()
         .await
         .expect("read staged Circle acknowledgement object");
     let sabotage = b"different bytes at the reserved Circle acknowledgement slot".to_vec();
