@@ -1,10 +1,5 @@
 use crate::{authorize_host_sql, DbError};
 
-pub(crate) struct HostSqlTransaction<'transaction, 'connection> {
-    transaction: &'transaction rusqlite::Transaction<'connection>,
-    authorization: HostSqlAuthorization<'transaction>,
-}
-
 pub(crate) struct HostSqlAuthorization<'connection> {
     connection: &'connection rusqlite::Connection,
     authorizer_installed: bool,
@@ -48,25 +43,6 @@ impl Drop for HostSqlAuthorization<'_> {
     }
 }
 
-impl<'transaction, 'connection> HostSqlTransaction<'transaction, 'connection> {
-    pub(crate) fn begin(
-        transaction: &'transaction rusqlite::Transaction<'connection>,
-    ) -> Result<Self, DbError> {
-        Ok(Self {
-            transaction,
-            authorization: HostSqlAuthorization::begin(transaction)?,
-        })
-    }
-
-    pub(crate) fn run<R, E>(
-        self,
-        f: impl FnOnce(&rusqlite::Transaction<'connection>) -> Result<R, E>,
-    ) -> Result<R, E> {
-        let transaction = self.transaction;
-        self.authorization.run(|| f(transaction))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,22 +67,22 @@ mod tests {
             assert_eq!(id, "guarded");
         };
 
-        HostSqlTransaction::begin(&tx)
+        HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|_| Ok::<_, DbError>(()))
+            .run(|| Ok::<_, DbError>(()))
             .expect("successful host SQL");
         assert_guard_removed();
 
-        let error = HostSqlTransaction::begin(&tx)
+        let error = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|_| Err::<(), _>(DbError::Message("host".into())));
+            .run(|| Err::<(), _>(DbError::Message("host".into())));
         assert!(error.is_err());
         assert_guard_removed();
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            HostSqlTransaction::begin(&tx)
+            HostSqlAuthorization::begin(&tx)
                 .expect("install authorizer")
-                .run(|_| -> Result<(), DbError> { panic!("host panic") })
+                .run(|| -> Result<(), DbError> { panic!("host panic") })
                 .expect("panicking host SQL closure never returns");
         }));
         assert!(panic.is_err());
@@ -114,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_host_sql_transaction_removes_the_authorizer() {
+    fn dropping_host_sql_authorization_removes_the_authorizer() {
         let conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(
             "ATTACH ':memory:' AS coven_gate_empty; \
@@ -124,7 +100,7 @@ mod tests {
         .expect("attach guarded schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
-        drop(HostSqlTransaction::begin(&tx).expect("install authorizer"));
+        drop(HostSqlAuthorization::begin(&tx).expect("install authorizer"));
 
         let id: String = tx
             .query_row("SELECT id FROM coven_gate_empty.baseline", [], |row| {
@@ -140,29 +116,27 @@ mod tests {
         crate::apply_coven_schema(&conn).expect("install Coven schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
-        let error = HostSqlTransaction::begin(&tx)
+        let error = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .execute(
-                        "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
-                        [],
-                    )
-                    .map(|_| ())
-                    .map_err(DbError::from)
+            .run(|| {
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
             })
             .expect_err("host SQL must not write Coven bookkeeping");
         assert!(error.to_string().contains("not authorized"));
 
-        let error = HostSqlTransaction::begin(&tx)
+        let error = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map(|_| ())
-                    .map_err(DbError::from)
+            .run(|| {
+                tx.query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map(|_| ())
+                .map_err(DbError::from)
             })
             .expect_err("host SQL must not read Coven bookkeeping");
         assert!(error.to_string().contains("not authorized"));
@@ -202,25 +176,23 @@ mod tests {
         crate::apply_coven_schema(&conn).expect("install Coven schema");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
-        HostSqlTransaction::begin(&tx)
+        HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
+            .run(|| {
                 crate::with_coven_sql_authority(|| {
-                    transaction
-                        .execute(
-                            "INSERT INTO protocol_state (key, value) VALUES ('coven-owned', 'yes')",
-                            [],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                })?;
-                transaction
-                    .execute(
-                        "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
+                    tx.execute(
+                        "INSERT INTO protocol_state (key, value) VALUES ('coven-owned', 'yes')",
                         [],
                     )
                     .map(|_| ())
                     .map_err(DbError::from)
+                })?;
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES ('host-owned', 'no')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(DbError::from)
             })
             .expect_err("host SQL after the Coven-owned write is still refused");
 
@@ -250,46 +222,42 @@ mod tests {
         .expect("install Coven cleanup guard");
         let tx = conn.unchecked_transaction().expect("begin transaction");
 
-        HostSqlTransaction::begin(&tx)
+        HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .execute("INSERT INTO notes (id) VALUES ('allowed')", [])
+            .run(|| {
+                tx.execute("INSERT INTO notes (id) VALUES ('allowed')", [])
                     .map(|_| ())
                     .map_err(DbError::from)
             })
             .expect("Coven cleanup guard may inspect its bookkeeping");
 
-        let direct_read = HostSqlTransaction::begin(&tx)
+        let direct_read = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map(|_| ())
-                    .map_err(DbError::from)
+            .run(|| {
+                tx.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map(|_| ())
+                .map_err(DbError::from)
             });
         assert!(direct_read.is_err());
 
-        let impersonation = HostSqlTransaction::begin(&tx)
+        let impersonation = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .execute_batch(
-                        "CREATE TEMP TRIGGER coven_cleanup_guard_forged
+            .run(|| {
+                tx.execute_batch(
+                    "CREATE TEMP TRIGGER coven_cleanup_guard_forged
                          BEFORE INSERT ON notes
                          BEGIN SELECT 1; END;",
-                    )
-                    .map_err(DbError::from)
+                )
+                .map_err(DbError::from)
             });
         assert!(impersonation.is_err());
 
-        let removal = HostSqlTransaction::begin(&tx)
+        let removal = HostSqlAuthorization::begin(&tx)
             .expect("install authorizer")
-            .run(|transaction| {
-                transaction
-                    .execute_batch("DROP TRIGGER COVEN_CLEANUP_GUARD_INSERT_NOTES")
+            .run(|| {
+                tx.execute_batch("DROP TRIGGER COVEN_CLEANUP_GUARD_INSERT_NOTES")
                     .map_err(DbError::from)
             });
         assert!(removal.is_err());

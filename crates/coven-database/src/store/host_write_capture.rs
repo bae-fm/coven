@@ -564,7 +564,269 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         })
     }
 
-    pub(crate) fn execute<R, E>(
+    pub(crate) fn execute_host<R, E>(
+        self,
+        mut staged: super::host_write_operation::StagedBlobBatch,
+        deleted: Vec<coven_protocol::blob::BlobRef>,
+        sql: super::host_write_operation::HostSql<R, E>,
+        stamper: coven_protocol::hlc::UpdatedAtStamper,
+    ) -> Result<WriteReceipt<R>, super::host_write_operation::HostWriteError<E>> {
+        use super::host_sql_transaction::HostSqlAuthorization;
+        use super::host_write_operation::HostWriteError;
+
+        let blob_decls = self.blob_decls;
+        let store_dir = self.store_dir;
+        let synced_tables = self.synced_tables;
+        let gates = self.gates;
+        let result = self.execute(|transaction| -> Result<R, HostWriteError<E>> {
+            let cleanup_intents = deleted
+                .iter()
+                .map(|blob| {
+                    blob_decls
+                        .row_for_blob_in_namespace(transaction, &blob.namespace, &blob.id)
+                        .map_err(|error| HostWriteError::Blob(error.to_string()))
+                        .map(|row| match row {
+                            Some((table, row_id)) => {
+                                crate::local_blob_cleanup_intents::LocalBlobCleanupIntent::for_row(
+                                    &blob.namespace,
+                                    &blob.id,
+                                    table,
+                                    row_id,
+                                )
+                            }
+                            None => {
+                                crate::local_blob_cleanup_intents::LocalBlobCleanupIntent::local(
+                                    &blob.namespace,
+                                    &blob.id,
+                                )
+                            }
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            staged.publish(|namespace, id| {
+                match blob_decls.row_for_blob_in_namespace(transaction, namespace, id) {
+                    Ok(Some(_)) => {
+                        return Err(HostWriteError::BlobAlreadyReferenced {
+                            namespace: namespace.to_string(),
+                            id: id.to_string(),
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(HostWriteError::Blob(error.to_string())),
+                }
+                let leased = transaction
+                    .query_row(
+                        "SELECT EXISTS(\
+                             SELECT 1 FROM store_write_blob_leases \
+                             WHERE namespace = ?1 AND blob_id = ?2\
+                         )",
+                        (namespace, id),
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(DbError::from)?;
+                if leased {
+                    return Err(HostWriteError::BlobOwnedByPendingWrite {
+                        namespace: namespace.to_string(),
+                        id: id.to_string(),
+                    });
+                }
+                Ok(())
+            })?;
+
+            let host_sql = HostSqlAuthorization::begin(transaction)?;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                host_sql.run(|| {
+                    sql(super::SqlContext::new(
+                        transaction,
+                        stamper,
+                        synced_tables,
+                        gates,
+                    ))
+                })
+            })) {
+                Ok(Ok(value)) => {
+                    for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
+                        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+                        if blob_decls
+                            .blob_id_is_referenced(transaction, &blob.namespace, &blob.id)
+                            .map_err(|error| DbError::Message(error.to_string()))?
+                        {
+                            return Err(HostWriteError::BlobStillReferenced {
+                                namespace: blob.namespace.clone(),
+                                id: blob.id.clone(),
+                            });
+                        }
+                        super::local_blob_cleanup::record_obsolete_copy_intents_on(
+                            transaction,
+                            blob_decls,
+                            intent,
+                        )?;
+                    }
+                    Ok(value)
+                }
+                Ok(Err(error)) => Err(HostWriteError::Host(error)),
+                Err(_) => Err(HostWriteError::WriteClosurePanicked),
+            }
+        });
+
+        match result {
+            Ok(receipt) => {
+                staged.commit();
+                Ok(receipt)
+            }
+            Err(error) => Err(staged.rollback(error)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_make_remote(
+        self,
+        root_table: String,
+        root_id: String,
+        gate_column: String,
+        stamp: String,
+        rows: Vec<coven_protocol::blob::RowBlobRef>,
+        publication_write_id: WriteId,
+    ) -> Result<WriteReceipt<()>, DbError> {
+        self.execute(|transaction| {
+            super::blob_transitions::write_gate(
+                transaction,
+                &root_table,
+                &gate_column,
+                true,
+                &stamp,
+                &root_id,
+            )
+            .map_err(DbError::from)?;
+            let external_blobs = ExternalBlobRecords::new(transaction);
+            for reference in &rows {
+                if reference.blob().provenance == Provenance::UserProvided {
+                    external_blobs.clear(reference)?;
+                }
+            }
+            Database::mark_make_remote_publishing_on(
+                transaction,
+                &root_table,
+                &root_id,
+                &publication_write_id,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_make_local(
+        self,
+        root_table: String,
+        root_id: String,
+        gate_column: String,
+        stamp: String,
+        materialized: Vec<super::blob_transitions::MaterializedLocalBlob>,
+    ) -> Result<WriteReceipt<()>, DbError> {
+        let gates = self.gates;
+        let synced_tables = self.synced_tables;
+        self.execute(|transaction| {
+            let remote = Database::row_blob_refs_for_root_on(
+                transaction,
+                gates,
+                synced_tables,
+                &root_table,
+                &root_id,
+            )?;
+            if remote.len() != materialized.len()
+                || remote.iter().zip(&materialized).any(|(current, local)| {
+                    !super::blob_transitions::same_row_blob_version(current, &local.remote)
+                        || current.authority() != local.remote.authority()
+                        || current.stored() != Some(&local.stored)
+                })
+            {
+                return Err(DbError::Message(format!(
+                    "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
+                )));
+            }
+            super::blob_transitions::write_gate(
+                transaction,
+                &root_table,
+                &gate_column,
+                false,
+                &stamp,
+                &root_id,
+            )
+            .map_err(DbError::from)?;
+
+            for local in &materialized {
+                let reference = &local.remote;
+                if reference.table() == root_table && reference.row_id() == root_id {
+                    continue;
+                }
+                let sql = format!(
+                    "UPDATE {} SET _updated_at = ?1 WHERE id = ?2 AND _updated_at = ?3",
+                    crate::quote_ident(reference.table())
+                );
+                let updated = transaction
+                    .execute(
+                        &sql,
+                        rusqlite::params![stamp, reference.row_id(), reference.row_stamp()],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(format!(
+                        "make_local row {:?}/{:?} changed before restamping",
+                        reference.table(),
+                        reference.row_id()
+                    )));
+                }
+            }
+            let local_rows = Database::row_blob_refs_for_root_on(
+                transaction,
+                gates,
+                synced_tables,
+                &root_table,
+                &root_id,
+            )?;
+            if local_rows.len() != materialized.len() {
+                return Err(DbError::Message(format!(
+                    "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
+                )));
+            }
+            let cloud_outbox = CloudOutboxRecords::new(transaction);
+            let external_blobs = ExternalBlobRecords::new(transaction);
+            for (local, materialized) in local_rows.iter().zip(&materialized) {
+                if local.table() != materialized.remote.table()
+                    || local.row_id() != materialized.remote.row_id()
+                    || local.column() != materialized.remote.column()
+                    || local.row_stamp() != stamp
+                    || local.blob() != materialized.remote.blob()
+                    || local.plaintext_size() != materialized.remote.plaintext_size()
+                    || local.plaintext_hash() != materialized.remote.plaintext_hash()
+                    || local.authority() != &coven_protocol::blob::RowBlobAuthority::Local
+                    || local.stored().is_some()
+                {
+                    return Err(DbError::Message(format!(
+                        "make_local row {:?}/{:?}/{:?} changed while its blob was materialized",
+                        materialized.remote.table(),
+                        materialized.remote.row_id(),
+                        materialized.remote.column()
+                    )));
+                }
+                if let Some(path) = &materialized.destination {
+                    external_blobs.register(local, path)?;
+                }
+                cloud_outbox.enqueue_delete(&materialized.stored, &stamp)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn execute_test<R>(
+        self,
+        operation: impl FnOnce(crate::DatabaseTestTransaction<'_, '_>) -> Result<R, DbError>,
+    ) -> Result<WriteReceipt<R>, DbError> {
+        self.execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
+    }
+
+    fn execute<R, E>(
         self,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>

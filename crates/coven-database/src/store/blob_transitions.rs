@@ -1,8 +1,8 @@
 use super::*;
 
-use crate::{CloudOutboxRecords, ExternalBlobRecords, MakeRemoteIntentState};
+use crate::{CloudOutboxRecords, MakeRemoteIntentState};
 use crate::{OutboxEntry, OutboxOperation, OutboxUploadState};
-use coven_protocol::blob::{Provenance, RowBlobRef};
+use coven_protocol::blob::RowBlobRef;
 
 pub enum PostUpload {
     Waiting,
@@ -167,7 +167,6 @@ impl StoreSession<'_> {
                     "make_remote root {root_table:?} has no boolean gate column"
                 ))
             })?;
-        let publication_write_id = write_id.clone();
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             connection,
             self.records.store_dir,
@@ -176,24 +175,16 @@ impl StoreSession<'_> {
             self.blob_decls,
             routing_encryption,
             self.verified_store_authority,
-            write_id,
+            write_id.clone(),
         )?
-        .execute(|transaction| {
-            write_gate(transaction, &root_table, gate_column, true, stamp, &root_id)
-                .map_err(DbError::from)?;
-            let external_blobs = ExternalBlobRecords::new(transaction);
-            for reference in &rows {
-                if reference.blob().provenance == Provenance::UserProvided {
-                    external_blobs.clear(reference)?;
-                }
-            }
-            Database::mark_make_remote_publishing_on(
-                transaction,
-                &root_table,
-                &root_id,
-                &publication_write_id,
-            )
-        })?;
+        .execute_make_remote(
+            root_table.clone(),
+            root_id.clone(),
+            gate_column.to_string(),
+            stamp.to_string(),
+            rows,
+            write_id,
+        )?;
         Ok(PostUpload::MadeRemote {
             root_table,
             root_id,
@@ -221,97 +212,13 @@ impl StoreSession<'_> {
             self.verified_store_authority,
             write_id,
         )?
-        .execute(|transaction| {
-            let remote = Database::row_blob_refs_for_root_on(
-                transaction,
-                self.gates,
-                self.synced_tables,
-                root_table,
-                root_id,
-            )?;
-            if remote.len() != materialized.len()
-                || remote.iter().zip(materialized).any(|(current, local)| {
-                    !same_row_blob_version(current, &local.remote)
-                        || current.authority() != local.remote.authority()
-                        || current.stored() != Some(&local.stored)
-                })
-            {
-                return Err(DbError::Message(format!(
-                    "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
-                )));
-            }
-            write_gate(
-                transaction,
-                root_table,
-                gate_column,
-                false,
-                stamp,
-                root_id,
-            )
-            .map_err(DbError::from)?;
-
-            for local in materialized {
-                let reference = &local.remote;
-                if reference.table() == root_table && reference.row_id() == root_id {
-                    continue;
-                }
-                let sql = format!(
-                    "UPDATE {} SET _updated_at = ?1 WHERE id = ?2 AND _updated_at = ?3",
-                    crate::quote_ident(reference.table())
-                );
-                let updated = transaction
-                    .execute(
-                        &sql,
-                        rusqlite::params![stamp, reference.row_id(), reference.row_stamp()],
-                    )
-                    .map_err(DbError::from)?;
-                if updated != 1 {
-                    return Err(DbError::Message(format!(
-                        "make_local row {:?}/{:?} changed before restamping",
-                        reference.table(),
-                        reference.row_id()
-                    )));
-                }
-            }
-            let local_rows = Database::row_blob_refs_for_root_on(
-                transaction,
-                self.gates,
-                self.synced_tables,
-                root_table,
-                root_id,
-            )?;
-            if local_rows.len() != materialized.len() {
-                return Err(DbError::Message(format!(
-                    "make_local root {root_table:?}/{root_id:?} changed while its blobs were materialized"
-                )));
-            }
-            let cloud_outbox = CloudOutboxRecords::new(transaction);
-            let external_blobs = ExternalBlobRecords::new(transaction);
-            for (local, materialized) in local_rows.iter().zip(materialized) {
-                if local.table() != materialized.remote.table()
-                    || local.row_id() != materialized.remote.row_id()
-                    || local.column() != materialized.remote.column()
-                    || local.row_stamp() != stamp
-                    || local.blob() != materialized.remote.blob()
-                    || local.plaintext_size() != materialized.remote.plaintext_size()
-                    || local.plaintext_hash() != materialized.remote.plaintext_hash()
-                    || local.authority() != &coven_protocol::blob::RowBlobAuthority::Local
-                    || local.stored().is_some()
-                {
-                    return Err(DbError::Message(format!(
-                        "make_local row {:?}/{:?}/{:?} changed while its blob was materialized",
-                        materialized.remote.table(),
-                        materialized.remote.row_id(),
-                        materialized.remote.column()
-                    )));
-                }
-                if let Some(path) = &materialized.destination {
-                    external_blobs.register(local, path)?;
-                }
-                cloud_outbox.enqueue_delete(&materialized.stored, stamp)?;
-            }
-            Ok(())
-        })
+        .execute_make_local(
+            root_table.to_string(),
+            root_id.to_string(),
+            gate_column.to_string(),
+            stamp.to_string(),
+            materialized.to_vec(),
+        )
         .map(|receipt| receipt.value)
     }
 
@@ -485,7 +392,7 @@ impl StoreDatabase {
 
 /// Set a gated root's locality and stamp the row inside the caller's prepared
 /// blob-transition transaction.
-fn write_gate(
+pub(super) fn write_gate(
     transaction: &rusqlite::Transaction<'_>,
     root_table: &str,
     gate_column: &str,
@@ -504,7 +411,7 @@ fn write_gate(
     Ok(())
 }
 
-fn same_row_blob_version(left: &RowBlobRef, right: &RowBlobRef) -> bool {
+pub(super) fn same_row_blob_version(left: &RowBlobRef, right: &RowBlobRef) -> bool {
     left.table() == right.table()
         && left.row_id() == right.row_id()
         && left.row_stamp() == right.row_stamp()

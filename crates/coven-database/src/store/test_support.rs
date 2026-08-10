@@ -319,7 +319,7 @@ impl StoreSession<'_> {
             self.verified_store_authority,
             write_id,
         )?
-        .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
+        .execute_test(operation)
     }
 
     fn run_prepared_blob_transition_write_for_test<R>(
@@ -340,7 +340,7 @@ impl StoreSession<'_> {
             self.verified_store_authority,
             write_id,
         )?
-        .execute(|transaction| operation(crate::DatabaseTestTransaction::new(transaction)))
+        .execute_test(operation)
     }
 
     fn cleanup_intent_count_for_test(
