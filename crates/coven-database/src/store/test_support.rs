@@ -1,4 +1,4 @@
-use super::{DbError, StoreDatabase};
+use super::{DbError, StoreDatabase, StoreSession};
 use coven_protocol::store_commit::{
     ObjectHash, StoreBatchCommitRef, StoreDeviceExclusionRef, StoreDeviceHeadRef,
 };
@@ -22,6 +22,227 @@ struct PreparedWriteTransfer {
     remotes: Vec<(String, String)>,
     payload_claims: Vec<(String, BTreeSet<ObjectHash>)>,
     payloads: Vec<(ObjectHash, Vec<u8>)>,
+}
+
+impl StoreSession<'_> {
+    fn export_prepared_write(&self, write_id: &WriteId) -> Result<PreparedWriteTransfer, DbError> {
+        let connection = self.records.conn;
+        let write = connection
+            .query_row(
+                "SELECT status, affected_rows, changeset_hash,
+                        base, blob_facts, prepared
+                 FROM store_writes WHERE write_id = ?1",
+                [write_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(DbError::from)?;
+        let partitions = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT audience, control_coord, changeset_hash
+                     FROM store_write_partitions WHERE write_id = ?1 ORDER BY audience",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([write_id.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            rows
+        };
+        let packages = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT audience, remote_object_id
+                     FROM store_write_packages WHERE write_id = ?1 ORDER BY audience",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([write_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            rows
+        };
+        let blobs = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT audience, locator_hash, remote_object_id, spool_path
+                     FROM store_write_blobs WHERE write_id = ?1
+                     ORDER BY audience, remote_object_id",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([write_id.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            rows
+        };
+        let remotes = {
+            let mut statement = connection
+                .prepare("SELECT object_id, state FROM remote_objects ORDER BY object_id")
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            rows
+        };
+        let mut owner_keys = vec![crate::payload_spool::store_write_owner_key(write_id)];
+        for (object_id, _) in &remotes {
+            let object_id = object_id
+                .parse()
+                .map_err(|error| DbError::context("parse transferred remote object id", error))?;
+            owner_keys.push(crate::payload_spool::remote_object_owner_key(object_id));
+        }
+        let mut payload_claims = Vec::new();
+        let mut payload_hashes = BTreeSet::new();
+        for owner_key in owner_keys {
+            let claims = {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT payload_hash FROM payload_spool_owners
+                         WHERE owner_key = ?1 ORDER BY payload_hash",
+                    )
+                    .map_err(DbError::from)?;
+                let claims = statement
+                    .query_map([&owner_key], |row| row.get::<_, String>(0))
+                    .map_err(DbError::from)?
+                    .map(|encoded| {
+                        encoded.map_err(DbError::from)?.parse().map_err(|error| {
+                            DbError::context("parse transferred payload hash", error)
+                        })
+                    })
+                    .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
+                claims
+            };
+            payload_hashes.extend(claims.iter().copied());
+            if !claims.is_empty() {
+                payload_claims.push((owner_key, claims));
+            }
+        }
+        let payloads = payload_hashes
+            .into_iter()
+            .map(|hash| Ok((hash, self.records.payload(hash)?)))
+            .collect::<Result<Vec<_>, DbError>>()?;
+        Ok(PreparedWriteTransfer {
+            write,
+            partitions,
+            packages,
+            blobs,
+            remotes,
+            payload_claims,
+            payloads,
+        })
+    }
+
+    fn import_prepared_write(
+        &self,
+        write_id: &WriteId,
+        transfer: PreparedWriteTransfer,
+    ) -> Result<(), DbError> {
+        for (expected_hash, bytes) in &transfer.payloads {
+            let actual_hash = self.records.install_payload(bytes)?;
+            if actual_hash != *expected_hash {
+                return Err(DbError::Message(format!(
+                    "transferred payload expected {expected_hash} but stored as {actual_hash}"
+                )));
+            }
+        }
+        let transaction = self
+            .records
+            .conn
+            .unchecked_transaction()
+            .map_err(DbError::from)?;
+        for (object_id, state) in transfer.remotes {
+            let imported = transaction
+                .execute(
+                    "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+                     ON CONFLICT(object_id) DO UPDATE SET state = excluded.state
+                     WHERE remote_objects.state = excluded.state",
+                    (object_id, state),
+                )
+                .map_err(DbError::from)?;
+            if imported != 1 {
+                return Err(DbError::Message(
+                    "prepared write remote object conflicts with restored state".to_string(),
+                ));
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO store_writes
+                 (write_id, status, affected_rows, changeset_hash,
+                  base, blob_facts, prepared)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    write_id.as_str(),
+                    transfer.write.0,
+                    transfer.write.1,
+                    transfer.write.2,
+                    transfer.write.3,
+                    transfer.write.4,
+                    transfer.write.5,
+                ],
+            )
+            .map_err(DbError::from)?;
+        for (audience, control, changeset_hash) in transfer.partitions {
+            transaction
+                .execute(
+                    "INSERT INTO store_write_partitions
+                     (write_id, audience, control_coord, changeset_hash)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![write_id.as_str(), audience, control, changeset_hash],
+                )
+                .map_err(DbError::from)?;
+        }
+        for (audience, object_id) in transfer.packages {
+            transaction
+                .execute(
+                    "INSERT INTO store_write_packages
+                     (write_id, audience, remote_object_id) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![write_id.as_str(), audience, object_id],
+                )
+                .map_err(DbError::from)?;
+        }
+        for (audience, locator_hash, object_id, spool_path) in transfer.blobs {
+            transaction
+                .execute(
+                    "INSERT INTO store_write_blobs
+                     (write_id, audience, locator_hash, remote_object_id, spool_path)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        write_id.as_str(),
+                        audience,
+                        locator_hash,
+                        object_id,
+                        spool_path
+                    ],
+                )
+                .map_err(DbError::from)?;
+        }
+        for (owner_key, claims) in transfer.payload_claims {
+            crate::payload_spool::set_payload_owner_claims_on(&transaction, &owner_key, &claims)?;
+        }
+        transaction.commit().map_err(DbError::from)
+    }
 }
 
 impl StoreDatabase {
@@ -591,240 +812,16 @@ impl StoreDatabase {
         write_id: &WriteId,
     ) -> Result<(), DbError> {
         let source_write_id = write_id.clone();
-        let source_store_dir = self.store_dir.clone();
         let transfer = self
             .connection
-            .call_database(move |session| {
-                let connection = session.conn;
-                let write = connection
-                    .query_row(
-                        "SELECT status, affected_rows, changeset_hash,
-                                base, blob_facts, prepared
-                         FROM store_writes WHERE write_id = ?1",
-                        [source_write_id.as_str()],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                                row.get(5)?,
-                            ))
-                        },
-                    )
-                    .map_err(DbError::from)?;
-                let partitions = {
-                    let mut statement = connection
-                        .prepare(
-                            "SELECT audience, control_coord, changeset_hash
-                             FROM store_write_partitions WHERE write_id = ?1 ORDER BY audience",
-                        )
-                        .map_err(DbError::from)?;
-                    let rows = statement
-                        .query_map([source_write_id.as_str()], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                        })
-                        .map_err(DbError::from)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(DbError::from)?;
-                    rows
-                };
-                let packages = {
-                    let mut statement = connection
-                        .prepare(
-                            "SELECT audience, remote_object_id
-                             FROM store_write_packages WHERE write_id = ?1 ORDER BY audience",
-                        )
-                        .map_err(DbError::from)?;
-                    let rows = statement
-                        .query_map([source_write_id.as_str()], |row| {
-                            Ok((row.get(0)?, row.get(1)?))
-                        })
-                        .map_err(DbError::from)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(DbError::from)?;
-                    rows
-                };
-                let blobs = {
-                    let mut statement = connection
-                        .prepare(
-                            "SELECT audience, locator_hash, remote_object_id, spool_path
-                             FROM store_write_blobs WHERE write_id = ?1
-                             ORDER BY audience, remote_object_id",
-                        )
-                        .map_err(DbError::from)?;
-                    let rows = statement
-                        .query_map([source_write_id.as_str()], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        })
-                        .map_err(DbError::from)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(DbError::from)?;
-                    rows
-                };
-                let remotes = {
-                    let mut statement = connection
-                        .prepare("SELECT object_id, state FROM remote_objects ORDER BY object_id")
-                        .map_err(DbError::from)?;
-                    let rows = statement
-                        .query_map([], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                        })
-                        .map_err(DbError::from)?
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(DbError::from)?;
-                    rows
-                };
-                let mut owner_keys = vec![crate::payload_spool::store_write_owner_key(
-                    &source_write_id,
-                )];
-                for (object_id, _) in &remotes {
-                    let object_id = object_id.parse().map_err(|error| {
-                        DbError::context("parse transferred remote object id", error)
-                    })?;
-                    owner_keys.push(crate::payload_spool::remote_object_owner_key(object_id));
-                }
-                let mut payload_claims = Vec::new();
-                let mut payload_hashes = BTreeSet::new();
-                for owner_key in owner_keys {
-                    let claims = {
-                        let mut statement = connection
-                            .prepare(
-                                "SELECT payload_hash FROM payload_spool_owners
-                                 WHERE owner_key = ?1 ORDER BY payload_hash",
-                            )
-                            .map_err(DbError::from)?;
-                        let claims = statement
-                            .query_map([&owner_key], |row| row.get::<_, String>(0))
-                            .map_err(DbError::from)?
-                            .map(|encoded| {
-                                encoded.map_err(DbError::from)?.parse().map_err(|error| {
-                                    DbError::context("parse transferred payload hash", error)
-                                })
-                            })
-                            .collect::<Result<BTreeSet<ObjectHash>, DbError>>()?;
-                        claims
-                    };
-                    payload_hashes.extend(claims.iter().copied());
-                    if !claims.is_empty() {
-                        payload_claims.push((owner_key, claims));
-                    }
-                }
-                let records =
-                    crate::payload_spool::StoreRecords::new(connection, &source_store_dir);
-                let payloads = payload_hashes
-                    .into_iter()
-                    .map(|hash| Ok((hash, records.payload(hash)?)))
-                    .collect::<Result<Vec<_>, DbError>>()?;
-                Ok(PreparedWriteTransfer {
-                    write,
-                    partitions,
-                    packages,
-                    blobs,
-                    remotes,
-                    payload_claims,
-                    payloads,
-                })
-            })
+            .call_store(move |session| session.export_prepared_write(&source_write_id))
             .await?;
 
-        for (expected_hash, bytes) in &transfer.payloads {
-            let actual_hash =
-                crate::payload_spool::write_payload_blocking(&destination.store_dir, bytes)?;
-            if actual_hash != *expected_hash {
-                return Err(DbError::Message(format!(
-                    "transferred payload expected {expected_hash} but stored as {actual_hash}"
-                )));
-            }
-        }
         let destination_write_id = write_id.clone();
         destination
             .connection
-            .call_database(move |session| {
-                let connection = session.conn;
-                let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
-                for (object_id, state) in transfer.remotes {
-                    let imported = transaction
-                        .execute(
-                            "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
-                             ON CONFLICT(object_id) DO UPDATE SET state = excluded.state
-                             WHERE remote_objects.state = excluded.state",
-                            (object_id, state),
-                        )
-                        .map_err(DbError::from)?;
-                    if imported != 1 {
-                        return Err(DbError::Message(
-                            "prepared write remote object conflicts with restored state"
-                                .to_string(),
-                        ));
-                    }
-                }
-                transaction
-                    .execute(
-                        "INSERT INTO store_writes
-                         (write_id, status, affected_rows, changeset_hash,
-                          base, blob_facts, prepared)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        rusqlite::params![
-                            destination_write_id.as_str(),
-                            transfer.write.0,
-                            transfer.write.1,
-                            transfer.write.2,
-                            transfer.write.3,
-                            transfer.write.4,
-                            transfer.write.5,
-                        ],
-                    )
-                    .map_err(DbError::from)?;
-                for (audience, control, changeset_hash) in transfer.partitions {
-                    transaction
-                        .execute(
-                            "INSERT INTO store_write_partitions
-                             (write_id, audience, control_coord, changeset_hash)
-                             VALUES (?1, ?2, ?3, ?4)",
-                            rusqlite::params![
-                                destination_write_id.as_str(),
-                                audience,
-                                control,
-                                changeset_hash
-                            ],
-                        )
-                        .map_err(DbError::from)?;
-                }
-                for (audience, object_id) in transfer.packages {
-                    transaction
-                        .execute(
-                            "INSERT INTO store_write_packages
-                             (write_id, audience, remote_object_id) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![destination_write_id.as_str(), audience, object_id],
-                        )
-                        .map_err(DbError::from)?;
-                }
-                for (audience, locator_hash, object_id, spool_path) in transfer.blobs {
-                    transaction
-                        .execute(
-                            "INSERT INTO store_write_blobs
-                             (write_id, audience, locator_hash, remote_object_id, spool_path)
-                             VALUES (?1, ?2, ?3, ?4, ?5)",
-                            rusqlite::params![
-                                destination_write_id.as_str(),
-                                audience,
-                                locator_hash,
-                                object_id,
-                                spool_path
-                            ],
-                        )
-                        .map_err(DbError::from)?;
-                }
-                for (owner_key, claims) in transfer.payload_claims {
-                    crate::payload_spool::set_payload_owner_claims_on(
-                        &transaction,
-                        &owner_key,
-                        &claims,
-                    )?;
-                }
-                transaction.commit().map_err(DbError::from)
+            .call_store(move |session| {
+                session.import_prepared_write(&destination_write_id, transfer)
             })
             .await
     }
