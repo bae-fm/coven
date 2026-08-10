@@ -18,14 +18,14 @@ jobs:
           cache-workspace-crates: true
       # rust-cache preserves dependency artifacts but deliberately exports
       # CARGO_INCREMENTAL=0 and removes incremental state. Coven's test build is
-      # dominated by recompiling the workspace crate, so restore the profile's
-      # setting and retain that crate's compiler state separately.
+      # dominated by recompiling workspace and integration-test crates, so
+      # restore the profile's setting and retain their compiler state separately.
       - name: Enable incremental compilation
         run: echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
       - name: Restore coven incremental compiler state
         uses: actions/cache@v5
         with:
-          path: target/debug/incremental/coven-*
+          path: target/debug/incremental
           key: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
           restore-keys: |
             coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-
