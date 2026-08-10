@@ -30,8 +30,8 @@ mod snapshot_install;
 /// touch rows alone continue to take the connection in their private SQL leaf.
 #[derive(Clone, Copy)]
 pub(crate) struct StoreRecords<'store> {
-    pub(crate) conn: &'store Connection,
-    pub(crate) store_dir: &'store StoreDir,
+    conn: &'store Connection,
+    store_dir: &'store StoreDir,
 }
 
 impl<'store> StoreRecords<'store> {
@@ -49,6 +49,181 @@ impl<'store> StoreRecords<'store> {
 
     pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
         write_payload_blocking(self.store_dir, bytes)
+    }
+
+    pub(crate) fn store_write_partitions(
+        self,
+        write_id: &str,
+    ) -> Result<crate::PreparedStoreWritePartitions, DbError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT audience, control_coord, changeset_hash
+                 FROM store_write_partitions
+                 WHERE write_id = ?1
+                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
+                          audience, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([write_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut store = None;
+        let mut circles = Vec::new();
+        let mut local = None;
+        for row in rows {
+            let (audience, control, changeset_hash) = row.map_err(DbError::from)?;
+            let changeset = self.payload(changeset_hash.parse()?)?;
+            if audience == "store" {
+                if control.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} Store partition carries a Circle control"
+                    )));
+                }
+                if store.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} carries more than one Store partition"
+                    )));
+                }
+                store = Some(AudiencePartition {
+                    audience: coven_protocol::circle::Audience::Store,
+                    control: None,
+                    changeset,
+                });
+                continue;
+            }
+            if audience == "local" {
+                if control.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} Local partition carries a Circle control"
+                    )));
+                }
+                if local.is_some() {
+                    return Err(DbError::Message(format!(
+                        "pending write {write_id} carries more than one Local partition"
+                    )));
+                }
+                local = Some(AudiencePartition {
+                    audience: coven_protocol::circle::Audience::Local,
+                    control: None,
+                    changeset,
+                });
+                continue;
+            }
+            let circle_id = audience
+                .parse::<coven_protocol::circle::CircleId>()
+                .map_err(|error| {
+                    DbError::context(
+                        format!("pending write {write_id} has invalid audience {audience:?}"),
+                        error,
+                    )
+                })?;
+            let control_json = control.ok_or_else(|| {
+                DbError::Message(format!(
+                    "pending write {write_id} Circle {circle_id} has no control coordinate"
+                ))
+            })?;
+            let control =
+                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
+                    DbError::Message(format!(
+                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
+                    ))
+                })?;
+            circles.push(AudiencePartition {
+                audience: coven_protocol::circle::Audience::Circle(circle_id),
+                control: Some(control),
+                changeset,
+            });
+        }
+        drop(statement);
+        Ok(crate::PreparedStoreWritePartitions {
+            store,
+            circles,
+            local,
+        })
+    }
+
+    pub(super) fn store_root_authority(
+        self,
+    ) -> Result<
+        Option<(
+            coven_protocol::store_commit::StoreRootRef,
+            coven_protocol::store_commit::StoreProtocolRoot,
+        )>,
+        DbError,
+    > {
+        crate::load_store_root_authority_on(self.conn)
+    }
+
+    pub(super) fn activated_registration(
+        self,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<coven_protocol::store_commit::StoreDeviceRegistration, DbError> {
+        crate::load_activated_registration_on(self.conn, root, reference)
+    }
+
+    pub(super) fn local_activated_registration_ref(
+        self,
+    ) -> Result<Option<coven_protocol::store_commit::StoreDeviceRegistrationRef>, DbError> {
+        crate::local_activated_registration_ref_on(self.conn)
+    }
+
+    pub(super) fn has_local_device(self) -> Result<bool, DbError> {
+        Ok(crate::get_protocol_state_on(self.conn, crate::LOCAL_DEVICE_ID_STATE_KEY)?.is_some())
+    }
+
+    pub(super) fn current_store_device_state(
+        self,
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+        let frontier = crate::StoreDatabase::materialized_frontier_on(self.conn, None)?
+            .into_values()
+            .map(|reference| (reference.coord.stream_id, reference))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let (_, state) = super::store_device_state::store_device_state_for_history_cut_on(
+            self.conn,
+            &coven_protocol::store_commit::StoreHistoryCut(frontier),
+        )?;
+        Ok(state)
+    }
+
+    pub(super) fn author_exclusion_activation_row(
+        self,
+        exclusion: &str,
+    ) -> Result<Option<(String, String, String)>, DbError> {
+        use rusqlite::OptionalExtension;
+
+        self.conn
+            .query_row(
+                "SELECT accepted_cut, activation_commit, activation_head
+                 FROM store_author_exclusion_activations
+                 WHERE exclusion_ref = ?1",
+                [exclusion],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
+    pub(super) fn materialized_commit_ref(
+        self,
+        stream_id: &str,
+        sequence: u64,
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        crate::StoreDatabase::materialized_commit_ref_on(self.conn, stream_id, sequence)
+    }
+
+    pub(super) fn declared_store_device_state(
+        self,
+        reference: &coven_protocol::store_commit::StoreDeviceStateRef,
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+        super::store_device_state::load_declared_store_device_state_on(self.conn, reference)
     }
 }
 

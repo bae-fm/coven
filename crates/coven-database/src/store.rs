@@ -134,9 +134,7 @@ pub use snapshot_image::{
     verify_circle_bootstrap_connection, verify_circle_bootstrap_image, CreatedSnapshot,
     SnapshotBlobAudience, SnapshotDatabaseImage, SnapshotImageError, SnapshotImageOperationError,
 };
-use store_device_state::{
-    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
-};
+use store_device_state::apply_store_device_exclusion_freezes_on;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::AuthorExclusionLocatorTamper;
 pub use write_lifecycle::BlockedWriteDiscard;

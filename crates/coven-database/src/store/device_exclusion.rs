@@ -188,8 +188,7 @@ impl StoreSession<'_> {
         operation: DurableStoreDeviceExclusionOperation,
         remotes: Vec<ClosedRemoteObject>,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let conn = records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
             if active.operation_id() != operation.operation_id() {
@@ -212,7 +211,7 @@ impl StoreSession<'_> {
         for remote in &remotes {
             persist_exact_remote_object_on(
                 &tx,
-                records.store_dir,
+                self.store_dir,
                 remote,
                 "Store-device exclusion candidate object",
             )?;
@@ -234,8 +233,7 @@ impl StoreSession<'_> {
         next: DurableStoreDeviceExclusionOperation,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let conn = records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         let next_candidate = next.candidate().expect("validated candidate state");
@@ -244,7 +242,7 @@ impl StoreSession<'_> {
                 let (winner, prepared) = next_candidate.publication();
                 replace_prepared_merge_head_remote_on(
                     &tx,
-                    records.store_dir,
+                    self.store_dir,
                     &current.object,
                     winner,
                     prepared,
@@ -382,8 +380,7 @@ impl StoreSession<'_> {
         replacement_remotes: Vec<ClosedRemoteObject>,
         nonactivation: coven_protocol::remote_object::CandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let conn = records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
         for remote in replacement_remotes
@@ -392,7 +389,7 @@ impl StoreSession<'_> {
         {
             persist_exact_remote_object_on(
                 &tx,
-                records.store_dir,
+                self.store_dir,
                 remote,
                 "replacement Store-device exclusion candidate object",
             )?;

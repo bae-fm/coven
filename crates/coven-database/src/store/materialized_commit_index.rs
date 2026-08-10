@@ -198,7 +198,7 @@ impl StoreSession<'_> {
             .ok_or_else(|| {
                 DbError::Message("Store root is absent while loading activated devices".to_string())
             })?;
-        let mut statement = records
+        let mut statement = self
             .conn
             .prepare(
                 "SELECT device_id, registration_hash, registration_object
@@ -282,7 +282,7 @@ impl StoreSession<'_> {
         let registration = self
             .verified_store_authority
             .activated_registration_on(records, &root, &reference)?;
-        let authority: String = records
+        let authority: String = self
             .conn
             .query_row(
                 "SELECT activation_authority FROM store_device_registration_activations \
@@ -316,7 +316,7 @@ impl StoreSession<'_> {
                     "Store root is absent while loading an activated device".to_string(),
                 )
             })?;
-        let stored: Option<(String, String)> = records
+        let stored: Option<(String, String)> = self
             .conn
             .query_row(
                 "SELECT registration_object, activation_authority \

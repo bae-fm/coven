@@ -9,8 +9,7 @@ use crate::WriteId;
 use crate::{attach_session, capture_changeset, *};
 use crate::{
     audience_moves, capture_routing_changes, partition_outbound,
-    validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, CirclePartitionControl,
-    Gates, RoutingChanges,
+    validate_scoped_foreign_key_audiences, AudienceMove, AudiencePartition, Gates, RoutingChanges,
 };
 
 use coven_protocol::blob::Provenance;
@@ -106,10 +105,8 @@ impl StoreSession<'_> {
         let Some((write_id, base, blob_facts)) = stored else {
             return Ok(None);
         };
-        let partitions = StoreDatabase::store_write_partitions_on(
-            crate::store::StoreRecords::new(self.conn, self.store_dir),
-            &write_id,
-        )?;
+        let partitions = crate::store::StoreRecords::new(self.conn, self.store_dir)
+            .store_write_partitions(&write_id)?;
         Ok(Some(PreparedStoreWrite {
             write_id: WriteId::from_generated(write_id),
             partitions,
@@ -489,104 +486,6 @@ impl StoreDatabase {
         self.connection
             .call_store(|session| session.prepare_store_write())
             .await
-    }
-
-    pub(crate) fn store_write_partitions_on(
-        records: crate::store::StoreRecords<'_>,
-        write_id: &str,
-    ) -> Result<PreparedStoreWritePartitions, DbError> {
-        let conn = records.conn;
-        let mut statement = conn
-            .prepare(
-                "SELECT audience, control_coord, changeset_hash
-                 FROM store_write_partitions
-                 WHERE write_id = ?1
-                 ORDER BY CASE audience WHEN 'store' THEN 0 WHEN 'local' THEN 2 ELSE 1 END,
-                          audience, control_coord",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([write_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        let mut store = None;
-        let mut circles = Vec::new();
-        let mut local = None;
-        for row in rows {
-            let (audience, control, changeset_hash) = row.map_err(DbError::from)?;
-            let changeset = records.payload(changeset_hash.parse()?)?;
-            if audience == "store" {
-                if control.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} Store partition carries a Circle control"
-                    )));
-                }
-                if store.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} carries more than one Store partition"
-                    )));
-                }
-                store = Some(AudiencePartition {
-                    audience: coven_protocol::circle::Audience::Store,
-                    control: None,
-                    changeset,
-                });
-                continue;
-            }
-            if audience == "local" {
-                if control.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} Local partition carries a Circle control"
-                    )));
-                }
-                if local.is_some() {
-                    return Err(DbError::Message(format!(
-                        "pending write {write_id} carries more than one Local partition"
-                    )));
-                }
-                local = Some(AudiencePartition {
-                    audience: coven_protocol::circle::Audience::Local,
-                    control: None,
-                    changeset,
-                });
-                continue;
-            }
-            let circle_id = audience
-                .parse::<coven_protocol::circle::CircleId>()
-                .map_err(|error| {
-                    DbError::context(
-                        format!("pending write {write_id} has invalid audience {audience:?}"),
-                        error,
-                    )
-                })?;
-            let control_json = control.ok_or_else(|| {
-                DbError::Message(format!(
-                    "pending write {write_id} Circle {circle_id} has no control coordinate"
-                ))
-            })?;
-            let control =
-                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
-                    DbError::Message(format!(
-                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
-                    ))
-                })?;
-            circles.push(AudiencePartition {
-                audience: coven_protocol::circle::Audience::Circle(circle_id),
-                control: Some(control),
-                changeset,
-            });
-        }
-        drop(statement);
-        Ok(PreparedStoreWritePartitions {
-            store,
-            circles,
-            local,
-        })
     }
 }
 

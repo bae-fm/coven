@@ -86,8 +86,7 @@ impl StoreSession<'_> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<PostUpload, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let connection = records.conn;
+        let connection = self.conn;
         let resolved_root = self
             .gates
             .resolve_root_of(connection, row.table(), row.row_id())
@@ -171,7 +170,7 @@ impl StoreSession<'_> {
         let publication_write_id = write_id.clone();
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             connection,
-            records.store_dir,
+            self.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,
@@ -212,10 +211,9 @@ impl StoreSession<'_> {
         materialized: &[MaterializedLocalBlob],
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
-            records.conn,
-            records.store_dir,
+            self.conn,
+            self.store_dir,
             self.synced_tables,
             self.gates,
             self.blob_decls,

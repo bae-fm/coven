@@ -1,5 +1,4 @@
 use super::*;
-use crate::query_mapped_rows;
 use crate::store::StoreRecords;
 
 impl StoreDatabase {
@@ -15,31 +14,13 @@ impl StoreDatabase {
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<BTreeSet<String>, DbError> {
-        let conn = records.conn;
-        let references = query_mapped_rows(
-            conn,
-            "SELECT DISTINCT activation_commit
-                 FROM store_author_exclusion_activations
-                 ORDER BY activation_commit",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        let mut required = references.into_iter().collect::<BTreeSet<_>>();
-        let bootstrap_rows = query_mapped_rows(
-            conn,
-            "SELECT circle_id, activation_commit, exact_cut
-                 FROM circle_bootstrap_coverage ORDER BY circle_id",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )?;
+        let rows = records.snapshot_retention_rows()?;
+        let mut required = rows
+            .exclusion_activation_commits
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let mut bootstrap_cuts = BTreeMap::new();
-        for (circle_id, activation_commit, exact_cut) in bootstrap_rows {
+        for (circle_id, activation_commit, exact_cut) in rows.circle_bootstraps {
             let circle_id: coven_protocol::circle::CircleId = circle_id
                 .parse()
                 .map_err(|error| DbError::context("snapshot Circle bootstrap id", error))?;
@@ -52,13 +33,7 @@ impl StoreDatabase {
             }
             required.insert(activation_commit);
         }
-        let materialization_refs = query_mapped_rows(
-            conn,
-            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for encoded in materialization_refs {
+        for encoded in rows.materialization_refs {
             let reference: StoreBatchCommitRef = serde_json::from_str(&encoded)
                 .map_err(|error| DbError::context("snapshot retained Circle commit", error))?;
             let materialization =
@@ -90,17 +65,9 @@ impl StoreDatabase {
         authority: &mut dyn VerifiedStoreLookup,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
-        let conn = records.conn;
         // Each recorded author-exclusion activation must still match its
         // exclusion locator, so the image's exclusion table is internally exact.
-        let stored = query_mapped_rows(
-            conn,
-            "SELECT exclusion_ref, activation_commit
-                 FROM store_author_exclusion_activations
-                 ORDER BY exclusion_ref",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
+        let stored = records.snapshot_exclusion_activation_rows()?;
         for (encoded_exclusion, activation_commit) in stored {
             let exclusion = serde_json::from_str(&encoded_exclusion)
                 .map_err(|error| DbError::context("snapshot author exclusion reference", error))?;
@@ -120,14 +87,7 @@ impl StoreDatabase {
         // keeps — an extra row is unjustified replay baseline, a missing one is
         // coverage the Circle retained replay needs.
         let expected = Self::snapshot_required_retained_refs(records, authority, root)?;
-        let mut statement = conn
-            .prepare("SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref")
-            .map_err(DbError::from)?;
-        let actual = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(DbError::from)?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()
-            .map_err(DbError::from)?;
+        let actual = records.retained_materialization_refs()?;
         if actual != expected {
             return Err(DbError::Message(
                 "snapshot retained inputs differ from the retention rule".to_string(),

@@ -107,9 +107,10 @@ impl SnapshotDatabaseImage {
         Self::prepare(temp_dir.join("snapshot.db"))
     }
 
-    pub(super) fn capture(
+    pub(super) fn capture_on(
         self,
-        records: crate::store::StoreRecords<'_>,
+        connection: &rusqlite::Connection,
+        store_dir: &coven_foundation::store_dir::StoreDir,
         root: &coven_protocol::store_commit::StoreRootRef,
         tables: &[SyncedTable],
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
@@ -118,8 +119,6 @@ impl SnapshotDatabaseImage {
         if tables.is_empty() {
             return self.finish(Err(SnapshotImageError::NoSyncedTables));
         }
-        let connection = records.conn;
-
         let gates = match crate::Gates::from_tables(connection, tables) {
             Ok(gates) => gates,
             Err(error) => {
@@ -152,13 +151,7 @@ impl SnapshotDatabaseImage {
         if let Err(error) = connection.execute("VACUUM INTO ?1", [path_str]) {
             return self.finish(Err(SnapshotImageError::VacuumFailed(error.to_string())));
         }
-        if let Err(error) = self.project(
-            records.store_dir,
-            root,
-            tables,
-            routing_key.as_ref(),
-            audience,
-        ) {
+        if let Err(error) = self.project(store_dir, root, tables, routing_key.as_ref(), audience) {
             return self.finish(Err(error));
         }
         let blobs = match self.blob_facts(connection, tables) {
@@ -630,12 +623,14 @@ impl StoreSession<'_> {
         DbError,
     > {
         let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        require_no_unpublished_store_writes(records.conn)?;
+        require_no_unpublished_store_writes(self.conn)?;
         let snapshot = SnapshotDatabaseImage::prepare_snapshot(temp_dir)
-            .and_then(|image| image.capture(records, root, tables, routing_encryption, &audience))
+            .and_then(|image| {
+                records.capture_snapshot(image, root, tables, routing_encryption, &audience)
+            })
             .map_err(snapshot_image_db_error)?;
         let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
-            StoreDatabase::materialized_frontier_on(records.conn, None)?,
+            StoreDatabase::materialized_frontier_on(self.conn, None)?,
         )
         .map_err(|error| DbError::context("snapshot coverage", error))?;
         Ok((snapshot, coverage))
@@ -652,12 +647,8 @@ impl StoreSession<'_> {
         circle_id: coven_protocol::circle::CircleId,
         cutoff: &coven_protocol::store_commit::CommitFrontier,
     ) -> Result<CreatedSnapshot, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let transaction = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let replay = crate::store::StoreRecordTransaction::new(&transaction, records.store_dir)
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let replay = crate::store::StoreRecordTransaction::new(&transaction, self.store_dir)
             .replay_projection_with_authority(
                 self.verified_store_authority,
                 root,
@@ -700,8 +691,8 @@ impl StoreSession<'_> {
     ) -> Result<Vec<u8>, DbError> {
         SnapshotDatabaseImage::prepare_snapshot(temp_dir)
             .and_then(|image| {
-                image.capture(
-                    crate::store::StoreRecords::new(self.conn, self.store_dir),
+                crate::store::StoreRecords::new(self.conn, self.store_dir).capture_snapshot(
+                    image,
                     root,
                     self.synced_tables,
                     routing_encryption,

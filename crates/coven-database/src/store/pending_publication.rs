@@ -57,7 +57,7 @@ impl StoreSession<'_> {
 
     fn oldest_prepared_store_write(&mut self) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
         let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let row = records
+        let row = self
             .conn
             .query_row(
                 "SELECT write_id, base, prepared FROM store_writes
@@ -97,7 +97,7 @@ impl StoreSession<'_> {
                 ));
             }
             let registration_ref = &unverified_commit.author_registration;
-            let stored_registration_ref: String = records
+            let stored_registration_ref: String = self
                 .conn
                 .query_row(
                     "SELECT registration_object \
@@ -156,9 +156,9 @@ impl StoreSession<'_> {
                     "prepared commit differs from its write dependency frontier".to_string(),
                 ));
             }
-            let partitions = StoreDatabase::store_write_partitions_on(records, write_id.as_str())?;
+            let partitions = records.store_write_partitions(write_id.as_str())?;
             let audiences =
-                load_prepared_audience_objects_on(records.conn, records.store_dir, &write_id)?;
+                load_prepared_audience_objects_on(self.conn, self.store_dir, &write_id)?;
             let graph_commit = match graph_commit {
                 Some(graph_commit) => {
                     let candidate_head = match &prepared {

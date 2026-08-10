@@ -35,15 +35,11 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         for remote in &remotes {
             persist_prepared_remote_object_on(
                 &tx,
-                records.store_dir,
+                self.store_dir,
                 remote,
                 &owner,
                 "Circle candidate graph",
@@ -67,11 +63,7 @@ impl StoreSession<'_> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let discarded = load_circle_operation_on(&tx, &superseded)?.ok_or_else(|| {
             DbError::Message("superseded Circle operation is absent from its slot".to_string())
         })?;
@@ -95,7 +87,7 @@ impl StoreSession<'_> {
         for remote in &remotes {
             persist_prepared_remote_object_on(
                 &tx,
-                records.store_dir,
+                self.store_dir,
                 remote,
                 &owner,
                 "Circle candidate graph",
@@ -202,11 +194,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let durable =
             load_circle_operation_on(&tx, journal.operation_id.as_str())?.ok_or_else(|| {
                 DbError::Message(format!(
@@ -228,7 +216,7 @@ impl StoreSession<'_> {
         for remote in &remotes {
             persist_prepared_remote_object_on(
                 &tx,
-                records.store_dir,
+                self.store_dir,
                 remote,
                 &owner,
                 "Circle close-finalization candidate graph",
@@ -310,10 +298,9 @@ impl StoreSession<'_> {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let gates = self.gates;
-        let conn = records.conn;
+        let conn = self.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         journal
             .validate_identity()
@@ -347,7 +334,7 @@ impl StoreSession<'_> {
         let unverified_commit: StoreBatchCommit =
             serde_json::from_slice(&operation.commit_bytes)
                 .map_err(|error| DbError::context("parse circle Store commit", error))?;
-        let transaction_records = crate::store::StoreRecords::new(&tx, records.store_dir);
+        let transaction_records = crate::store::StoreRecords::new(&tx, self.store_dir);
         let root = authority.required_root_authority_on(transaction_records)?;
         let author = authority.activated_registration_on(
             transaction_records,
@@ -450,7 +437,7 @@ impl StoreSession<'_> {
                 &[],
                 None,
             )?;
-            let retained = MergeMaterializationTransaction::new(&tx, records.store_dir)
+            let retained = MergeMaterializationTransaction::new(&tx, self.store_dir)
                 .record_verified_merge_materialization(authority, materialization)?;
             (
                 commit,
@@ -483,7 +470,7 @@ impl StoreSession<'_> {
         if let Some(head_object_id) = head_object_id {
             object_ids.push(head_object_id);
         }
-        let store_transaction = MergeMaterializationTransaction::new(&tx, records.store_dir);
+        let store_transaction = MergeMaterializationTransaction::new(&tx, self.store_dir);
         store_transaction
             .activate_store_operation_remote_objects(&operation.commit_ref, &object_ids)?;
         store_transaction.record_verified_circle_activations(&commit, &[activation])?;

@@ -41,7 +41,7 @@ impl StoreSession<'_> {
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
         let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let raw_prepared: String = records
+        let raw_prepared: String = self
             .conn
             .query_row(
                 "SELECT prepared FROM store_writes WHERE write_id = ?1",
@@ -59,7 +59,7 @@ impl StoreSession<'_> {
             .iter()
             .map(|object| (remote_object_id(object).to_string(), None))
             .collect::<Vec<_>>();
-        let mut statement = records
+        let mut statement = self
             .conn
             .prepare(
                 "SELECT remote_object_id, spool_path
@@ -82,7 +82,7 @@ impl StoreSession<'_> {
                     .parse()
                     .map_err(|error| DbError::context("prepared remote object id", error))?;
                 Ok(PreparedRemoteObject {
-                    closed: crate::reopen_remote_object_on(records.conn, records.store_dir, id)?,
+                    closed: crate::reopen_remote_object_on(self.conn, self.store_dir, id)?,
                     spool_path: spool_path.map(PathBuf::from),
                 })
             })

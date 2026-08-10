@@ -25,7 +25,6 @@ use super::candidate_records::PreparedMergeCandidate;
 use super::materialization_models::{
     MergeRetractionCleanupInput, RetainedAudiencePackage, RetainedMergeMaterializationInput,
 };
-use super::store_device_state::load_store_device_snapshot_on;
 use super::verified_store_authority::{VerifiedRegistrationLookup, VerifiedStoreLookup};
 use super::*;
 use crate::store::candidate_records::{
@@ -36,6 +35,51 @@ use crate::store::candidate_records::{
 pub(super) enum RetainedCommitAuthority<'a> {
     StoredBytes,
     Operation(&'a coven_protocol::store_commit::VerifiedStoreBatchCommit),
+}
+
+pub(super) fn load_merge_retraction_cleanup_objects_on(
+    conn: &Connection,
+    candidate: &StoreBatchCommitRef,
+) -> Result<(DurablePreparedProtocolObject, DurablePreparedProtocolObject), DbError> {
+    let StoreCommitCoord {
+        stream_id,
+        sequence,
+    } = &candidate.coord;
+    let stream_id = stream_id.to_string();
+    let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
+    let encoded_ref = serde_json::to_string(candidate)
+        .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
+    let (stored_hash, canonical_cleanup): (String, Vec<u8>) = conn
+        .query_row(
+            "SELECT cleanup_hash, canonical_cleanup
+             FROM merge_retraction_cleanups
+             WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
+            rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    if stored_hash != ObjectHash::digest(&canonical_cleanup).to_string() {
+        return Err(DbError::Message(
+            "Merge retraction cleanup hash differs from its bytes".to_string(),
+        ));
+    }
+    let input: MergeRetractionCleanupInput = serde_json::from_slice(&canonical_cleanup)
+        .map_err(|error| DbError::context("parse Merge retraction cleanup", error))?;
+    if serde_json::to_vec(&input)
+        .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?
+        != canonical_cleanup
+    {
+        return Err(DbError::Message(
+            "Merge retraction cleanup is not canonical".to_string(),
+        ));
+    }
+    let commit =
+        DurablePreparedProtocolObject::new(input.commit.stored_bytes().to_vec(), input.commit);
+    let head = DurablePreparedProtocolObject::new(
+        input.activation_head.stored_bytes().to_vec(),
+        input.activation_head,
+    );
+    Ok((commit, head))
 }
 
 pub struct CircleReplayEpochIndex {

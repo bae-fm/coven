@@ -356,38 +356,10 @@ pub(crate) fn validate_replay_authority_on(
     Ok(())
 }
 
-struct StoredGenerationZeroReplayBaseline {
-    generation: i64,
-    exact_cut: String,
-    schema_version: i64,
-    routing_hash: String,
-    image_hash: String,
-    authority_hash: String,
-}
-
 pub(crate) fn load_generation_zero_replay_baseline_on(
     records: crate::store::StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
-    let conn = records.conn;
-    let stored: Option<StoredGenerationZeroReplayBaseline> = conn
-        .query_row(
-            "SELECT generation, exact_cut, schema_version,
-                    routing_hash, image_hash, authority_hash
-             FROM retained_replay_baselines WHERE singleton = 1",
-            [],
-            |row| {
-                Ok(StoredGenerationZeroReplayBaseline {
-                    generation: row.get(0)?,
-                    exact_cut: row.get(1)?,
-                    schema_version: row.get(2)?,
-                    routing_hash: row.get(3)?,
-                    image_hash: row.get(4)?,
-                    authority_hash: row.get(5)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(DbError::from)?;
+    let stored = records.retained_replay_baseline_row()?;
     let Some(stored) = stored else {
         return Ok(None);
     };
@@ -431,8 +403,8 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
             .map_err(|error| DbError::context("retained replay image hash", error))?,
         authority,
     };
-    baseline.validate_image(records.store_dir)?;
-    validate_replay_authority_on(conn, &baseline)?;
+    records.validate_replay_baseline_image(&baseline)?;
+    records.validate_replay_authority(&baseline)?;
     Ok(Some(baseline))
 }
 
@@ -448,7 +420,7 @@ pub(crate) fn install_generation_zero_replay_baseline_on(
         ));
     }
     let baseline =
-        RetainedReplayBaseline::generation_zero(records, schema_version, routing_hash, authority)?;
+        records.create_generation_zero_replay_baseline(schema_version, routing_hash, authority)?;
     insert_retained_replay_baseline_on(records, &baseline)
 }
 
@@ -464,7 +436,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
         ));
     }
     let baseline =
-        RetainedReplayBaseline::stable_snapshot(records, schema_version, routing_hash, authority)?;
+        records.create_stable_snapshot_replay_baseline(schema_version, routing_hash, authority)?;
     insert_retained_replay_baseline_on(records, &baseline)
 }
 
@@ -472,35 +444,11 @@ pub(crate) fn insert_retained_replay_baseline_on(
     records: crate::store::StoreRecords<'_>,
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
-    let conn = records.conn;
-    validate_replay_authority_on(conn, baseline)?;
+    records.validate_replay_authority(baseline)?;
     let authority_hash = records
         .install_payload(&baseline.canonical_authority_bytes()?)
         .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
-    conn.execute(
-        "INSERT INTO retained_replay_baselines
-         (singleton, generation, exact_cut, schema_version,
-          routing_hash, image_hash, authority_hash)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            i64::try_from(baseline.generation).map_err(|_| {
-                DbError::Message("retained replay generation exceeds SQLite INTEGER".to_string())
-            })?,
-            serde_json::to_string(&baseline.exact_cut).map_err(|error| {
-                DbError::context("serialize retained replay exact cut", error)
-            })?,
-            i64::from(baseline.schema_version),
-            baseline.routing_hash.to_string(),
-            baseline.image_hash.to_string(),
-            authority_hash.to_string(),
-        ],
-    )
-    .map_err(DbError::from)?;
-    crate::payload_spool::set_payload_owner_claims_on(
-        conn,
-        crate::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
-        &std::collections::BTreeSet::from([baseline.image_hash, authority_hash]),
-    )?;
+    records.insert_retained_replay_baseline_row(baseline, authority_hash)?;
     let installed = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
         DbError::Message("installed retained replay baseline is absent".to_string())
     })?;
@@ -518,7 +466,6 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
 ) -> Result<(), DbError> {
-    let conn = records.conn;
     if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
@@ -537,14 +484,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
         }
         return Ok(());
     }
-    let accepted_history: i64 = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM materialized_commits)
-                    + (SELECT COUNT(*) FROM snapshot_coverage)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(DbError::from)?;
+    let accepted_history = records.accepted_history_count()?;
     if accepted_history != 0 {
         return Err(DbError::Message(
             "accepted Store history exists without a retained replay baseline".to_string(),

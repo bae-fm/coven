@@ -10,6 +10,95 @@ use crate::payload_spool::{
 use crate::store::verified_store_authority::VerifiedStoreLookup;
 use crate::{DbError, ObjectHash, StoreDatabase};
 
+impl StoreRecords<'_> {
+    pub(crate) fn retained_circle_activation_commit_ref(
+        self,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        StoreDatabase::retained_circle_activation_commit_ref_on(self.conn, circle_id, control)
+    }
+
+    pub(crate) fn circle_controls(
+        self,
+        circle_id: coven_protocol::circle::CircleId,
+    ) -> Result<Vec<coven_protocol::circle::CircleControlCoord>, DbError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT control_coord
+                 FROM circle_control_activations
+                 WHERE circle_id = ?1
+                 ORDER BY control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?;
+        let mut controls = Vec::new();
+        for encoded in rows {
+            let encoded = encoded.map_err(DbError::from)?;
+            controls.push(serde_json::from_str(&encoded).map_err(|error| {
+                DbError::context(
+                    format!("parse retained Circle {circle_id} control coordinate"),
+                    error,
+                )
+            })?);
+        }
+        Ok(controls)
+    }
+
+    /// Rebuild the stream-activation index from the retained materializations
+    /// before restore selection resolves control-stream authority.
+    pub(crate) fn seed_stream_activation_index_from_retained(
+        self,
+        registrations: &mut dyn crate::store::verified_store_authority::VerifiedRegistrationLookup,
+        root: &coven_protocol::store_commit::StoreRootRef,
+    ) -> Result<(), DbError> {
+        let encoded_refs = crate::query_mapped_rows(
+            self.conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        for encoded in encoded_refs {
+            let reference: coven_protocol::store_commit::StoreBatchCommitRef =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::context("parse retained materialization commit ref", error)
+                })?;
+            let owned = StoreDatabase::load_retained_merge_materialization_by_ref_on(
+                self,
+                root,
+                registrations,
+                &reference,
+            )?;
+            StoreDatabase::record_verified_stream_activations_on(
+                self.conn,
+                owned.circle_activations().stream_activations(),
+                &encoded,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn claimed_circle_bootstrap_coverage_refs(
+        self,
+    ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
+        let coverage = StoreDatabase::circle_bootstrap_coverage_refs_on(self.conn)?;
+        for retained in &coverage {
+            let owner_key = circle_bootstrap_coverage_owner_key(retained.circle_id);
+            let expected = BTreeSet::from([retained.bootstrap.image.image_hash]);
+            if payload_owner_claims_on(self.conn, &owner_key)? != expected {
+                return Err(DbError::Message(format!(
+                    "retained Circle {} bootstrap payload claims differ from its image hash",
+                    retained.circle_id
+                )));
+            }
+        }
+        Ok(coverage)
+    }
+}
+
 impl StoreRecordTransaction<'_, '_> {
     pub(crate) fn record_circle_bootstrap_coverage(
         self,

@@ -375,45 +375,6 @@ pub struct RetainedReplayBaseline {
 }
 
 impl RetainedReplayBaseline {
-    pub(crate) fn generation_zero(
-        source: StoreRecords<'_>,
-        schema_version: u32,
-        routing_hash: ObjectHash,
-        authority: RetainedReplayGenesisAuthority,
-    ) -> Result<Self, DbError> {
-        let image_bytes = project_generation_zero_image(source.conn)?;
-        let baseline = Self {
-            generation: GENERATION_ZERO,
-            exact_cut: CommitFrontier(Default::default()),
-            schema_version,
-            routing_hash,
-            image_hash: install_image(source, &image_bytes)?,
-            authority: RetainedReplayAuthority::Genesis(authority),
-        };
-        baseline.validate_image(source.store_dir)?;
-        Ok(baseline)
-    }
-
-    pub(crate) fn stable_snapshot(
-        source: StoreRecords<'_>,
-        schema_version: u32,
-        routing_hash: ObjectHash,
-        authority: RetainedReplaySnapshotAuthority,
-    ) -> Result<Self, DbError> {
-        authority.validate()?;
-        let image_bytes = serialized_database(source.conn)?;
-        let baseline = Self {
-            generation: GENERATION_ZERO,
-            exact_cut: authority.metadata.coverage.clone(),
-            schema_version,
-            routing_hash,
-            image_hash: install_image(source, &image_bytes)?,
-            authority: RetainedReplayAuthority::StableSnapshot(authority),
-        };
-        baseline.validate_image(source.store_dir)?;
-        Ok(baseline)
-    }
-
     pub fn canonical_authority_bytes(&self) -> Result<Vec<u8>, DbError> {
         serde_json::to_vec(&self.authority)
             .map_err(|error| DbError::context("serialize retained replay authority", error))
@@ -588,16 +549,6 @@ fn open_image(image: &[u8]) -> Result<Connection, DbError> {
         .map_err(|error| DbError::context("open retained replay database image", error))
 }
 
-/// Put a freshly projected image in the spool and return the hash naming it.
-/// The file lands before the row that references it, so a baseline row never
-/// names an image that is not there; an image whose insert never commits is
-/// inert content-keyed garbage.
-fn install_image(source: StoreRecords<'_>, image: &[u8]) -> Result<ObjectHash, DbError> {
-    source
-        .install_payload(image)
-        .map_err(|error| DbError::Message(format!("install retained replay image: {error}")))
-}
-
 /// Copy `table` from `source` into `target`. With `ignore_existing`, a row whose
 /// unique key already exists in `target` is left untouched instead of failing —
 /// used when installing a Circle image onto a Store image that already carries the
@@ -647,14 +598,14 @@ pub fn copy_table_with_conflicts(
     Ok(())
 }
 
-fn serialized_database(connection: &Connection) -> Result<Vec<u8>, DbError> {
+pub(super) fn serialized_database(connection: &Connection) -> Result<Vec<u8>, DbError> {
     connection
         .serialize(rusqlite::MAIN_DB)
         .map(|bytes| bytes.to_vec())
         .map_err(DbError::from)
 }
 
-fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
+pub(super) fn project_generation_zero_image(source: &Connection) -> Result<Vec<u8>, DbError> {
     let source_bytes = serialized_database(source)?;
     let image = open_image(&source_bytes)?;
     image

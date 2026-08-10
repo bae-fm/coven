@@ -1,5 +1,4 @@
 use super::*;
-use crate::payload_spool::{circle_bootstrap_coverage_owner_key, payload_owner_claims_on};
 use crate::query_mapped_rows;
 use crate::store::StoreRecords;
 
@@ -8,16 +7,9 @@ impl StoreSession<'_> {
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        StoreDatabase::seed_stream_activation_index_from_retained_on(
-            StoreRecords::new(&tx, records.store_dir),
-            self.verified_store_authority,
-            root,
-        )?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        StoreRecords::new(&tx, self.store_dir)
+            .seed_stream_activation_index_from_retained(self.verified_store_authority, root)?;
         let rows = query_mapped_rows(
             &tx,
             "SELECT circle_id, control_coord FROM circle_control_activations
@@ -118,44 +110,6 @@ impl StoreDatabase {
             .await
     }
 
-    /// Rebuild the stream-activation index from the retained materializations. A
-    /// device restored from a snapshot has the retained authority but not the
-    /// per-cycle stream-activation index the pull writes; restore selection must
-    /// resolve control-stream authority before any pull, so it seeds the index
-    /// from the retained inputs it will otherwise replay from. Idempotent: the
-    /// recorder re-verifies each activation against any existing row.
-    pub(crate) fn seed_stream_activation_index_from_retained_on(
-        records: StoreRecords<'_>,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        root: &coven_protocol::store_commit::StoreRootRef,
-    ) -> Result<(), DbError> {
-        let conn = records.conn;
-        let encoded_refs = query_mapped_rows(
-            conn,
-            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
-            [],
-            |row| row.get::<_, String>(0),
-        )?;
-        for encoded in encoded_refs {
-            let reference: StoreBatchCommitRef =
-                serde_json::from_str(&encoded).map_err(|error| {
-                    DbError::context("parse retained materialization commit ref", error)
-                })?;
-            let owned = Self::load_retained_merge_materialization_by_ref_on(
-                records,
-                root,
-                registrations,
-                &reference,
-            )?;
-            Self::record_verified_stream_activations_on(
-                conn,
-                owned.circle_activations().stream_activations(),
-                &encoded,
-            )?;
-        }
-        Ok(())
-    }
-
     pub fn circle_bootstrap_coverage_ref_on(
         conn: &Connection,
         circle_id: coven_protocol::circle::CircleId,
@@ -230,23 +184,6 @@ impl StoreDatabase {
         Ok(bootstraps)
     }
 
-    pub(crate) fn claimed_circle_bootstrap_coverage_refs_on(
-        records: StoreRecords<'_>,
-    ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        let coverage = Self::circle_bootstrap_coverage_refs_on(records.conn)?;
-        for retained in &coverage {
-            let owner_key = circle_bootstrap_coverage_owner_key(retained.circle_id);
-            let expected = BTreeSet::from([retained.bootstrap.image.image_hash]);
-            if payload_owner_claims_on(records.conn, &owner_key)? != expected {
-                return Err(DbError::Message(format!(
-                    "retained Circle {} bootstrap payload claims differ from its image hash",
-                    retained.circle_id
-                )));
-            }
-        }
-        Ok(coverage)
-    }
-
     fn decode_circle_bootstrap_coverage_ref(
         circle_id: coven_protocol::circle::CircleId,
         control: String,
@@ -294,7 +231,8 @@ impl StoreDatabase {
         )>,
         DbError,
     > {
-        Self::claimed_circle_bootstrap_coverage_refs_on(records)?
+        records
+            .claimed_circle_bootstrap_coverage_refs()?
             .into_iter()
             .map(|coverage| {
                 let image_bytes = records.payload(coverage.bootstrap.image.image_hash)?;

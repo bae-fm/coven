@@ -7,7 +7,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
     commit: &StoreBatchCommit,
     device_operations: &VerifiedStoreDeviceOperations,
 ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
-    let mut device_state = load_declared_store_device_state_on(records.conn, &commit.device_state)?;
+    let mut device_state = records.declared_store_device_state(&commit.device_state)?;
     let recovery_author = commit
         .device_registrations()
         .iter()

@@ -36,7 +36,7 @@ impl StoreSession<'_> {
             ));
         }
         let owner = get_protocol_state_on(
-            records.conn,
+            self.conn,
             coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
         )?
         .ok_or_else(|| DbError::Message("Store owner anchor is absent".to_string()))?;
@@ -77,7 +77,7 @@ impl StoreSession<'_> {
         )
         .map_err(|error| DbError::Message(error.to_string()))?;
         let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
-            &required_protocol_state_on(records.conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
+            &required_protocol_state_on(self.conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
         )
         .map_err(|error| DbError::context("Store device genesis state", error))?;
         if founder.author_pubkey != owner || stored_genesis != expected_genesis {
@@ -100,11 +100,7 @@ impl StoreSession<'_> {
         owner: String,
         membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let root_value = install_store_root_authority_on(&tx, &root, &root_bytes)?;
         install_store_founder_state_on(
             &tx,
@@ -121,7 +117,7 @@ impl StoreSession<'_> {
         )?;
         membership.install_on(&tx)?;
         ensure_founder_replay_baseline_on(
-            crate::store::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, self.store_dir),
             self.schema_version,
             self.sync_routing_hash,
             RetainedReplayGenesisAuthority {
@@ -336,13 +332,9 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
-        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
-        let tx = records
-            .conn
-            .unchecked_transaction()
-            .map_err(DbError::from)?;
-        let store_dir = records.store_dir;
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let store_dir = self.store_dir;
         let graph = load_local_store_founder_graph_on(&tx)?
             .ok_or_else(|| DbError::Message("local Store founder graph is absent".to_string()))?;
         let root = coven_protocol::store_commit::StoreRootRef {

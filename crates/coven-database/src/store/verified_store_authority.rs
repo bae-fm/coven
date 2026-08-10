@@ -2,10 +2,7 @@ use super::candidate_records::PreparedMergeCandidate;
 use super::retained_merge_replay::CircleReplayEpochIndex;
 use super::ReplayProjection;
 use super::*;
-use crate::{
-    get_protocol_state_on, load_activated_registration_on, load_store_root_authority_on,
-    local_activated_registration_ref_on, BlobDecls, LOCAL_DEVICE_ID_STATE_KEY,
-};
+use crate::BlobDecls;
 use coven_protocol::store_commit::{
     ReferencedStoreDeviceRegistration, StoreDeviceRegistration, StoreDeviceRegistrationRef,
     StoreProtocolRoot, StoreRootRef,
@@ -264,7 +261,7 @@ impl VerifiedStoreAuthority {
         records: crate::store::StoreRecords<'_>,
     ) -> Result<Option<(StoreRootRef, StoreProtocolRoot)>, DbError> {
         if self.root_authority.is_none() {
-            self.root_authority = load_store_root_authority_on(records.conn)?;
+            self.root_authority = records.store_root_authority()?;
         }
         Ok(self.root_authority.clone())
     }
@@ -301,7 +298,7 @@ impl VerifiedStoreAuthority {
         if let Some(registration) = registrations.get(reference) {
             return Ok(registration.clone());
         }
-        let registration = load_activated_registration_on(records.conn, root, reference)?;
+        let registration = records.activated_registration(root, reference)?;
         registrations.insert(reference.clone(), registration.clone());
         Ok(registration)
     }
@@ -311,7 +308,7 @@ impl VerifiedStoreAuthority {
         records: crate::store::StoreRecords<'_>,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         let root = self.required_root_authority_on(records)?;
-        let reference = local_activated_registration_ref_on(records.conn)?.ok_or_else(|| {
+        let reference = records.local_activated_registration_ref()?.ok_or_else(|| {
             DbError::Message("local Store device has no activated registration".to_string())
         })?;
         let registration = self.activated_registration_on(records, &root, &reference)?;
@@ -323,7 +320,7 @@ impl VerifiedStoreAuthority {
         &mut self,
         records: crate::store::StoreRecords<'_>,
     ) -> Result<Option<String>, DbError> {
-        if get_protocol_state_on(records.conn, LOCAL_DEVICE_ID_STATE_KEY)?.is_none() {
+        if !records.has_local_device()? {
             return Ok(None);
         }
         let registration = self.local_store_authority_on(records)?;

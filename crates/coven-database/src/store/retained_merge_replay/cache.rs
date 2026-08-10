@@ -1,5 +1,4 @@
 use super::*;
-use crate::query_mapped_rows;
 use crate::store::retained_merge_replay::CircleReplayEpochIndex;
 use crate::store::{StoreRecordTransaction, StoreRecords};
 use crate::{
@@ -229,21 +228,7 @@ impl RetainedReplayCache {
         registrations: &mut dyn VerifiedRegistrationLookup,
         authorities: RetainedCommitAuthorities<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let rows = query_mapped_rows(
-            records.conn,
-            "SELECT device_id, seq, commit_ref, input_hash
-                 FROM retained_merge_materializations
-                 ORDER BY device_id, seq",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?;
+        let rows = records.retained_materialization_rows()?;
 
         self.replay_inputs_from_rows(rows, authorities, |authority, row| match authority {
             RetainedCommitAuthorities::StoredBytes => {
@@ -378,8 +363,7 @@ impl RetainedReplayCache {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
-        let Some(activation_commit) =
-            StoreDatabase::circle_activation_commit_ref_on(records.conn, circle_id, control)?
+        let Some(activation_commit) = records.circle_activation_commit_ref(circle_id, control)?
         else {
             return Ok(None);
         };
@@ -392,14 +376,7 @@ impl RetainedReplayCache {
         &self,
         records: StoreRecords<'_>,
     ) -> Result<CircleReplayEpochIndex, DbError> {
-        let rows = query_mapped_rows(
-            records.conn,
-            "SELECT circle_id, control_coord
-                 FROM circle_control_activations
-                 ORDER BY circle_id, control_coord",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
+        let rows = records.circle_replay_controls()?;
         Self::circle_replay_epoch_index_from_rows(rows, |circle_id, control| {
             self.verified_circle_activation_on(records, circle_id, control)
         })

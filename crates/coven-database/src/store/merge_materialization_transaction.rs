@@ -26,7 +26,7 @@ use super::store_device_state::{
     store_device_state_for_history_cut_on,
 };
 use super::{
-    apply_store_device_exclusion_freezes_on, load_declared_store_device_state_on,
+    apply_store_device_exclusion_freezes_on,
     verified_store_authority::{
         RetainedReplayTransaction, VerifiedRegistrationLookup, VerifiedStoreLookup,
     },

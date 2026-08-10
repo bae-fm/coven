@@ -11,6 +11,343 @@ use crate::{
 };
 use coven_protocol::store_commit::RetainedStoreDeviceRegistrationActivations;
 
+pub(crate) struct RetainedReplayBaselineRow {
+    pub(crate) generation: i64,
+    pub(crate) exact_cut: String,
+    pub(crate) schema_version: i64,
+    pub(crate) routing_hash: String,
+    pub(crate) image_hash: String,
+    pub(crate) authority_hash: String,
+}
+
+pub(crate) struct SnapshotRetentionRows {
+    pub(crate) exclusion_activation_commits: Vec<String>,
+    pub(crate) circle_bootstraps: Vec<(String, String, String)>,
+    pub(crate) materialization_refs: Vec<String>,
+}
+
+impl StoreRecords<'_> {
+    pub(crate) fn snapshot_retention_rows(self) -> Result<SnapshotRetentionRows, DbError> {
+        let exclusions = crate::query_mapped_rows(
+            self.conn,
+            "SELECT DISTINCT activation_commit
+             FROM store_author_exclusion_activations
+             ORDER BY activation_commit",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        let bootstraps = crate::query_mapped_rows(
+            self.conn,
+            "SELECT circle_id, activation_commit, exact_cut
+             FROM circle_bootstrap_coverage ORDER BY circle_id",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        let materializations = crate::query_mapped_rows(
+            self.conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(SnapshotRetentionRows {
+            exclusion_activation_commits: exclusions,
+            circle_bootstraps: bootstraps,
+            materialization_refs: materializations,
+        })
+    }
+
+    pub(crate) fn snapshot_exclusion_activation_rows(
+        self,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT exclusion_ref, activation_commit
+             FROM store_author_exclusion_activations
+             ORDER BY exclusion_ref",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?)
+    }
+
+    pub(crate) fn retained_materialization_refs(self) -> Result<BTreeSet<String>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT commit_ref FROM retained_merge_materializations ORDER BY commit_ref",
+            [],
+            |row| row.get::<_, String>(0),
+        )?
+        .into_iter()
+        .collect())
+    }
+
+    pub(crate) fn remote_object(
+        self,
+        object_id: ObjectHash,
+    ) -> Result<coven_protocol::remote_object::RemoteObjectRecord, DbError> {
+        crate::load_remote_object_on(self.conn, object_id)
+    }
+
+    pub(crate) fn retained_materialization_row(
+        self,
+        stream_id: &str,
+        sequence: i64,
+    ) -> Result<(String, String, Vec<u8>), DbError> {
+        self.conn
+            .query_row(
+                "SELECT commit_ref, input_hash, canonical_input
+                 FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn retained_materialization_identity(
+        self,
+        stream_id: &str,
+        sequence: i64,
+    ) -> Result<(String, String), DbError> {
+        self.conn
+            .query_row(
+                "SELECT commit_ref, input_hash FROM retained_merge_materializations
+                 WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn validate_retained_merge_pin_closure(
+        self,
+        input: &RetainedMergeMaterializationInput,
+        owner: &RetainedReplayOwner,
+    ) -> Result<(), DbError> {
+        StoreDatabase::validate_retained_merge_pin_closure_on(self.conn, input, owner)
+    }
+
+    pub(crate) fn snapshot_coverage_reference(
+        self,
+        stream_id: &str,
+        sequence: i64,
+    ) -> Result<Option<String>, DbError> {
+        use rusqlite::OptionalExtension;
+
+        self.conn
+            .query_row(
+                "SELECT commit_ref FROM snapshot_coverage WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![stream_id, sequence],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn store_device_snapshot(
+        self,
+        reference: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
+        crate::store::store_device_state::load_store_device_snapshot_on(self.conn, reference)
+    }
+
+    pub(crate) fn store_write_status_rows(self) -> Result<Vec<(String, String)>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT write_id, status FROM store_writes ORDER BY ordinal",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?)
+    }
+
+    pub(crate) fn merge_retraction_cleanup_objects(
+        self,
+        candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
+    ) -> Result<
+        (
+            crate::DurablePreparedProtocolObject,
+            crate::DurablePreparedProtocolObject,
+        ),
+        DbError,
+    > {
+        crate::store::retained_merge_replay::load_merge_retraction_cleanup_objects_on(
+            self.conn, candidate,
+        )
+    }
+
+    pub(crate) fn retained_materialization_rows(
+        self,
+    ) -> Result<Vec<(String, i64, String, String)>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT device_id, seq, commit_ref, input_hash
+             FROM retained_merge_materializations
+             ORDER BY device_id, seq",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?)
+    }
+
+    pub(crate) fn circle_activation_commit_ref(
+        self,
+        circle_id: coven_protocol::circle::CircleId,
+        control: &coven_protocol::circle::CircleControlCoord,
+    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
+        StoreDatabase::circle_activation_commit_ref_on(self.conn, circle_id, control)
+    }
+
+    pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
+        Ok(crate::query_mapped_rows(
+            self.conn,
+            "SELECT circle_id, control_coord
+             FROM circle_control_activations
+             ORDER BY circle_id, control_coord",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?)
+    }
+
+    pub(crate) fn retained_replay_baseline_row(
+        self,
+    ) -> Result<Option<RetainedReplayBaselineRow>, DbError> {
+        use rusqlite::OptionalExtension;
+
+        self.conn
+            .query_row(
+                "SELECT generation, exact_cut, schema_version,
+                        routing_hash, image_hash, authority_hash
+                 FROM retained_replay_baselines WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(RetainedReplayBaselineRow {
+                        generation: row.get(0)?,
+                        exact_cut: row.get(1)?,
+                        schema_version: row.get(2)?,
+                        routing_hash: row.get(3)?,
+                        image_hash: row.get(4)?,
+                        authority_hash: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn validate_replay_authority(
+        self,
+        baseline: &crate::RetainedReplayBaseline,
+    ) -> Result<(), DbError> {
+        crate::store_authority_records::validate_replay_authority_on(self.conn, baseline)
+    }
+
+    pub(crate) fn insert_retained_replay_baseline_row(
+        self,
+        baseline: &crate::RetainedReplayBaseline,
+        authority_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.conn
+            .execute(
+                "INSERT INTO retained_replay_baselines
+                 (singleton, generation, exact_cut, schema_version,
+                  routing_hash, image_hash, authority_hash)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    i64::try_from(baseline.generation).map_err(|_| {
+                        DbError::Message(
+                            "retained replay generation exceeds SQLite INTEGER".to_string(),
+                        )
+                    })?,
+                    serde_json::to_string(&baseline.exact_cut).map_err(|error| {
+                        DbError::context("serialize retained replay exact cut", error)
+                    })?,
+                    i64::from(baseline.schema_version),
+                    baseline.routing_hash.to_string(),
+                    baseline.image_hash.to_string(),
+                    authority_hash.to_string(),
+                ],
+            )
+            .map_err(DbError::from)?;
+        crate::payload_spool::set_payload_owner_claims_on(
+            self.conn,
+            crate::payload_spool::RETAINED_REPLAY_BASELINE_OWNER_KEY,
+            &BTreeSet::from([baseline.image_hash, authority_hash]),
+        )
+    }
+
+    pub(crate) fn accepted_history_count(self) -> Result<i64, DbError> {
+        self.conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM materialized_commits)
+                        + (SELECT COUNT(*) FROM snapshot_coverage)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+    }
+
+    pub(crate) fn create_generation_zero_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: crate::RetainedReplayGenesisAuthority,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        let image_bytes = crate::store::retained_replay::project_generation_zero_image(self.conn)?;
+        let baseline = crate::RetainedReplayBaseline {
+            generation: crate::GENERATION_ZERO,
+            exact_cut: coven_protocol::store_commit::CommitFrontier(Default::default()),
+            schema_version,
+            routing_hash,
+            image_hash: self.install_payload(&image_bytes).map_err(|error| {
+                DbError::Message(format!("install retained replay image: {error}"))
+            })?,
+            authority: crate::RetainedReplayAuthority::Genesis(authority),
+        };
+        baseline.validate_image(self.store_dir)?;
+        Ok(baseline)
+    }
+
+    pub(crate) fn create_stable_snapshot_replay_baseline(
+        self,
+        schema_version: u32,
+        routing_hash: ObjectHash,
+        authority: crate::RetainedReplaySnapshotAuthority,
+    ) -> Result<crate::RetainedReplayBaseline, DbError> {
+        authority.validate()?;
+        let image_bytes = crate::store::retained_replay::serialized_database(self.conn)?;
+        let baseline = crate::RetainedReplayBaseline {
+            generation: crate::GENERATION_ZERO,
+            exact_cut: authority.metadata.coverage.clone(),
+            schema_version,
+            routing_hash,
+            image_hash: self.install_payload(&image_bytes).map_err(|error| {
+                DbError::Message(format!("install retained replay image: {error}"))
+            })?,
+            authority: crate::RetainedReplayAuthority::StableSnapshot(authority),
+        };
+        baseline.validate_image(self.store_dir)?;
+        Ok(baseline)
+    }
+
+    pub(crate) fn validate_replay_baseline_image(
+        self,
+        baseline: &crate::RetainedReplayBaseline,
+    ) -> Result<(), DbError> {
+        baseline.validate_image(self.store_dir)
+    }
+}
+
 impl StoreRecordTransaction<'_, '_> {
     pub(crate) fn generation_zero_replay_baseline(
         self,
@@ -33,10 +370,7 @@ impl StoreRecordTransaction<'_, '_> {
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
         self,
     ) -> Result<Vec<coven_protocol::circle::CircleBootstrapCoverageRef>, DbError> {
-        StoreDatabase::claimed_circle_bootstrap_coverage_refs_on(StoreRecords::new(
-            self.transaction,
-            self.store_dir,
-        ))
+        StoreRecords::new(self.transaction, self.store_dir).claimed_circle_bootstrap_coverage_refs()
     }
 
     pub(crate) fn verified_payload(self, hash: ObjectHash) -> Result<Vec<u8>, DbError> {
@@ -48,21 +382,7 @@ impl StoreRecordTransaction<'_, '_> {
     pub(crate) fn retained_materialization_rows(
         self,
     ) -> Result<Vec<(String, i64, String, String)>, DbError> {
-        Ok(crate::query_mapped_rows(
-            self.transaction,
-            "SELECT device_id, seq, commit_ref, input_hash
-             FROM retained_merge_materializations
-             ORDER BY device_id, seq",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?)
+        StoreRecords::new(self.transaction, self.store_dir).retained_materialization_rows()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -103,14 +423,7 @@ impl StoreRecordTransaction<'_, '_> {
     }
 
     pub(crate) fn circle_replay_controls(self) -> Result<Vec<(String, String)>, DbError> {
-        Ok(crate::query_mapped_rows(
-            self.transaction,
-            "SELECT circle_id, control_coord
-             FROM circle_control_activations
-             ORDER BY circle_id, control_coord",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?)
+        StoreRecords::new(self.transaction, self.store_dir).circle_replay_controls()
     }
 
     pub(crate) fn circle_activation_commit_ref(
@@ -118,7 +431,8 @@ impl StoreRecordTransaction<'_, '_> {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, DbError> {
-        StoreDatabase::circle_activation_commit_ref_on(self.transaction, circle_id, control)
+        StoreRecords::new(self.transaction, self.store_dir)
+            .circle_activation_commit_ref(circle_id, control)
     }
 
     pub(crate) fn merge_replay_write_overlays(

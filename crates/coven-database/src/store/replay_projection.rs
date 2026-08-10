@@ -1,5 +1,4 @@
 use super::*;
-use crate::store::StoreRecords;
 
 /// A replay-owned SQLite image. Callers can apply or inspect the projection,
 /// but cannot obtain the connection that implements it.
@@ -26,8 +25,9 @@ impl ReplayProjection {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         audience: &coven_protocol::circle::Audience,
     ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
-        image.capture(
-            StoreRecords::new(&self.connection, &self.store_dir),
+        image.capture_on(
+            &self.connection,
+            &self.store_dir,
             root,
             tables,
             routing_encryption,

@@ -1,5 +1,4 @@
 use super::*;
-use crate::query_mapped_rows;
 use crate::store::StoreRecords;
 
 /// The plaintext one record names, read from the spool.
@@ -55,7 +54,6 @@ impl StoreDatabase {
         input_hash: ObjectHash,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn;
         let sequence = &commit_ref.coord.sequence;
         if sequence == &0 {
             return Err(DbError::Message(
@@ -187,7 +185,7 @@ impl StoreDatabase {
             .device_operations
             .verify_for(root, &commit)
             .map_err(|error| DbError::Message(error.to_string()))?;
-        let local_identity = match local_activated_registration_ref_on(conn)? {
+        let local_identity = match records.local_activated_registration_ref()? {
             Some(reference) => Some(match introduced_registration(&reference)? {
                 Some(registration) => registration.author_pubkey.clone(),
                 None if reference == unverified.author_registration => author.author_pubkey.clone(),
@@ -211,13 +209,11 @@ impl StoreDatabase {
             ));
         }
         if let Some(objects) = &input.membership_objects {
-            let entry_remote =
-                load_remote_object_on(conn, remote_object_id(&objects.entry().object))?;
+            let entry_remote = records.remote_object(remote_object_id(&objects.entry().object))?;
             let entry: MembershipEntry =
                 serde_json::from_slice(&spooled_semantic_payload(records, &entry_remote)?)
                     .map_err(|error| DbError::context("retained membership entry", error))?;
-            let head_remote =
-                load_remote_object_on(conn, remote_object_id(&objects.head().object))?;
+            let head_remote = records.remote_object(remote_object_id(&objects.head().object))?;
             let head_value: AuthorHead =
                 serde_json::from_slice(&spooled_semantic_payload(records, &head_remote)?)
                     .map_err(|error| DbError::context("retained membership head", error))?;
@@ -234,7 +230,7 @@ impl StoreDatabase {
                 ));
             }
             if let Some(reference) = objects.resolution() {
-                let remote = load_remote_object_on(conn, remote_object_id(&reference.object))?;
+                let remote = records.remote_object(remote_object_id(&reference.object))?;
                 let resolution: coven_protocol::membership::StoreMembershipConflictResolution =
                     serde_json::from_slice(&spooled_semantic_payload(records, &remote)?).map_err(
                         |error| DbError::context("retained membership resolution", error),
@@ -318,17 +314,9 @@ impl StoreDatabase {
         expected_input_hash: &str,
         authority: RetainedCommitAuthority<'_>,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn;
         let sequence_sql = Database::sequence_to_sqlite(stream_id, sequence)?;
-        let (stored_ref, stored_hash, canonical_input): (String, String, Vec<u8>) = conn
-            .query_row(
-                "SELECT commit_ref, input_hash, canonical_input
-                 FROM retained_merge_materializations
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![stream_id, sequence_sql],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(DbError::from)?;
+        let (stored_ref, stored_hash, canonical_input) =
+            records.retained_materialization_row(stream_id, sequence_sql)?;
         let expected_ref = serde_json::to_string(commit_ref)
             .map_err(|error| DbError::context("serialize materialized Merge commit ref", error))?;
         if stored_ref != expected_ref {
@@ -368,8 +356,7 @@ impl StoreDatabase {
             input_hash,
             authority,
         )?;
-        Self::validate_retained_merge_pin_closure_on(
-            conn,
+        records.validate_retained_merge_pin_closure(
             &input,
             &RetainedReplayOwner::Commit {
                 commit: commit_ref.clone(),
@@ -385,21 +372,14 @@ impl StoreDatabase {
         registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
-        let conn = records.conn;
         let StoreCommitCoord {
             stream_id,
             sequence,
         } = &reference.coord;
         let stream_id = stream_id.to_string();
         let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let (stored_ref, input_hash): (String, String) = conn
-            .query_row(
-                "SELECT commit_ref, input_hash FROM retained_merge_materializations
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![&stream_id, sequence_sql],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
+        let (stored_ref, input_hash) =
+            records.retained_materialization_identity(&stream_id, sequence_sql)?;
         let stored_ref = Self::parse_stored_commit_ref(&stream_id, *sequence, &stored_ref)?;
         if &stored_ref != reference {
             return Err(DbError::Message(
@@ -423,21 +403,13 @@ impl StoreDatabase {
         registrations: &mut dyn VerifiedRegistrationLookup,
         reference: &StoreBatchCommitRef,
     ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
-        let conn = records.conn;
         let StoreCommitCoord {
             stream_id,
             sequence,
         } = &reference.coord;
         let stream = stream_id.to_string();
         let sequence_sql = Database::sequence_to_sqlite(&stream, *sequence)?;
-        let snapshot_reference: Option<String> = conn
-            .query_row(
-                "SELECT commit_ref FROM snapshot_coverage WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![&stream, sequence_sql],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
+        let snapshot_reference = records.snapshot_coverage_reference(&stream, sequence_sql)?;
         if let Some(snapshot_reference) = snapshot_reference {
             let snapshot_reference: StoreBatchCommitRef = serde_json::from_str(&snapshot_reference)
                 .map_err(|error| DbError::context("snapshot Merge checkpoint commit ref", error))?;
@@ -470,7 +442,7 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint is absent from its signed frontier".to_string(),
                 ));
             }
-            let state = load_store_device_snapshot_on(conn, reference)?;
+            let state = records.store_device_snapshot(reference)?;
             let expected_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
                 CommitFrontier(
                     summary
@@ -493,14 +465,8 @@ impl StoreDatabase {
                 },
             ));
         }
-        let (stored_ref, input_hash): (String, String) = conn
-            .query_row(
-                "SELECT commit_ref, input_hash FROM retained_merge_materializations \
-                 WHERE device_id = ?1 AND seq = ?2",
-                rusqlite::params![stream, sequence_sql],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
+        let (stored_ref, input_hash) =
+            records.retained_materialization_identity(&stream, sequence_sql)?;
         let stored_ref: StoreBatchCommitRef = serde_json::from_str(&stored_ref)
             .map_err(|error| DbError::context("retained Merge checkpoint commit ref", error))?;
         if &stored_ref != reference {
@@ -531,13 +497,12 @@ impl StoreDatabase {
         reference: &StoreBatchCommitRef,
         retained: &OwnedVerifiedMergeMaterialization,
     ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
-        let conn = records.conn;
         if retained.commit_ref() != reference {
             return Err(DbError::Message(
                 "retained Merge checkpoint materialization names another commit".to_string(),
             ));
         }
-        let state = load_store_device_snapshot_on(conn, reference)?;
+        let state = records.store_device_snapshot(reference)?;
         state
             .validate_canonical()
             .map_err(|error| DbError::context("retained Merge checkpoint state", error))?;
@@ -564,20 +529,12 @@ impl StoreDatabase {
         active_accepted_writes: &BTreeSet<WriteId>,
         retracted_writes: &BTreeSet<WriteId>,
     ) -> Result<Vec<MergeReplayWriteOverlay>, DbError> {
-        let conn = records.conn;
         if !active_accepted_writes.is_disjoint(retracted_writes) {
             return Err(DbError::Message(
                 "retained replay classifies one write as active and retracted".to_string(),
             ));
         }
-        let rows = query_mapped_rows(
-            conn,
-            "SELECT write_id, status
-                 FROM store_writes
-                 ORDER BY ordinal",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
+        let rows = records.store_write_status_rows()?;
         let mut overlays = Vec::new();
         for (encoded_write_id, raw_status) in rows {
             let write_id = WriteId::from_generated(encoded_write_id.clone());
@@ -587,7 +544,7 @@ impl StoreDatabase {
                     error,
                 )
             })?;
-            let partitions = StoreDatabase::store_write_partitions_on(records, &encoded_write_id)?;
+            let partitions = records.store_write_partitions(&encoded_write_id)?;
             let active = active_accepted_writes.contains(&write_id);
             let retracted = retracted_writes.contains(&write_id);
             let partitions = match status {
@@ -666,58 +623,12 @@ impl StoreDatabase {
         })
     }
 
-    fn load_merge_retraction_cleanup_objects_on(
-        conn: &Connection,
-        candidate: &StoreBatchCommitRef,
-    ) -> Result<(DurablePreparedProtocolObject, DurablePreparedProtocolObject), DbError> {
-        let StoreCommitCoord {
-            stream_id,
-            sequence,
-        } = &candidate.coord;
-        let stream_id = stream_id.to_string();
-        let sequence_sql = Database::sequence_to_sqlite(&stream_id, *sequence)?;
-        let encoded_ref = serde_json::to_string(candidate)
-            .map_err(|error| DbError::context("serialize Merge retraction cleanup ref", error))?;
-        let (stored_hash, canonical_cleanup): (String, Vec<u8>) = conn
-            .query_row(
-                "SELECT cleanup_hash, canonical_cleanup
-                 FROM merge_retraction_cleanups
-                 WHERE device_id = ?1 AND seq = ?2 AND commit_ref = ?3",
-                rusqlite::params![&stream_id, sequence_sql, &encoded_ref],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
-        if stored_hash != ObjectHash::digest(&canonical_cleanup).to_string() {
-            return Err(DbError::Message(
-                "Merge retraction cleanup hash differs from its bytes".to_string(),
-            ));
-        }
-        let input: MergeRetractionCleanupInput = serde_json::from_slice(&canonical_cleanup)
-            .map_err(|error| DbError::context("parse Merge retraction cleanup", error))?;
-        if serde_json::to_vec(&input)
-            .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?
-            != canonical_cleanup
-        {
-            return Err(DbError::Message(
-                "Merge retraction cleanup is not canonical".to_string(),
-            ));
-        }
-        let commit =
-            DurablePreparedProtocolObject::new(input.commit.stored_bytes().to_vec(), input.commit);
-        let head = DurablePreparedProtocolObject::new(
-            input.activation_head.stored_bytes().to_vec(),
-            input.activation_head,
-        );
-        Ok((commit, head))
-    }
-
     pub(crate) fn load_merge_retraction_cleanup_on(
         records: StoreRecords<'_>,
         authority: &mut VerifiedStoreAuthority,
         candidate: &StoreBatchCommitRef,
     ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) =
-            Self::load_merge_retraction_cleanup_objects_on(records.conn, candidate)?;
+        let (commit, head) = records.merge_retraction_cleanup_objects(candidate)?;
         let prepared = parse_prepared_merge_candidate_parts_on(
             records,
             authority,
@@ -738,8 +649,7 @@ impl StoreDatabase {
         conn: &Connection,
         retained: &OwnedVerifiedMergeMaterialization,
     ) -> Result<PreparedMergeCandidate, DbError> {
-        let (commit, head) =
-            Self::load_merge_retraction_cleanup_objects_on(conn, retained.commit_ref())?;
+        let (commit, head) = load_merge_retraction_cleanup_objects_on(conn, retained.commit_ref())?;
         let unverified = serde_json::from_slice(commit.semantic_bytes())
             .map_err(|error| DbError::context("signed Merge retraction cleanup", error))?;
         let prepared = verify_prepared_merge_candidate_parts(
@@ -769,21 +679,7 @@ impl StoreDatabase {
         root: &coven_protocol::store_commit::StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let rows = query_mapped_rows(
-            records.conn,
-            "SELECT device_id, seq, commit_ref, input_hash
-                 FROM retained_merge_materializations
-                 ORDER BY device_id, seq",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )?;
+        let rows = records.retained_materialization_rows()?;
         rows.into_iter()
             .map(|(stream_id, sequence, encoded_ref, input_hash)| {
                 let sequence = Database::sequence_from_sqlite(&stream_id, sequence)?;

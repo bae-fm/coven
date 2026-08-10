@@ -6,11 +6,10 @@ use coven_protocol::store_commit::{
     StoreDeviceRegistrationRef, StoreHistoryCut, VerifiedStoreBatchCommit,
 };
 use coven_protocol::write::WriteId;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::publication_state::PreparedStoreWriteState;
-use super::store_device_state::store_device_state_for_history_cut_on;
 #[derive(Debug, Clone)]
 pub struct PreparedMergeCandidate {
     pub commit: VerifiedStoreBatchCommit,
@@ -276,7 +275,6 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
     candidate: &StoreBatchCommitRef,
     author: &StoreDeviceRegistrationRef,
 ) -> Result<Option<AuthorExclusionActivationLocator>, DbError> {
-    let conn = records.conn;
     let expected_stream =
         coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
@@ -292,11 +290,7 @@ pub(crate) fn author_exclusion_activation_for_candidate_on(
             "candidate stream differs from its exact author registration".to_string(),
         ));
     }
-    let frontier = crate::StoreDatabase::materialized_frontier_on(conn, None)?
-        .into_values()
-        .map(|reference| (reference.coord.stream_id, reference))
-        .collect::<BTreeMap<_, _>>();
-    let (_, state) = store_device_state_for_history_cut_on(conn, &StoreHistoryCut(frontier))?;
+    let state = records.current_store_device_state()?;
     let Some(record) = state.devices.get(&author.device_id) else {
         return Err(DbError::Message(
             "candidate author is absent from the current device state".to_string(),
@@ -349,19 +343,9 @@ pub(crate) fn load_author_exclusion_activation_locator_on(
     root: &coven_protocol::store_commit::StoreRootRef,
     exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
 ) -> Result<AuthorExclusionActivationLocator, DbError> {
-    let conn = records.conn;
     let exclusion_json = serde_json::to_string(exclusion)
         .map_err(|error| DbError::context("serialize author exclusion reference", error))?;
-    let stored: Option<(String, String, String)> = conn
-        .query_row(
-            "SELECT accepted_cut, activation_commit, activation_head
-             FROM store_author_exclusion_activations
-             WHERE exclusion_ref = ?1",
-            [&exclusion_json],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(DbError::from)?;
+    let stored = records.author_exclusion_activation_row(&exclusion_json)?;
     let Some((accepted_cut, activation_commit, activation_head)) = stored else {
         return Err(DbError::Message(
             "applied author exclusion has no exact activation locator".to_string(),
@@ -459,7 +443,6 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
     root: &coven_protocol::store_commit::StoreRootRef,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
-    let conn = records.conn;
     match durable.proof() {
         coven_protocol::remote_object::CandidateNonactivationProof::AuthorExclusion {
             exclusion,
@@ -502,11 +485,8 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
                 stream_id,
                 sequence,
             } = &activation_commit.coord;
-            if crate::StoreDatabase::materialized_commit_ref_on(
-                conn,
-                &stream_id.to_string(),
-                *sequence,
-            )?
+            if records
+                .materialized_commit_ref(&stream_id.to_string(), *sequence)?
             .as_ref()
                 != Some(activation_commit)
             {
@@ -656,8 +636,7 @@ pub(crate) fn terminal_candidate_verification_on(
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,
 ) -> Result<Option<TerminalCandidateCleanupVerification>, DbError> {
-    let conn = records.conn;
-    let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
+    let remote = records.remote_object(remote_object_id(&candidate.reference.object))?;
     let Some(proof) = remote
         .candidate_nonactivation_proof(&candidate.reference)
         .map_err(|error| DbError::Message(error.to_string()))?

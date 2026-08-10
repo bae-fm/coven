@@ -441,7 +441,6 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         controls: &[coven_protocol::circle::CircleControlCoord],
     ) -> Result<Option<coven_protocol::circle::CircleControlCoord>, DbError> {
-        let conn = records.conn;
         // A control whose activating commit was reclaimed is superseded by a later
         // epoch and cannot be head; keep only controls whose commit is retained.
         let mut retained: Vec<(
@@ -450,7 +449,7 @@ impl StoreDatabase {
         )> = Vec::new();
         for coord in controls {
             let Some(activation_commit) =
-                Self::retained_circle_activation_commit_ref_on(conn, circle_id, coord)?
+                records.retained_circle_activation_commit_ref(circle_id, coord)?
             else {
                 continue;
             };
@@ -601,8 +600,7 @@ impl StoreDatabase {
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
-        let Some(activation_commit) =
-            Self::circle_activation_commit_ref_on(records.conn, circle_id, control)?
+        let Some(activation_commit) = records.circle_activation_commit_ref(circle_id, control)?
         else {
             return Ok(None);
         };
@@ -699,7 +697,6 @@ pub(crate) fn circle_blob_opening_protection_on(
     expected_control: &coven_protocol::circle::CircleControlCoord,
     expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
 ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
-    let conn = records.conn;
     let Some(authority) = StoreDatabase::verified_circle_activation_on(
         records,
         verified_store,
@@ -719,27 +716,7 @@ pub(crate) fn circle_blob_opening_protection_on(
         )));
     }
 
-    let mut statement = conn
-        .prepare(
-            "SELECT control_coord
-                 FROM circle_control_activations
-                 WHERE circle_id = ?1
-                 ORDER BY control_coord",
-        )
-        .map_err(DbError::from)?;
-    let rows = statement
-        .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(DbError::from)?;
-    let mut controls = Vec::new();
-    for encoded in rows {
-        let encoded = encoded.map_err(DbError::from)?;
-        controls.push(serde_json::from_str(&encoded).map_err(|error| {
-            DbError::context(
-                format!("parse retained Circle {circle_id} control coordinate"),
-                error,
-            )
-        })?);
-    }
+    let controls = records.circle_controls(circle_id)?;
 
     let mut retained_key = None;
     for control in controls {

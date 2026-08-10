@@ -6,6 +6,26 @@ use crate::{
     SyncedTable, VerifiedSnapshotBootstrapInstall,
 };
 
+impl StoreRecords<'_> {
+    pub(crate) fn capture_snapshot(
+        self,
+        image: crate::SnapshotDatabaseImage,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        tables: &[SyncedTable],
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        audience: &coven_protocol::circle::Audience,
+    ) -> Result<crate::CreatedSnapshot, crate::SnapshotImageError> {
+        image.capture_on(
+            self.conn,
+            self.store_dir,
+            root,
+            tables,
+            routing_encryption,
+            audience,
+        )
+    }
+}
+
 impl StoreRecordTransaction<'_, '_> {
     pub(crate) fn install_verified_snapshot_bootstrap(
         self,
