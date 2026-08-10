@@ -7,6 +7,24 @@ use crate::remote_object_records::update_remote_object_on;
 
 use super::*;
 
+#[cfg(any(test, feature = "test-utils"))]
+impl DatabaseSession<'_> {
+    fn row_blob_ref(&self, table_name: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
+        let table = self
+            .synced_tables
+            .iter()
+            .find(|candidate| candidate.name() == table_name)
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table_name:?}")))?;
+        if table.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            )));
+        }
+        Database::row_blob_ref_on(self.conn, self.gates, table, row_id)
+    }
+}
+
 impl Database {
     // ---- Materialized Store commit ledger ----
 
@@ -430,24 +448,10 @@ impl Database {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
-        let table = self
-            .synced_tables()
-            .iter()
-            .find(|candidate| candidate.name() == table)
-            .cloned()
-            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
-        if table.blob().is_none() {
-            return Err(DbError::Message(format!(
-                "synced table {:?} has no blob declaration",
-                table.name()
-            )));
-        }
+        let table = table.to_string();
         let row_id = row_id.to_string();
-        let gates = self.state.gates.clone();
         self.connection
-            .call_database(move |session| {
-                Self::row_blob_ref_on(session.conn, &gates, &table, &row_id)
-            })
+            .call_database(move |session| session.row_blob_ref(&table, &row_id))
             .await
     }
 }

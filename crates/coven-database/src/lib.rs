@@ -802,6 +802,8 @@ struct DatabaseCore {
 /// SQL functions borrow it during the operation.
 pub(crate) struct DatabaseSession<'session> {
     conn: &'session Connection,
+    gates: &'session Gates,
+    synced_tables: &'session [SyncedTable],
 }
 
 /// One Circle image selected against the restoring identity's re-resolved

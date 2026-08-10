@@ -35,7 +35,11 @@ impl DatabaseConnection {
         R: Send + 'static,
     {
         self.on_connection_thread(move |core| {
-            let mut session = DatabaseSession { conn: &core.conn };
+            let mut session = DatabaseSession {
+                conn: &core.conn,
+                gates: &core.gates,
+                synced_tables: &core.synced_tables,
+            };
             operation(&mut session)
         })
         .await
