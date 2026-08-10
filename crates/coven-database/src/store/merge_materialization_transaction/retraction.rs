@@ -38,7 +38,7 @@ pub(crate) fn require_exact_merge_retraction_closure(
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn insert_merge_retraction_cleanup(
+    pub(crate) fn insert_merge_retraction_cleanup(
         &self,
         retained: &OwnedVerifiedMergeMaterialization,
     ) -> Result<(), DbError> {
@@ -86,7 +86,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(())
     }
 
-    pub fn retire_circle_bootstrap_coverage(
+    pub(crate) fn retire_circle_bootstrap_coverage(
         &self,
         activation_commit: &StoreBatchCommitRef,
     ) -> Result<usize, DbError> {

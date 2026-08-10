@@ -1,7 +1,7 @@
 use super::*;
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn record_activated_store_ack(
+    pub(crate) fn record_activated_store_ack(
         &self,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -58,7 +58,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         .map_err(DbError::from)
     }
 
-    pub fn record_activated_circle_acks(
+    pub(crate) fn record_activated_circle_acks(
         &self,
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
@@ -186,7 +186,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(())
     }
 
-    pub fn record_verified_circle_activations(
+    pub(crate) fn record_verified_circle_activations(
         &self,
         verified_commit: &VerifiedStoreBatchCommit,
         activations: &[coven_protocol::circle_activation::VerifiedCircleReference],

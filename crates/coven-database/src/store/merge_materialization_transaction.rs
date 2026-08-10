@@ -87,7 +87,7 @@ pub(super) fn retract_verified_merge_materializations(
     transaction.retract_verified_merge_materializations(root, retained_replay, retractions)
 }
 
-pub enum MergeSubsetOutcome {
+pub(crate) enum MergeSubsetOutcome {
     Applied(Vec<crate::WinningRow>),
     ConstraintConflict(Vec<String>),
 }
@@ -171,7 +171,7 @@ fn advance_max_updated_at(
     }
 }
 
-pub struct MergeMaterializationTransaction<'transaction, 'connection> {
+pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
     transaction: &'transaction rusqlite::Transaction<'connection>,
     /// Where this store's payload files go. Materializing a pulled commit
     /// writes remote object rows, and a row that names a payload installs it in
@@ -180,7 +180,7 @@ pub struct MergeMaterializationTransaction<'transaction, 'connection> {
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn new(
+    pub(crate) fn new(
         transaction: &'transaction rusqlite::Transaction<'connection>,
         store_dir: &'transaction StoreDir,
     ) -> Self {
@@ -190,7 +190,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         }
     }
 
-    pub fn circle_current_state_is_deleted(
+    pub(crate) fn circle_current_state_is_deleted(
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<bool, DbError> {
@@ -203,7 +203,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     /// Install only blob bindings whose exact row stamp won the enclosing
     /// changeset. App rows, locator facts, and the materialized commit position
     /// share this transaction and therefore commit or roll back together.
-    pub fn install_winning_blob_bindings(
+    pub(crate) fn install_winning_blob_bindings(
         &self,
         gates: &crate::Gates,
         synced_tables: &[SyncedTable],

@@ -125,7 +125,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn record_store_reclaim_activation(
+    pub(crate) fn record_store_reclaim_activation(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
         commit: &StoreBatchCommit,
@@ -260,7 +260,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(())
     }
 
-    pub fn replace_store_device_exclusion_freezes_from_replay(
+    pub(crate) fn replace_store_device_exclusion_freezes_from_replay(
         &self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<(), DbError> {
@@ -300,7 +300,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         replace_store_device_exclusion_freezes_on(self.transaction, &retained)
     }
 
-    pub fn complete_membership_journal(
+    pub(crate) fn complete_membership_journal(
         &self,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         candidate: &StoreBatchCommitRef,
@@ -411,7 +411,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         Ok(())
     }
 
-    pub fn record_obsolete_blob_cleanup_intent(
+    pub(crate) fn record_obsolete_blob_cleanup_intent(
         &self,
         declarations: &crate::BlobDecls,
         intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,

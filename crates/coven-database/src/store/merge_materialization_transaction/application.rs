@@ -2,7 +2,7 @@ use super::*;
 use crate::query_mapped_rows;
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
-    pub fn activate_store_operation_remote_objects(
+    pub(crate) fn activate_store_operation_remote_objects(
         &self,
         commit_ref: &StoreBatchCommitRef,
         object_ids: &[ObjectHash],
@@ -39,7 +39,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_merge_subset(
+    pub(crate) fn apply_merge_subset(
         &self,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
@@ -102,7 +102,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_merge_package(
+    pub(crate) fn apply_merge_package(
         &self,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,

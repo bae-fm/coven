@@ -109,11 +109,11 @@ pub use materialization_models::{
     RetainedMergeMaterializationKey, RetainedPackageApplication, VerifiedMergeMaterialization,
     VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
 };
+pub(crate) use merge_materialization_transaction::MergeMaterializationTransaction;
 #[cfg(any(test, feature = "test-utils"))]
 pub use merge_materialization_transaction::{resolve_and_apply_changeset, ApplyResult};
 pub use merge_materialization_transaction::{
-    IncomingTimestampPolicy, MergeMaterializationTransaction, TableSchema, ValidatedChangeset,
-    WinningRow,
+    IncomingTimestampPolicy, TableSchema, ValidatedChangeset, WinningRow,
 };
 pub use publication_state::{MergeCandidateAbandonmentPreparation, StoreWritePreparation};
 pub use pull_replay::{

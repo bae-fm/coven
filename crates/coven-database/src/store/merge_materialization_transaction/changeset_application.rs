@@ -163,7 +163,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
 }
 
 impl MergeMaterializationTransaction<'_, '_> {
-    pub fn apply_changeset<B: AsRef<[u8]>>(
+    pub(crate) fn apply_changeset<B: AsRef<[u8]>>(
         &self,
         changeset: ValidatedChangeset<B>,
         timestamp_policy: IncomingTimestampPolicy,
@@ -261,7 +261,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         })
     }
 
-    pub fn current_winning_rows<B: AsRef<[u8]>>(
+    pub(crate) fn current_winning_rows<B: AsRef<[u8]>>(
         &self,
         schema: &TableSchema,
         changeset: B,
@@ -273,7 +273,7 @@ impl MergeMaterializationTransaction<'_, '_> {
         )
     }
 
-    pub fn apply_changeset_strict<B: AsRef<[u8]>>(
+    pub(crate) fn apply_changeset_strict<B: AsRef<[u8]>>(
         &self,
         changeset: ValidatedChangeset<B>,
     ) -> Result<(), DbError> {

@@ -209,6 +209,8 @@ pub use schema_introspection::{
 pub use store::device_join_journal;
 pub use store::device_join_journal::DeviceJoinJournalError;
 pub use store::payload_spool;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use store::MergeMaterializationTransaction;
 pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, MembershipAuthorityBytes,
@@ -237,7 +239,7 @@ pub use store::{
     WinningRow, GENERATION_ZERO,
 };
 #[cfg(any(test, feature = "test-utils"))]
-pub use store::{resolve_and_apply_changeset, ApplyResult, MergeMaterializationTransaction};
+pub use store::{resolve_and_apply_changeset, ApplyResult};
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
