@@ -8,6 +8,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
       # The pinned toolchain and components come from rust-toolchain.toml on the
@@ -23,7 +26,8 @@ jobs:
       - name: Enable incremental compilation
         run: echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
       - name: Restore coven incremental compiler state
-        uses: actions/cache@v5
+        id: coven-incremental-cache
+        uses: actions/cache/restore@v5
         with:
           path: target/debug/incremental
           key: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
@@ -64,6 +68,35 @@ jobs:
           retention-days: 14
       - name: Run tests and doctests
         run: cargo test --all-features
+      - name: Save coven incremental compiler state
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.coven-incremental-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: target/debug/incremental
+          key: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+      # An incremental tree is about 4.6 GB and cache entries are immutable.
+      # Keeping two crowds the platform dependency caches out of GitHub's
+      # default 10 GB allowance, while only the newest successful main build is
+      # useful as the next commit's restore base.
+      - name: Remove superseded incremental compiler state
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CACHE_PREFIX: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+          CURRENT_CACHE_KEY: coven-incremental-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+        run: |
+          main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+            gh cache list --key "$CURRENT_CACHE_KEY" --limit 1 --json id --jq '.[].id' |
+              while read -r cache_id; do gh cache delete "$cache_id"; done
+            exit 0
+          fi
+          gh cache list --key "$CACHE_PREFIX" --limit 100 --json id,key --jq '.[] | [.id, .key] | @tsv' |
+            while IFS=$'\t' read -r cache_id cache_key; do
+              if [[ "$cache_key" != "$CURRENT_CACHE_KEY" ]]; then
+                gh cache delete "$cache_id"
+              fi
+            done
 
   check-windows:
     runs-on: windows-latest
