@@ -248,7 +248,7 @@ impl DatabaseCore {
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     }
                     install.install_on(
-                        crate::payload_spool::StoreRecordTransaction::new(&tx, &store_dir),
+                        crate::store::StoreRecordTransaction::new(&tx, &store_dir),
                         schema_version,
                         resolved.hash(),
                         &synced_tables,

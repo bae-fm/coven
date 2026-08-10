@@ -91,7 +91,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: WriteId,
     ) -> Result<Vec<(WriteId, WriteStatus)>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -114,7 +114,7 @@ impl StoreSession<'_> {
                     DbError::context(format!("blocked write {write_id} preparation"), error)
                 })?;
             let candidate = parse_prepared_merge_candidate_on(
-                crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                crate::store::StoreRecords::new(&tx, records.store_dir),
                 self.verified_store_authority,
                 &prepared,
             )?
@@ -165,7 +165,7 @@ impl StoreSession<'_> {
     }
 
     fn discard_blocked_write(&mut self, write_id: WriteId) -> Result<BlockedWriteDiscard, DbError> {
-        let session_records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let session_records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = session_records
             .conn
             .unchecked_transaction()
@@ -225,7 +225,7 @@ impl StoreSession<'_> {
         }
         for (discarded_id, _) in &discarded {
             let cleanup = StoreDatabase::unpublished_write_cleanup_on(
-                crate::payload_spool::StoreRecordTransaction::new(&tx, session_records.store_dir),
+                crate::store::StoreRecordTransaction::new(&tx, session_records.store_dir),
                 self.verified_store_authority,
                 discarded_id,
             )?;
@@ -238,7 +238,7 @@ impl StoreSession<'_> {
             self.synced_tables,
             self.gates,
         )?);
-        let records = crate::payload_spool::StoreRecords::new(&tx, session_records.store_dir);
+        let records = crate::store::StoreRecords::new(&tx, session_records.store_dir);
         for (_, changeset_hash) in discarded.iter().rev() {
             let changeset = records.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
@@ -254,7 +254,7 @@ impl StoreSession<'_> {
             .collect();
         let resolution = WriteResolution::Discarded;
         StoreDatabase::resolve_unpublished_writes_on(
-            crate::payload_spool::StoreRecordTransaction::new(&tx, session_records.store_dir),
+            crate::store::StoreRecordTransaction::new(&tx, session_records.store_dir),
             self.verified_store_authority,
             &discarded_ids,
             &resolution,
@@ -307,7 +307,7 @@ impl StoreDatabase {
     }
 
     fn unpublished_write_cleanup_on(
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreRecordTransaction<'_, '_>,
         authority: &mut VerifiedStoreAuthority,
         write_id: &WriteId,
     ) -> Result<UnpublishedWriteCleanup, DbError> {
@@ -325,7 +325,7 @@ impl StoreDatabase {
             let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                 .map_err(|error| DbError::context("resolved prepared write", error))?;
             let merge = parse_prepared_merge_candidate_on(
-                crate::payload_spool::StoreRecords::new(tx, records.store_dir),
+                crate::store::StoreRecords::new(tx, records.store_dir),
                 authority,
                 &prepared,
             )?;
@@ -387,7 +387,7 @@ impl StoreDatabase {
     }
 
     fn resolve_unpublished_writes_on(
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreRecordTransaction<'_, '_>,
         authority: &mut VerifiedStoreAuthority,
         write_ids: &[WriteId],
         resolution: &WriteResolution,

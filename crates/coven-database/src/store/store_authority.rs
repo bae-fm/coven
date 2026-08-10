@@ -25,7 +25,7 @@ impl StoreSession<'_> {
         &mut self,
         expected_root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<String, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let (root, protocol_root) = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -100,7 +100,7 @@ impl StoreSession<'_> {
         owner: String,
         membership: InitialStoreMembershipAuthority,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -121,7 +121,7 @@ impl StoreSession<'_> {
         )?;
         membership.install_on(&tx)?;
         ensure_founder_replay_baseline_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             self.schema_version,
             self.sync_routing_hash,
             RetainedReplayGenesisAuthority {
@@ -336,7 +336,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let schema_version = self.schema_version;
         let routing_hash = self.sync_routing_hash;
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let tx = records
             .conn
@@ -396,9 +396,9 @@ impl StoreSession<'_> {
                     ));
                 }
                 let installed = verified_authority
-                    .root_authority_on(crate::payload_spool::StoreRecords::new(&tx, store_dir))?;
+                    .root_authority_on(crate::store::StoreRecords::new(&tx, store_dir))?;
                 let installed_registration = verified_authority.activated_registration_on(
-                    crate::payload_spool::StoreRecords::new(&tx, store_dir),
+                    crate::store::StoreRecords::new(&tx, store_dir),
                     &root,
                     &registration,
                 )?;
@@ -450,7 +450,7 @@ impl StoreSession<'_> {
                     ));
                 }
                 let baseline = load_generation_zero_replay_baseline_on(
-                    crate::payload_spool::StoreRecords::new(&tx, store_dir),
+                    crate::store::StoreRecords::new(&tx, store_dir),
                 )?
                 .ok_or_else(|| {
                     DbError::Message(
@@ -555,7 +555,7 @@ impl StoreSession<'_> {
         }
         .install_on(&tx)?;
         install_generation_zero_replay_baseline_on(
-            crate::payload_spool::StoreRecords::new(&tx, store_dir),
+            crate::store::StoreRecords::new(&tx, store_dir),
             schema_version,
             routing_hash,
             RetainedReplayGenesisAuthority {

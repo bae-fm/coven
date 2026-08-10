@@ -190,66 +190,6 @@ pub fn pay_owed_payload_deletions_on(
     Ok(())
 }
 
-/// A connection and the payload files the rows on it name.
-///
-/// A record whose bytes live in the spool is half a row and half a file, so
-/// everything that handles whole records carries both halves as one value. A
-/// function that only touches rows keeps taking the connection alone, and its
-/// signature says so.
-#[derive(Clone, Copy)]
-pub(crate) struct StoreRecords<'store> {
-    pub(crate) conn: &'store Connection,
-    pub(crate) store_dir: &'store StoreDir,
-}
-
-impl<'store> StoreRecords<'store> {
-    pub(crate) fn new(conn: &'store Connection, store_dir: &'store StoreDir) -> Self {
-        Self { conn, store_dir }
-    }
-
-    /// The payload stored under `hash`, read on this thread.
-    pub(crate) fn payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
-        read_payload_blocking(self.store_dir, hash)
-    }
-
-    pub(crate) fn verified_payload(&self, hash: ObjectHash) -> Result<Vec<u8>, PayloadSpoolError> {
-        read_verified_payload_blocking(self.store_dir, hash)
-    }
-
-    /// Install `bytes` as a payload and return the hash naming the file.
-    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
-        write_payload_blocking(self.store_dir, bytes)
-    }
-}
-
-/// The same pair inside one write transaction.
-///
-/// A row and the payload file it names commit together, so a flow that installs
-/// payloads takes this rather than a bare connection: on a connection in
-/// autocommit each statement would land on its own, and a failure between them
-/// would leave a row naming a file that never arrived — or the reverse.
-#[derive(Clone, Copy)]
-pub(crate) struct StoreRecordTransaction<'store, 'connection> {
-    pub(crate) transaction: &'store rusqlite::Transaction<'connection>,
-    pub(crate) store_dir: &'store StoreDir,
-}
-
-impl<'store, 'connection> StoreRecordTransaction<'store, 'connection> {
-    pub(crate) fn new(
-        transaction: &'store rusqlite::Transaction<'connection>,
-        store_dir: &'store StoreDir,
-    ) -> Self {
-        Self {
-            transaction,
-            store_dir,
-        }
-    }
-
-    pub(crate) fn install_payload(&self, bytes: &[u8]) -> Result<ObjectHash, PayloadSpoolError> {
-        write_payload_blocking(self.store_dir, bytes)
-    }
-}
-
 /// Install `bytes` as one payload from a caller that owns its thread, and
 /// return the hash naming the file they were installed as.
 ///
@@ -302,7 +242,7 @@ pub fn read_payload_blocking(
     std::fs::read(&path).map_err(|error| read_error(hash, path, error))
 }
 
-fn read_verified_payload_blocking(
+pub(super) fn read_verified_payload_blocking(
     store_dir: &StoreDir,
     hash: ObjectHash,
 ) -> Result<Vec<u8>, PayloadSpoolError> {

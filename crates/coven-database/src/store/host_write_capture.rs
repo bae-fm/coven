@@ -110,7 +110,7 @@ impl StoreSession<'_> {
             return Ok(None);
         };
         let partitions = StoreDatabase::store_write_partitions_on(
-            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            crate::store::StoreRecords::new(self.conn, self.store_dir),
             &write_id,
         )?;
         Ok(Some(PreparedStoreWrite {
@@ -148,7 +148,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
                 )
             })?;
         let registration = self.verified_authority.activated_registration_on(
-            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            crate::store::StoreRecords::new(self.transaction, self.store_dir),
             root,
             &reference,
         )?;
@@ -175,7 +175,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         expected_key_fingerprint: coven_keys::encryption::KeyFingerprint,
     ) -> Result<coven_protocol::objects::BlobSpoolProtection, DbError> {
         super::circle_blob_opening_protection_on(
-            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            crate::store::StoreRecords::new(self.transaction, self.store_dir),
             self.verified_authority,
             root,
             circle_id,
@@ -489,7 +489,7 @@ impl StoreDatabase {
     }
 
     pub(crate) fn insert_store_write_on(
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreRecordTransaction<'_, '_>,
         write_id: &WriteId,
         partitions: &[AudiencePartition],
         changeset_hash: ObjectHash,
@@ -635,7 +635,7 @@ impl StoreDatabase {
     }
 
     pub(crate) fn store_write_partitions_on(
-        records: crate::payload_spool::StoreRecords<'_>,
+        records: crate::store::StoreRecords<'_>,
         write_id: &str,
     ) -> Result<PreparedStoreWritePartitions, DbError> {
         let conn = records.conn;
@@ -873,9 +873,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
                     let store_root_hash = verified_authority
-                        .required_root_authority_on(crate::payload_spool::StoreRecords::new(
-                            &tx, store_dir,
-                        ))
+                        .required_root_authority_on(crate::store::StoreRecords::new(&tx, store_dir))
                         .map_err(E::from)?
                         .store_root_hash;
                     let key =
@@ -966,9 +964,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             drop(journal);
             let committed = (|| {
                 let rows_changed = tx.total_changes().saturating_sub(changes_before);
-                let local_stream_id = verified_authority.local_merge_stream_id_on(
-                    crate::payload_spool::StoreRecords::new(&tx, store_dir),
-                )?;
+                let local_stream_id = verified_authority
+                    .local_merge_stream_id_on(crate::store::StoreRecords::new(&tx, store_dir))?;
                 let base = StoreWriteBase {
                     dependencies: StoreDatabase::materialized_frontier_on(
                         &tx,
@@ -976,7 +973,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     )?,
                 };
                 let status = StoreDatabase::insert_store_write_on(
-                    crate::payload_spool::StoreRecordTransaction::new(&tx, store_dir),
+                    crate::store::StoreRecordTransaction::new(&tx, store_dir),
                     &write_id,
                     &partitioned.partitions,
                     changeset_hash,

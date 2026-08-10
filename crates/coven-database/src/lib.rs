@@ -906,7 +906,7 @@ impl VerifiedSnapshotBootstrapInstall {
 
     fn install_on(
         &self,
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreRecordTransaction<'_, '_>,
         schema_version: u32,
         routing_hash: ObjectHash,
         synced_tables: &[SyncedTable],
@@ -963,7 +963,7 @@ impl VerifiedSnapshotBootstrapInstall {
             .map_err(DbError::from)?;
         }
         install_snapshot_replay_baseline_on(
-            crate::payload_spool::StoreRecords::new(records.transaction, records.store_dir),
+            crate::store::StoreRecords::new(records.transaction, records.store_dir),
             schema_version,
             routing_hash,
             self.stability.clone(),
@@ -978,7 +978,7 @@ impl VerifiedSnapshotBootstrapInstall {
     /// installing payload-backed coverage.
     fn install_selected_circles_on(
         &self,
-        records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+        records: crate::store::StoreRecordTransaction<'_, '_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
@@ -997,7 +997,7 @@ impl VerifiedSnapshotBootstrapInstall {
         let mut verified_authority = store::VerifiedStoreAuthority::default();
         for install in circle_installs {
             let activation = StoreDatabase::verified_circle_activation_on(
-                crate::payload_spool::StoreRecords::new(records.transaction, records.store_dir),
+                crate::store::StoreRecords::new(records.transaction, records.store_dir),
                 &mut verified_authority,
                 root,
                 install.image.circle_id(),

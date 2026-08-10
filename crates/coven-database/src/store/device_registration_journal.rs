@@ -142,7 +142,7 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(records)?;
@@ -205,12 +205,12 @@ impl StoreSession<'_> {
         record: LocalRegistrationRecord,
         subject: &str,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let transaction_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let transaction_records = crate::store::StoreRecords::new(&tx, records.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(transaction_records)?;
@@ -334,12 +334,12 @@ impl StoreSession<'_> {
         activation: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
         subject: &str,
     ) -> Result<bool, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let transaction_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let transaction_records = crate::store::StoreRecords::new(&tx, records.store_dir);
         let root = self
             .verified_store_authority
             .required_root_authority_on(transaction_records)?;
@@ -432,7 +432,7 @@ impl StoreSession<'_> {
         &mut self,
         sql: &'static str,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         records
             .conn
             .query_row(sql, [], |row| {

@@ -86,7 +86,7 @@ impl StoreSession<'_> {
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<PostUpload, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let connection = records.conn;
         let resolved_root = self
             .gates
@@ -212,7 +212,7 @@ impl StoreSession<'_> {
         materialized: &[MaterializedLocalBlob],
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         super::host_write_capture::CapturedStoreWriteTransaction::begin_prepared_blob_transition(
             records.conn,
             records.store_dir,

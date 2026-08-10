@@ -128,7 +128,7 @@ impl StoreSession<'_> {
         remote_objects: Vec<coven_protocol::remote_object::ClosedRemoteObject>,
         pending_rotation_generation: Option<u64>,
     ) -> Result<ObjectHash, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let intent_hash = ObjectHash::digest(&plan_bytes);
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -228,7 +228,7 @@ impl StoreSession<'_> {
         rotation_generation: Option<u64>,
         replacement_hash: ObjectHash,
     ) -> Result<ObjectHash, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         let previous_id = previous.object_id();

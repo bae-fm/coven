@@ -1,5 +1,5 @@
 use super::*;
-use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
+use crate::store::{StoreRecordTransaction, StoreRecords};
 
 /// A replay-owned SQLite image. Callers can apply or inspect the projection,
 /// but cannot obtain the connection that implements it.

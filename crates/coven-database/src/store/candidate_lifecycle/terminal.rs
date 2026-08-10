@@ -7,7 +7,7 @@ impl StoreSession<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
         write_id: &WriteId,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let (raw_status, raw_prepared): (String, Option<String>) = conn
@@ -91,7 +91,7 @@ impl StoreSession<'_> {
         durable: coven_protocol::remote_object::CandidateNonactivation,
         head_nonactivation: coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -117,7 +117,7 @@ impl StoreSession<'_> {
                 ));
             }
             candidates.push(crate::StoreDatabase::load_merge_retraction_cleanup_on(
-                crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                crate::store::StoreRecords::new(&tx, records.store_dir),
                 verified_authority,
                 &reference,
             )?);
@@ -130,7 +130,7 @@ impl StoreSession<'_> {
             match &prepared {
                 PreparedStoreWriteState::Publication { commit, head, .. } => {
                     candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                        crate::store::StoreRecords::new(&tx, records.store_dir),
                         verified_authority,
                         commit.semantic_bytes(),
                         commit.prepared().reference(),
@@ -146,7 +146,7 @@ impl StoreSession<'_> {
                     ..
                 } => {
                     candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                        crate::store::StoreRecords::new(&tx, records.store_dir),
                         verified_authority,
                         candidate_commit.semantic_bytes(),
                         candidate_commit.prepared().reference(),
@@ -154,7 +154,7 @@ impl StoreSession<'_> {
                         candidate_head.prepared().reference(),
                     )?);
                     candidates.push(parse_prepared_merge_candidate_parts_on(
-                        crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+                        crate::store::StoreRecords::new(&tx, records.store_dir),
                         verified_authority,
                         authority_commit.semantic_bytes(),
                         authority_commit.prepared().reference(),
@@ -173,7 +173,7 @@ impl StoreSession<'_> {
                 )
             })?;
         validate_terminal_candidate_authority_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             verified_authority,
             root,
             &candidate,
@@ -219,7 +219,7 @@ impl StoreSession<'_> {
         winner: StoreDeviceHead,
         winner_prepared: PreparedExactObject,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -239,7 +239,7 @@ impl StoreSession<'_> {
         }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let tx_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let tx_records = crate::store::StoreRecords::new(&tx, records.store_dir);
         let publication =
             parse_prepared_merge_publication_on(tx_records, verified_authority, &prepared)?;
         let root = verified_authority.required_root_authority_on(tx_records)?;

@@ -64,7 +64,7 @@ impl StoreSession<'_> {
             transition.into_values();
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         advance_owner_promotion_journal_on(
-            crate::payload_spool::StoreRecordTransaction::new(&tx, self.store_dir),
+            crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
             journal_key,
             target_key,
             previous_value,
@@ -91,7 +91,7 @@ impl StoreSession<'_> {
             &nonactivation,
         )?;
         advance_owner_promotion_journal_on(
-            crate::payload_spool::StoreRecordTransaction::new(&tx, self.store_dir),
+            crate::store::StoreRecordTransaction::new(&tx, self.store_dir),
             journal_key,
             target_key,
             previous_value,
@@ -350,7 +350,7 @@ impl StoreDatabase {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn advance_owner_promotion_journal_on(
-    records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+    records: crate::store::StoreRecordTransaction<'_, '_>,
     journal_key: String,
     target_key: String,
     previous_value: String,

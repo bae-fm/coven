@@ -56,7 +56,7 @@ impl StoreSession<'_> {
     }
 
     fn oldest_prepared_store_write(&mut self) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let row = records
             .conn
             .query_row(

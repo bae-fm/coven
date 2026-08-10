@@ -29,7 +29,7 @@ impl StoreSession<'_> {
                 "prepared Store write belongs to another verified Store root".to_string(),
             ));
         }
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -116,7 +116,7 @@ impl StoreSession<'_> {
             )));
         }
         let partitions = StoreDatabase::store_write_partitions_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             stage.write_id.as_str(),
         )?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
@@ -317,7 +317,7 @@ impl StoreSession<'_> {
         &mut self,
         stage: MergeCandidateAbandonmentPreparation,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let verified_authority = &mut *self.verified_store_authority;
         let tx = records
             .conn
@@ -353,7 +353,7 @@ impl StoreSession<'_> {
             ));
         };
         let candidate = parse_prepared_merge_candidate_parts_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             verified_authority,
             candidate_commit.semantic_bytes(),
             candidate_commit.prepared().reference(),
@@ -365,7 +365,7 @@ impl StoreSession<'_> {
                 "prepared Merge candidate differs from its write identity".to_string(),
             ));
         }
-        let tx_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let tx_records = crate::store::StoreRecords::new(&tx, records.store_dir);
         let root = verified_authority.required_root_authority_on(tx_records)?;
         let registration = verified_authority.activated_registration_on(
             tx_records,
@@ -495,14 +495,14 @@ impl StoreSession<'_> {
         write_id: coven_protocol::write::WriteId,
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let local_stream_id = self.verified_store_authority.local_merge_stream_id_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
-        )?;
+        let local_stream_id = self
+            .verified_store_authority
+            .local_merge_stream_id_on(crate::store::StoreRecords::new(&tx, records.store_dir))?;
         let base = StoreWriteBase {
             dependencies: StoreDatabase::materialized_frontier_on(&tx, local_stream_id.as_deref())?,
         };
@@ -516,7 +516,7 @@ impl StoreSession<'_> {
         let changeset_hash =
             crate::payload_spool::write_payload_blocking(records.store_dir, &changeset)?;
         StoreDatabase::insert_store_write_on(
-            crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
+            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
             &write_id,
             &partitions,
             changeset_hash,

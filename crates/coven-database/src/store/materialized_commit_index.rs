@@ -24,7 +24,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.verified_store_authority.retained_replay_inputs_on(
-            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            crate::store::StoreRecords::new(self.conn, self.store_dir),
             &root,
         )
     }
@@ -62,7 +62,7 @@ impl StoreSession<'_> {
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         self.verified_store_authority
             .retained_replay_inputs_with_verified_commits_on(
-                crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                crate::store::StoreRecords::new(self.conn, self.store_dir),
                 &root,
                 &verified,
             )
@@ -75,7 +75,7 @@ impl StoreSession<'_> {
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         self.verified_store_authority
             .retained_replay_inputs_on(
-                crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                crate::store::StoreRecords::new(self.conn, self.store_dir),
                 &root,
             )?
             .into_iter()
@@ -92,7 +92,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         references: Vec<StoreBatchCommitRef>,
     ) -> Result<Vec<RetainedMergeHistoryCheckpoint>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let retained = authority.retained_replay_inputs_on(records, &root)?;
         let by_reference = retained
@@ -190,7 +190,7 @@ impl StoreSession<'_> {
     fn activated_store_device_registration_records(
         &mut self,
     ) -> Result<Vec<ReferencedStoreDeviceRegistration>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .root_authority_on(records)?
@@ -259,7 +259,7 @@ impl StoreSession<'_> {
                 )
             })?;
         let registration = self.verified_store_authority.activated_registration_on(
-            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            crate::store::StoreRecords::new(self.conn, self.store_dir),
             &root,
             &reference,
         )?;
@@ -278,7 +278,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         reference: StoreDeviceRegistrationRef,
     ) -> Result<ActivatedStoreDeviceRegistration, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let registration = self
             .verified_store_authority
             .activated_registration_on(records, &root, &reference)?;
@@ -306,7 +306,7 @@ impl StoreSession<'_> {
         &mut self,
         device_id: coven_protocol::store_commit::StoreDeviceId,
     ) -> Result<Option<ActivatedStoreDeviceRegistration>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let root = self
             .verified_store_authority
             .root_authority_on(records)?

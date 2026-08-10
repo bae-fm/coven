@@ -1,16 +1,17 @@
 use super::*;
 use crate::payload_spool::{
     circle_bootstrap_coverage_owner_key, payload_owner_claims_on, release_payload_owner_on,
-    set_payload_owner_claims_on, StoreRecordTransaction, StoreRecords,
+    set_payload_owner_claims_on,
 };
 use crate::query_mapped_rows;
+use crate::store::{StoreRecordTransaction, StoreRecords};
 
 impl StoreSession<'_> {
     fn prepare_circle_restore_selection(
         &mut self,
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleRestoreSelectionIndex, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -62,7 +63,7 @@ impl StoreSession<'_> {
         let retained = self
             .verified_store_authority
             .retained_materialization_by_ref_on(
-                crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                crate::store::StoreRecords::new(self.conn, self.store_dir),
                 reference,
             )?;
         if retained.root() != root {
@@ -78,12 +79,14 @@ impl StoreSession<'_> {
         root: &coven_protocol::store_commit::StoreRootRef,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         self.verified_store_authority.retained_replay_inputs_on(
-            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+            crate::store::StoreRecords::new(self.conn, self.store_dir),
             root,
         )?;
-        self.verified_store_authority.circle_replay_epoch_index_on(
-            crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
-        )
+        self.verified_store_authority
+            .circle_replay_epoch_index_on(crate::store::StoreRecords::new(
+                self.conn,
+                self.store_dir,
+            ))
     }
 }
 

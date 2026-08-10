@@ -188,7 +188,7 @@ impl StoreSession<'_> {
         operation: DurableStoreDeviceExclusionOperation,
         remotes: Vec<ClosedRemoteObject>,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         if let Some(active) = load_active_store_device_exclusion_on(&tx)? {
@@ -234,7 +234,7 @@ impl StoreSession<'_> {
         next: DurableStoreDeviceExclusionOperation,
         candidate: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;
@@ -382,7 +382,7 @@ impl StoreSession<'_> {
         replacement_remotes: Vec<ClosedRemoteObject>,
         nonactivation: coven_protocol::remote_object::CandidateNonactivation,
     ) -> Result<DurableStoreDeviceExclusionOperation, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let conn = records.conn;
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         require_store_device_exclusion_transition_on(&tx, &expected, &next)?;

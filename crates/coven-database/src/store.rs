@@ -52,6 +52,8 @@ mod snapshot_publication;
 mod store_acknowledgements;
 mod store_authority;
 mod store_device_state;
+mod store_records;
+pub(crate) use store_records::{StoreRecordTransaction, StoreRecords};
 mod store_session;
 mod stream_activation_records;
 mod verified_store_authority;
@@ -390,7 +392,7 @@ impl StoreSession<'_> {
 
     #[cfg(any(test, feature = "test-utils"))]
     fn generation_zero_replay_baseline(&self) -> Result<crate::RetainedReplayBaseline, DbError> {
-        StoreDatabase::generation_zero_replay_baseline_on(crate::payload_spool::StoreRecords::new(
+        StoreDatabase::generation_zero_replay_baseline_on(crate::store::StoreRecords::new(
             self.conn,
             self.store_dir,
         ))
@@ -438,7 +440,7 @@ impl StoreSession<'_> {
         )>,
         DbError,
     > {
-        StoreDatabase::circle_bootstrap_replay_inputs_on(crate::payload_spool::StoreRecords::new(
+        StoreDatabase::circle_bootstrap_replay_inputs_on(crate::store::StoreRecords::new(
             self.conn,
             self.store_dir,
         ))

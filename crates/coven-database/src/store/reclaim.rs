@@ -80,7 +80,7 @@ impl StoreSession<'_> {
             let retained = self
                 .verified_store_authority
                 .validate_retained_materialization_by_ref_on(
-                    crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                    crate::store::StoreRecords::new(self.conn, self.store_dir),
                     commit,
                 )?;
             if retained.root() != root || retained.input_hash() != *input_hash {
@@ -127,7 +127,7 @@ impl StoreSession<'_> {
             let retained = self
                 .verified_store_authority
                 .validate_retained_materialization_by_ref_on(
-                    crate::payload_spool::StoreRecords::new(self.conn, self.store_dir),
+                    crate::store::StoreRecords::new(self.conn, self.store_dir),
                     commit,
                 )?;
             if retained.root() != root || retained.input_hash() != *input_hash {

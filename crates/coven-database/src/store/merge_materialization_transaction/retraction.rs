@@ -105,7 +105,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .parse()
                 .map_err(|error| DbError::context("parse retracted Circle bootstrap id", error))?;
             StoreDatabase::clear_circle_bootstrap_coverage_on(
-                crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
+                crate::store::StoreRecordTransaction::new(self.transaction, self.store_dir),
                 circle_id,
             )?;
         }
@@ -127,13 +127,14 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     .map_err(|error| DbError::Message(error.to_string()))
             })
             .collect::<Result<BTreeSet<_>, _>>()?;
-        let retained = retained_replay.replay_inputs_on(
-            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
-        )?;
+        let retained = retained_replay.replay_inputs_on(crate::store::StoreRecords::new(
+            self.transaction,
+            self.store_dir,
+        ))?;
         let mut required = BTreeSet::new();
         for retained in &retained {
             if author_exclusion_activation_for_candidate_on(
-                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+                crate::store::StoreRecords::new(self.transaction, self.store_dir),
                 retained_replay,
                 root,
                 retained.commit_ref(),
@@ -183,7 +184,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .reference()
                 .map_err(|error| DbError::Message(error.to_string()))?;
             validate_terminal_nonactivation_authority_on(
-                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+                crate::store::StoreRecords::new(self.transaction, self.store_dir),
                 retained_replay,
                 root,
                 &nonactivation,
@@ -196,7 +197,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 } => {
                     let locator =
                         load_author_exclusion_activation_locator_on(
-                            crate::payload_spool::StoreRecords::new(
+                            crate::store::StoreRecords::new(
                                 self.transaction,
                                 self.store_dir,
                             ),
@@ -238,7 +239,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 )
                 .map_err(DbError::from)?;
             let retained = retained_replay.retained_materialization_by_ref_on(
-                crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+                crate::store::StoreRecords::new(self.transaction, self.store_dir),
                 &candidate,
             )?;
             if retained.root() != root || retained.input_hash().to_string() != input_hash {

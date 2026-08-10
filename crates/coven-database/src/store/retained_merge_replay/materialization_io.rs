@@ -1,6 +1,6 @@
 use super::*;
-use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
+use crate::store::{StoreRecordTransaction, StoreRecords};
 
 /// The plaintext one record names, read from the spool.
 ///

@@ -143,8 +143,7 @@ impl StoreSession<'_> {
             .map(|hash| {
                 Ok((
                     hash,
-                    crate::payload_spool::StoreRecords::new(self.conn, self.store_dir)
-                        .payload(hash)?,
+                    crate::store::StoreRecords::new(self.conn, self.store_dir).payload(hash)?,
                 ))
             })
             .collect::<Result<Vec<_>, DbError>>()?;
@@ -165,7 +164,7 @@ impl StoreSession<'_> {
         transfer: PreparedWriteTransfer,
     ) -> Result<(), DbError> {
         for (expected_hash, bytes) in &transfer.payloads {
-            let actual_hash = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir)
+            let actual_hash = crate::store::StoreRecords::new(self.conn, self.store_dir)
                 .install_payload(bytes)?;
             if actual_hash != *expected_hash {
                 return Err(DbError::Message(format!(
@@ -414,8 +413,8 @@ impl StoreSession<'_> {
         status: &str,
         base: &str,
     ) -> Result<(), DbError> {
-        let changeset_hash = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir)
-            .install_payload(b"")?;
+        let changeset_hash =
+            crate::store::StoreRecords::new(self.conn, self.store_dir).install_payload(b"")?;
         let owner_key = crate::payload_spool::store_write_owner_key(write_id);
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         transaction
@@ -462,7 +461,7 @@ impl StoreSession<'_> {
         let hash = encoded
             .parse()
             .map_err(|error| DbError::context("parse captured changeset hash", error))?;
-        Ok(crate::payload_spool::StoreRecords::new(self.conn, self.store_dir).payload(hash)?)
+        Ok(crate::store::StoreRecords::new(self.conn, self.store_dir).payload(hash)?)
     }
 
     fn write_blob_lease_count_for_test(&self, write_id: &WriteId) -> Result<i64, DbError> {
@@ -505,7 +504,7 @@ impl StoreSession<'_> {
     ) -> Result<(i64, i64, i64, i64), DbError> {
         let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let retained = self.verified_store_authority.replay_projection_on(
-            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.store_dir),
+            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
             root,
             self.blob_decls,
             self.gates,
@@ -522,7 +521,7 @@ impl StoreSession<'_> {
             .execute("DELETE FROM circle_bootstrap_coverage", [])
             .map_err(DbError::from)?;
         let sabotaged = self.verified_store_authority.replay_projection_on(
-            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.store_dir),
+            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
             root,
             self.blob_decls,
             self.gates,
@@ -571,7 +570,7 @@ impl StoreSession<'_> {
             )
             .map_err(DbError::from)?;
         let error = StoreDatabase::circle_bootstrap_replay_inputs_on(
-            crate::payload_spool::StoreRecords::new(&transaction, self.store_dir),
+            crate::store::StoreRecords::new(&transaction, self.store_dir),
         )
         .expect_err("Circle bootstrap replay must require its payload claim");
         transaction.rollback().map_err(DbError::from)?;
@@ -597,13 +596,13 @@ impl StoreSession<'_> {
             )
             .map_err(DbError::from)?;
         let retained = StoreDatabase::load_retained_merge_materialization_by_ref_on(
-            crate::payload_spool::StoreRecords::new(&transaction, self.store_dir),
+            crate::store::StoreRecords::new(&transaction, self.store_dir),
             root,
             self.verified_store_authority,
             activation_commit,
         )?;
         let error = StoreDatabase::record_circle_bootstrap_coverage_on(
-            crate::payload_spool::StoreRecordTransaction::new(&transaction, self.store_dir),
+            crate::store::StoreRecordTransaction::new(&transaction, self.store_dir),
             self.verified_store_authority,
             root,
             activation_commit,

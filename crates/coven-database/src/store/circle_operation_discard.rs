@@ -40,7 +40,7 @@ pub struct CircleOperationDiscardCandidate {
 }
 
 fn circle_operation_candidate_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     authority: &mut super::VerifiedStoreAuthority,
     operation: &PreparedCircleOperation,
 ) -> Result<CircleOperationCandidate, crate::DbError> {
@@ -97,7 +97,7 @@ impl StoreSession<'_> {
         &mut self,
         operation_id: String,
     ) -> Result<CircleOperationDiscardCandidate, crate::DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let journal = load_discardable_operation_on(records.conn, &operation_id)?;
         let candidate = circle_operation_candidate_on(
             records,
@@ -129,7 +129,7 @@ impl StoreSession<'_> {
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<(), crate::DbError> {
         let nonactivation = blocked_merge_candidate_nonactivation(nonactivation)?;
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -139,12 +139,12 @@ impl StoreSession<'_> {
             candidate,
             bootstrap_blobs,
         } = circle_operation_candidate_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             self.verified_store_authority,
             journal.operation(),
         )?;
         begin_blocked_merge_candidate_nonactivation_on(
-            crate::payload_spool::StoreRecordTransaction::new(&tx, records.store_dir),
+            crate::store::StoreRecordTransaction::new(&tx, records.store_dir),
             self.verified_store_authority,
             &root,
             &candidate.commit.write_id,
@@ -165,7 +165,7 @@ impl StoreSession<'_> {
         root: coven_protocol::store_commit::StoreRootRef,
         operation_id: String,
     ) -> Result<Vec<TerminalCandidateCleanupVerification>, crate::DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let journal = load_discarding_operation_on(records.conn, &operation_id)?;
         let candidate = circle_operation_candidate_on(
             records,
@@ -189,14 +189,14 @@ impl StoreSession<'_> {
         durable: coven_protocol::remote_object::CandidateNonactivation,
         head_nonactivation: coven_protocol::remote_object::VerifiedCandidateHeadNonactivation,
     ) -> Result<(), crate::DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
             .map_err(crate::DbError::from)?;
         let journal = load_discarding_operation_on(&tx, &operation_id)?;
         let candidate = circle_operation_candidate_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             self.verified_store_authority,
             journal.operation(),
         )?
@@ -210,7 +210,7 @@ impl StoreSession<'_> {
             ));
         }
         validate_terminal_candidate_authority_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             self.verified_store_authority,
             &root,
             &candidate,
@@ -257,7 +257,7 @@ impl StoreSession<'_> {
         &mut self,
         operation_id: String,
     ) -> Result<Vec<CandidateCleanupObject>, crate::DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let journal = load_discarding_operation_on(records.conn, &operation_id)?;
         let CircleOperationCandidate {
             candidate,
@@ -293,7 +293,7 @@ impl StoreSession<'_> {
         &mut self,
         operation_id: String,
     ) -> Result<(), crate::DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -303,7 +303,7 @@ impl StoreSession<'_> {
             candidate,
             bootstrap_blobs,
         } = circle_operation_candidate_on(
-            crate::payload_spool::StoreRecords::new(&tx, records.store_dir),
+            crate::store::StoreRecords::new(&tx, records.store_dir),
             self.verified_store_authority,
             journal.operation(),
         )?;

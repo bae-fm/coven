@@ -1,7 +1,7 @@
 use super::*;
-use crate::payload_spool::{StoreRecordTransaction, StoreRecords};
 use crate::query_mapped_rows;
 use crate::store::retained_merge_replay::CircleReplayEpochIndex;
+use crate::store::{StoreRecordTransaction, StoreRecords};
 use crate::{
     activated_merge_membership_remote_objects, MembershipAuthorityBytes, ObjectHash,
     PreparedMergeMaterialization, PreparedMergeMaterializationPackage,

@@ -35,7 +35,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -67,7 +67,7 @@ impl StoreSession<'_> {
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
         let circle_id = row.circle_id.clone();
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -202,7 +202,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::Message(error.to_string()))?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let tx = records
             .conn
             .unchecked_transaction()
@@ -310,7 +310,7 @@ impl StoreSession<'_> {
         journal: CircleOperationJournal,
         verified: VerifiedCircleActivations,
     ) -> Result<(), DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let gates = self.gates;
         let conn = records.conn;
@@ -347,7 +347,7 @@ impl StoreSession<'_> {
         let unverified_commit: StoreBatchCommit =
             serde_json::from_slice(&operation.commit_bytes)
                 .map_err(|error| DbError::context("parse circle Store commit", error))?;
-        let transaction_records = crate::payload_spool::StoreRecords::new(&tx, records.store_dir);
+        let transaction_records = crate::store::StoreRecords::new(&tx, records.store_dir);
         let root = authority.required_root_authority_on(transaction_records)?;
         let author = authority.activated_registration_on(
             transaction_records,

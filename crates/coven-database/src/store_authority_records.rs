@@ -366,7 +366,7 @@ struct StoredGenerationZeroReplayBaseline {
 }
 
 pub(crate) fn load_generation_zero_replay_baseline_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
 ) -> Result<Option<RetainedReplayBaseline>, DbError> {
     let conn = records.conn;
     let stored: Option<StoredGenerationZeroReplayBaseline> = conn
@@ -437,7 +437,7 @@ pub(crate) fn load_generation_zero_replay_baseline_on(
 }
 
 pub(crate) fn install_generation_zero_replay_baseline_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,
@@ -453,7 +453,7 @@ pub(crate) fn install_generation_zero_replay_baseline_on(
 }
 
 pub(crate) fn install_snapshot_replay_baseline_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplaySnapshotAuthority,
@@ -469,7 +469,7 @@ pub(crate) fn install_snapshot_replay_baseline_on(
 }
 
 pub(crate) fn insert_retained_replay_baseline_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     baseline: &RetainedReplayBaseline,
 ) -> Result<(), DbError> {
     let conn = records.conn;
@@ -513,7 +513,7 @@ pub(crate) fn insert_retained_replay_baseline_on(
 }
 
 pub(crate) fn ensure_founder_replay_baseline_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     schema_version: u32,
     routing_hash: ObjectHash,
     authority: RetainedReplayGenesisAuthority,

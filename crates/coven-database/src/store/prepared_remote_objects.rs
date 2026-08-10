@@ -40,7 +40,7 @@ impl StoreSession<'_> {
         &mut self,
         write_id: &WriteId,
     ) -> Result<Vec<PreparedRemoteObject>, DbError> {
-        let records = crate::payload_spool::StoreRecords::new(self.conn, self.store_dir);
+        let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let raw_prepared: String = records
             .conn
             .query_row(

@@ -137,7 +137,7 @@ pub fn delete_remote_objects_on(
 }
 
 pub(crate) fn parse_prepared_merge_candidate_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -166,7 +166,7 @@ pub(super) fn prepared_merge_candidate_objects(
 /// under; the upload representation is not needed to verify a candidate, only to
 /// create one, so it is not asked for.
 pub(crate) fn parse_prepared_merge_candidate_parts_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     commit_bytes: &[u8],
     commit_object: &ExactObjectRef,
@@ -234,7 +234,7 @@ pub fn blocked_merge_candidate_from_prepared(
 }
 
 pub(crate) fn parse_prepared_merge_publication_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -270,7 +270,7 @@ pub enum MergeCandidateHeadEvidence<'a> {
 }
 
 pub(crate) fn author_exclusion_activation_for_candidate_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &StoreBatchCommitRef,
@@ -344,7 +344,7 @@ pub fn select_author_exclusion_activation_locator(
 }
 
 pub(crate) fn load_author_exclusion_activation_locator_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
@@ -435,7 +435,7 @@ pub fn blocked_merge_candidate_nonactivation(
 }
 
 pub(crate) fn validate_terminal_candidate_authority_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &PreparedMergeCandidate,
@@ -454,7 +454,7 @@ pub(crate) fn validate_terminal_candidate_authority_on(
 }
 
 pub(crate) fn validate_terminal_nonactivation_authority_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
@@ -538,7 +538,7 @@ pub(crate) fn validate_terminal_nonactivation_authority_on(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn begin_blocked_merge_candidate_nonactivation_on(
-    records: crate::payload_spool::StoreRecordTransaction<'_, '_>,
+    records: crate::store::StoreRecordTransaction<'_, '_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     write_id: &WriteId,
@@ -550,7 +550,7 @@ pub(crate) fn begin_blocked_merge_candidate_nonactivation_on(
     let tx = records.transaction;
     if let BlockedMergeCandidateNonactivation::Terminal { durable, .. } = nonactivation {
         validate_terminal_candidate_authority_on(
-            crate::payload_spool::StoreRecords::new(records.transaction, records.store_dir),
+            crate::store::StoreRecords::new(records.transaction, records.store_dir),
             retained,
             root,
             candidate,
@@ -698,7 +698,7 @@ pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// by occupation, not terminal reconciliation). Shared by Merge cleanup and
 /// Circle-operation discard so both derive the authority identically.
 pub(crate) fn terminal_candidate_verification_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,

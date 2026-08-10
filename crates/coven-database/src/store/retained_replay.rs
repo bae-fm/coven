@@ -1,7 +1,7 @@
 //! Private accepted-history baselines and deterministic retained replay.
 
-use crate::payload_spool::StoreRecords;
 use crate::query_mapped_rows;
+use crate::store::StoreRecords;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{types::Value, Connection};

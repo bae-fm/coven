@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn derive_materialized_store_device_state_on(
-    records: crate::payload_spool::StoreRecords<'_>,
+    records: crate::store::StoreRecords<'_>,
     registrations: &mut dyn VerifiedRegistrationLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     commit: &StoreBatchCommit,
@@ -357,7 +357,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 let (journal_key, target_key, previous_value, next_value, remote_objects) =
                     transition.into_values();
                 advance_owner_promotion_journal_on(
-                    crate::payload_spool::StoreRecordTransaction::new(
+                    crate::store::StoreRecordTransaction::new(
                         self.transaction,
                         self.store_dir,
                     ),
@@ -475,13 +475,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         )?;
         let (retained_commit_ref, retained) =
             crate::StoreDatabase::retain_merge_materialization_on(
-                crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
+                crate::store::StoreRecordTransaction::new(self.transaction, self.store_dir),
                 registrations_lookup,
                 root,
                 &materialization,
             )?;
         StoreDatabase::record_circle_bootstrap_coverage_on(
-            crate::payload_spool::StoreRecordTransaction::new(self.transaction, self.store_dir),
+            crate::store::StoreRecordTransaction::new(self.transaction, self.store_dir),
             registrations_lookup,
             root,
             materialization.commit_ref(),
@@ -515,7 +515,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         device_operations: &VerifiedStoreDeviceOperations,
     ) -> Result<coven_protocol::store_commit::ResolvedStoreDeviceState, DbError> {
         derive_materialized_store_device_state_on(
-            crate::payload_spool::StoreRecords::new(self.transaction, self.store_dir),
+            crate::store::StoreRecords::new(self.transaction, self.store_dir),
             registrations,
             root,
             commit,
