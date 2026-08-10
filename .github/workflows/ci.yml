@@ -36,7 +36,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Lib-only check (production feature sets, no test cfg)
         run: scripts/check-lib-only.sh
-      - name: Test
+      - name: Compile unit and integration tests
+        run: cargo test --all-features --no-run
+      - name: Run tests and doctests
         run: cargo test --all-features
 
   check-windows:
