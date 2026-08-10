@@ -107,7 +107,8 @@ impl StoreSession<'_> {
         let mut candidates = Vec::new();
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
             witness.validate().map_err(DbError::Message)?;
             if witness.original_position().commit() != &reference {
@@ -232,7 +233,8 @@ impl StoreSession<'_> {
         }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let publication =
             store_transaction.prepared_merge_publication(verified_authority, &prepared)?;
         let root = store_transaction.required_root_authority(verified_authority)?;

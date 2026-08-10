@@ -136,7 +136,7 @@ pub fn delete_remote_objects_on(
 }
 
 pub(super) fn parse_prepared_merge_candidate_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -165,7 +165,7 @@ pub(super) fn prepared_merge_candidate_objects(
 /// under; the upload representation is not needed to verify a candidate, only to
 /// create one, so it is not asked for.
 pub(super) fn parse_prepared_merge_candidate_parts_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     commit_bytes: &[u8],
     commit_object: &ExactObjectRef,
@@ -233,7 +233,7 @@ pub fn blocked_merge_candidate_from_prepared(
 }
 
 pub(super) fn parse_prepared_merge_publication_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     authority: &mut super::verified_store_authority::VerifiedStoreAuthority,
     prepared: &PreparedStoreWriteState,
 ) -> Result<PreparedMergeCandidate, DbError> {
@@ -269,7 +269,7 @@ pub enum MergeCandidateHeadEvidence<'a> {
 }
 
 pub(super) fn author_exclusion_activation_for_candidate_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &StoreBatchCommitRef,
@@ -338,7 +338,7 @@ pub fn select_author_exclusion_activation_locator(
 }
 
 pub(super) fn load_author_exclusion_activation_locator_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     exclusion: &coven_protocol::store_commit::StoreDeviceExclusionRef,
@@ -419,7 +419,7 @@ pub fn blocked_merge_candidate_nonactivation(
 }
 
 pub(super) fn validate_terminal_candidate_authority_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: &PreparedMergeCandidate,
@@ -438,7 +438,7 @@ pub(super) fn validate_terminal_candidate_authority_on(
 }
 
 pub(super) fn validate_terminal_nonactivation_authority_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
@@ -631,7 +631,7 @@ pub fn begin_merge_candidate_nonactivation_with_head_evidence_on(
 /// by occupation, not terminal reconciliation). Shared by Merge cleanup and
 /// Circle-operation discard so both derive the authority identically.
 pub(super) fn terminal_candidate_verification_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     retained: &mut dyn super::verified_store_authority::VerifiedStoreLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     candidate: PreparedMergeCandidate,
@@ -917,7 +917,7 @@ pub fn load_merge_candidate_head_cleanup_on(
     }
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(super) fn prepared_merge_candidate(
         self,
         authority: &mut super::verified_store_authority::VerifiedStoreAuthority,

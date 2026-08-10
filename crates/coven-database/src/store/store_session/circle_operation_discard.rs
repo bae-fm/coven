@@ -33,7 +33,7 @@ struct CircleOperationCandidate {
     bootstrap_blobs: Vec<ExactObjectRef>,
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     fn circle_operation_candidate(
         self,
         authority: &mut super::VerifiedStoreAuthority,
@@ -49,7 +49,7 @@ pub struct CircleOperationDiscardCandidate {
 }
 
 fn circle_operation_candidate_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     authority: &mut super::VerifiedStoreAuthority,
     operation: &PreparedCircleOperation,
 ) -> Result<CircleOperationCandidate, crate::DbError> {
@@ -147,9 +147,9 @@ impl StoreSession<'_> {
         let CircleOperationCandidate {
             candidate,
             bootstrap_blobs,
-        } = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        } = crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .circle_operation_candidate(self.verified_store_authority, journal.operation())?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .begin_blocked_merge_candidate_nonactivation(
                 self.verified_store_authority,
                 &root,
@@ -201,7 +201,8 @@ impl StoreSession<'_> {
             .unchecked_transaction()
             .map_err(crate::DbError::from)?;
         let journal = load_discarding_operation_on(&tx, &operation_id)?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction
             .circle_operation_candidate(self.verified_store_authority, journal.operation())?
             .candidate;
@@ -305,7 +306,7 @@ impl StoreSession<'_> {
         let CircleOperationCandidate {
             candidate,
             bootstrap_blobs,
-        } = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        } = crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .circle_operation_candidate(self.verified_store_authority, journal.operation())?;
         if !merge_candidate_cleanup_targets_on(
             &tx,

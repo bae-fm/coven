@@ -105,9 +105,10 @@ impl StoreSession<'_> {
                 serde_json::from_str(raw_prepared).map_err(|error| {
                     DbError::context(format!("blocked write {write_id} preparation"), error)
                 })?;
-            let candidate = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-                .prepared_merge_candidate(self.verified_store_authority, &prepared)?
-                .reference;
+            let candidate =
+                crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+                    .prepared_merge_candidate(self.verified_store_authority, &prepared)?
+                    .reference;
             let remote = load_remote_object_on(&tx, remote_object_id(&candidate.object))?;
             if matches!(
                 remote,
@@ -213,7 +214,7 @@ impl StoreSession<'_> {
             )));
         }
         for (discarded_id, _) in &discarded {
-            if !crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+            if !crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
                 .unpublished_write_cleanup_is_complete(
                     self.verified_store_authority,
                     discarded_id,
@@ -227,7 +228,8 @@ impl StoreSession<'_> {
             self.synced_tables,
             self.gates,
         )?);
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         for (_, changeset_hash) in discarded.iter().rev() {
             let changeset = store_transaction.payload(*changeset_hash)?;
             let inverse = StoreDatabase::invert_changeset(&changeset)?;
@@ -242,7 +244,7 @@ impl StoreSession<'_> {
             .map(|(write_id, _)| write_id)
             .collect();
         let resolution = WriteResolution::Discarded;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .resolve_unpublished_writes(
                 self.verified_store_authority,
                 &discarded_ids,

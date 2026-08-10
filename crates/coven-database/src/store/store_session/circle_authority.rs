@@ -1,4 +1,4 @@
-use crate::store::StoreRecords;
+use crate::store::store_session::StoreRecords;
 use crate::*;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::store_commit::StoreBatchCommitRef;
@@ -743,7 +743,7 @@ pub(crate) fn circle_blob_opening_protection_on(
         })
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(super) fn circle_blob_opening_protection(
         self,
         verified_store: &mut dyn super::verified_store_authority::VerifiedStoreLookup,

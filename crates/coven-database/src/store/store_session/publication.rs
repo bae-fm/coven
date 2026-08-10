@@ -547,7 +547,8 @@ impl StoreSession<'_> {
         }
         let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
             .map_err(|error| DbError::context("prepared Merge candidate", error))?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let prepared_candidate =
             store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
         let publication =

@@ -1,6 +1,6 @@
 use super::*;
 use crate::query_mapped_rows;
-use crate::store::StoreRecords;
+use crate::store::store_session::StoreRecords;
 
 impl StoreSession<'_> {
     fn prepare_circle_restore_selection(
@@ -12,7 +12,7 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .seed_stream_activation_index_from_retained(self.verified_store_authority, root)?;
         let rows = query_mapped_rows(
             &tx,
@@ -241,7 +241,7 @@ impl StoreDatabase {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(crate) fn circle_bootstrap_replay_inputs(
         self,
     ) -> Result<

@@ -145,7 +145,10 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 || !retracted.is_empty()
             {
                 let replay = authority.replay_projection_on(
-                    crate::store::StoreTransaction::new(tx, self.store.records.store_dir),
+                    crate::store::store_session::StoreTransaction::new(
+                        tx,
+                        self.store.records.store_dir,
+                    ),
                     blob_decls,
                     gates,
                     synced_tables,
@@ -172,8 +175,11 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                     tx.execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
                         .map_err(DbError::from)?;
                 }
-                crate::store::StoreTransaction::new(tx, self.store.records.store_dir)
-                    .replace_tables_from_projection(&replay, &tables)?;
+                crate::store::store_session::StoreTransaction::new(
+                    tx,
+                    self.store.records.store_dir,
+                )
+                .replace_tables_from_projection(&replay, &tables)?;
                 let violations: bool = tx
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",

@@ -542,26 +542,32 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let retained = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .replay_projection_with_authority(
-                self.verified_store_authority,
-                root,
-                self.blob_decls,
-                self.gates,
-                self.synced_tables,
-                Some(routing_key),
-                &BTreeSet::new(),
-                None,
-                false,
-                coven_protocol::membership::LocalStoreMembership::Current,
-            )?;
+        let retained = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .replay_projection_with_authority(
+            self.verified_store_authority,
+            root,
+            self.blob_decls,
+            self.gates,
+            self.synced_tables,
+            Some(routing_key),
+            &BTreeSet::new(),
+            None,
+            false,
+            coven_protocol::membership::LocalStoreMembership::Current,
+        )?;
         let retained_count = retained.document_count(historical_id)?;
         let retained_late_count = retained.document_count(late_id)?;
         transaction
             .execute("DELETE FROM circle_bootstrap_coverage", [])
             .map_err(DbError::from)?;
-        let sabotaged = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .replay_projection_with_authority(
+        let sabotaged = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .replay_projection_with_authority(
             self.verified_store_authority,
             root,
             self.blob_decls,
@@ -615,9 +621,12 @@ impl StoreSession<'_> {
                 )],
             )
             .map_err(DbError::from)?;
-        let error = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .circle_bootstrap_replay_inputs()
-            .expect_err("Circle bootstrap replay must require its payload claim");
+        let error = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .circle_bootstrap_replay_inputs()
+        .expect_err("Circle bootstrap replay must require its payload claim");
         transaction.rollback().map_err(DbError::from)?;
         Ok(error.to_string())
     }
@@ -644,20 +653,26 @@ impl StoreSession<'_> {
                 ],
             )
             .map_err(DbError::from)?;
-        let retained = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .load_retained_merge_materialization_by_ref(
-                root,
-                self.verified_store_authority,
-                activation_commit,
-            )?;
-        let error = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .record_circle_bootstrap_coverage(
-                self.verified_store_authority,
-                root,
-                activation_commit,
-                retained.circle_activations(),
-            )
-            .expect_err("changed image hash must conflict with its exact reference");
+        let retained = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .load_retained_merge_materialization_by_ref(
+            root,
+            self.verified_store_authority,
+            activation_commit,
+        )?;
+        let error = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .record_circle_bootstrap_coverage(
+            self.verified_store_authority,
+            root,
+            activation_commit,
+            retained.circle_activations(),
+        )
+        .expect_err("changed image hash must conflict with its exact reference");
         transaction.rollback().map_err(DbError::from)?;
         Ok(error.to_string())
     }

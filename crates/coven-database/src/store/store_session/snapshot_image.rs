@@ -311,7 +311,8 @@ impl SnapshotDatabaseImage {
                     })?;
             }
             if matches!(audience, coven_protocol::circle::Audience::Store) {
-                let records = crate::store::StoreTransaction::new(&transaction, store_dir);
+                let records =
+                    crate::store::store_session::StoreTransaction::new(&transaction, store_dir);
                 let mut authority = super::VerifiedStoreAuthority::default();
                 records
                     .retain_snapshot_replay_inputs(&mut authority, root)
@@ -662,19 +663,22 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let replay = crate::store::StoreTransaction::new(&transaction, self.records.store_dir)
-            .replay_projection_with_authority(
-                self.verified_store_authority,
-                root,
-                self.blob_decls,
-                self.gates,
-                self.synced_tables,
-                Some(routing_key),
-                &std::collections::BTreeSet::new(),
-                Some(cutoff),
-                false,
-                coven_protocol::membership::LocalStoreMembership::Current,
-            )?;
+        let replay = crate::store::store_session::StoreTransaction::new(
+            &transaction,
+            self.records.store_dir,
+        )
+        .replay_projection_with_authority(
+            self.verified_store_authority,
+            root,
+            self.blob_decls,
+            self.gates,
+            self.synced_tables,
+            Some(routing_key),
+            &std::collections::BTreeSet::new(),
+            Some(cutoff),
+            false,
+            coven_protocol::membership::LocalStoreMembership::Current,
+        )?;
         transaction.rollback().map_err(DbError::from)?;
         let replay_frontier = replay.materialized_frontier()?;
         if replay_frontier != *cutoff {

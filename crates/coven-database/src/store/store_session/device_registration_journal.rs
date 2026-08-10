@@ -212,7 +212,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let coven_protocol::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
@@ -339,7 +340,8 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let root = store_transaction.required_root_authority(self.verified_store_authority)?;
         record.require_installed_store_root(&root, subject)?;
         let objects = record.columns(subject)?;

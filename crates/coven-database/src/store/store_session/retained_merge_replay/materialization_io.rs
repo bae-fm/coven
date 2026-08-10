@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::retained_replay::load_generation_zero_replay_baseline_on;
-use crate::store::StoreRecords;
+use crate::store::store_session::StoreRecords;
 
 /// The plaintext one record names, read from the spool.
 ///
@@ -25,7 +25,7 @@ fn spooled_semantic_payload(
         .map_err(|error| DbError::Message(error.to_string()))
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(crate) fn load_merge_retraction_cleanup(
         self,
         authority: &mut VerifiedStoreAuthority,

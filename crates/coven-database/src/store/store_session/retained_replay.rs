@@ -1,7 +1,7 @@
 //! Private accepted-history baselines and deterministic retained replay.
 
 use crate::query_mapped_rows;
-use crate::store::StoreRecords;
+use crate::store::store_session::StoreRecords;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{types::Value, Connection};
@@ -158,7 +158,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     install_generation_zero_replay_baseline_on(records, schema_version, routing_hash, authority)
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(super) fn ensure_founder_replay_baseline(
         self,
         schema_version: u32,

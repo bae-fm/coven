@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn derive_materialized_store_device_state_on(
-    records: crate::store::StoreRecords<'_>,
+    records: crate::store::store_session::StoreRecords<'_>,
     registrations: &mut dyn VerifiedRegistrationLookup,
     root: &coven_protocol::store_commit::StoreRootRef,
     commit: &StoreBatchCommit,
@@ -124,7 +124,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
     Ok(device_state)
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(super) fn derive_materialized_store_device_state(
         self,
         registrations: &mut dyn VerifiedRegistrationLookup,

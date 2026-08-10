@@ -69,7 +69,7 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
 }
 
 pub struct HostWriteBlobTransaction<'transaction, 'connection> {
-    store: crate::store::StoreTransaction<'transaction, 'connection>,
+    store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
     verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
 }
 
@@ -124,7 +124,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
         verified_authority: &'transaction mut super::verified_store_authority::VerifiedStoreAuthority,
     ) -> Self {
         Self {
-            store: crate::store::StoreTransaction::new(transaction, store_dir),
+            store: crate::store::store_session::StoreTransaction::new(transaction, store_dir),
             verified_authority,
         }
     }
@@ -887,10 +887,11 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             }
             let partitioned = match routing {
                 StoreWriteRouting::MergeScoped(encryption) => {
-                    let store_root_hash = crate::store::StoreTransaction::new(&tx, store_dir)
-                        .required_root_authority(verified_authority)
-                        .map_err(E::from)?
-                        .store_root_hash;
+                    let store_root_hash =
+                        crate::store::store_session::StoreTransaction::new(&tx, store_dir)
+                            .required_root_authority(verified_authority)
+                            .map_err(E::from)?
+                            .store_root_hash;
                     let key =
                         coven_protocol::circle::derive_row_routing_key(encryption, store_root_hash)
                             .map_err(|error| {
@@ -976,8 +977,9 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             drop(journal);
             let committed = (|| {
                 let rows_changed = tx.total_changes().saturating_sub(changes_before);
-                let local_stream_id = crate::store::StoreTransaction::new(&tx, store_dir)
-                    .local_merge_stream_id(verified_authority)?;
+                let local_stream_id =
+                    crate::store::store_session::StoreTransaction::new(&tx, store_dir)
+                        .local_merge_stream_id(verified_authority)?;
                 let base = StoreWriteBase {
                     dependencies:
                         crate::store::materialized_commit_index::materialized_frontier_on(
@@ -985,7 +987,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                             local_stream_id.as_deref(),
                         )?,
                 };
-                let status = crate::store::StoreTransaction::new(&tx, store_dir)
+                let status = crate::store::store_session::StoreTransaction::new(&tx, store_dir)
                     .insert_store_write(
                         &write_id,
                         &partitioned.partitions,

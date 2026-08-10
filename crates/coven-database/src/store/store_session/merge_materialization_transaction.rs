@@ -168,7 +168,7 @@ fn advance_max_updated_at(
 }
 
 pub(crate) struct MergeMaterializationTransaction<'transaction, 'connection> {
-    store: crate::store::StoreTransaction<'transaction, 'connection>,
+    store: crate::store::store_session::StoreTransaction<'transaction, 'connection>,
 }
 
 impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'connection> {
@@ -177,7 +177,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         store_dir: &'transaction StoreDir,
     ) -> Self {
         Self {
-            store: crate::store::StoreTransaction::new(transaction, store_dir),
+            store: crate::store::store_session::StoreTransaction::new(transaction, store_dir),
         }
     }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::retained_merge_replay::CircleReplayEpochIndex;
-use crate::store::{StoreRecords, StoreTransaction};
+use crate::store::store_session::{StoreRecords, StoreTransaction};
 use crate::{
     activated_merge_membership_remote_objects, ObjectHash, PreparedMergeMaterialization,
     PreparedMergeMaterializationPackage,

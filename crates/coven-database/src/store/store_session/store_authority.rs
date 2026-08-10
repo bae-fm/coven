@@ -121,12 +121,13 @@ impl StoreSession<'_> {
             anchor.owner(),
         )?;
         membership.install_on(&tx)?;
-        let baseline = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .ensure_founder_replay_baseline(
-                self.schema_version,
-                self.sync_routing_hash,
-                authority.clone(),
-            )?;
+        let baseline =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+                .ensure_founder_replay_baseline(
+                    self.schema_version,
+                    self.sync_routing_hash,
+                    authority.clone(),
+                )?;
         tx.commit().map_err(DbError::from)?;
         self.verified_store_authority.commit_installed_owner_anchor(
             authority,
@@ -399,7 +400,8 @@ impl StoreSession<'_> {
                             .to_string(),
                     ));
                 }
-                let store_transaction = crate::store::StoreTransaction::new(&tx, store_dir);
+                let store_transaction =
+                    crate::store::store_session::StoreTransaction::new(&tx, store_dir);
                 let installed = store_transaction.root_authority(verified_authority)?;
                 let installed_registration = store_transaction.activated_registration(
                     verified_authority,
@@ -458,8 +460,9 @@ impl StoreSession<'_> {
                     founder_registration: registration.clone(),
                 };
                 let baseline_matches = {
-                    let baseline = crate::store::StoreTransaction::new(&tx, store_dir)
-                        .retained_replay_baseline(verified_authority)?;
+                    let baseline =
+                        crate::store::store_session::StoreTransaction::new(&tx, store_dir)
+                            .retained_replay_baseline(verified_authority)?;
                     baseline.generation == GENERATION_ZERO
                         && baseline.schema_version == schema_version
                         && baseline.routing_hash == routing_hash
@@ -555,7 +558,7 @@ impl StoreSession<'_> {
             head_refs: vec![graph.membership.head_ref.clone()],
         }
         .install_on(&tx)?;
-        let baseline = crate::store::StoreTransaction::new(&tx, store_dir)
+        let baseline = crate::store::store_session::StoreTransaction::new(&tx, store_dir)
             .install_generation_zero_replay_baseline(
                 schema_version,
                 routing_hash,

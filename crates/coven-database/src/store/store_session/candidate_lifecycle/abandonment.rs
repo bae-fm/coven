@@ -163,7 +163,8 @@ impl StoreSession<'_> {
                 "author exclusion reached a non-candidate Merge preparation".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate =
             store_transaction.prepared_merge_candidate(verified_authority, &prepared)?;
         store_transaction.begin_blocked_merge_candidate_nonactivation(
@@ -222,7 +223,8 @@ impl StoreSession<'_> {
                 "Merge abandonment already has a publication outcome".to_string(),
             ));
         }
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -368,7 +370,8 @@ impl StoreSession<'_> {
                 "Merge abandonment did not lose to its prepared candidate".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -452,7 +455,8 @@ impl StoreSession<'_> {
                 "Merge abandonment has no third-candidate winner".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -536,7 +540,8 @@ impl StoreSession<'_> {
                 "Merge abandonment has no author-exclusion outcome".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),

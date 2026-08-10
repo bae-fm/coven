@@ -114,8 +114,9 @@ impl StoreSession<'_> {
                 stage.write_id
             )));
         }
-        let partitions = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .store_write_partitions(stage.write_id.as_str())?;
+        let partitions =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+                .store_write_partitions(stage.write_id.as_str())?;
         let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
             .map_err(|error| DbError::context(format!("write {} base", stage.write_id), error))?;
         let stored_dependencies = CommitFrontier::from_refs(stored_base.dependencies)
@@ -357,7 +358,8 @@ impl StoreSession<'_> {
                 "Merge abandonment requires one prepared candidate".to_string(),
             ));
         };
-        let store_transaction = crate::store::StoreTransaction::new(&tx, self.records.store_dir);
+        let store_transaction =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir);
         let candidate = store_transaction.prepared_merge_candidate_parts(
             verified_authority,
             candidate_commit.semantic_bytes(),
@@ -504,8 +506,9 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        let local_stream_id = crate::store::StoreTransaction::new(&tx, self.records.store_dir)
-            .local_merge_stream_id(self.verified_store_authority)?;
+        let local_stream_id =
+            crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+                .local_merge_stream_id(self.verified_store_authority)?;
         let base = StoreWriteBase {
             dependencies: crate::store::materialized_commit_index::materialized_frontier_on(
                 &tx,
@@ -524,14 +527,15 @@ impl StoreSession<'_> {
         )?;
         let changeset_hash =
             crate::payload_spool::write_payload_blocking(self.records.store_dir, &changeset)?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir).insert_store_write(
-            &write_id,
-            &partitions,
-            changeset_hash,
-            &base,
-            &blob_facts,
-            1,
-        )?;
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
+            .insert_store_write(
+                &write_id,
+                &partitions,
+                changeset_hash,
+                &base,
+                &blob_facts,
+                1,
+            )?;
         tx.commit().map_err(DbError::from)
     }
 }

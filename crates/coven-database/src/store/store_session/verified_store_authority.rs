@@ -41,7 +41,7 @@ pub(super) struct VerifiedStoreAuthorityTransaction {
 pub(crate) trait VerifiedRegistrationLookup {
     fn activated_registration_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError>;
@@ -50,7 +50,7 @@ pub(crate) trait VerifiedRegistrationLookup {
 pub(crate) trait VerifiedStoreLookup: VerifiedRegistrationLookup {
     fn retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError>;
 }
@@ -70,7 +70,7 @@ impl<'cache> CachedVerifiedRegistrations<'cache> {
 impl VerifiedRegistrationLookup for CachedVerifiedRegistrations<'_> {
     fn activated_registration_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
@@ -97,7 +97,7 @@ impl VerifiedStoreAuthorityTransaction {
 
     pub(super) fn replay_inputs_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
         self.cache
@@ -106,7 +106,7 @@ impl VerifiedStoreAuthorityTransaction {
 
     pub(super) fn prepared_merge_candidate_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         prepared: &super::publication_state::PreparedStoreWriteState,
     ) -> Result<PreparedMergeCandidate, DbError> {
         let (commit, head) = super::candidate_records::prepared_merge_candidate_objects(prepared);
@@ -121,7 +121,7 @@ impl VerifiedStoreAuthorityTransaction {
 
     pub(super) fn prepared_merge_candidate_parts_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         commit_bytes: &[u8],
         commit_object: &coven_protocol::objects::ExactObjectRef,
         head_bytes: &[u8],
@@ -146,7 +146,7 @@ impl VerifiedStoreAuthorityTransaction {
 
     fn retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         if let Some(materialization) = self.cache.cached_by_ref(reference)? {
@@ -166,7 +166,7 @@ impl VerifiedStoreAuthorityTransaction {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replay_projection_on(
         &mut self,
-        records: crate::store::StoreTransaction<'_, '_>,
+        records: crate::store::store_session::StoreTransaction<'_, '_>,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
         synced_tables: &[coven_protocol::synced_schema::SyncedTable],
@@ -320,7 +320,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn prepared_merge_candidate_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         prepared: &super::publication_state::PreparedStoreWriteState,
     ) -> Result<PreparedMergeCandidate, DbError> {
         let (commit, head) = super::candidate_records::prepared_merge_candidate_objects(prepared);
@@ -335,7 +335,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn prepared_merge_candidate_parts_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         commit_bytes: &[u8],
         commit_object: &coven_protocol::objects::ExactObjectRef,
         head_bytes: &[u8],
@@ -360,7 +360,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn begin_transaction_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<VerifiedStoreAuthorityTransaction, DbError> {
         let root = self.required_root_authority_on(records)?;
         Ok(VerifiedStoreAuthorityTransaction {
@@ -393,7 +393,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn root_authority_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<Option<(StoreRootRef, StoreProtocolRoot)>, DbError> {
         if self.root_authority.is_none() {
             self.root_authority = records.store_root_authority()?;
@@ -403,7 +403,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn required_root_authority_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<StoreRootRef, DbError> {
         self.root_authority_on(records)?
             .map(|(reference, _)| reference)
@@ -412,7 +412,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn activated_registration_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
@@ -426,7 +426,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn activated_registration_with_cache_on(
         registrations: &mut BTreeMap<StoreDeviceRegistrationRef, StoreDeviceRegistration>,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
@@ -440,7 +440,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn local_store_authority_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<ReferencedStoreDeviceRegistration, DbError> {
         let root = self.required_root_authority_on(records)?;
         let reference = records.local_activated_registration_ref()?.ok_or_else(|| {
@@ -453,7 +453,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn local_merge_stream_id_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<Option<String>, DbError> {
         if !records.has_local_device()? {
             return Ok(None);
@@ -471,7 +471,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn retained_replay_baseline_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<&RetainedReplayBaseline, DbError> {
         let root = self.required_root_authority_on(records)?;
         let baseline = self.retained_replay.baseline_on(records)?;
@@ -489,7 +489,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn retained_replay_inputs_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         expected_root: &StoreRootRef,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let root = self.required_root_authority_on(records)?;
@@ -505,7 +505,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn retained_replay_inputs_with_verified_commits_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         expected_root: &StoreRootRef,
         verified: &BTreeMap<
             coven_protocol::store_commit::StoreBatchCommitRef,
@@ -529,7 +529,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn retained_history_checkpoint_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<RetainedMergeHistoryCheckpoint, DbError> {
         self.retained_materialization_by_ref_on(records, reference)?;
@@ -540,7 +540,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         if let Some(materialization) = self.retained_replay.cached_by_ref(reference)? {
@@ -561,7 +561,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn validate_retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let root = self.required_root_authority_on(records)?;
@@ -576,7 +576,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn verified_circle_activation_on(
         &self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         circle_id: coven_protocol::circle::CircleId,
         control: &coven_protocol::circle::CircleControlCoord,
     ) -> Result<Option<coven_protocol::circle_activation::VerifiedCircleReference>, DbError> {
@@ -586,7 +586,7 @@ impl VerifiedStoreAuthority {
 
     pub(super) fn circle_replay_epoch_index_on(
         &self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
     ) -> Result<CircleReplayEpochIndex, DbError> {
         self.retained_replay.circle_replay_epoch_index_on(records)
     }
@@ -594,7 +594,7 @@ impl VerifiedStoreAuthority {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn replay_projection_for_root_on(
         &mut self,
-        records: crate::store::StoreTransaction<'_, '_>,
+        records: crate::store::store_session::StoreTransaction<'_, '_>,
         root: &StoreRootRef,
         blob_decls: &BlobDecls,
         gates: &crate::Gates,
@@ -625,7 +625,7 @@ impl VerifiedStoreAuthority {
 impl VerifiedRegistrationLookup for VerifiedStoreAuthority {
     fn activated_registration_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
@@ -636,14 +636,14 @@ impl VerifiedRegistrationLookup for VerifiedStoreAuthority {
 impl VerifiedStoreLookup for VerifiedStoreAuthority {
     fn retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         VerifiedStoreAuthority::retained_materialization_by_ref_on(self, records, reference)
     }
 }
 
-impl crate::store::StoreTransaction<'_, '_> {
+impl crate::store::store_session::StoreTransaction<'_, '_> {
     pub(super) fn begin_verified_authority_transaction(
         self,
         authority: &mut VerifiedStoreAuthority,
@@ -707,7 +707,7 @@ impl crate::store::StoreTransaction<'_, '_> {
 impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
     fn activated_registration_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         root: &StoreRootRef,
         reference: &StoreDeviceRegistrationRef,
     ) -> Result<StoreDeviceRegistration, DbError> {
@@ -728,7 +728,7 @@ impl VerifiedRegistrationLookup for VerifiedStoreAuthorityTransaction {
 impl VerifiedStoreLookup for VerifiedStoreAuthorityTransaction {
     fn retained_materialization_by_ref_on(
         &mut self,
-        records: crate::store::StoreRecords<'_>,
+        records: crate::store::store_session::StoreRecords<'_>,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         VerifiedStoreAuthorityTransaction::retained_materialization_by_ref_on(

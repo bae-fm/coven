@@ -72,7 +72,7 @@ impl StoreSession<'_> {
             .conn
             .unchecked_transaction()
             .map_err(DbError::from)?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .advance_owner_promotion_journal(
                 journal_key,
                 target_key,
@@ -103,7 +103,7 @@ impl StoreSession<'_> {
             &objects,
             &nonactivation,
         )?;
-        crate::store::StoreTransaction::new(&tx, self.records.store_dir)
+        crate::store::store_session::StoreTransaction::new(&tx, self.records.store_dir)
             .advance_owner_promotion_journal(
                 journal_key,
                 target_key,

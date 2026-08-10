@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::StoreRecords;
+use crate::store::store_session::StoreRecords;
 
 impl StoreDatabase {
     /// The `retained_merge_materializations` commit-refs a Store snapshot image
