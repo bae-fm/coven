@@ -1,5 +1,6 @@
 use super::*;
 use crate::query_mapped_rows;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

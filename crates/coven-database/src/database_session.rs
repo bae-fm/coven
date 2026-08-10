@@ -155,6 +155,22 @@ impl<'session> DatabaseSession<'session> {
         operation(DatabaseTestSql::for_store(self.conn, self.store_dir))
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn apply_test_changeset(
+        &self,
+        bytes: &[u8],
+        tables: &[SyncedTable],
+        receiver_wall_ms: u64,
+    ) -> Result<crate::ApplyResult, DbError> {
+        crate::resolve_and_apply_changeset(
+            self.conn,
+            self.store_dir,
+            bytes,
+            tables,
+            receiver_wall_ms,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn select_one_after_delay(
         &self,

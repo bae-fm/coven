@@ -273,14 +273,6 @@ impl StoreDatabase {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn merge_materialization_failure_injection(
-        &self,
-    ) -> crate::MergeMaterializationFailureInjection {
-        self.database
-            .store_merge_materialization_failure_injection()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub async fn reach_test_point(&self, point: crate::DatabaseTestPoint) {
         self.database.reach_store_test_point(point).await;
     }

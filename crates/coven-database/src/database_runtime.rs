@@ -1,5 +1,13 @@
 use super::*;
 
+/// A cloneable handle to one owned database. The connection capability retains
+/// both the worker and its matching database context; this handle has no second
+/// path to either.
+#[derive(Clone)]
+pub struct Database {
+    connection: DatabaseConnection,
+}
+
 /// Bind a database to the store directory that owns its payload files.
 ///
 /// Production databases live under their store directory. In-memory databases
@@ -19,6 +27,12 @@ fn store_dir_of(path: &Path) -> coven_foundation::store_dir::StoreDir {
 }
 
 impl Database {
+    pub(crate) fn from_core(core: DatabaseCore, thread_name: &str) -> Result<Self, DbError> {
+        Ok(Self {
+            connection: DatabaseConnection::start(core, thread_name)?,
+        })
+    }
+
     pub(crate) async fn call_database<F, R>(&self, operation: F) -> Result<R, DbError>
     where
         F: for<'session> FnOnce(
@@ -42,42 +56,42 @@ impl Database {
     }
 
     pub(crate) fn store_schema_version(&self) -> u32 {
-        self.state.schema_version
+        self.connection.store_schema_version()
     }
 
     pub(crate) fn store_sync_routing_hash(&self) -> ObjectHash {
-        self.state.sync_routing_hash
+        self.connection.store_sync_routing_hash()
     }
 
     pub(crate) fn store_synced_tables(&self) -> &[SyncedTable] {
-        &self.state.synced_tables
+        self.connection.store_synced_tables()
     }
 
     pub(crate) fn store_transfer_limits(&self) -> coven_protocol::blob::TransferLimits {
-        self.state.transfer_limits
+        self.connection.store_transfer_limits()
     }
 
     pub(crate) fn store_blob_tombstone_grace(&self) -> chrono::Duration {
-        self.state.blob_tombstone_grace
+        self.connection.store_blob_tombstone_grace()
     }
 
     pub(crate) fn store_has_scoped_graph(&self) -> bool {
-        self.state.gates.has_scoped_graph()
+        self.connection.store_has_scoped_graph()
     }
 
     pub(crate) fn store_stamp(&self) -> String {
-        self.state.hlc.now().to_string()
+        self.connection.store_stamp()
     }
 
     pub(crate) fn store_hlc_high_water(&self) -> String {
-        self.state.hlc.high_water().to_string()
+        self.connection.store_hlc_high_water()
     }
 
     pub(crate) fn store_blob_ref_from_change(
         &self,
         change: &coven_foundation::changeset::RowChange,
     ) -> Result<Option<coven_protocol::blob::BlobRef>, BlobDeclError> {
-        self.state.blob_decls.ref_from_change(change)
+        self.connection.store_blob_ref_from_change(change)
     }
 
     pub(crate) fn validate_store_local_blob_cleanup_changes(
@@ -85,31 +99,20 @@ impl Database {
         old_changes: &[coven_foundation::changeset::RowChange],
         new_changes: &[coven_foundation::changeset::RowChange],
     ) -> Result<(), BlobDeclError> {
-        crate::local_blob_cleanup_intents::intents_from_changes(
-            self.state.blob_decls.as_ref(),
-            old_changes,
-            new_changes,
-        )
-        .map(|_| ())
+        self.connection
+            .validate_store_local_blob_cleanup_changes(old_changes, new_changes)
     }
 
     pub(crate) fn store_receive_wall_ms(&self) -> u64 {
-        self.state.hlc.wall_now_ms()
+        self.connection.store_receive_wall_ms()
     }
 
     pub(crate) fn new_store_id(&self) -> String {
-        self.state.ids.new_id()
+        self.connection.new_store_id()
     }
 
     pub(crate) fn notify_store_write_status(&self, write_id: WriteId, status: WriteStatus) {
-        let senders = self
-            .state
-            .write_statuses
-            .lock()
-            .expect("write status mutex poisoned");
-        if let Some(sender) = senders.get(&write_id) {
-            sender.send_replace(status);
-        }
+        self.connection.notify_store_write_status(write_id, status);
     }
 
     pub(crate) fn subscribe_store_write_status(
@@ -117,82 +120,65 @@ impl Database {
         write_id: WriteId,
         current: WriteStatus,
     ) -> tokio::sync::watch::Receiver<WriteStatus> {
-        let mut senders = self
-            .state
-            .write_statuses
-            .lock()
-            .expect("write status mutex poisoned");
-        let sender = senders
-            .entry(write_id)
-            .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
-        sender.send_replace(current);
-        sender.subscribe()
+        self.connection
+            .subscribe_store_write_status(write_id, current)
     }
 
     pub(crate) async fn membership_load_permit(&self) -> crate::store::MembershipLoadPermit {
-        self.state.store_runtime.membership_load_permit().await
+        self.connection.membership_load_permit().await
     }
 
     pub(crate) async fn membership_mutation_permit(
         &self,
     ) -> crate::store::MembershipMutationPermit {
-        self.state.store_runtime.membership_mutation_permit().await
+        self.connection.membership_mutation_permit().await
     }
 
     pub(crate) async fn store_creation_permit(&self) -> crate::store::StoreCreationPermit {
-        self.state.store_runtime.store_creation_permit().await
+        self.connection.store_creation_permit().await
     }
 
     pub(crate) async fn device_exclusion_permit(&self) -> crate::store::DeviceExclusionPermit {
-        self.state.store_runtime.device_exclusion_permit().await
+        self.connection.device_exclusion_permit().await
     }
 
     pub(crate) async fn author_own_store_stream(&self) -> crate::store::OwnStreamAuthorship {
-        self.state.store_runtime.author_own_stream().await
+        self.connection.author_own_store_stream().await
     }
 
     pub(crate) async fn snapshot_publication_permit(
         &self,
     ) -> crate::store::SnapshotPublicationPermit {
-        self.state.store_runtime.snapshot_publication_permit().await
+        self.connection.snapshot_publication_permit().await
     }
 
     pub(crate) async fn local_blob_cleanup_permit(&self) -> crate::store::LocalBlobCleanupPermit {
-        self.state.store_runtime.local_blob_cleanup_permit().await
+        self.connection.local_blob_cleanup_permit().await
     }
 
     pub(crate) async fn apply_local_blob_cleanup_intent(
         &self,
         intent: &crate::local_blob_cleanup_intents::LocalBlobCleanupIntent,
     ) -> Result<(), DbError> {
-        intent.apply(&self.state.store_dir).await
+        self.connection
+            .apply_local_blob_cleanup_intent(intent)
+            .await
     }
 
     pub(crate) async fn stage_host_write_blobs<E>(
         &self,
         blobs: Vec<crate::store::NewBlob>,
     ) -> Result<crate::store::StagedBlobBatch, crate::HostWriteError<E>> {
-        crate::store::StagedBlobBatch::stage(&self.state.store_dir, blobs).await
+        self.connection.stage_host_write_blobs(blobs).await
     }
 
     pub(crate) async fn sync_store_parent_dir(&self, path: &Path) -> Result<(), String> {
-        self.state.store_dir.sync_parent_dir(path).await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn store_merge_materialization_failure_injection(
-        &self,
-    ) -> MergeMaterializationFailureInjection {
-        StoreDatabaseTestAccess {
-            pause_points: self.state.test_pause_points.clone(),
-            merge_materialization_failure: self.state.merge_materialization_failure.clone(),
-        }
-        .merge_materialization_failure_injection()
+        self.connection.sync_store_parent_dir(path).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn reach_store_test_point(&self, point: DatabaseTestPoint) {
-        self.state.test_pause_points.reach(point).await;
+        self.connection.reach_store_test_point(point).await;
     }
 
     /// Open and own the connection at `path`.
@@ -278,7 +264,7 @@ impl Database {
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
     ) -> Result<Database, OpenError> {
-        let (core, state) = DatabaseCore::open(
+        let core = DatabaseCore::open(
             path,
             store_dir,
             synced_tables,
@@ -289,12 +275,7 @@ impl Database {
             metadata_open,
         )?;
 
-        let database = Database {
-            connection: DatabaseConnection::start(core, "coven-db")?,
-            state,
-        };
-
-        Ok(database)
+        Self::from_core(core, "coven-db").map_err(OpenError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -368,7 +349,7 @@ impl Database {
     ) -> Result<Database, OpenError> {
         let hlc = Hlc::try_new(device_id, clock).map_err(|e| DbError::context("device_id", e))?;
         let store_dir = store_dir_of(path);
-        let (core, state) = DatabaseCore::open_read_only(
+        let core = DatabaseCore::open_read_only(
             path,
             store_dir,
             synced_tables,
@@ -377,10 +358,7 @@ impl Database {
             Arc::new(hlc),
             migrations,
         )?;
-        Ok(Database {
-            connection: DatabaseConnection::start(core, "coven-db-ro")?,
-            state,
-        })
+        Self::from_core(core, "coven-db-ro").map_err(OpenError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -389,23 +367,19 @@ impl Database {
         &self,
         point: DatabaseTestPoint,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.state.test_pause_points.arm(point)
+        self.connection.arm_test_pause(point)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn observe_test_points(&self) -> tokio::sync::mpsc::UnboundedReceiver<DatabaseTestPoint> {
-        self.state.test_pause_points.observe()
+        self.connection.observe_test_points()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn fail_next_merge_materialization_at(&self, point: MergeMaterializationFailurePoint) {
-        *self
-            .state
-            .merge_materialization_failure
-            .lock()
-            .expect("Merge materialization failure lock poisoned") = Some(point);
+        self.connection.fail_next_merge_materialization_at(point);
     }
 
     /// Open with a caller-supplied register clock instead of a fresh
@@ -436,17 +410,17 @@ impl Database {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn synced_tables(&self) -> &[SyncedTable] {
-        &self.state.synced_tables
+        self.connection.store_synced_tables()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn schema_version(&self) -> u32 {
-        self.state.schema_version
+        self.connection.store_schema_version()
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn sync_routing_hash(&self) -> ObjectHash {
-        self.state.sync_routing_hash
+        self.connection.store_sync_routing_hash()
     }
 
     /// The receiver's current wall-clock millis, read from this database's
@@ -455,7 +429,7 @@ impl Database {
     /// win last-writer-wins or ratchet the clock).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn receive_wall_ms(&self) -> u64 {
-        self.state.hlc.wall_now_ms()
+        self.connection.store_receive_wall_ms()
     }
 }
 

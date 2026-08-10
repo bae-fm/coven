@@ -60,7 +60,7 @@ pub use crate::store_reclaim_records::{
     insert_store_reclaim_operation_on, load_store_reclaim_operation_on,
     parse_store_reclaim_operation, store_reclaim_journal_error, update_store_reclaim_operation_on,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -91,6 +91,9 @@ use rusqlite::{Connection, OptionalExtension};
 pub use rusqlite;
 
 mod blob_bindings;
+pub(crate) use blob_bindings::{
+    install_pulled_merge_membership_activations_on, install_pulled_package_activation_on,
+};
 mod blob_declarations;
 mod blob_records;
 mod changeset;
@@ -166,8 +169,9 @@ pub use circle_operation_records::{
     PreparedCircleOperationRow,
 };
 pub use coven_protocol::objects::{ExactProtocolObject, PreparedProtocolObject};
-pub use database_connection::DatabaseConnection;
+pub(crate) use database_connection::{DatabaseConnection, DatabaseCore};
 use database_open::CovenMetadataOpen;
+pub use database_runtime::Database;
 pub use external_blob_records::ExternalBlob;
 use external_blob_records::ExternalBlobRecords;
 pub use gate::query_truth;
@@ -235,9 +239,9 @@ pub use store::{
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
     RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotDatabaseImage,
     SnapshotImageError, SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
-    StoreDatabaseRuntime, StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation,
-    TableSchema, ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects,
-    WinningRow, GENERATION_ZERO,
+    StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation, TableSchema,
+    ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
+    GENERATION_ZERO,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{resolve_and_apply_changeset, ApplyResult};
@@ -574,64 +578,6 @@ pub enum OpenError {
     Db(#[from] DbError),
 }
 
-#[derive(Clone)]
-struct DatabaseState {
-    /// The directory holding this database, and with it the payload spool the
-    /// rows name. Bound at open because a row and the file it names are one
-    /// store's state, so nothing downstream gets to pick a different directory.
-    store_dir: coven_foundation::store_dir::StoreDir,
-    hlc: Arc<Hlc>,
-    synced_tables: Arc<Vec<SyncedTable>>,
-    schema_version: u32,
-    sync_routing_hash: ObjectHash,
-    gates: Arc<Gates>,
-    blob_decls: Arc<BlobDecls>,
-    /// The host's blob-tombstone convergence window, read by the tombstone GC to
-    /// age each tombstone's `deleted_at`. Host config carried here alongside
-    /// `synced_tables` so the sync layer reads it from the one owner rather than
-    /// threading a separately-passed copy that could diverge.
-    blob_tombstone_grace: chrono::Duration,
-    /// How many blob transfers each transfer loop runs at once, read by the upload
-    /// drain and the pin loop (both hold `&Database`). Open-time host config carried
-    /// here for the same single-owner reason as `blob_tombstone_grace`.
-    transfer_limits: coven_protocol::blob::TransferLimits,
-    store_runtime: crate::StoreDatabaseRuntime,
-    ids: coven_foundation::id_provider::IdRef,
-    write_statuses:
-        Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
-    #[cfg(any(test, feature = "test-utils"))]
-    test_pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
-    #[cfg(any(test, feature = "test-utils"))]
-    merge_materialization_failure: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
-pub struct StoreDatabaseTestAccess {
-    pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
-    merge_materialization_failure: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl StoreDatabaseTestAccess {
-    pub fn arm(
-        &self,
-        point: DatabaseTestPoint,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        self.pause_points.arm(point)
-    }
-
-    pub async fn reach(&self, point: DatabaseTestPoint) {
-        self.pause_points.reach(point).await;
-    }
-
-    pub fn merge_materialization_failure_injection(&self) -> MergeMaterializationFailureInjection {
-        MergeMaterializationFailureInjection {
-            armed: self.merge_materialization_failure.clone(),
-        }
-    }
-}
-
 /// Test-only checkpoints reached by database operations whose ordering matters.
 #[cfg(any(test, feature = "test-utils"))]
 #[doc(hidden)]
@@ -668,26 +614,6 @@ pub enum MergeMaterializationFailurePoint {
     SummaryMaterialization,
     RetractionDeletion,
     ProjectionReplacement,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
-pub struct MergeMaterializationFailureInjection {
-    armed: Arc<std::sync::Mutex<Option<MergeMaterializationFailurePoint>>>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl MergeMaterializationFailureInjection {
-    pub fn reach(&self, point: MergeMaterializationFailurePoint) -> Result<bool, DbError> {
-        let mut armed = self.armed.lock().map_err(|_| {
-            DbError::Message("Merge materialization failure lock poisoned".to_string())
-        })?;
-        if armed.as_ref() != Some(&point) {
-            return Ok(false);
-        }
-        armed.take();
-        Ok(true)
-    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -773,31 +699,6 @@ impl<K: Clone + PartialEq> TestPausePoints<K> {
             pause.resume.notified().await;
         }
     }
-}
-
-/// The owned SQLite connection and the sync bookkeeping resolved beside it at
-/// open. One connection thread owns this for the connection's whole life; every
-/// database access runs against it, so access is serialized. Changeset capture is
-/// per-transaction: the host-write transaction retains one attached session for
-/// its full span and drains it into the existing write records, so no capture
-/// state lives on the core between calls.
-///
-/// `DatabaseCore` holds only `Send` fields (a `rusqlite::Connection`, which is
-/// `Send`, plus `Arc`s and a `u32`), so it is `Send` by construction — the
-/// connection thread receives it by value across a single `thread::spawn` with no
-/// manual `unsafe impl`.
-struct DatabaseCore {
-    store_dir: coven_foundation::store_dir::StoreDir,
-    conn: Connection,
-    verified_store_authority: store::VerifiedStoreAuthority,
-    hlc: Arc<Hlc>,
-    synced_tables: Arc<Vec<SyncedTable>>,
-    schema_version: u32,
-    sync_routing_hash: ObjectHash,
-    gates: Arc<Gates>,
-    blob_decls: Arc<BlobDecls>,
-    blob_tombstone_grace: chrono::Duration,
-    transfer_limits: coven_protocol::blob::TransferLimits,
 }
 
 /// One Circle image selected against the restoring identity's re-resolved
@@ -904,15 +805,6 @@ impl VerifiedSnapshotBootstrapInstall {
         self.fail_circle_install = true;
         self
     }
-}
-
-/// A handle to the owned database. Cloneable; every clone sends work to the one
-/// connection thread over the same channel, so access serializes as the channel's
-/// FIFO.
-#[derive(Clone)]
-pub struct Database {
-    connection: DatabaseConnection,
-    state: DatabaseState,
 }
 
 #[cfg(test)]

@@ -187,9 +187,8 @@ impl Database {
         let bytes = bytes.to_vec();
         let tables = self.synced_tables().to_vec();
         let receiver_wall_ms = self.receive_wall_ms();
-        let store_dir = self.state.store_dir.clone();
-        self.test_sql(move |database| {
-            database.apply_changeset(&store_dir, &bytes, &tables, receiver_wall_ms)
+        self.call_database(move |session| {
+            session.apply_test_changeset(&bytes, &tables, receiver_wall_ms)
         })
         .await
     }
@@ -767,8 +766,7 @@ impl Database {
             + 'static,
         R: Send + 'static,
     {
-        self.connection
-            .call_database(move |session| session.run_test_sql(operation))
+        self.call_database(move |session| session.run_test_sql(operation))
             .await
     }
 }

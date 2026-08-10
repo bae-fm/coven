@@ -206,7 +206,7 @@ pub(crate) fn retained_merge_replay_inputs_for_test(
 }
 
 #[derive(Clone)]
-pub struct StoreDatabaseRuntime {
+pub(crate) struct StoreDatabaseRuntime {
     /// Serializes complete membership-chain loads that share this database, so a
     /// load cannot return an older chain after another load commits a newer floor.
     membership_load: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -235,7 +235,7 @@ pub struct StoreDatabaseRuntime {
 }
 
 impl StoreDatabaseRuntime {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             membership_load: Default::default(),
             membership_mutation: Default::default(),
@@ -335,6 +335,9 @@ pub(crate) struct StoreSession<'session> {
     sync_routing_hash: coven_protocol::store_commit::ObjectHash,
     hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
     blob_decls: &'session crate::BlobDecls,
+    #[cfg(any(test, feature = "test-utils"))]
+    merge_materialization_failure:
+        &'session std::sync::Mutex<Option<crate::MergeMaterializationFailurePoint>>,
 }
 
 impl StoreSession<'_> {

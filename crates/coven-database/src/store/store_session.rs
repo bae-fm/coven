@@ -15,6 +15,10 @@ impl<'session> StoreSession<'session> {
         sync_routing_hash: coven_protocol::store_commit::ObjectHash,
         hlc: &'session std::sync::Arc<coven_protocol::hlc::Hlc>,
         blob_decls: &'session crate::BlobDecls,
+        #[cfg(any(test, feature = "test-utils"))]
+        merge_materialization_failure: &'session std::sync::Mutex<
+            Option<crate::MergeMaterializationFailurePoint>,
+        >,
     ) -> Self {
         Self {
             conn,
@@ -26,6 +30,8 @@ impl<'session> StoreSession<'session> {
             sync_routing_hash,
             hlc,
             blob_decls,
+            #[cfg(any(test, feature = "test-utils"))]
+            merge_materialization_failure,
         }
     }
 

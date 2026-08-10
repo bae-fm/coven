@@ -51,7 +51,6 @@ const NON_OWNER_TYPES: &[&str] = &[
     "CloudCipher",
     "Config",
     "ConnectionThread",
-    "DatabaseState",
     "InitializedStore",
     "RemoteBlobSourceInner",
     "ResolvedBlobAccess",
@@ -87,9 +86,24 @@ const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
 
 const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
+        "crates/coven-database/src/database_connection.rs",
+        "DatabaseCore",
+        "new",
+    ),
+    (
+        "crates/coven-database/src/database_connection.rs",
+        "DatabaseConnection",
+        "start",
+    ),
+    (
         "crates/coven-database/src/database_open.rs",
         "DatabaseCore",
         "open",
+    ),
+    (
+        "crates/coven-database/src/database_runtime.rs",
+        "Database",
+        "from_core",
     ),
     (
         "crates/coven-database/src/database_runtime.rs",
@@ -105,6 +119,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-database/src/database_runtime.rs",
         "Database",
         "open_with_hlc_and_coven_metadata",
+    ),
+    (
+        "crates/coven-database/src/database_runtime.rs",
+        "Database",
+        "open_with_hlc_and_coven_metadata_in_store_dir",
     ),
     (
         "crates/coven-database/src/database_runtime.rs",
@@ -146,6 +165,16 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-replication/src/sync/test_owner_graph.rs",
         "TestOwnerGraph",
         "new",
+    ),
+    (
+        "crates/coven-database/src/test_support/synthetic_store.rs",
+        "SyntheticDatabase",
+        "open",
+    ),
+    (
+        "crates/coven-database/src/test_support/synthetic_store.rs",
+        "SyntheticDatabase",
+        "open_with_hlc",
     ),
     (
         "crates/coven-domain/src/joining/transport_tests.rs",
@@ -306,11 +335,6 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
         "create_with_protection_database",
-    ),
-    (
-        "crates/coven-replication/src/sync/test_helpers.rs",
-        "TestStore",
-        "with_store_and_keypair",
     ),
 ];
 
@@ -1967,6 +1991,7 @@ fn find_retained_service_construction_violations(
 
 pub(crate) fn is_test_source(path: &str) -> bool {
     path.contains("/tests/")
+        || path.contains("/test_support/")
         || path.contains("_tests/")
         || path.ends_with("/tests.rs")
         || path.ends_with("_tests.rs")
@@ -2210,6 +2235,70 @@ mod tests {
             "path keys no longer resolve, so the gates keyed on them cover nothing:\n{}",
             stranded.join("\n")
         );
+    }
+
+    #[test]
+    fn every_composition_root_names_an_existing_method() {
+        struct MethodCollector<'a> {
+            path: &'a str,
+            methods: &'a mut BTreeSet<(String, String, String)>,
+        }
+
+        impl Visit<'_> for MethodCollector<'_> {
+            fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
+                let Some(owner) = type_name(&node.self_ty) else {
+                    return;
+                };
+                for item in &node.items {
+                    if let syn::ImplItem::Fn(method) = item {
+                        self.methods.insert((
+                            self.path.to_string(),
+                            owner.clone(),
+                            method.sig.ident.to_string(),
+                        ));
+                    }
+                }
+                visit::visit_item_impl(self, node);
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("tool lives two directories under the repository root");
+        let files = rust_files(root).expect("parse repository Rust sources");
+        let mut methods = BTreeSet::new();
+        for file in &files {
+            MethodCollector {
+                path: &file.relative_path,
+                methods: &mut methods,
+            }
+            .visit_file(&file.syntax);
+        }
+
+        let missing = COMPOSITION_ROOTS
+            .iter()
+            .filter(|(path, owner, method)| {
+                !methods.contains(&(
+                    (*path).to_string(),
+                    (*owner).to_string(),
+                    (*method).to_string(),
+                ))
+            })
+            .map(|(path, owner, method)| format!("{path}: {owner}::{method}"))
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "composition roots name methods that do not exist:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    #[test]
+    fn test_support_directories_are_test_sources() {
+        assert!(is_test_source(
+            "crates/coven-database/src/test_support/synthetic_store.rs"
+        ));
     }
 
     #[test]

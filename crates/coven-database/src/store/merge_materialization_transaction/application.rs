@@ -321,7 +321,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             };
             let retained =
                 crate::RetainedAudiencePackage::verify(commit, commit_ref, package.clone())?;
-            Database::install_pulled_package_activation_on(
+            crate::install_pulled_package_activation_on(
                 conn,
                 self.store_dir,
                 commit_ref,
@@ -414,7 +414,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             &retained_packages,
             package_application,
         )?;
-        Database::install_pulled_merge_membership_activations_on(
+        crate::install_pulled_merge_membership_activations_on(
             conn,
             self.store_dir,
             commit_ref,

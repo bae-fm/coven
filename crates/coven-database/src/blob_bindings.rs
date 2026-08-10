@@ -7,6 +7,100 @@ use crate::remote_object_records::update_remote_object_on;
 
 use super::*;
 
+pub(crate) fn install_pulled_package_activation_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    commit_ref: &StoreBatchCommitRef,
+    domain: SharedLiveSetObjectDomain,
+    object: &ExactObjectRef,
+    package: &AudiencePackage,
+) -> Result<(), DbError> {
+    let object_id = remote_object_id(object);
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if exists {
+        let remote = load_remote_object_on(conn, object_id)?;
+        let mut remote = if matches!(remote, RemoteObjectRecord::CandidateExclusive(_)) {
+            remote.into_activated(commit_ref).map_err(|error| {
+                DbError::context(
+                    format!("activate locally prepared pulled package {object_id}"),
+                    error,
+                )
+            })?
+        } else {
+            remote
+        };
+        remote
+            .merge_package_activation(&domain, package, commit_ref)
+            .map_err(|error| {
+                DbError::context(
+                    format!("merge pulled package activation {object_id}"),
+                    error,
+                )
+            })?;
+        update_remote_object_on(conn, object_id, &remote)
+    } else {
+        let remote =
+            RemoteObjectRecord::activated_external_package(domain, package, commit_ref.clone())
+                .map_err(|error| {
+                    DbError::context(
+                        format!("construct pulled package activation {object_id}"),
+                        error,
+                    )
+                })?;
+        persist_exact_remote_object_on(conn, store_dir, &remote, "pulled audience package")
+    }
+}
+
+pub(crate) fn install_pulled_merge_membership_activations_on(
+    conn: &Connection,
+    store_dir: &coven_foundation::store_dir::StoreDir,
+    commit_ref: &StoreBatchCommitRef,
+    remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
+) -> Result<(), DbError> {
+    let mut object_ids = BTreeSet::new();
+    for expected in remotes {
+        let object_id = expected.object_id();
+        if !object_ids.insert(object_id) {
+            return Err(DbError::Message(
+                "pulled Merge membership closure repeats an exact object".to_string(),
+            ));
+        }
+        let existing = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)?;
+        if existing {
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            remote
+                .merge_retained_authority_activation(expected, commit_ref)
+                .map_err(|error| {
+                    DbError::context(
+                        format!("merge pulled Merge membership authority {object_id}"),
+                        error,
+                    )
+                })?;
+            update_remote_object_on(conn, object_id, &remote)?;
+        } else {
+            persist_exact_remote_object_on(
+                conn,
+                store_dir,
+                expected,
+                "pulled Merge membership authority",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     // ---- Materialized Store commit ledger ----
 
@@ -56,100 +150,6 @@ impl Database {
                 rusqlite::params![object_id.to_string(), state],
             )
             .map_err(DbError::from)?;
-        }
-        Ok(())
-    }
-
-    pub fn install_pulled_package_activation_on(
-        conn: &Connection,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-        commit_ref: &StoreBatchCommitRef,
-        domain: SharedLiveSetObjectDomain,
-        object: &ExactObjectRef,
-        package: &AudiencePackage,
-    ) -> Result<(), DbError> {
-        let object_id = remote_object_id(object);
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                [object_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if exists {
-            let remote = load_remote_object_on(conn, object_id)?;
-            let mut remote = if matches!(remote, RemoteObjectRecord::CandidateExclusive(_)) {
-                remote.into_activated(commit_ref).map_err(|error| {
-                    DbError::context(
-                        format!("activate locally prepared pulled package {object_id}"),
-                        error,
-                    )
-                })?
-            } else {
-                remote
-            };
-            remote
-                .merge_package_activation(&domain, package, commit_ref)
-                .map_err(|error| {
-                    DbError::context(
-                        format!("merge pulled package activation {object_id}"),
-                        error,
-                    )
-                })?;
-            update_remote_object_on(conn, object_id, &remote)
-        } else {
-            let remote =
-                RemoteObjectRecord::activated_external_package(domain, package, commit_ref.clone())
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("construct pulled package activation {object_id}"),
-                            error,
-                        )
-                    })?;
-            persist_exact_remote_object_on(conn, store_dir, &remote, "pulled audience package")
-        }
-    }
-
-    pub fn install_pulled_merge_membership_activations_on(
-        conn: &Connection,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-        commit_ref: &StoreBatchCommitRef,
-        remotes: &[coven_protocol::remote_object::ClosedRemoteObject],
-    ) -> Result<(), DbError> {
-        let mut object_ids = BTreeSet::new();
-        for expected in remotes {
-            let object_id = expected.object_id();
-            if !object_ids.insert(object_id) {
-                return Err(DbError::Message(
-                    "pulled Merge membership closure repeats an exact object".to_string(),
-                ));
-            }
-            let existing = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
-                    [object_id.to_string()],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(DbError::from)?;
-            if existing {
-                let mut remote = load_remote_object_on(conn, object_id)?;
-                remote
-                    .merge_retained_authority_activation(expected, commit_ref)
-                    .map_err(|error| {
-                        DbError::context(
-                            format!("merge pulled Merge membership authority {object_id}"),
-                            error,
-                        )
-                    })?;
-                update_remote_object_on(conn, object_id, &remote)?;
-            } else {
-                persist_exact_remote_object_on(
-                    conn,
-                    store_dir,
-                    expected,
-                    "pulled Merge membership authority",
-                )?;
-            }
         }
         Ok(())
     }
@@ -432,8 +432,7 @@ impl Database {
     pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
         let table = table.to_string();
         let row_id = row_id.to_string();
-        self.connection
-            .call_database(move |session| session.row_blob_ref(&table, &row_id))
+        self.call_database(move |session| session.row_blob_ref(&table, &row_id))
             .await
     }
 }

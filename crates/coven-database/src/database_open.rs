@@ -181,7 +181,7 @@ impl DatabaseCore {
         hlc: Arc<Hlc>,
         migrations: &[Migration],
         metadata_open: CovenMetadataOpen<'_>,
-    ) -> Result<(Self, DatabaseState), OpenError> {
+    ) -> Result<Self, OpenError> {
         let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
@@ -286,10 +286,9 @@ impl DatabaseCore {
             .map_err(|e| DbError::Message(e.to_string()))?;
         gate::attach_empty_clone(&conn, &gates)
             .map_err(|error| DbError::context("install host transaction gate", error))?;
-        let core = DatabaseCore {
+        Ok(DatabaseCore::new(
             store_dir,
             conn,
-            verified_store_authority: Default::default(),
             hlc,
             synced_tables,
             schema_version,
@@ -298,10 +297,7 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
-        };
-        let state = core.state();
-
-        Ok((core, state))
+        ))
     }
 
     /// Open the connection at `path` read-only: a `SQLITE_OPEN_READONLY`
@@ -318,7 +314,7 @@ impl DatabaseCore {
         transfer_limits: coven_protocol::blob::TransferLimits,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
-    ) -> Result<(Self, DatabaseState), OpenError> {
+    ) -> Result<Self, OpenError> {
         let conn = open_connection_read_only(path)?;
         // `foreign_keys` is a per-connection runtime setting, not a write to the db
         // file, so it is allowed on a read-only connection; keeping it on matches the
@@ -356,10 +352,9 @@ impl DatabaseCore {
             BlobDecls::from_tables(&conn, &synced_tables)
                 .map_err(|e| DbError::Message(e.to_string()))?,
         );
-        let core = DatabaseCore {
+        Ok(DatabaseCore::new(
             store_dir,
             conn,
-            verified_store_authority: Default::default(),
             hlc,
             synced_tables,
             schema_version,
@@ -368,61 +363,6 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
-        };
-        let state = core.state();
-        Ok((core, state))
-    }
-
-    fn state(&self) -> DatabaseState {
-        DatabaseState {
-            store_dir: self.store_dir.clone(),
-            hlc: self.hlc.clone(),
-            synced_tables: self.synced_tables.clone(),
-            schema_version: self.schema_version,
-            sync_routing_hash: self.sync_routing_hash,
-            gates: self.gates.clone(),
-            blob_decls: self.blob_decls.clone(),
-            blob_tombstone_grace: self.blob_tombstone_grace,
-            transfer_limits: self.transfer_limits,
-            store_runtime: crate::StoreDatabaseRuntime::new(),
-            ids: Arc::new(coven_foundation::id_provider::UuidProvider),
-            write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            #[cfg(any(test, feature = "test-utils"))]
-            test_pause_points: Arc::new(TestPausePoints::default()),
-            #[cfg(any(test, feature = "test-utils"))]
-            merge_materialization_failure: Arc::new(std::sync::Mutex::new(None)),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn database_core_retains_the_injected_store_directory() {
-        let temporary = tempfile::tempdir().expect("temporary store directory");
-        let store_dir = StoreDir::new_ephemeral(temporary.path());
-        let hlc = Arc::new(
-            Hlc::try_new(
-                "injected-store-directory".to_string(),
-                Arc::new(coven_foundation::clock::SystemClock),
-            )
-            .expect("test clock"),
-        );
-
-        let (_core, state) = DatabaseCore::open(
-            Path::new(":memory:"),
-            store_dir.clone(),
-            Vec::new(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-            coven_protocol::blob::TransferLimits::one_at_a_time(),
-            hlc,
-            &[],
-            CovenMetadataOpen::Detect,
-        )
-        .expect("open database core");
-
-        assert_eq!(state.store_dir, store_dir);
+        ))
     }
 }

@@ -40,22 +40,19 @@ pub fn delete_protocol_state_on(conn: &Connection, key: &str) -> Result<usize, D
 impl Database {
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
-        self.connection
-            .call_database(move |session| session.protocol_state(&key))
+        self.call_database(move |session| session.protocol_state(&key))
             .await
     }
 
     pub async fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
         let (key, value) = (key.to_string(), value.to_string());
-        self.connection
-            .call_database(move |session| session.set_protocol_state(&key, &value))
+        self.call_database(move |session| session.set_protocol_state(&key, &value))
             .await
     }
 
     pub async fn delete_protocol_state(&self, key: &str) -> Result<(), DbError> {
         let key = key.to_string();
-        self.connection
-            .call_database(move |session| session.delete_protocol_state(&key))
+        self.call_database(move |session| session.delete_protocol_state(&key))
             .await
     }
 }

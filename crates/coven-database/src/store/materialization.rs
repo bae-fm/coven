@@ -9,6 +9,21 @@ use coven_protocol::store_commit::{
     VerifiedStoreDeviceOperations,
 };
 
+#[cfg(any(test, feature = "test-utils"))]
+fn reach_materialization_failure(
+    armed: &std::sync::Mutex<Option<crate::MergeMaterializationFailurePoint>>,
+    point: crate::MergeMaterializationFailurePoint,
+) -> Result<bool, DbError> {
+    let mut armed = armed
+        .lock()
+        .map_err(|_| DbError::Message("Merge materialization failure lock poisoned".to_string()))?;
+    if armed.as_ref() != Some(&point) {
+        return Ok(false);
+    }
+    armed.take();
+    Ok(true)
+}
+
 impl StoreSession<'_> {
     fn apply_received_merge_materialization(
         &mut self,
@@ -17,10 +32,10 @@ impl StoreSession<'_> {
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-        #[cfg(any(test, feature = "test-utils"))]
-        materialization_failure: crate::MergeMaterializationFailureInjection,
     ) -> Result<super::merge_materialization_transaction::AppliedMergeMaterialization, DbError>
     {
+        #[cfg(any(test, feature = "test-utils"))]
+        let materialization_failure = self.merge_materialization_failure;
         let records = crate::store::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let blob_decls = self.blob_decls;
@@ -85,9 +100,10 @@ impl StoreSession<'_> {
             })?;
             transaction_cache.insert_verified(retained)?;
             #[cfg(any(test, feature = "test-utils"))]
-            if materialization_failure
-                .reach(crate::MergeMaterializationFailurePoint::SummaryMaterialization)?
-            {
+            if reach_materialization_failure(
+                materialization_failure,
+                crate::MergeMaterializationFailurePoint::SummaryMaterialization,
+            )? {
                 return Err(DbError::Message(
                     "injected failure after Merge summary materialization".to_string(),
                 ));
@@ -112,9 +128,10 @@ impl StoreSession<'_> {
                         retractions,
                     )?;
                 #[cfg(any(test, feature = "test-utils"))]
-                if materialization_failure
-                    .reach(crate::MergeMaterializationFailurePoint::RetractionDeletion)?
-                {
+                if reach_materialization_failure(
+                    materialization_failure,
+                    crate::MergeMaterializationFailurePoint::RetractionDeletion,
+                )? {
                     return Err(DbError::Message(
                         "injected failure after Merge retraction deletion".to_string(),
                     ));
@@ -179,9 +196,10 @@ impl StoreSession<'_> {
                     .changeset_strm(&mut projection_changeset)
                     .map_err(DbError::from)?;
                 #[cfg(any(test, feature = "test-utils"))]
-                if materialization_failure
-                    .reach(crate::MergeMaterializationFailurePoint::ProjectionReplacement)?
-                {
+                if reach_materialization_failure(
+                    materialization_failure,
+                    crate::MergeMaterializationFailurePoint::ProjectionReplacement,
+                )? {
                     return Err(DbError::Message(
                         "injected failure after Merge projection replacement".to_string(),
                     ));
@@ -526,8 +544,6 @@ impl StoreDatabase {
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
     ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
-        #[cfg(any(test, feature = "test-utils"))]
-        let materialization_failure = self.merge_materialization_failure_injection();
         let applied = self
             .call_store(move |session| {
                 session.apply_received_merge_materialization(
@@ -536,8 +552,6 @@ impl StoreDatabase {
                     local_store_membership,
                     routing_key,
                     receiver_wall_ms,
-                    #[cfg(any(test, feature = "test-utils"))]
-                    materialization_failure,
                 )
             })
             .await?;
