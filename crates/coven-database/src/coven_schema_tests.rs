@@ -594,3 +594,15 @@ fn routing_tables_are_strict_without_rowid() {
         assert_eq!((wr, strict), (1, 1), "{name}");
     }
 }
+
+#[test]
+fn expected_manifest_is_one_process_value_per_routing_shape() {
+    let plain_first = expected_coven_schema_manifest(false).expect("build plain manifest");
+    let plain_second = expected_coven_schema_manifest(false).expect("reuse plain manifest");
+    let routed_first = expected_coven_schema_manifest(true).expect("build routed manifest");
+    let routed_second = expected_coven_schema_manifest(true).expect("reuse routed manifest");
+
+    assert!(std::ptr::eq(plain_first, plain_second));
+    assert!(std::ptr::eq(routed_first, routed_second));
+    assert!(!std::ptr::eq(plain_first, routed_first));
+}

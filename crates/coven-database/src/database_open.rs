@@ -72,9 +72,9 @@ fn initialize_coven_metadata_on(
 }
 
 fn validate_live_coven_schema(conn: &Connection, include_routing: bool) -> Result<String, DbError> {
-    let expected = expected_coven_schema_manifest(include_routing).map_err(DbError::from)?;
+    let expected = expected_coven_schema_manifest(include_routing)?;
     let actual = live_coven_schema_manifest(conn).map_err(DbError::from)?;
-    if actual != expected {
+    if actual != *expected {
         return Err(DbError::Message(format!(
             "Coven schema does not match the current table, index, constraint, primary-key, STRICT, and WITHOUT ROWID declarations: expected {expected:?}, found {actual:?}"
         )));
@@ -87,7 +87,7 @@ pub(crate) fn validate_initialized_coven_schema(
     conn: &Connection,
     include_routing: bool,
 ) -> Result<(), DbError> {
-    let expected = expected_coven_schema_manifest(include_routing).map_err(DbError::from)?;
+    let expected = expected_coven_schema_manifest(include_routing)?;
     let stored_json =
         get_protocol_state_on(conn, COVEN_SCHEMA_MANIFEST_STATE_KEY)?.ok_or_else(|| {
             DbError::Message(
@@ -96,7 +96,7 @@ pub(crate) fn validate_initialized_coven_schema(
         })?;
     let stored: CovenSchemaManifest = serde_json::from_str(&stored_json)
         .map_err(|error| DbError::context("Store Coven schema manifest is invalid", error))?;
-    if stored != expected {
+    if stored != *expected {
         return Err(DbError::Message(format!(
             "Store Coven schema manifest does not match the current schema: stored {stored:?}, current {expected:?}"
         )));

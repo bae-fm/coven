@@ -9,7 +9,7 @@
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; app SQL goes through `CovenHandle::sql` or `CovenHandle::write`.
 
-use crate::query_mapped_rows;
+use crate::{query_mapped_rows, DbError};
 
 macro_rules! coven_tables {
     ($visit:ident) => {
@@ -895,7 +895,7 @@ pub fn live_coven_schema_manifest(
     Ok(CovenSchemaManifest { objects, tables })
 }
 
-pub fn expected_coven_schema_manifest(
+fn build_expected_coven_schema_manifest(
     include_routing: bool,
 ) -> rusqlite::Result<CovenSchemaManifest> {
     let conn = rusqlite::Connection::open_in_memory()?;
@@ -904,6 +904,30 @@ pub fn expected_coven_schema_manifest(
         apply_coven_routing_schema(&conn)?;
     }
     live_coven_schema_manifest(&conn)
+}
+
+static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, String>> =
+    std::sync::LazyLock::new(|| {
+        build_expected_coven_schema_manifest(false).map_err(|error| error.to_string())
+    });
+static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, String>> =
+    std::sync::LazyLock::new(|| {
+        build_expected_coven_schema_manifest(true).map_err(|error| error.to_string())
+    });
+
+pub fn expected_coven_schema_manifest(
+    include_routing: bool,
+) -> Result<&'static CovenSchemaManifest, DbError> {
+    let expected = if include_routing {
+        &*EXPECTED_ROUTED_COVEN_SCHEMA
+    } else {
+        &*EXPECTED_COVEN_SCHEMA
+    };
+    expected.as_ref().map_err(|error| {
+        DbError::Message(format!(
+            "failed to construct the expected Coven schema manifest: {error}"
+        ))
+    })
 }
 
 /// Creates Coven's bookkeeping tables after the fresh host schema has passed
