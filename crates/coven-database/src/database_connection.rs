@@ -240,6 +240,25 @@ impl DatabaseConnection {
         self.context.hlc.wall_now_ms()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn assert_owns_payload_directory_for_test(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) {
+        let owned = self
+            .context
+            .store_dir
+            .canonicalize()
+            .expect("canonicalize database payload directory");
+        let supplied = store_dir
+            .canonicalize()
+            .expect("canonicalize supplied payload directory");
+        assert_eq!(
+            owned, supplied,
+            "payload directory does not belong to this database",
+        );
+    }
+
     pub(crate) fn new_store_id(&self) -> String {
         self.context.ids.new_id()
     }

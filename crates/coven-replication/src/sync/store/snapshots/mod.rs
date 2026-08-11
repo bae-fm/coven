@@ -31,8 +31,35 @@ use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
 
 pub(crate) struct SnapshotCut {
-    pub(crate) snapshot: CreatedSnapshot,
-    pub(crate) coverage: CommitFrontier,
+    snapshot: CreatedSnapshot,
+    coverage: CommitFrontier,
+}
+
+impl SnapshotCut {
+    pub(crate) fn new(snapshot: CreatedSnapshot, coverage: CommitFrontier) -> Self {
+        Self { snapshot, coverage }
+    }
+
+    pub(crate) fn blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+        self.snapshot.blobs()
+    }
+
+    pub(crate) async fn read_image(&self) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
+        self.snapshot.read_image().await
+    }
+
+    pub(crate) fn coverage(&self) -> &CommitFrontier {
+        &self.coverage
+    }
+
+    pub(crate) fn into_parts(self) -> (CreatedSnapshot, CommitFrontier) {
+        (self.snapshot, self.coverage)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_path_for_test(&self) -> &std::path::Path {
+        self.snapshot.image_path_for_test()
+    }
 }
 
 pub(crate) struct StoreSnapshotCut {
@@ -469,10 +496,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let database = &self.database;
         let storage = self.storage.as_ref();
         let authority = self.local_writer.blob_write_authority();
-        let CreatedSnapshot {
-            db_image,
-            mut blobs,
-        } = snapshot;
+        let (db_image, mut blobs) = snapshot.into_parts();
         blobs.sort_by_key(|captured| captured.fact.previous.is_none());
         let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
         let mut coalesced = std::collections::BTreeMap::<String, usize>::new();

@@ -21,19 +21,21 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
-fn config(dir: StoreDir) -> Config {
-    Config::with_defaults(
-        "lib-test".to_string(),
-        "device-test".to_string(),
+fn builder(dir: StoreDir) -> CovenBuilder {
+    Coven::builder(
         dir,
-        "Test".to_string(),
+        Config::with_defaults(
+            "lib-test".to_string(),
+            "device-test".to_string(),
+            "Test".to_string(),
+        ),
     )
 }
 
 async fn query_handle_text(handle: &CovenHandle, sql: &str) -> String {
     let sql = sql.to_string();
     handle
-        .sql_read(move |connection| {
+        .read(move |connection| {
             connection
                 .query_row(&sql, [], |row| row.get(0))
                 .map_err(CovenError::from)
@@ -45,7 +47,7 @@ async fn query_handle_text(handle: &CovenHandle, sql: &str) -> String {
 async fn handle_row_exists(handle: &CovenHandle, sql: &str) -> bool {
     let sql = sql.to_string();
     handle
-        .sql_read(move |connection| {
+        .read(move |connection| {
             connection
                 .query_row(&sql, [], |_| Ok(true))
                 .optional()
@@ -129,7 +131,7 @@ fn gated_roots_migration() -> Migration {
 
 fn open_gated_roots_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let handle = Coven::builder(config(StoreDir::new_ephemeral(tmp.path())))
+    let handle = builder(StoreDir::new_ephemeral(tmp.path()))
         .synced_tables(vec![gated_roots_table()])
         .migrations(vec![gated_roots_migration()])
         .open()
@@ -138,7 +140,7 @@ fn open_gated_roots_handle() -> (tempfile::TempDir, CovenHandle) {
 }
 
 fn open_gated_roots_at(dir: StoreDir) -> CovenResult<CovenHandle> {
-    Coven::builder(config(dir))
+    builder(dir)
         .synced_tables(vec![gated_roots_table()])
         .migrations(vec![gated_roots_migration()])
         .open()
@@ -205,7 +207,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
     let (_tmp, handle) = open_gated_roots_handle();
 
     let discovery = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query("PRAGMA database_list", [], |row| row.get::<_, String>(1))
                 .map_err(CovenError::from)
         })
@@ -216,7 +218,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
     );
 
     let mutation = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO coven_gate_empty.roots \
                      (id, title, shared, _updated_at) \
@@ -232,7 +234,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
     );
 
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute_batch(
                 "CREATE TABLE host_local (id TEXT PRIMARY KEY, value TEXT) STRICT; \
                      INSERT INTO host_local VALUES ('local-1', 'kept'); \
@@ -245,7 +247,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
         .await
         .expect("arbitrary host-schema SQL remains available");
     let published = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "UPDATE roots SET shared = 1, \
                      _updated_at = '0000000002000-0000-device-test' \
@@ -273,7 +275,7 @@ async fn host_sql_cannot_discover_or_mutate_the_gate_baseline() {
 fn open_files_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    let handle = Coven::builder(config(dir))
+    let handle = builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -285,7 +287,7 @@ fn open_files_handle() -> (tempfile::TempDir, CovenHandle) {
 async fn configured_clock_is_the_hlc_wall_source() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let clock = chrono::DateTime::from_timestamp_millis(1_234).expect("valid clock instant");
-    let handle = Coven::builder(config(StoreDir::new_ephemeral(tmp.path())))
+    let handle = builder(StoreDir::new_ephemeral(tmp.path()))
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .clock(Arc::new(coven_foundation::clock::FixedClock(clock)))
@@ -293,7 +295,7 @@ async fn configured_clock_is_the_hlc_wall_source() {
         .expect("open handle");
 
     let receipt = handle
-        .sql(|sql| {
+        .write(|sql| {
             let stamp = sql.stamp();
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
@@ -312,14 +314,14 @@ async fn configured_clock_is_the_hlc_wall_source() {
 async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    let first = Coven::builder(config(dir.clone()))
+    let first = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
         .expect("first open succeeds");
     let clone = first.clone();
 
-    let second = Coven::builder(config(dir.clone()))
+    let second = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open();
@@ -330,7 +332,7 @@ async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
 
     drop(first);
 
-    let still_locked = Coven::builder(config(dir.clone()))
+    let still_locked = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open();
@@ -341,7 +343,7 @@ async fn second_open_of_one_store_is_refused_until_the_first_handle_drops() {
 
     drop(clone);
 
-    Coven::builder(config(dir))
+    builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -353,7 +355,7 @@ async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
     for grace in [chrono::Duration::zero(), chrono::Duration::seconds(-1)] {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new_ephemeral(tmp.path());
-        let result = Coven::builder(config(dir))
+        let result = builder(dir)
             .synced_tables(vec![files_table()])
             .migrations(vec![files_migration()])
             .blob_tombstone_grace(grace)
@@ -369,7 +371,7 @@ async fn a_zero_or_negative_blob_tombstone_grace_is_refused_at_open() {
 async fn a_positive_blob_tombstone_grace_opens() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    Coven::builder(config(dir))
+    builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .blob_tombstone_grace(chrono::Duration::hours(1))
@@ -380,7 +382,7 @@ async fn a_positive_blob_tombstone_grace_opens() {
 fn open_remote_root_files_handle() -> (tempfile::TempDir, CovenHandle) {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    let handle = Coven::builder(config(dir))
+    let handle = builder(dir)
         .synced_tables(vec![remote_root_files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -444,7 +446,7 @@ async fn write_survives_reopen_before_sync_cycle() {
     let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = open_files_handle_in(dir.clone());
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('file-before-reopen', NULL, 0, ?1)",
@@ -489,7 +491,7 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
     let mut write_ids = Vec::new();
     for id in ["file-pending-a", "file-pending-b"] {
         let receipt = handle
-            .sql(move |sql| {
+            .write(move |sql| {
                 sql.execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
                     (id, sql.stamp()),
@@ -566,7 +568,7 @@ async fn separate_host_transactions_publish_as_separate_store_commits_after_rest
 async fn device_local_transaction_is_local_only_and_never_pending() {
     let (_tmp, handle) = open_files_handle();
     let receipt = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute_batch(
                 "CREATE TABLE local_notes (id TEXT PRIMARY KEY, body TEXT) STRICT;
                      INSERT INTO local_notes VALUES ('local-1', 'private');",
@@ -615,7 +617,7 @@ async fn device_local_transaction_is_local_only_and_never_pending() {
 async fn mixed_transaction_tracks_and_publishes_only_shared_rows() {
     let (_tmp, handle) = open_files_handle();
     let receipt = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute_batch(
                 "CREATE TABLE local_notes (id TEXT PRIMARY KEY, body TEXT) STRICT;
                      INSERT INTO local_notes VALUES ('local-1', 'private');",
@@ -670,7 +672,7 @@ async fn delete_survives_reopen_before_sync_cycle() {
     let dir = StoreDir::new_ephemeral(tmp.path());
     let handle = open_files_handle_in(dir.clone());
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('file-delete-reopen', NULL, 0, ?1)",
@@ -690,7 +692,7 @@ async fn delete_survives_reopen_before_sync_cycle() {
     );
 
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute("DELETE FROM files WHERE id = 'file-delete-reopen'", [])?;
             Ok(())
         })
@@ -715,7 +717,7 @@ async fn delete_survives_reopen_before_sync_cycle() {
 async fn pending_write_drains_only_after_changeset_push() {
     let (_tmp, handle) = open_files_handle();
     let receipt = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('file-retry-publish', NULL, 0, ?1)",
@@ -769,7 +771,7 @@ async fn builder_open_runs_coven_and_host_migrations() {
         .await
         .expect("query coven table");
     let has_host_table: i64 = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'files'",
                 [],
@@ -778,8 +780,7 @@ async fn builder_open_runs_coven_and_host_migrations() {
             .map_err(CovenError::from)
         })
         .await
-        .expect("query host table")
-        .value;
+        .expect("query host table");
     assert!(has_coven_table);
     assert_eq!(has_host_table, 1);
 }
@@ -790,7 +791,7 @@ async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
     let dir = StoreDir::new_ephemeral(tmp.path());
 
     // Open with a two-step ladder so the db lands at synced-schema version 2.
-    let ahead = Coven::builder(config(dir.clone()))
+    let ahead = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![
             files_migration(),
@@ -803,7 +804,7 @@ async fn open_of_a_too_new_db_yields_the_matchable_migration_variant() {
     // Reopen with only the first step: an older binary meeting a db a newer one
     // already migrated. The remedy is "update the app", so the host must be able
     // to match the specific variant rather than string-scrape a DbError.
-    let reopened = Coven::builder(config(dir))
+    let reopened = builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open();
@@ -821,7 +822,7 @@ async fn sql_reads_writes_and_stamps() {
     let (_tmp, handle) = open_files_handle();
     let id = "file-sql".to_string();
     handle
-        .sql(move |sql| {
+        .write(move |sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
                 params![id, sql.stamp()],
@@ -831,13 +832,12 @@ async fn sql_reads_writes_and_stamps() {
         .await
         .expect("insert through sql");
     let count: i64 = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .map_err(CovenError::from)
         })
         .await
-        .expect("count rows")
-        .value;
+        .expect("count rows");
     assert_eq!(count, 1);
 }
 
@@ -845,7 +845,7 @@ async fn sql_reads_writes_and_stamps() {
 async fn sql_surfaces_sqlite_constraint_typed() {
     let (_tmp, handle) = open_files_handle();
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
                 params!["duplicate-id", sql.stamp()],
@@ -856,7 +856,7 @@ async fn sql_surfaces_sqlite_constraint_typed() {
         .expect("seed row");
 
     let result: CovenResult<WriteReceipt<()>> = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, NULL, 0, ?2)",
                 params!["duplicate-id", sql.stamp()],
@@ -869,10 +869,10 @@ async fn sql_surfaces_sqlite_constraint_typed() {
 }
 
 #[tokio::test]
-async fn sql_read_sees_a_committed_write() {
+async fn read_sees_a_committed_write() {
     let (_tmp, handle) = open_files_handle();
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('file-read-your-write', NULL, 0, ?1)",
@@ -886,7 +886,7 @@ async fn sql_read_sees_a_committed_write() {
     // The read runs on the separate read-only connection; it must observe the
     // just-committed write (WAL read-your-writes for committed data).
     let id: String = handle
-        .sql_read(|conn| {
+        .read(|conn| {
             conn.query_row(
                 "SELECT id FROM files WHERE id = 'file-read-your-write'",
                 [],
@@ -895,30 +895,30 @@ async fn sql_read_sees_a_committed_write() {
             .map_err(CovenError::from)
         })
         .await
-        .expect("read the committed row back through sql_read");
+        .expect("read the committed row back through the read path");
     assert_eq!(id, "file-read-your-write");
 }
 
 #[tokio::test]
-async fn open_on_a_fresh_store_serves_sql_read() {
+async fn open_on_a_fresh_store_serves_reads() {
     // A fresh (empty) directory: `open` runs the writer's migrations, then opens
-    // the read connection against the schema they created. A `sql_read` over the
+    // the read connection against the schema they created. A read over the
     // host table then succeeds rather than failing on a missing table — proof the
     // read connection opened after, not before, the schema exists.
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    let handle = Coven::builder(config(dir))
+    let handle = builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
         .expect("open on an empty directory");
     let count: i64 = handle
-        .sql_read(|conn| {
+        .read(|conn| {
             conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .map_err(CovenError::from)
         })
         .await
-        .expect("sql_read on a fresh store");
+        .expect("read on a fresh store");
     assert_eq!(count, 0);
 }
 
@@ -939,7 +939,7 @@ async fn open_removes_orphaned_local_blob_temps() {
         .expect("write interrupted stage");
     let temp = staged.leave_unpublished_for_test();
 
-    let _handle = Coven::builder(config(dir.clone()))
+    let _handle = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -964,7 +964,7 @@ async fn write_inserts_row_and_host_provided_blob() {
     let bytes = b"piece-bytes".to_vec();
     let hash = coven_protocol::blob::content_hash(&bytes);
     handle
-        .write(
+        .write_with_blobs(
             {
                 let bytes = bytes.clone();
                 move |w| {
@@ -1004,7 +1004,7 @@ async fn orphaned_final_blob_is_replaced_by_next_write() {
         .expect("write orphaned file");
 
     handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "orphaaaa", b"committed bytes".to_vec());
                 Ok(())
@@ -1038,7 +1038,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new_ephemeral(tmp.path());
     handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "dupeaaaa", b"original".to_vec());
                 Ok(())
@@ -1062,7 +1062,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
         .expect("seed original blob");
 
     let result: CovenResult<WriteReceipt<()>> = handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "dupeaaaa", b"replacement".to_vec());
                 Ok(())
@@ -1096,7 +1096,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
         b"original"
     );
     let replacement_rows: i64 = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query_row(
                 "SELECT count(*) FROM files WHERE id = 'file-replacement'",
                 [],
@@ -1105,8 +1105,7 @@ async fn put_blob_rejects_id_already_referenced_by_a_row() {
             .map_err(CovenError::from)
         })
         .await
-        .expect("count replacement rows")
-        .value;
+        .expect("count replacement rows");
     assert_eq!(replacement_rows, 0);
 }
 
@@ -1118,7 +1117,7 @@ async fn remote_root_host_provided_write_reads_staging_through_handle_before_upl
     let hash = coven_protocol::blob::content_hash(&bytes);
 
     handle
-        .write(
+        .write_with_blobs(
             {
                 let bytes = bytes.clone();
                 move |w| {
@@ -1192,7 +1191,7 @@ impl RemoteOnlyStoreBlob {
     ) -> crate::CovenResult<crate::WriteReceipt<()>> {
         let destination_circle_value = self.destination_circle.to_string();
         self.handle
-            .sql(move |sql| {
+            .write(move |sql| {
                 sql.execute(
                     "UPDATE files SET audience = ?1, _updated_at = ?2
                      WHERE id = 'circle-file'",
@@ -1206,7 +1205,7 @@ impl RemoteOnlyStoreBlob {
     /// The audience the scoped `circle-file` row currently carries.
     async fn circle_file_audience(&self) -> crate::CovenResult<Option<String>> {
         self.handle
-            .sql_read(|conn| {
+            .read(|conn| {
                 conn.query_row(
                     "SELECT audience FROM files WHERE id = 'circle-file'",
                     [],
@@ -1221,7 +1220,7 @@ impl RemoteOnlyStoreBlob {
         let dir = StoreDir::new_ephemeral(tmp.path());
         let signer = coven_keys::keys::UserKeypair::generate();
         let encryption = crate::EncryptionService::from_key([42; 32]);
-        let handle = Coven::builder(config(dir.clone()))
+        let handle = builder(dir.clone())
             .synced_tables(vec![scoped_files_table()])
             .migrations(vec![scoped_files_migration()])
             .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
@@ -1241,7 +1240,7 @@ impl RemoteOnlyStoreBlob {
         let bytes = b"remote-only-circle-blob".to_vec();
         let hash = coven_protocol::blob::content_hash(&bytes);
         handle
-            .write(
+            .write_with_blobs(
                 {
                     let bytes = bytes.clone();
                     move |batch| {
@@ -1473,7 +1472,7 @@ async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() 
 
     let result = fixture
         .handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "UPDATE files SET audience = 'local', _updated_at = ?1
                      WHERE id = 'circle-file'",
@@ -1515,7 +1514,7 @@ async fn local_audience_move_rolls_back_its_file_and_reuses_an_exact_leftover() 
         .expect("model an exact file left by failed cleanup");
     fixture
         .handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "UPDATE files SET audience = 'local', _updated_at = ?1
                      WHERE id = 'circle-file'",
@@ -1565,7 +1564,7 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
     let destination_circle_value = fixture.destination_circle.to_string();
     let receipt = fixture
         .handle
-        .sql(move |sql| {
+        .write(move |sql| {
             sql.execute(
                 "UPDATE files SET audience = ?1, _updated_at = ?2
                      WHERE id = 'circle-file'",
@@ -1633,7 +1632,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
                 let keyring =
                     crate::MasterKeyring::from(crate::EncryptionService::from_key([42; 32]));
                 let open = || {
-                    Coven::builder(config(dir.clone()))
+                    builder(dir.clone())
                         .synced_tables(vec![remote_root_files_table()])
                         .migrations(vec![files_migration()])
                         .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
@@ -1659,7 +1658,7 @@ async fn public_materialization_survives_store_reopen_without_a_cloud_connection
                 let bytes = expected.clone();
                 let hash = coven_protocol::blob::content_hash(&bytes);
                 let receipt = handle
-                    .write(
+                    .write_with_blobs(
                         {
                             let bytes = bytes.clone();
                             move |batch| {
@@ -1744,7 +1743,7 @@ async fn sql_failure_removes_staged_blob() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new_ephemeral(tmp.path());
     let err = handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "blobbbbb", b"staged".to_vec());
                 Ok(())
@@ -1764,7 +1763,7 @@ async fn sql_failure_removes_staged_blob() {
 async fn blob_stage_failure_does_not_run_sql() {
     let (_tmp, handle) = open_files_handle();
     let result: CovenResult<WriteReceipt<()>> = handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "..", b"bad".to_vec());
                 Ok(())
@@ -1783,13 +1782,12 @@ async fn blob_stage_failure_does_not_run_sql() {
     // generic blob catch-all.
     assert!(matches!(result, Err(CovenError::UnsafeBlobPath(_))));
     let count: i64 = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .map_err(CovenError::from)
         })
         .await
-        .expect("count rows")
-        .value;
+        .expect("count rows");
     assert_eq!(count, 0);
 }
 
@@ -1801,7 +1799,7 @@ async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         .await
         .expect("store old");
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                      VALUES (?1, ?2, 3, ?3, ?4)",
@@ -1829,7 +1827,7 @@ async fn replacement_deletes_old_blob_after_sql_drops_reference() {
         fill: CacheFill::CacheLazy,
     };
     handle
-        .write(
+        .write_with_blobs(
             move |w| {
                 w.put_blob("media-files", "newaaaa", b"new".to_vec());
                 w.delete_blob(old_ref);
@@ -1869,7 +1867,7 @@ struct PendingReplacement {
 impl PendingReplacement {
     async fn queue(handle: &CovenHandle, store_dir: &StoreDir) -> Self {
         let first = handle
-            .write(
+            .write_with_blobs(
                 |batch| {
                     batch.put_blob("media-files", "ownedaaa", b"first".to_vec());
                     Ok(())
@@ -1897,7 +1895,7 @@ impl PendingReplacement {
             fill: CacheFill::CacheLazy,
         };
         let second = handle
-            .write(
+            .write_with_blobs(
                 move |batch| {
                     batch.put_blob("media-files", "ownedbbb", b"second".to_vec());
                     batch.delete_blob(first_blob);
@@ -1994,7 +1992,7 @@ async fn pending_write_owns_blob_bytes_until_its_publication() {
                     b"first"
                 );
                 let overwrite: CovenResult<WriteReceipt<()>> = handle
-                    .write(
+                    .write_with_blobs(
                         |batch| {
                             batch.put_blob("media-files", "ownedaaa", b"overwritten".to_vec());
                             Ok(())
@@ -2062,7 +2060,7 @@ async fn author_delete_drops_all_local_blob_copies() {
         .await
         .expect("store old");
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                      VALUES (?1, ?2, 3, ?3, ?4)",
@@ -2112,7 +2110,7 @@ async fn author_delete_drops_all_local_blob_copies() {
     };
 
     handle
-        .write(
+        .write_with_blobs(
             move |w| {
                 w.delete_blob(old_ref);
                 Ok(())
@@ -2150,7 +2148,7 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
     .await
     .expect("store old");
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                      VALUES (?1, ?2, 3, ?3, ?4)",
@@ -2197,7 +2195,7 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
     };
 
     handle
-        .write(
+        .write_with_blobs(
             move |w| {
                 w.delete_blob(old_ref);
                 Ok(())
@@ -2228,7 +2226,7 @@ async fn failed_local_blob_cleanup_keeps_intent_for_later_drain() {
 
     std::fs::remove_dir_all(&pinned).expect("remove pinned blocker");
     handle
-        .write(
+        .write_with_blobs(
             |_| Ok(()),
             |sql| {
                 sql.execute(
@@ -2261,7 +2259,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
     let dir = StoreDir::new_ephemeral(tmp.path());
     let blob_id = "shared01";
     handle
-        .sql(move |sql| {
+        .write(move |sql| {
             let hash = coven_protocol::blob::content_hash(b"live");
             for id in ["remote-deletes", "still-live"] {
                 sql.execute(
@@ -2295,7 +2293,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
             .expect("create remote exact test Store"),
     );
     source
-        .write(
+        .write_with_blobs(
             |batch| {
                 batch.put_blob("media-files", "shared01", b"live".to_vec());
                 Ok(())
@@ -2337,7 +2335,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
         .await
         .expect("write cached blob");
     let delete = source
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute("DELETE FROM files WHERE id = 'remote-deletes'", [])?;
             Ok(())
         })
@@ -2369,7 +2367,7 @@ async fn write_drain_separates_live_local_source_from_deleted_exact_cache() {
 
     commit_reached.notified().await;
     handle
-        .write(
+        .write_with_blobs(
             |_| Ok(()),
             |sql| {
                 sql.execute(
@@ -2413,7 +2411,7 @@ async fn replacement_is_rejected_while_sql_still_references_old_blob() {
         .await
         .expect("store old");
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
                      VALUES (?1, ?2, 3, ?3, ?4)",
@@ -2437,7 +2435,7 @@ async fn replacement_is_rejected_while_sql_still_references_old_blob() {
         fill: CacheFill::CacheLazy,
     };
     let result: CovenResult<WriteReceipt<()>> = handle
-        .write(
+        .write_with_blobs(
             move |w| {
                 w.put_blob("media-files", "newbbbb", b"new".to_vec());
                 w.delete_blob(old_ref);
@@ -2471,7 +2469,7 @@ async fn sql_panic_removes_moved_blob() {
     let (tmp, handle) = open_files_handle();
     let dir = StoreDir::new_ephemeral(tmp.path());
     let result: CovenResult<WriteReceipt<()>> = handle
-        .write(
+        .write_with_blobs(
             |w| {
                 w.put_blob("media-files", "panicccc", b"new".to_vec());
                 Ok(())
@@ -2496,7 +2494,7 @@ async fn write_surfaces_a_failed_installed_blob_rollback() {
     let obstructed_path = final_path.clone();
 
     let result: CovenResult<WriteReceipt<()>> = handle
-        .write(
+        .write_with_blobs(
             |write| {
                 write.put_blob("media-files", "rollback-failure", b"new".to_vec());
                 Ok(())
@@ -2531,7 +2529,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
 
     let write_winner = tokio::spawn(async move {
         winner
-            .write(
+            .write_with_blobs(
                 move |w| {
                     w.put_blob("media-files", "raceblob", b"committed".to_vec());
                     Ok(())
@@ -2556,7 +2554,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
 
     let write_loser = tokio::spawn(async move {
         loser
-            .write(
+            .write_with_blobs(
                 move |w| {
                     w.put_blob("media-files", "raceblob", b"rolled-back".to_vec());
                     Ok(())
@@ -2576,7 +2574,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
         .expect("race path");
     assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
     let rows: i64 = handle
-        .sql(|sql| {
+        .read(|sql| {
             sql.query_row(
                 "SELECT count(*) FROM files WHERE id = 'winner'",
                 [],
@@ -2585,8 +2583,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
             .map_err(CovenError::from)
         })
         .await
-        .expect("count winner row")
-        .value;
+        .expect("count winner row");
     assert_eq!(rows, 1);
 }
 
@@ -2725,7 +2722,7 @@ impl ExactSlotStorage for GateCloudHome {
 }
 
 fn try_open(dir: &StoreDir) -> CovenResult<CovenHandle> {
-    Coven::builder(config(dir.clone()))
+    builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -2758,12 +2755,14 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
     // lock is path-scoped, not store-id-scoped) but this test's own
     // identity establishment must not collide with a concurrently
     // running test that also establishes one under the shared default id.
-    let handle = Coven::builder(Config::with_defaults(
-        "lock-held-until-cycle-exits".to_string(),
-        "device-test".to_string(),
+    let handle = Coven::builder(
         dir.clone(),
-        "Test".to_string(),
-    ))
+        Config::with_defaults(
+            "lock-held-until-cycle-exits".to_string(),
+            "device-test".to_string(),
+            "Test".to_string(),
+        ),
+    )
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
     .open()
@@ -2828,12 +2827,14 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
     let dir = StoreDir::new_ephemeral(tmp.path());
     // A store id distinct from every other test's — see the identical
     // note in `lock_is_held_until_the_sync_loop_exits_its_cycle`.
-    let handle = Coven::builder(Config::with_defaults(
-        "normal-shutdown-releases-lock".to_string(),
-        "device-test".to_string(),
+    let handle = Coven::builder(
         dir.clone(),
-        "Test".to_string(),
-    ))
+        Config::with_defaults(
+            "normal-shutdown-releases-lock".to_string(),
+            "device-test".to_string(),
+            "Test".to_string(),
+        ),
+    )
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
     .open()
@@ -2864,7 +2865,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
 // ========================================================================
 
 fn try_open_read_only(dir: &StoreDir) -> CovenResult<crate::read_handle::CovenReadHandle> {
-    Coven::builder(config(dir.clone()))
+    builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open_read_only()
@@ -2872,7 +2873,7 @@ fn try_open_read_only(dir: &StoreDir) -> CovenResult<crate::read_handle::CovenRe
 
 async fn read_files_count(handle: &crate::read_handle::CovenReadHandle) -> i64 {
     handle
-        .sql_read(|conn| {
+        .read(|conn| {
             conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0))
                 .map_err(CovenError::from)
         })
@@ -2926,7 +2927,7 @@ async fn read_only_open_sees_committed_writer_data() {
     let writer = open_files_handle_in(dir.clone());
 
     writer
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('row-before-reader', NULL, 0, ?1)",
@@ -2947,7 +2948,7 @@ async fn read_only_open_sees_committed_writer_data() {
     // A commit after the reader is open is visible on its next read: coven runs
     // each read as its own transaction, so it never pins an old WAL snapshot.
     writer
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO files (id, blob_id, size, _updated_at) \
                      VALUES ('row-after-reader', NULL, 0, ?1)",
@@ -2973,7 +2974,7 @@ async fn read_only_open_refuses_a_too_new_schema() {
     let dir = StoreDir::new_ephemeral(tmp.path());
 
     // A newer binary migrates the db to synced-schema version 2.
-    let ahead = Coven::builder(config(dir.clone()))
+    let ahead = builder(dir.clone())
         .synced_tables(vec![files_table()])
         .migrations(vec![
             files_migration(),
@@ -2985,7 +2986,7 @@ async fn read_only_open_refuses_a_too_new_schema() {
 
     // An older binary opens the same db read-only with only the version-1 ladder:
     // it cannot understand the schema, so it refuses with the matchable variant.
-    let reopened = Coven::builder(config(dir))
+    let reopened = builder(dir)
         .synced_tables(vec![files_table()])
         .migrations(vec![files_migration()])
         .open_read_only();
@@ -3006,7 +3007,7 @@ async fn read_only_open_refuses_a_too_new_schema() {
 async fn read_only_handle_reads_a_host_provided_blob() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
-    let writer = Coven::builder(config(dir.clone()))
+    let writer = builder(dir.clone())
         .synced_tables(vec![remote_root_files_table()])
         .migrations(vec![files_migration()])
         .open()
@@ -3015,7 +3016,7 @@ async fn read_only_handle_reads_a_host_provided_blob() {
     let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
     let hash = coven_protocol::blob::content_hash(&bytes);
     writer
-        .write(
+        .write_with_blobs(
             {
                 let bytes = bytes.clone();
                 move |w| {
@@ -3038,7 +3039,7 @@ async fn read_only_handle_reads_a_host_provided_blob() {
         .await
         .expect("writer stores the row and blob");
 
-    let reader = Coven::builder(config(dir))
+    let reader = builder(dir)
         .synced_tables(vec![remote_root_files_table()])
         .migrations(vec![files_migration()])
         .open_read_only()

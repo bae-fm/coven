@@ -301,14 +301,11 @@ impl<'storage> AuthorizedStore<'storage> {
     }
 
     #[cfg(test)]
-    pub(super) async fn open_membership_keyring_for_test(
+    pub(super) async fn membership_keyring_facts_for_test(
         &self,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::membership::InviteError,
-    > {
+    ) -> Result<([u8; 32], usize), crate::sync::store::membership::InviteError> {
         self.history
-            .open_keyring(self.identity, &self.membership)
+            .membership_keyring_facts(self.identity, &self.membership)
             .await
     }
 

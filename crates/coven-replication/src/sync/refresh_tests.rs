@@ -15,9 +15,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::sync::store::authorization::load_wrapped_store_key;
 use crate::sync::store::MembershipOpsError;
-use crate::sync::test_helpers::{
-    open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore, TestStoreFixture,
-};
+use crate::sync::test_helpers::{pubkey_hex, TestCustody, TestStore};
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::MasterKeyCustody;
@@ -39,12 +37,14 @@ trait RefreshTestStoreOps {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
         pending_rotation: &PendingRotation,
-        db: &coven_database::SyntheticStoreFixture,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<String, MembershipOpsError>;
 
     async fn revoke_member_durable(
         &self,
-        db: &coven_database::SyntheticStoreFixture,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -54,20 +54,25 @@ trait RefreshTestStoreOps {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &coven_database::SyntheticStoreFixture,
+        owner_db: &coven_database::Database,
+        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
         encryption: &EncryptionService,
     ) -> MembershipChain;
 
-    async fn load_exact_chain(&self, db: &coven_database::SyntheticStoreFixture)
-        -> MembershipChain;
+    async fn load_exact_chain(
+        &self,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
+    ) -> MembershipChain;
 
     async fn create_unreferenced_wrapped_key(
         &self,
         cloud_storage: &coven_storage::CloudSyncConnection,
-        owner_db: &coven_database::SyntheticStoreFixture,
+        owner_db: &coven_database::Database,
+        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -83,9 +88,10 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         master_keys: &dyn MasterKeyCustody,
         cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
         pending_rotation: &PendingRotation,
-        db: &coven_database::SyntheticStoreFixture,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Result<String, MembershipOpsError> {
-        self.bind_device(db, user_keypair)
+        self.bind_device(db, db_store_dir.clone(), user_keypair)
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?
             .remove_member(
@@ -100,7 +106,8 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn revoke_member_durable(
         &self,
-        db: &coven_database::SyntheticStoreFixture,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
         owner_keypair: &UserKeypair,
         revokee_pubkey: &str,
         timestamp: &str,
@@ -108,7 +115,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         pending_rotation: &PendingRotation,
     ) -> Result<EncryptionService, MembershipOpsError> {
         let device = self
-            .bind_device(db, owner_keypair)
+            .bind_device(db, db_store_dir.clone(), owner_keypair)
             .await
             .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
         let mut writer = device
@@ -127,7 +134,8 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn invite_exact_member(
         &self,
-        owner_db: &coven_database::SyntheticStoreFixture,
+        owner_db: &coven_database::Database,
+        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
         owner: &UserKeypair,
         member: &UserKeypair,
         role: MemberRole,
@@ -135,6 +143,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     ) -> MembershipChain {
         self.invite_member(
             owner_db,
+            owner_db_store_dir.clone(),
             owner,
             &pubkey_hex(member),
             None,
@@ -145,7 +154,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         .await
         .expect("publish exact membership invitation");
         let device = self
-            .open_into(owner_db)
+            .open_into(owner_db, owner_db_store_dir.clone())
             .await
             .expect("reload exact membership after invitation");
         device
@@ -156,10 +165,11 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 
     async fn load_exact_chain(
         &self,
-        db: &coven_database::SyntheticStoreFixture,
+        db: &coven_database::Database,
+        db_store_dir: coven_foundation::store_dir::StoreDir,
     ) -> MembershipChain {
         let device = self
-            .open_into(db)
+            .open_into(db, db_store_dir.clone())
             .await
             .expect("load exact refresh membership chain");
         device
@@ -171,7 +181,8 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     async fn create_unreferenced_wrapped_key(
         &self,
         cloud_storage: &coven_storage::CloudSyncConnection,
-        owner_db: &coven_database::SyntheticStoreFixture,
+        owner_db: &coven_database::Database,
+        owner_db_store_dir: coven_foundation::store_dir::StoreDir,
         recipient: &UserKeypair,
         encryption: &EncryptionService,
         signer: &UserKeypair,
@@ -186,7 +197,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         )
         .expect("seal wrapped Store key");
         let prepared = self
-            .bind_device(owner_db, signer)
+            .bind_device(owner_db, owner_db_store_dir.clone(), signer)
             .await
             .expect("bind wrapped-key publication Store")
             .prepare_wrapped_key(&recipient_pubkey, wrapped)
@@ -203,28 +214,31 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
 struct ExactStoreFixture {
     store: Arc<TestStore>,
     cloud_storage: Arc<coven_storage::CloudSyncConnection>,
-    db: coven_database::SyntheticStoreFixture,
+    db: coven_database::Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 async fn exact_store(owner: &UserKeypair, encryption: &EncryptionService) -> ExactStoreFixture {
-    let owner_db = open_test_db();
-    let (store, cloud_storage) = (Box::pin(TestStoreFixture::create_encrypted(
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let (store, cloud_storage) = Box::pin(TestStore::create_encrypted_with_connection(
         &owner_db,
+        owner_db_store_dir.clone(),
         LIB_ID,
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
         encryption.clone(),
     ))
     .await
-    .expect("create exact refresh Store"))
-    .into_parts();
-    Box::pin(store.open_into(&owner_db))
+    .expect("create exact refresh Store");
+    Box::pin(store.open_into(&owner_db, owner_db_store_dir.clone()))
         .await
         .expect("open exact refresh Store on owner device");
     ExactStoreFixture {
         store,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     }
 }
 
@@ -284,10 +298,12 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         store: storage,
         cloud_storage: _,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -295,15 +311,29 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         )
         .await;
     storage
-        .invite_exact_member(&owner_db, &owner, &victim, MemberRole::Member, &encryption)
+        .invite_exact_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &victim,
+            MemberRole::Member,
+            &encryption,
+        )
         .await;
 
     // B's local state: pinned owner + its keyring holds the OLD key + its live
     // cipher is the OLD key. This is the just-joined steady state.
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
@@ -312,7 +342,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("pre-rotation cycle");
     assert_eq!(
@@ -328,6 +358,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let new_key = storage
         .revoke_member_durable(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &pubkey_hex(&victim),
             "0000000004000-0000-A",
@@ -344,7 +375,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("post-rotation cycle");
 
@@ -366,14 +397,13 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     );
 
     // The chain supplies the exact refs; no path search chooses the key.
-    let reunwrapped = storage
-        .bind_device(&db_b, &device_b)
+    let (reunwrapped, _) = storage
+        .bind_device_in(&db_b, db_b_store_dir.clone(), &device_b)
         .await
         .expect("bind refreshed member Store")
-        .open_membership_keyring()
+        .membership_keyring_facts()
         .await
-        .expect("B can unwrap its re-wrapped key")
-        .key_bytes();
+        .expect("B can unwrap its re-wrapped key");
     assert_eq!(reunwrapped, new_key.key_bytes());
 }
 
@@ -387,10 +417,12 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         store: storage,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &initial).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &removed_member,
             MemberRole::Member,
@@ -404,6 +436,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     let rotated = storage
         .revoke_member_durable(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &pubkey_hex(&removed_member),
             "0000000004000-0000-owner",
@@ -416,7 +449,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .adopt_key_rotation(&rotated, &custody)
         .expect("owner adopts the activated rotation");
     storage
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind rotation owner")
         .complete_revoke_rotation_adoption_for_test(&pending_rotation, rotated.current_generation())
@@ -426,6 +459,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
     let invitation = storage
         .invite_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &pubkey_hex(&invited_member),
             None,
@@ -477,17 +511,21 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         store: storage,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
             &encryption,
         )
         .await;
-    let chain = storage.load_exact_chain(&owner_db).await;
+    let chain = storage
+        .load_exact_chain(&owner_db, owner_db_store_dir.clone())
+        .await;
     let pending_keyring = EncryptionService::from_key(old_key)
         .with_appended_generation(2, rotated_key)
         .unwrap();
@@ -495,6 +533,7 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         .create_unreferenced_wrapped_key(
             &cloud_storage,
             &owner_db,
+            owner_db_store_dir.clone(),
             &device_b,
             &pending_keyring,
             &owner,
@@ -507,37 +546,39 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         "creating an exact object does not activate it",
     );
 
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
 
     // A peer changeset waiting to be pulled, so the cycle proving it "completes"
     // also proves the pull ran and applied it while sealing was paused.
-    let peer_src = open_test_db();
+    let peer_src_store_dir = crate::sync::test_helpers::test_store_dir();
+    let peer_src = crate::sync::test_helpers::open_test_db(peer_src_store_dir.clone());
     let peer_cs = peer_src
-        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
            VALUES ('peer1', 'FromOwner', NULL, 1, '0000000005000-0000-A', '2026-01-01')",
         ])
         .await;
     storage
-        .publish_changeset(
-            "owner-device",
-            4,
-            &peer_cs,
-            db_b.database().schema_version(),
-        )
+        .publish_changeset("owner-device", 4, &peer_cs, db_b.schema_version())
         .await
         .expect("publish exact owner changeset");
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("an unreferenced wrapped key does not affect the cycle");
 
@@ -575,10 +616,12 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         store: storage,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -586,7 +629,14 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         )
         .await;
     let chain = storage
-        .invite_exact_member(&owner_db, &owner, &victim, MemberRole::Member, &encryption)
+        .invite_exact_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &victim,
+            MemberRole::Member,
+            &encryption,
+        )
         .await;
     let old_reference = chain
         .active_wrapped_keys_for(&pubkey_hex(&device_b))
@@ -594,10 +644,17 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .next()
         .expect("invitation activates the initial exact wrapped key");
 
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
@@ -605,6 +662,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let new_key = storage
         .revoke_member_durable(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &pubkey_hex(&victim),
             "0000000004000-0000-A",
@@ -615,7 +673,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("revoke rotates key");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("adopt generation 2");
     assert_eq!(
@@ -635,7 +693,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     .expect("the retained pre-rotation object remains readable");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("replayed old wrapped key is ignored");
 
@@ -673,13 +731,22 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         store: storage,
         cloud_storage: _,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &current).await;
     storage
-        .invite_exact_member(&owner_db, &owner, &device_b, MemberRole::Member, &current)
+        .invite_exact_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &device_b,
+            MemberRole::Member,
+            &current,
+        )
         .await;
     let chain = storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -692,16 +759,23 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         "the replacement grant is the sole authority for its wrapped key",
     );
 
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("replacement same-generation wrapped key is merged");
 
@@ -739,10 +813,12 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         store: storage,
         cloud_storage: _,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             MemberRole::Member,
@@ -752,6 +828,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &founder,
             &device_b,
             MemberRole::Member,
@@ -761,42 +838,57 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &founder,
             &victim,
             MemberRole::Member,
             &encryption,
         )
         .await;
-    let second_owner_db = open_test_db();
-    let db_b = open_test_db();
+    let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_owner_db =
+        crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     storage
         .activate_joined_device(
             &owner_db,
+            owner_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &second_owner,
             "0000000001000-0000-refresh",
         )
         .await
         .expect("activate exact joined test device");
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     storage
         .promote_active_member_fixture(
             &owner_db,
+            owner_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             &encryption,
         )
         .await
         .expect("promote active second Owner");
-    let (_tmp_b, ld_b) = temp_store_dir();
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let new_key = Box::pin(storage.revoke_member_durable(
         &second_owner_db,
+        second_owner_db_store_dir.clone(),
         &second_owner,
         &pubkey_hex(&victim),
         "0000000005000-0000-B",
@@ -806,7 +898,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     .await
     .expect("second owner can revoke");
 
-    Box::pin(running_b.run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None))
+    Box::pin(running_b.run_cycle_with(&SystemClock, Some(&ks_b), None))
         .await
         .expect("existing member adopts a current owner's rotation");
 
@@ -832,21 +924,27 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         store: storage,
         cloud_storage: _,
         db: founder_db,
+        db_store_dir: founder_db_store_dir,
     } = exact_store(&founder, &initial).await;
     storage
         .invite_exact_member(
             &founder_db,
+            founder_db_store_dir.clone(),
             &founder,
             &second_owner,
             MemberRole::Member,
             &initial,
         )
         .await;
-    let second_owner_db = open_test_db();
+    let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_owner_db =
+        crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());
     storage
         .activate_joined_device(
             &founder_db,
+            founder_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &second_owner,
             "0000000001000-0000-refresh",
         )
@@ -855,7 +953,9 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     storage
         .promote_active_member_fixture(
             &founder_db,
+            founder_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             &initial,
@@ -865,6 +965,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     storage
         .invite_exact_member(
             &founder_db,
+            founder_db_store_dir.clone(),
             &founder,
             &remaining_member,
             MemberRole::Member,
@@ -874,6 +975,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     storage
         .invite_exact_member(
             &founder_db,
+            founder_db_store_dir.clone(),
             &founder,
             &first_victim,
             MemberRole::Member,
@@ -883,6 +985,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
     storage
         .invite_exact_member(
             &founder_db,
+            founder_db_store_dir.clone(),
             &founder,
             &second_victim,
             MemberRole::Member,
@@ -891,11 +994,15 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         .await;
 
     let founder_device = storage
-        .bind_device(&founder_db, &founder)
+        .bind_device_in(&founder_db, founder_db_store_dir.clone(), &founder)
         .await
         .expect("bind founder before either concurrent rotation");
     let second_owner_device = storage
-        .bind_device(&second_owner_db, &second_owner)
+        .bind_device_in(
+            &second_owner_db,
+            second_owner_db_store_dir.clone(),
+            &second_owner,
+        )
         .await
         .expect("bind second Owner before either concurrent rotation");
     let mut founder_writer = founder_device
@@ -940,17 +1047,18 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         .await
         .expect("founder completes its activated removal journal");
 
-    let authority_keyring = storage
-        .bind_device(&founder_db, &founder)
+    let (_, authority_key_count) = storage
+        .bind_device_in(&founder_db, founder_db_store_dir.clone(), &founder)
         .await
         .expect("bind founder Store keyring")
-        .open_membership_keyring()
+        .membership_keyring_facts()
         .await
         .expect("founder unwraps both concurrent rotation forks");
-    assert_eq!(authority_keyring.key_count(), 3);
+    assert_eq!(authority_key_count, 3);
 
     let next_rotation = Box::pin(storage.revoke_member_durable(
         &founder_db,
+        founder_db_store_dir.clone(),
         &founder,
         &pubkey_hex(&remaining_member),
         "0000000006000-0000-founder",
@@ -962,7 +1070,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
 
     assert_eq!(
         next_rotation.key_count(),
-        authority_keyring.key_count() + 1,
+        authority_key_count + 1,
         "a later rotation extends the membership-selected keyring rather than one device's fork",
     );
 }
@@ -980,10 +1088,12 @@ async fn removed_owner_key_is_not_adopted() {
         store: storage,
         cloud_storage: _,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             MemberRole::Member,
@@ -993,41 +1103,56 @@ async fn removed_owner_key_is_not_adopted() {
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &founder,
             &device_b,
             MemberRole::Member,
             &encryption,
         )
         .await;
-    let second_owner_db = open_test_db();
-    let db_b = open_test_db();
+    let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_owner_db =
+        crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     storage
         .activate_joined_device(
             &owner_db,
+            owner_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &second_owner,
             "0000000001000-0000-refresh",
         )
         .await
         .expect("activate exact joined test device");
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     storage
         .promote_active_member_fixture(
             &owner_db,
+            owner_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             &encryption,
         )
         .await
         .expect("promote active second Owner");
-    let (_tmp_b, ld_b) = temp_store_dir();
     let rotated = storage
         .revoke_member_durable(
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &second_owner,
             &founder_pk,
             "0000000004000-0000-B",
@@ -1040,7 +1165,7 @@ async fn removed_owner_key_is_not_adopted() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
@@ -1068,10 +1193,12 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         store: storage,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -1084,6 +1211,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         .create_unreferenced_wrapped_key(
             &cloud_storage,
             &owner_db,
+            owner_db_store_dir.clone(),
             &device_b,
             &EncryptionService::from_key(forged_key),
             &attacker,
@@ -1091,16 +1219,23 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         .await;
 
     // B holds its real key (live + keyring) and pins the owner.
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await
         .expect("an unreferenced attacker object does not affect refresh");
 
@@ -1141,10 +1276,12 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         store: storage,
         cloud_storage,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     let chain = storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -1152,14 +1289,21 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         )
         .await;
 
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let owner_device = storage
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind exact membership owner");
     let head = owner_device
@@ -1178,7 +1322,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), &ld_b, None)
+        .run_cycle_with(&SystemClock, Some(&ks_b), None)
         .await;
     assert!(
         result.is_err(),
@@ -1205,10 +1349,12 @@ async fn one_cycle_loads_exact_membership_once() {
         store: storage,
         cloud_storage: _,
         db: owner_db,
+        db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     let chain = storage
         .invite_exact_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &device_b,
             MemberRole::Member,
@@ -1220,10 +1366,17 @@ async fn one_cycle_loads_exact_membership_once() {
     // cycle's refresh and pull both run against the anchored chain rather than
     // short-circuiting as a plaintext no-op. B is a Member, so it authors no
     // snapshot — whose reclaim would be a separate, out-of-scope membership read.
-    let db_b = open_test_db();
-    let (_tmp_b, ld_b) = temp_store_dir();
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
     let running_b = storage
-        .activate_joined_device(&owner_db, &db_b, &device_b, "0000000001000-0000-refresh")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &device_b,
+            "0000000001000-0000-refresh",
+        )
         .await
         .expect("activate exact joined test device");
     let ks_b = TestCustody::default();
@@ -1242,7 +1395,7 @@ async fn one_cycle_loads_exact_membership_once() {
         .len();
     let counter = MembershipReadCounter::new();
     running_b
-        .run_cycle_with_interceptor(&SystemClock, Some(&ks_b), &ld_b, None, counter.clone())
+        .run_cycle_with_interceptor(&SystemClock, Some(&ks_b), None, counter.clone())
         .await
         .expect("B's cycle");
     assert_eq!(
@@ -1279,9 +1432,17 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         store: storage,
         cloud_storage: _,
         db,
+        db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(&db, &owner, &member, MemberRole::Member, &encryption)
+        .invite_exact_member(
+            &db,
+            db_store_dir.clone(),
+            &owner,
+            &member,
+            MemberRole::Member,
+            &encryption,
+        )
         .await;
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
@@ -1303,6 +1464,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &cipher,
             &pending_rotation,
             &db,
+            db_store_dir.clone(),
         ),
     )
     .await
@@ -1317,7 +1479,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
 
     // The cloud rotation committed: the member is durably removed from the
     // committed chain even though this device could not adopt the new key.
-    let committed = storage.load_exact_chain(&db).await;
+    let committed = storage.load_exact_chain(&db, db_store_dir.clone()).await;
     assert!(
         !committed
             .current_members()
@@ -1355,12 +1517,11 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
     {
         let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);
-        let (_tmp, ld) = temp_store_dir();
         let running_owner = storage
-            .bind_device(&db, &owner)
+            .bind_device(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind removal owner to its retained sync storage");
-        Box::pin(running_owner.run_cycle_with(&SystemClock, Some(&ks_refresh), &ld, None))
+        Box::pin(running_owner.run_cycle_with(&SystemClock, Some(&ks_refresh), None))
             .await
             .expect("refresh cycle");
         assert_eq!(
@@ -1391,6 +1552,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             &cipher,
             &pending_rotation,
             &db,
+            db_store_dir.clone(),
         ),
     )
     .await

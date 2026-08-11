@@ -520,8 +520,9 @@ mod tests {
         pending
             .insert_or_load("attempt", "joiner", "pending")
             .expect("insert pending join");
-        let database = crate::synthetic_store::open_test_db();
-        let store = StoreDatabase::new(database.database());
+        let database_store_dir = crate::synthetic_store::test_store_dir();
+        let database = crate::synthetic_store::open_test_db(database_store_dir.clone());
+        let store = StoreDatabase::new(&database);
         let store_key = "device_join/attempt/joiner";
         store
             .set_protocol_state(store_key, "conflicting")

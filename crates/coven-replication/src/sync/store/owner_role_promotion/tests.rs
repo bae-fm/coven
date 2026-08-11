@@ -12,23 +12,27 @@ use super::journal::OwnerPromotionJournalState;
 /// device's registration names — the starting point of every promotion case that
 /// works on a single candidate.
 struct PromotionCandidate {
-    owner_db: coven_database::SyntheticStoreFixture,
+    owner_db: coven_database::Database,
+    owner_db_store_dir: coven_foundation::store_dir::StoreDir,
     owner: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
     member: UserKeypair,
-    member_db: coven_database::SyntheticStoreFixture,
+    member_db: coven_database::Database,
+    member_db_store_dir: coven_foundation::store_dir::StoreDir,
     member_registration: coven_protocol::store_commit::StoreDeviceRegistrationRef,
     encryption: EncryptionService,
 }
 
 impl PromotionCandidate {
     async fn build(store_name: &str) -> Self {
-        let owner_db = crate::sync::test_helpers::open_test_db();
+        let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
         let owner = UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &owner_db,
+            owner_db_store_dir.clone(),
             store_name,
             owner.clone(),
             home.clone(),
@@ -40,6 +44,7 @@ impl PromotionCandidate {
         store
             .invite_member(
                 &owner_db,
+                owner_db_store_dir.clone(),
                 &owner,
                 &keys::public_key_hex(&member),
                 None,
@@ -49,13 +54,21 @@ impl PromotionCandidate {
             )
             .await
             .expect("invite Member identity");
-        let member_db = crate::sync::test_helpers::open_test_db();
+        let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
         store
-            .activate_joined_device(&owner_db, &member_db, &member, "2026-07-20T00:00:00Z")
+            .activate_joined_device(
+                &owner_db,
+                owner_db_store_dir.clone(),
+                &member_db,
+                member_db_store_dir.clone(),
+                &member,
+                "2026-07-20T00:00:00Z",
+            )
             .await
             .expect("activate Member device");
         let member_registration = store
-            .bind_device(&member_db, &member)
+            .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
             .await
             .expect("bind Member Store")
             .owner_promotion_target_for_test()
@@ -63,11 +76,13 @@ impl PromotionCandidate {
             .expect("load Member promotion target");
         Self {
             owner_db,
+            owner_db_store_dir,
             owner,
             home,
             store,
             member,
             member_db,
+            member_db_store_dir,
             member_registration,
             encryption,
         }
@@ -76,10 +91,12 @@ impl PromotionCandidate {
 
 #[tokio::test]
 async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
-    let founder_db = crate::sync::test_helpers::open_test_db();
+    let founder_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let founder_db = crate::sync::test_helpers::open_test_db(founder_db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &founder_db,
+        founder_db_store_dir.clone(),
         "successive-owner-promotions",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -93,6 +110,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         store
             .invite_member(
                 &founder_db,
+                founder_db_store_dir.clone(),
                 &founder,
                 &keys::public_key_hex(member),
                 None,
@@ -104,12 +122,17 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
             .expect("invite Member identity");
     }
 
-    let first_owner_db = crate::sync::test_helpers::open_test_db();
-    let second_owner_db = crate::sync::test_helpers::open_test_db();
+    let first_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let first_owner_db = crate::sync::test_helpers::open_test_db(first_owner_db_store_dir.clone());
+    let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_owner_db =
+        crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());
     store
         .activate_joined_device(
             &founder_db,
+            founder_db_store_dir.clone(),
             &first_owner_db,
+            first_owner_db_store_dir.clone(),
             &first_owner,
             "2026-07-21T00:00:00Z",
         )
@@ -118,7 +141,9 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     store
         .activate_joined_device(
             &founder_db,
+            founder_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &second_owner,
             "2026-07-21T00:01:00Z",
         )
@@ -127,7 +152,9 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     store
         .promote_active_member_fixture(
             &founder_db,
+            founder_db_store_dir.clone(),
             &first_owner_db,
+            first_owner_db_store_dir.clone(),
             &founder,
             &first_owner,
             &encryption,
@@ -136,7 +163,11 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         .expect("promote first Owner");
 
     let second_device = store
-        .bind_device(&second_owner_db, &second_owner)
+        .bind_device_in(
+            &second_owner_db,
+            second_owner_db_store_dir.clone(),
+            &second_owner,
+        )
         .await
         .expect("bind second Owner Store");
     let mut second_writer = second_device
@@ -152,7 +183,9 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     store
         .promote_active_member_fixture(
             &founder_db,
+            founder_db_store_dir.clone(),
             &second_owner_db,
+            second_owner_db_store_dir.clone(),
             &founder,
             &second_owner,
             &encryption,
@@ -161,7 +194,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
         .expect("promote second Owner");
 
     let membership = store
-        .bind_device(&founder_db, &founder)
+        .bind_device_in(&founder_db, founder_db_store_dir.clone(), &founder)
         .await
         .expect("bind founder Store")
         .membership_for_test()
@@ -175,18 +208,22 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
 async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persists_exact_receipt() {
     let PromotionCandidate {
         owner_db,
+        owner_db_store_dir,
         owner,
         home: _home,
         store,
         member,
         member_db,
+        member_db_store_dir,
         member_registration,
         encryption,
     } = PromotionCandidate::build("merge-owner-promotion").await;
 
     Box::pin(store.promote_active_member_fixture(
         &owner_db,
+        owner_db_store_dir.clone(),
         &member_db,
+        member_db_store_dir.clone(),
         &owner,
         &member,
         &encryption,
@@ -195,7 +232,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     .expect("activate Owner promotion");
 
     assert!(
-        StoreDatabase::new(member_db.database())
+        StoreDatabase::new(&member_db)
             .load_owner_promotion_target(target_key(&member_registration).unwrap())
             .await
             .expect("load candidate target index")
@@ -204,7 +241,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     );
 
     let owner_device = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind promotion owner Store");
     let membership = owner_device
@@ -226,7 +263,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         coven_protocol::membership::MembershipHeadActivation::StoreCommit { .. }
     ));
 
-    let mut journal = StoreDatabase::new(owner_db.database())
+    let mut journal = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load finalized promotion journal")
@@ -251,7 +288,6 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
     state.heads.sort();
     let encoded = serde_json::to_string(&journal).expect("serialize substituted receipt journal");
     owner_db
-        .database()
         .set_protocol_state(
             &format!("owner_promotion/{}", journal.promotion_id),
             &encoded,
@@ -259,7 +295,7 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
         .await
         .expect("install substituted receipt journal");
 
-    assert!(StoreDatabase::new(owner_db.database())
+    assert!(StoreDatabase::new(&owner_db)
         .load_owner_promotion_journal(journal.promotion_id)
         .await
         .is_err());
@@ -269,23 +305,25 @@ async fn merge_owner_promotion_activates_through_its_store_bound_head_and_persis
 async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let PromotionCandidate {
         owner_db,
+        owner_db_store_dir,
         owner,
         home,
         store,
         member: _member,
         member_db: _member_db,
+        member_db_store_dir: _member_db_store_dir,
         member_registration,
         encryption: _encryption,
     } = PromotionCandidate::build("corrupt-owner-promotion-request").await;
     home.fail_exact_create_before_call(1);
     store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("load Owner Store")
         .begin_owner_promotion(member_registration.clone())
         .await
         .expect_err("interrupted publication retains RequestPrepared");
-    let journal = StoreDatabase::new(owner_db.database())
+    let journal = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load prepared request journal")
@@ -301,7 +339,6 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let encoded =
         serde_json::to_string(&substituted_request).expect("serialize corrupt request journal");
     owner_db
-        .database()
         .set_protocol_state(
             &format!("owner_promotion/{}", journal.promotion_id),
             &encoded,
@@ -309,12 +346,11 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("install corrupt id journal");
     owner_db
-        .database()
         .set_protocol_state(&target_key(&journal.target).unwrap(), &encoded)
         .await
         .expect("install corrupt target journal");
 
-    assert!(StoreDatabase::new(owner_db.database())
+    assert!(StoreDatabase::new(&owner_db)
         .load_owner_promotion_journal(journal.promotion_id)
         .await
         .is_err());
@@ -335,7 +371,6 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
     let encoded = serde_json::to_string(&substituted_bytes)
         .expect("serialize substituted prepared bytes journal");
     owner_db
-        .database()
         .set_protocol_state(
             &format!("owner_promotion/{}", substituted_bytes.promotion_id),
             &encoded,
@@ -343,12 +378,11 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
         .await
         .expect("install substituted id journal");
     owner_db
-        .database()
         .set_protocol_state(&target_key(&substituted_bytes.target).unwrap(), &encoded)
         .await
         .expect("install substituted target journal");
 
-    assert!(StoreDatabase::new(owner_db.database())
+    assert!(StoreDatabase::new(&owner_db)
         .load_owner_promotion_journal(substituted_bytes.promotion_id)
         .await
         .is_err());
@@ -367,24 +401,26 @@ async fn journal_load_rejects_substituted_request_or_prepared_commit_bytes() {
 async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() {
     let PromotionCandidate {
         owner_db,
+        owner_db_store_dir,
         owner,
         home,
         store,
         member,
         member_db,
+        member_db_store_dir,
         member_registration,
         encryption,
     } = PromotionCandidate::build("owner-promotion-loses-its-position").await;
 
     let request = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("load Owner Store")
         .begin_owner_promotion(member_registration.clone())
         .await
         .expect("publish the promotion request");
     let acceptance = store
-        .bind_device(&member_db, &member)
+        .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
         .await
         .expect("load Member Store")
         .accept_owner_promotion(request)
@@ -394,7 +430,6 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     // A queued host write composes against the same next position the
     // finalization will, and takes it the moment it drains.
     owner_db
-        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \
@@ -402,7 +437,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         )
         .await;
     let loaded_owner_store = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("load promoter Store");
     let mut writer = loaded_owner_store
@@ -418,14 +453,14 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     home.fail_exact_create_before_call(5);
     Box::pin(
         store
-            .bind_device(&owner_db, &owner)
+            .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
             .await
             .expect("load Owner Store")
             .finalize_owner_promotion(&encryption, acceptance.clone()),
     )
     .await
     .expect_err("the interrupted finalization cannot publish its head");
-    let interrupted = StoreDatabase::new(owner_db.database())
+    let interrupted = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load the interrupted promotion journal")
@@ -448,7 +483,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
 
     let lost = Box::pin(
         store
-            .bind_device(&owner_db, &owner)
+            .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
             .await
             .expect("load Owner Store")
             .finalize_owner_promotion(&encryption, acceptance),
@@ -466,7 +501,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
         ),
         "the finalization ends on the verified winner: {lost}",
     );
-    let ended = StoreDatabase::new(owner_db.database())
+    let ended = StoreDatabase::new(&owner_db)
         .load_owner_promotion_target(target_key(&member_registration).unwrap())
         .await
         .expect("load the ended promotion journal")
@@ -479,7 +514,9 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
 
     Box::pin(store.promote_active_member_fixture(
         &owner_db,
+        owner_db_store_dir.clone(),
         &member_db,
+        member_db_store_dir.clone(),
         &owner,
         &member,
         &encryption,
@@ -487,7 +524,7 @@ async fn a_promotion_whose_stream_position_was_taken_goes_stale_and_re_issues() 
     .await
     .expect("a fresh attempt replaces the stale one and activates");
     assert!(store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind re-issued promotion Store")
         .membership_for_test()

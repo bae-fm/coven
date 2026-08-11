@@ -265,7 +265,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_same_id_row_with_another_locator_does_not_suppress_exact_cleanup() {
+        let store_dir = crate::synthetic_store::test_store_dir();
         let db = open_test_db_with_blob(
+            store_dir,
             BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
                 .with_id_column("blob_id"),
         );
@@ -273,17 +275,16 @@ mod tests {
         let live_locator = ObjectHash::digest(b"live locator");
         let removed_object = ObjectHash::digest(b"removed object");
         let live_object = ObjectHash::digest(b"live object");
-        let database = StoreDatabase::new(db.database());
+        let database = StoreDatabase::new(&db);
 
-        db.database()
-            .seed_distinct_cleanup_bindings_for_test(
-                removed_locator,
-                live_locator,
-                removed_object,
-                live_object,
-            )
-            .await
-            .expect("seed removed and live blob bindings");
+        db.seed_distinct_cleanup_bindings_for_test(
+            removed_locator,
+            live_locator,
+            removed_object,
+            live_object,
+        )
+        .await
+        .expect("seed removed and live blob bindings");
 
         database
             .record_obsolete_copy_intent_for_test(LocalBlobCleanupIntent::for_row(
@@ -295,8 +296,7 @@ mod tests {
             .await
             .expect("record obsolete row copies");
 
-        db.database()
-            .cleanup_intent_copy_identities_for_test()
+        db.cleanup_intent_copy_identities_for_test()
             .await
             .map(|identities| {
                 assert_eq!(

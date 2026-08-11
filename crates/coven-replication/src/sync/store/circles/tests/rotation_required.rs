@@ -1,5 +1,5 @@
 use super::*;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -49,8 +49,9 @@ fn circle_routing_tables() -> Vec<coven_protocol::synced_schema::SyncedTable> {
     ]
 }
 
-fn open_circle_routing_test_db() -> SyntheticStoreFixture {
+fn open_circle_routing_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         circle_routing_tables(),
         circle_routing_migrations(),
     )
@@ -61,7 +62,7 @@ fn open_circle_routing_test_db() -> SyntheticStoreFixture {
 /// components; the member exists only as a Store identity and Circle roster
 /// entry whose removal makes the Circle rotation-required.
 struct RotationFixture {
-    db: SyntheticStoreFixture,
+    db: Database,
     store: std::sync::Arc<TestStore>,
     cloud_storage: Arc<coven_storage::CloudSyncConnection>,
     home: Arc<coven_storage::InMemoryCloudHome>,
@@ -71,23 +72,21 @@ struct RotationFixture {
     circle_id: CircleId,
     member: UserKeypair,
     member_pubkey: String,
-    member_db: SyntheticStoreFixture,
+    member_db: Database,
     member_device: RotationMemberDevice,
     store_dir: coven_foundation::store_dir::StoreDir,
-    _store_temp: tempfile::TempDir,
     custody: crate::sync::test_helpers::TestCustody,
 }
 
 struct RotationMemberDevice {
     device: TestDevice,
-    _temp: tempfile::TempDir,
     store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl RotationMemberDevice {
     async fn pull(&self) {
         self.device
-            .pull_store(&self.store_dir)
+            .pull_store()
             .await
             .expect("member installs the Circle bootstrap");
     }
@@ -117,13 +116,14 @@ impl RotationMemberDevice {
 
 impl RotationFixture {
     async fn build(label: &str) -> Self {
-        let db = open_circle_routing_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = open_circle_routing_test_db(db_store_dir.clone());
         let (store_fixture, _home, signer, founder) =
-            persist_merge_operation_fixture(&db, label).await;
-        let (store, cloud_storage) = (store_fixture).into_parts();
+            persist_merge_operation_fixture(&db, db_store_dir.clone(), label).await;
+        let (store, cloud_storage) = store_fixture;
         let circle_id = founder.circle_id();
         let owner_device = store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store");
         owner_device
@@ -136,6 +136,7 @@ impl RotationFixture {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &member_pubkey,
                 None,
@@ -145,19 +146,25 @@ impl RotationFixture {
             )
             .await
             .expect("invite Store member");
-        let member_db = open_circle_routing_test_db();
+        let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
         let member_device = store
-            .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+            .activate_joined_device(
+                &db,
+                db_store_dir.clone(),
+                &member_db,
+                member_db_store_dir.clone(),
+                &member,
+                "2026-07-23T00:00:00Z",
+            )
             .await
             .expect("activate Store member device");
-        let (member_temp, member_store_dir) = temp_store_dir();
         let member_device = RotationMemberDevice {
             device: member_device,
-            _temp: member_temp,
-            store_dir: member_store_dir,
+            store_dir: member_db_store_dir,
         };
 
-        let (store_temp, store_dir) = temp_store_dir();
+        let store_dir = db_store_dir;
         let components =
             prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, label).await;
         components
@@ -181,7 +188,6 @@ impl RotationFixture {
             member_db,
             member_device,
             store_dir,
-            _store_temp: store_temp,
             custody,
         }
     }
@@ -200,7 +206,14 @@ impl RotationFixture {
             .remove_circle_member(self.circle_id, self.member_pubkey.clone())
             .await
             .expect("close the epoch by removing the roster member");
-        finalize_circle_epoch_close(&self.store, &self.db, &self.signer, &self.components).await;
+        finalize_circle_epoch_close(
+            &self.store,
+            &self.db,
+            self.store_dir.clone(),
+            &self.signer,
+            &self.components,
+        )
+        .await;
     }
 
     /// Authors one standalone Circle snapshot into a throwaway directory.
@@ -209,8 +222,9 @@ impl RotationFixture {
         self.store
             .push_circle_snapshots(
                 &self.db,
+                self.store_dir.clone(),
                 snapshot_temp.path().to_path_buf(),
-                self.db.database().schema_version(),
+                self.db.schema_version(),
                 stamp,
                 &EncryptionService::from_key([42; 32]),
             )
@@ -225,7 +239,6 @@ impl RotationFixture {
         stamp: &str,
     ) -> coven_protocol::write::WriteId {
         self.db
-            .database()
             .capture_document_for_test(row_id, audience, stamp)
             .await
             .expect("capture document row")
@@ -233,7 +246,7 @@ impl RotationFixture {
 
     async fn active_store_members(&self) -> BTreeSet<String> {
         self.store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.store_dir.clone(), &self.signer)
             .await
             .expect("load cycle Store")
             .membership_for_test()
@@ -247,7 +260,7 @@ impl RotationFixture {
 
     async fn circles(&self) -> Vec<coven_protocol::circle::CircleInfo> {
         let members = self.active_store_members().await;
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .get_circles(&keys::public_key_hex(&self.signer), members)
             .await
             .expect("list Circles")
@@ -257,7 +270,7 @@ impl RotationFixture {
         &self,
         circle_id: CircleId,
     ) -> Option<coven_database::PublishedCircleSnapshot> {
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .latest_local_circle_snapshot(circle_id)
             .await
             .expect("read latest local Circle snapshot")
@@ -267,7 +280,7 @@ impl RotationFixture {
         &self,
         circle_id: CircleId,
     ) -> Option<coven_database::DurableCircleSnapshotPublication> {
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .outbound_circle_snapshot_publication(circle_id)
             .await
             .expect("read pending Circle snapshot publication")
@@ -286,7 +299,7 @@ impl RotationFixture {
             .circles()
             .snapshots()
             .push_circle_snapshots(
-                self.db.database().schema_version(),
+                self.db.schema_version(),
                 stamp,
                 Some(&EncryptionService::from_key([42; 32])),
             )
@@ -295,7 +308,6 @@ impl RotationFixture {
 
     async fn release_retained_replay_ownership(&self) {
         self.db
-            .database()
             .release_retained_replay_ownership_for_test()
             .await
             .expect("release retained replay ownership");
@@ -311,7 +323,6 @@ impl RotationFixture {
     ) -> coven_protocol::write::WriteId {
         let write_id = self
             .db
-            .database()
             .capture_document_with_file_for_test(document_id, file_id, audience, bytes, stamp)
             .await
             .expect("capture document and its file row");
@@ -338,7 +349,7 @@ impl RotationFixture {
         let staging = self
             .components
             .host_write_blob_staging(tokio::runtime::Handle::current());
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .run_host_store_write_for_test(
                 Some(EncryptionService::from_key([42; 32])),
                 Some(Box::new(staging) as Box<dyn coven_database::AudienceBlobMoveStaging>),
@@ -357,7 +368,7 @@ impl RotationFixture {
     }
 
     async fn stored_blobs(&self) -> Vec<coven_protocol::blob::locator::StoredBlobRef> {
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .stored_blob_reclaim_candidates_for_test()
             .await
             .expect("read stored blob candidates")
@@ -368,7 +379,6 @@ impl RotationFixture {
 
     async fn document_file_stamp(&self, file_id: &str) -> String {
         self.db
-            .database()
             .document_file_stamp_for_test(file_id)
             .await
             .expect("read the document file row stamp")
@@ -380,14 +390,14 @@ impl RotationFixture {
         coven_protocol::store_commit::CircleSnapshotRef,
         coven_protocol::store_commit::CircleSnapshotMeta,
     )> {
-        let control = StoreDatabase::new(self.db.database())
+        let control = StoreDatabase::new(&self.db)
             .current_circle_control(self.circle_id)
             .await
             .expect("read the current Circle control")
             .expect("the Circle has an active control");
         let device = self
             .store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.store_dir.clone(), &self.signer)
             .await
             .expect("bind Circle snapshot access Store");
         let access = device
@@ -406,7 +416,6 @@ impl RotationFixture {
         image: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
-            .database()
             .remote_object_exists_for_test(image.clone())
             .await
             .expect("read bootstrap image ownership presence")
@@ -416,7 +425,7 @@ impl RotationFixture {
         &self,
         circle_id: CircleId,
     ) -> coven_protocol::objects::ExactObjectRef {
-        StoreDatabase::new(self.member_db.database())
+        StoreDatabase::new(&self.member_db)
             .circle_bootstrap_coverage_ref(circle_id)
             .await
             .expect("read member Circle bootstrap coverage")
@@ -432,7 +441,6 @@ impl RotationFixture {
     ) -> usize {
         let record = self
             .db
-            .database()
             .remote_object_for_test(image.clone())
             .await
             .expect("load bootstrap image ownership");
@@ -459,7 +467,7 @@ impl RotationFixture {
 
     async fn live_bootstrap_images(&self) -> Vec<(coven_protocol::objects::ExactObjectRef, usize)> {
         self.db
-            .database().remote_objects_for_test()
+            .remote_objects_for_test()
             .await
             .expect("read remote object records")
             .into_iter()
@@ -511,7 +519,7 @@ impl RotationFixture {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the Circle package");
-        let published = match coven_database::StoreDatabase::new(self.db.database())
+        let published = match coven_database::StoreDatabase::new(&self.db)
             .write_status(&write_id)
             .await
             .expect("read Circle write status")
@@ -521,7 +529,7 @@ impl RotationFixture {
         };
         let owner = self
             .store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.store_dir.clone(), &self.signer)
             .await
             .expect("bind the Store owner");
         let package_commit = owner
@@ -603,14 +611,14 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .await
         .expect("publish Store-audience and unaffected-Circle writes");
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&store_write)
             .await
             .expect("read Store write status"),
         coven_protocol::write::WriteStatus::Published(_)
     ));
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&unaffected_write)
             .await
             .expect("read unaffected Circle write status"),
@@ -630,7 +638,7 @@ async fn store_member_removal_blocks_affected_circle_and_leaves_others_running()
         .components
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
-    match coven_database::StoreDatabase::new(fixture.db.database())
+    match coven_database::StoreDatabase::new(&fixture.db)
         .write_status(&blocked_write)
         .await
         .expect("read affected Circle write status")
@@ -706,6 +714,7 @@ async fn re_adding_the_store_member_clears_rotation_required() {
         .store
         .invite_member(
             &fixture.db,
+            fixture.store_dir.clone(),
             &fixture.signer,
             &fixture.member_pubkey,
             None,
@@ -750,7 +759,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
     // roster without the removed identity.
     fixture.close_epoch_by_removing_the_circle_member().await;
 
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load successor Circle authoring state");
@@ -769,7 +778,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         "the successor roster omits the removed identity, clearing rotation"
     );
     // Publication context succeeds under the successor control.
-    StoreDatabase::new(fixture.db.database())
+    StoreDatabase::new(&fixture.db)
         .circle_publication_context(fixture.circle_id, successor.control.coord.clone())
         .await
         .expect("publication context resolves under the successor control");
@@ -788,7 +797,7 @@ async fn closing_the_epoch_clears_rotation_and_resumes_publication() {
         .await
         .expect("publish Circle content after the close");
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&resumed)
             .await
             .expect("read resumed write status"),
@@ -815,7 +824,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await;
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&blocked)
             .await
             .expect("read blocked write status"),
@@ -830,7 +839,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     // longer demands a write-free device.
     fixture.close_epoch_by_removing_the_circle_member().await;
 
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load successor Circle authoring state");
@@ -848,7 +857,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     // The blocked write survives the close as a durable write; the rows it holds
     // were never surrendered.
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&blocked)
             .await
             .expect("read blocked write status after the close"),
@@ -858,7 +867,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     // Returning the same durable write to publication (no discard, no recreate)
     // publishes it under the successor epoch: the write captured under the closed
     // epoch's control now resolves the current control.
-    StoreDatabase::new(fixture.db.database())
+    StoreDatabase::new(&fixture.db)
         .retry_blocked_write(&blocked)
         .await
         .expect("return the durable write to publication after the close");
@@ -867,7 +876,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish the formerly blocked write under the successor epoch");
-    let published = match coven_database::StoreDatabase::new(fixture.db.database())
+    let published = match coven_database::StoreDatabase::new(&fixture.db)
         .write_status(&blocked)
         .await
         .expect("read republished write status")
@@ -877,7 +886,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     };
     let owner = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind the Store owner");
     let published_commit = owner
@@ -900,7 +909,11 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
     // projection.
     let removed_member = fixture
         .store
-        .bind_device(&fixture.member_db, &fixture.member)
+        .bind_device(
+            &fixture.member_db,
+            fixture.member_device.store_dir.clone(),
+            &fixture.member,
+        )
         .await
         .expect("open the Store as the removed member");
     let mut removed_member = removed_member
@@ -919,7 +932,7 @@ async fn epoch_close_finalizes_with_a_rotation_blocked_write_present() {
             .any(|reference| reference == &published),
         "the removed member cannot advance into the successor-epoch commit"
     );
-    let received = StoreDatabase::new(fixture.member_db.database())
+    let received = StoreDatabase::new(&fixture.member_db)
         .read(|sql| {
             sql.query_row(
                 "SELECT EXISTS(
@@ -973,7 +986,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
     // write is present. The cut no longer refuses, and the image is the accepted
     // projection: the accepted row is present, the unpublished row is absent.
     let cutoff = coven_protocol::store_commit::CommitFrontier::from_refs(
-        StoreDatabase::new(fixture.db.database())
+        StoreDatabase::new(&fixture.db)
             .materialized_frontier()
             .await
             .expect("read the accepted materialized frontier"),
@@ -982,7 +995,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
     .expect("shape the accepted materialized frontier");
     let loaded_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("load the successor bootstrap Store");
     let mut authorized = loaded_store
@@ -999,7 +1012,7 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
         )
         .await
         .expect("cut the successor bootstrap from accepted history");
-    let image = coven_database::DatabaseImageTest::open(cut.snapshot.db_image.path())
+    let image = coven_database::DatabaseImageTest::open(cut.image_path_for_test())
         .expect("open the bootstrap image");
     let installed_ids = image
         .query("SELECT id FROM documents ORDER BY id", [], |row| {
@@ -1028,7 +1041,7 @@ async fn ordinary_store_snapshot_cut_still_refuses_unpublished_writes() {
         .await;
     let loaded_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("load the ordinary snapshot Store");
     let mut authorized = loaded_store
@@ -1060,6 +1073,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .store
         .invite_member(
             &fixture.db,
+            fixture.store_dir.clone(),
             &fixture.signer,
             &outsider_pubkey,
             None,
@@ -1100,7 +1114,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
         .await
         .expect("publish Circle content after an unrelated Store removal");
     assert!(matches!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .write_status(&write)
             .await
             .expect("read Circle write status"),
@@ -1116,7 +1130,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
     fixture.close_epoch_by_removing_the_circle_member().await;
 
     // Confirm the close activated its successor.
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load successor Circle authoring state");
@@ -1127,12 +1141,15 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 
     // A remaining member (the owner) installs a new device through the ordinary
     // genesis-replaying join, which reconstructs the full retained history.
-    let joined_db = open_circle_routing_test_db();
+    let joined_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let joined_db = open_circle_routing_test_db(joined_db_store_dir.clone());
     fixture
         .store
         .activate_joined_device(
             &fixture.db,
+            fixture.store_dir.clone(),
             &joined_db,
+            joined_db_store_dir.clone(),
             &fixture.signer,
             "2026-07-24T00:00:00Z",
         )
@@ -1141,11 +1158,10 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 
     // The newly joined device pulls the Circle's post-close state, including the
     // successor bootstrap, which triggers a retained-replay projection.
-    let (_joined_temp, joined_dir) = temp_store_dir();
     let joined_store = crate::sync::store::Store::load(
-        StoreDatabase::new(joined_db.database()),
+        StoreDatabase::new(&joined_db),
         fixture.cloud_storage.clone(),
-        joined_dir,
+        joined_db_store_dir,
         fixture.signer.clone(),
     )
     .await
@@ -1172,7 +1188,8 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 /// Circle's roster, and the production sync components the owner drives. Every
 /// restore case starts from this shape and differs only in what it does next.
 struct CircleWithOneMember {
-    db: SyntheticStoreFixture,
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
@@ -1180,18 +1197,18 @@ struct CircleWithOneMember {
     circle_id: CircleId,
     member: UserKeypair,
     member_pubkey: String,
-    /// The owner's Store directory, which must outlive the components using it.
-    _store_temp: tempfile::TempDir,
 }
 
 impl CircleWithOneMember {
     async fn build(name: &str) -> Self {
         let routing = EncryptionService::from_key([42; 32]);
-        let db = open_circle_routing_test_db();
-        let (store, home, signer, founder) = persist_merge_operation(&db, name).await;
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = open_circle_routing_test_db(db_store_dir.clone());
+        let (store, home, signer, founder) =
+            persist_merge_operation(&db, db_store_dir.clone(), name).await;
         let circle_id = founder.circle_id();
         store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store")
             .resume_circle_operations()
@@ -1203,6 +1220,7 @@ impl CircleWithOneMember {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &member_pubkey,
                 None,
@@ -1212,9 +1230,8 @@ impl CircleWithOneMember {
             )
             .await
             .expect("invite Store member");
-        let (store_temp, store_dir) = temp_store_dir();
         let components =
-            prepare_owner_sync_components(&db, &store, &home, &store_dir, &signer, name).await;
+            prepare_owner_sync_components(&db, &store, &home, &db_store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
             .await
@@ -1222,6 +1239,7 @@ impl CircleWithOneMember {
 
         Self {
             db,
+            db_store_dir,
             store,
             home,
             signer,
@@ -1229,7 +1247,6 @@ impl CircleWithOneMember {
             circle_id,
             member,
             member_pubkey,
-            _store_temp: store_temp,
         }
     }
 }
@@ -1239,14 +1256,15 @@ impl CircleWithOneMember {
 /// from that snapshot is floored against.
 async fn publish_acknowledged_store_snapshot(
     store: &TestStore,
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     signer: &UserKeypair,
     routing: &EncryptionService,
     cut_stamp: &str,
     acknowledged_at: &str,
 ) -> coven_protocol::membership::MembershipChain {
     let loaded_store = store
-        .bind_device(db, signer)
+        .bind_device_in(db, db_store_dir.clone(), signer)
         .await
         .expect("load the Store snapshot");
     let mut authorized = loaded_store
@@ -1274,7 +1292,7 @@ async fn publish_acknowledged_store_snapshot(
         .expect("activate snapshot stability acknowledgement");
 
     store
-        .bind_device(db, signer)
+        .bind_device_in(db, db_store_dir.clone(), signer)
         .await
         .expect("load snapshot Store")
         .membership_for_test()
@@ -1306,7 +1324,7 @@ impl RestoreTarget {
 /// the failure cases are exactly what several of these tests assert on.
 async fn restore_store_snapshot<'a>(
     store: &'a TestStore,
-    db: &SyntheticStoreFixture,
+    db: &Database,
     membership: &coven_protocol::membership::MembershipChain,
     restorer: &UserKeypair,
     target: &'a RestoreTarget,
@@ -1315,7 +1333,7 @@ async fn restore_store_snapshot<'a>(
     store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
-            db.database().schema_version(),
+            db.schema_version(),
             &target.database_path,
             restorer,
         )
@@ -1335,7 +1353,7 @@ async fn restore_store_snapshot<'a>(
 }
 
 struct ActiveMemberCircleSnapshot {
-    db: SyntheticStoreFixture,
+    db: Database,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
@@ -1359,6 +1377,7 @@ impl ActiveMemberCircleSnapshot {
         let routing = EncryptionService::from_key([42; 32]);
         let CircleWithOneMember {
             db,
+            db_store_dir,
             store,
             home,
             signer,
@@ -1366,18 +1385,16 @@ impl ActiveMemberCircleSnapshot {
             circle_id,
             member,
             member_pubkey,
-            _store_temp,
         } = CircleWithOneMember::build(name).await;
 
         // Pre-close Circle content the member holds access to, under the live epoch.
-        db.database()
-            .capture_document_for_test(
-                "00000000-0000-4000-8000-000000000090",
-                Some(circle_id),
-                "0000000002000-0000-owner",
-            )
-            .await
-            .expect("capture Circle content");
+        db.capture_document_for_test(
+            "00000000-0000-4000-8000-000000000090",
+            Some(circle_id),
+            "0000000002000-0000-owner",
+        )
+        .await
+        .expect("capture Circle content");
         components
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
@@ -1392,12 +1409,14 @@ impl ActiveMemberCircleSnapshot {
                 .remove_circle_member(circle_id, member_pubkey.clone())
                 .await
                 .expect("close the epoch by removing the roster member");
-            finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+            finalize_circle_epoch_close(&store, &db, db_store_dir.clone(), &signer, &components)
+                .await;
         }
 
         let membership = publish_acknowledged_store_snapshot(
             &store,
             &db,
+            db_store_dir.clone(),
             &signer,
             &routing,
             "2026-07-24T01:00:00Z",
@@ -1552,7 +1571,7 @@ async fn restore_rolls_back_the_store_image_when_circle_install_fails() {
     let outcome = store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
-            db.database().schema_version(),
+            db.schema_version(),
             &target.database_path,
             &member,
         )
@@ -1593,13 +1612,13 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     // snapshot's stability quorum stays the single owner device.
     let CircleWithOneMember {
         db,
+        db_store_dir,
         store,
         signer,
         components,
         circle_id,
         member,
         member_pubkey,
-        _store_temp,
         ..
     } = CircleWithOneMember::build("snapshot-restore-after-close").await;
 
@@ -1607,7 +1626,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     {
         let routing = routing.clone();
         let audience = Some(circle_id.to_string());
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .run_host_store_write_for_test(Some(routing), None, move |transaction| {
                 transaction
                     .execute(
@@ -1636,7 +1655,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         .remove_circle_member(circle_id, member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+    finalize_circle_epoch_close(&store, &db, db_store_dir.clone(), &signer, &components).await;
 
     // Publish a Store snapshot covering the post-close frontier; the single owner
     // device acknowledges it stable. Its image prunes the old-epoch retained rows
@@ -1649,6 +1668,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
     let membership = publish_acknowledged_store_snapshot(
         &store,
         &db,
+        db_store_dir.clone(),
         &signer,
         &routing,
         "2026-07-24T01:00:00Z",
@@ -1679,7 +1699,7 @@ async fn post_close_circle_store_snapshot_restores_and_converges() {
         "the restored device holds no positions after the close: {:?}",
         pull.held_positions
     );
-    let owner_frontier = coven_database::StoreDatabase::new(db.database())
+    let owner_frontier = coven_database::StoreDatabase::new(&db)
         .materialized_frontier()
         .await
         .expect("read owner Store frontier");
@@ -1764,25 +1784,24 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let routing = EncryptionService::from_key([42; 32]);
     let CircleWithOneMember {
         db,
+        db_store_dir,
         store,
         signer,
         components,
         circle_id,
         member_pubkey,
-        _store_temp,
         ..
     } = CircleWithOneMember::build("standalone-restore-dominates").await;
 
     // Pre-close content, then close the epoch by removing the member. The successor
     // bootstrap and the owner's successor leaf both cover the pre-close cutoff.
-    db.database()
-        .capture_document_for_test(
-            "00000000-0000-4000-8000-000000000090",
-            Some(circle_id),
-            "0000000002000-0000-owner",
-        )
-        .await
-        .expect("capture Circle content");
+    db.capture_document_for_test(
+        "00000000-0000-4000-8000-000000000090",
+        Some(circle_id),
+        "0000000002000-0000-owner",
+    )
+    .await
+    .expect("capture Circle content");
     components
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
@@ -1791,18 +1810,17 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
         .remove_circle_member(circle_id, member_pubkey.clone())
         .await
         .expect("close the epoch by removing the roster member");
-    finalize_circle_epoch_close(&store, &db, &signer, &components).await;
+    finalize_circle_epoch_close(&store, &db, db_store_dir.clone(), &signer, &components).await;
 
     // Post-close content under the successor epoch advances the frontier past the
     // close cutoff, so a snapshot over it dominates the close-cutoff candidates.
-    db.database()
-        .capture_document_for_test(
-            "00000000-0000-4000-8000-000000000091",
-            Some(circle_id),
-            "0000000004000-0000-owner",
-        )
-        .await
-        .expect("capture Circle content");
+    db.capture_document_for_test(
+        "00000000-0000-4000-8000-000000000091",
+        Some(circle_id),
+        "0000000004000-0000-owner",
+    )
+    .await
+    .expect("capture Circle content");
     components
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
@@ -1813,8 +1831,9 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let standalone = store
         .push_circle_snapshots(
             &db,
+            db_store_dir.clone(),
             standalone_dir.as_ref().join("standalone"),
-            db.database().schema_version(),
+            db.schema_version(),
             "2026-07-24T02:00:00Z",
             &routing,
         )
@@ -1827,6 +1846,7 @@ async fn restore_installs_a_dominating_standalone_circle_snapshot() {
     let membership = publish_acknowledged_store_snapshot(
         &store,
         &db,
+        db_store_dir.clone(),
         &signer,
         &routing,
         "2026-07-24T02:00:01Z",
@@ -1871,13 +1891,13 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("cycle publishes the owner's Circle acknowledgement");
-    let (old_authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("old Circle authoring context");
     let old_control = old_authoring.control.coord.clone();
     let old_epoch = old_authoring.control.value.epoch_id();
-    let acknowledgements = StoreDatabase::new(fixture.db.database())
+    let acknowledgements = StoreDatabase::new(&fixture.db)
         .activated_circle_acks(fixture.circle_id)
         .await
         .expect("read activated Circle acknowledgements");
@@ -1887,7 +1907,7 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
         .expect("the owner published a Circle acknowledgement");
     let before = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &ack_ref)
         .await
         .expect("read acknowledgement through its exact control");
     assert_eq!(before.epoch_id, old_epoch);
@@ -1900,7 +1920,7 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
     // activates.
     fixture.remove_store_member().await;
     fixture.close_epoch_by_removing_the_circle_member().await;
-    let (new_authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("successor Circle authoring context");
@@ -1912,7 +1932,7 @@ async fn circle_acknowledgement_stays_readable_across_epoch_rotation() {
     // from the retained activation of the control the acknowledgement names.
     let after = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &ack_ref)
         .await
         .expect("read the pre-rotation acknowledgement after the epoch rotated");
     assert_eq!(after.epoch_id, old_epoch);
@@ -1927,7 +1947,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
     fixture
         .author_standalone_circle_snapshot("2026-07-23T00:00:00Z")
         .await;
-    let published = StoreDatabase::new(fixture.db.database())
+    let published = StoreDatabase::new(&fixture.db)
         .latest_local_circle_snapshot(fixture.circle_id)
         .await
         .expect("read published Circle snapshot")
@@ -1944,7 +1964,12 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
         .expect("owner publishes its Circle acknowledgement");
     assert!(!fixture
         .store
-        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .circle_snapshot_is_stable(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            fixture.circle_id,
+            &published.cut
+        )
         .await
         .expect("evaluate stability before the member acknowledges"));
 
@@ -1964,7 +1989,12 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
     // Every access-holding device has now acknowledged coverage past the cut.
     assert!(fixture
         .store
-        .circle_snapshot_is_stable(&fixture.db, fixture.circle_id, &published.cut)
+        .circle_snapshot_is_stable(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            fixture.circle_id,
+            &published.cut
+        )
         .await
         .expect("evaluate stability once every access device acknowledged"));
 }
@@ -1973,7 +2003,7 @@ async fn circle_snapshot_stability_requires_every_access_device_to_acknowledge()
 async fn circle_snapshot_stays_readable_across_epoch_rotation() {
     let fixture = RotationFixture::build("rotation-snapshot-read").await;
     let owner_pk = keys::public_key_hex(&fixture.signer);
-    let (old_authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("old Circle authoring context");
@@ -1994,7 +2024,7 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
     // control the snapshot names.
     let device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind retained Circle activation Store");
     let retained = device
@@ -2004,7 +2034,12 @@ async fn circle_snapshot_stays_readable_across_epoch_rotation() {
         .expect("the pre-rotation control's activation is retained");
     let metas = fixture
         .store
-        .load_circle_snapshot_metas(&fixture.db, fixture.circle_id, &retained)
+        .load_circle_snapshot_metas(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            fixture.circle_id,
+            &retained,
+        )
         .await
         .expect("read the pre-rotation Circle snapshot after the epoch rotated");
     let old = metas
@@ -2047,11 +2082,11 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
 
     // A recipient reads the image with the Circle epoch key and authenticates its
     // routing state against the true Store routing key.
-    let (authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pk)
         .await
         .expect("Circle authoring context");
-    let access = StoreDatabase::new(fixture.db.database())
+    let access = StoreDatabase::new(&fixture.db)
         .circle_publication_context(fixture.circle_id, authoring.control.coord.clone())
         .await
         .expect("Circle publication context");
@@ -2059,6 +2094,7 @@ async fn standalone_circle_snapshot_authenticates_under_the_true_store_routing_k
         .store
         .verify_standalone_circle_snapshot_image(
             &fixture.db,
+            fixture.store_dir.clone(),
             fixture.circle_id,
             &access,
             &EncryptionService::from_key([42; 32]),
@@ -2101,7 +2137,7 @@ async fn standalone_circle_snapshot_authoring_survives_epoch_rotation() {
         .await;
 
     assert!(
-        StoreDatabase::new(fixture.db.database())
+        StoreDatabase::new(&fixture.db)
             .latest_local_circle_snapshot(fixture.circle_id)
             .await
             .expect("read the published Circle snapshot")
@@ -2119,7 +2155,7 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     // real coverage row the install recorded.
     let member_view = &fixture.member_device;
     member_view.pull().await;
-    let member_coverage = StoreDatabase::new(fixture.member_db.database())
+    let member_coverage = StoreDatabase::new(&fixture.member_db)
         .circle_bootstrap_coverage_ref(circle_id)
         .await
         .expect("read member Circle bootstrap coverage")
@@ -2140,18 +2176,17 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     // is present and names the exact bootstrap coverage row the member installed.
     let member_device_id = fixture
         .member_db
-        .database()
         .local_store_device_id_for_test()
         .await
         .expect("read local Store device id");
-    let member_ack_ref = StoreDatabase::new(fixture.db.database())
+    let member_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, member_device_id)
         .await
         .expect("read activated member Circle acknowledgement")
         .expect("the owner activated the member's Circle acknowledgement");
     let member_ack = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &member_ack_ref)
         .await
         .expect("owner reads the member's Circle acknowledgement");
     assert_eq!(
@@ -2164,18 +2199,17 @@ async fn member_circle_acknowledgement_names_its_seed_bootstrap_coverage() {
     // its own acknowledgement names no seed coverage.
     let owner_device_id = fixture
         .db
-        .database()
         .local_store_device_id_for_test()
         .await
         .expect("read local Store device id");
-    let owner_ack_ref = StoreDatabase::new(fixture.db.database())
+    let owner_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, owner_device_id)
         .await
         .expect("read activated owner Circle acknowledgement")
         .expect("the owner activated its own Circle acknowledgement");
     let owner_ack = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &owner_ack_ref)
         .await
         .expect("owner reads its own Circle acknowledgement");
     assert!(
@@ -2198,7 +2232,7 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
     // close to successor activation. The member stays a Store member.
     fixture.close_epoch_by_removing_the_circle_member().await;
 
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(circle_id, &owner_pk)
         .await
         .expect("successor Circle authoring context");
@@ -2209,7 +2243,7 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
     // activation — so it could author and read such a snapshot.
     let owner_device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind owner successor Circle Store");
     assert!(
@@ -2227,7 +2261,11 @@ async fn a_removed_member_cannot_read_a_successor_epoch_circle_snapshot() {
     member_view.pull().await;
     let member_device = fixture
         .store
-        .bind_device(&fixture.member_db, &fixture.member)
+        .bind_device(
+            &fixture.member_db,
+            fixture.member_device.store_dir.clone(),
+            &fixture.member,
+        )
         .await
         .expect("bind removed member Circle Store");
     assert!(
@@ -2257,7 +2295,7 @@ async fn circle_snapshot_publication_resumes_idempotently_across_upload_boundari
         "a blobless Circle snapshot uploads an image, then its metadata"
     );
     assert!(
-        StoreDatabase::new(baseline.db.database())
+        StoreDatabase::new(&baseline.db)
             .latest_local_circle_snapshot(baseline.circle_id)
             .await
             .expect("read baseline snapshot")
@@ -2393,13 +2431,12 @@ async fn tombstone_gc_resolves_a_live_reference_through_an_audience_scoped_row()
         .with_timezone(&chrono::Utc);
     fixture
         .db
-        .database()
         .enqueue_blob_delete_for_test(&stored, "2026-07-23T00:11:00Z")
         .await
         .expect("enqueue the blob deletion");
     let loaded_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("load the Owner Store");
     let writer = loaded_store
@@ -2601,7 +2638,7 @@ async fn audience_blob_reclaim_deletes_the_stranded_source_ciphertext() {
     // names is held back rather than deleted.
     let mut pinned_by_an_image = Vec::new();
     for stored in &sources {
-        if StoreDatabase::new(fixture.db.database())
+        if StoreDatabase::new(&fixture.db)
             .stored_blob_has_snapshot_owner_for_test(stored.clone())
             .await
             .expect("read the blob's snapshot ownership")
@@ -2905,7 +2942,7 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
         .await;
     let owner_device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind Circle package replay Store");
 
@@ -2946,7 +2983,7 @@ async fn circle_package_reclaim_deletes_a_snapshot_covered_package() {
             .expect("read Circle package replay retention after reclaim"),
         "the reclaimed Circle package no longer has an ownership record"
     );
-    let row_present = StoreDatabase::new(fixture.db.database())
+    let row_present = StoreDatabase::new(&fixture.db)
         .read(|sql| {
             sql.query_row(
                 "SELECT EXISTS(
@@ -2978,7 +3015,7 @@ async fn circle_package_reclaim_refuses_a_replay_retained_package() {
         .await;
     let owner_device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind replay-retained Circle package Store");
 
@@ -3021,7 +3058,7 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
 
     // The member's projection seeds from a real bootstrap coverage row the install
     // recorded — the coverage its acknowledgements will name.
-    let member_coverage = StoreDatabase::new(fixture.member_db.database())
+    let member_coverage = StoreDatabase::new(&fixture.member_db)
         .circle_bootstrap_coverage_ref(circle_id)
         .await
         .expect("read member Circle bootstrap coverage")
@@ -3035,18 +3072,17 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
     // cross-device evidence the owner reads and dominates to prove stability.
     let member_device_id = fixture
         .member_db
-        .database()
         .local_store_device_id_for_test()
         .await
         .expect("read local Store device id");
-    let member_ack_ref = StoreDatabase::new(fixture.db.database())
+    let member_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, member_device_id)
         .await
         .expect("read activated member acknowledgement")
         .expect("the owner activated the member acknowledgement");
     let member_ack = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &member_ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &member_ack_ref)
         .await
         .expect("owner reads the member acknowledgement");
     assert_eq!(
@@ -3069,7 +3105,7 @@ async fn circle_package_reclaim_verifies_a_cross_device_seeded_acknowledgement()
     );
     let owner_device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.signer)
         .await
         .expect("bind reclaimed Circle package Store");
     assert!(
@@ -3111,6 +3147,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         .store
         .invite_member(
             &fixture.db,
+            fixture.store_dir.clone(),
             &fixture.signer,
             &second_pubkey,
             None,
@@ -3120,10 +3157,18 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
         )
         .await
         .expect("invite the second Store member");
-    let second_db = open_circle_routing_test_db();
+    let second_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_db = open_circle_routing_test_db(second_db_store_dir.clone());
     fixture
         .store
-        .activate_joined_device(&fixture.db, &second_db, &second, "2026-07-25T02:00:00Z")
+        .activate_joined_device(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            &second_db,
+            second_db_store_dir,
+            &second,
+            "2026-07-25T02:00:00Z",
+        )
         .await
         .expect("activate the second member device");
     fixture
@@ -3240,7 +3285,7 @@ async fn circle_bootstrap_reclaim_unblocks_when_recipient_loses_authority() {
     // activates whose roster excludes the member.
     fixture.close_epoch_by_removing_the_circle_member().await;
     assert!(
-        !StoreDatabase::new(fixture.db.database())
+        !StoreDatabase::new(&fixture.db)
             .circle_current_roster_members(circle_id)
             .await
             .expect("read successor roster")
@@ -3301,7 +3346,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
         "revoking Store membership marks the Circle rotation-required"
     );
     assert!(
-        StoreDatabase::new(fixture.db.database())
+        StoreDatabase::new(&fixture.db)
             .circle_current_roster_members(circle_id)
             .await
             .expect("read roster after Store revocation")
@@ -3323,7 +3368,7 @@ async fn store_membership_revocation_cascades_into_bootstrap_reclaim() {
     // evidence the lost-authority arm consumes, and the seed image is now reclaimed.
     fixture.close_epoch_by_removing_the_circle_member().await;
     assert!(
-        !StoreDatabase::new(fixture.db.database())
+        !StoreDatabase::new(&fixture.db)
             .circle_current_roster_members(circle_id)
             .await
             .expect("read successor roster")
@@ -3352,7 +3397,7 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("owner acknowledges under the pre-rotation epoch");
-    let (old_authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (old_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(circle_id, &owner_pk)
         .await
         .expect("pre-rotation Circle authoring context");
@@ -3360,11 +3405,10 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     let old_epoch = old_authoring.control.value.epoch_id();
     let owner_device_id = fixture
         .db
-        .database()
         .local_store_device_id_for_test()
         .await
         .expect("read local Store device id");
-    let owner_ack_ref = StoreDatabase::new(fixture.db.database())
+    let owner_ack_ref = StoreDatabase::new(&fixture.db)
         .activated_circle_ack(circle_id, owner_device_id)
         .await
         .expect("read owner activated acknowledgement")
@@ -3373,7 +3417,7 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     // Rotate the epoch: remove the roster member and finalize the close.
     fixture.remove_store_member().await;
     fixture.close_epoch_by_removing_the_circle_member().await;
-    let (new_authoring, _) = StoreDatabase::new(fixture.db.database())
+    let (new_authoring, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(circle_id, &owner_pk)
         .await
         .expect("successor Circle authoring context");
@@ -3386,7 +3430,7 @@ async fn circle_package_reclaim_reads_an_acknowledgement_sealed_under_a_rotated_
     // path reclaim stability uses) still reads the pre-rotation acknowledgement.
     let acknowledgement = fixture
         .store
-        .load_circle_acknowledgement(&fixture.db, &owner_ack_ref)
+        .load_circle_acknowledgement(&fixture.db, fixture.store_dir.clone(), &owner_ack_ref)
         .await
         .expect("reclaim reads a rotated-epoch acknowledgement via its retained control");
     assert_eq!(

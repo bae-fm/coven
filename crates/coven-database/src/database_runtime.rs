@@ -111,6 +111,15 @@ impl Database {
         self.connection.store_receive_wall_ms()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn assert_owns_payload_directory_for_test(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) {
+        self.connection
+            .assert_owns_payload_directory_for_test(store_dir);
+    }
+
     pub(crate) fn new_store_id(&self) -> String {
         self.connection.new_store_id()
     }

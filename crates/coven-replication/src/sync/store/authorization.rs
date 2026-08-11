@@ -42,8 +42,18 @@ pub struct StoreRestoreMembership {
 }
 
 pub(crate) struct InitializedStore {
-    pub(crate) store: Store,
-    pub(crate) device_id: String,
+    store: Store,
+    device_id: String,
+}
+
+impl InitializedStore {
+    pub(crate) fn new(store: Store, device_id: String) -> Self {
+        Self { store, device_id }
+    }
+
+    pub(crate) fn into_parts(self) -> (Store, String) {
+        (self.store, self.device_id)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,12 +90,11 @@ impl Store {
         Ok(transport::DeviceJoinOfferBundle {
             version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
             offer,
-            transport: transport::DeviceJoinTransportParams {
-                version: coven_protocol::store_commit::STORE_PROTOCOL_VERSION,
+            transport: transport::DeviceJoinTransportParams::new(
                 attempt_namespace,
                 slots,
-                seal_key: coven_keys::encryption::MasterKeyring::generate(),
-            },
+                coven_keys::encryption::MasterKeyring::generate(),
+            ),
         })
     }
 

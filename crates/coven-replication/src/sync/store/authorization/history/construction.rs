@@ -78,7 +78,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             Some(device_id.clone()),
             self.history_verifier.verified_root().clone(),
         );
-        Ok(InitializedStore { store, device_id })
+        Ok(InitializedStore::new(store, device_id))
     }
 
     pub(crate) async fn install_existing_founder_device(

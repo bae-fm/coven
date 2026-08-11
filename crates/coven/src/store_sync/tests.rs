@@ -10,6 +10,7 @@ use coven_keys::encryption::MasterKeyring;
 use coven_keys::keys::{
     test_keyring, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys,
 };
+use coven_replication::sync::store::blob::LocalStoreBlobAccess;
 use coven_storage::cloud::setup::StorageSetupError;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo};
@@ -60,8 +61,9 @@ fn store_security(
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
+    store_dir: &StoreDir,
 ) -> StoreSecurity {
-    StoreSecurity::new(keys, master_keys, identity)
+    StoreSecurity::new(keys, master_keys, identity, store_dir.clone())
 }
 
 fn store_cloud_storage(
@@ -86,23 +88,31 @@ fn store_sync(
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
-    database: coven_database::SyntheticStoreFixture,
+    database: coven_database::Database,
     store_dir: &StoreDir,
 ) -> StoreSync {
-    let database = StoreDatabase::from_database(database.database().clone());
-    let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+    let database = StoreDatabase::from_database(database.clone());
+    let local_blob_access = LocalStoreBlobAccess::new(
         database.clone(),
         store_dir.clone(),
+        coven_replication::sync::store::blob::StoreBlobCache::new(
+            database.clone(),
+            store_dir.clone(),
+        ),
     );
     let cloud_keys = keys.clone();
-    let security = store_security(keys, master_keys.clone(), identity);
+    let security = store_security(keys, master_keys.clone(), identity, store_dir);
     let clock: ClockRef = Arc::new(SystemClock);
     let cloud_storage = store_cloud_storage(&cloud_keys, &security, clock.clone());
     let blob_storage = crate::store_blobs::StoreBlobAccess::new(
         database.clone(),
         config_provider.clone(),
         cloud_storage.clone(),
-        owners.local_access(),
+        local_blob_access.clone(),
+    );
+    let local_blob_transitions = coven_replication::blob::transition::LocalBlobTransitions::new(
+        database.clone(),
+        store_dir.clone(),
     );
     StoreSync::new(
         config_provider,
@@ -114,9 +124,8 @@ fn store_sync(
         None,
         StoreOpenGuard::acquire_for_test(store_dir),
         cloud_storage,
-        owners.local_access(),
         blob_storage,
-        owners.local_transitions(),
+        local_blob_transitions,
     )
 }
 
@@ -152,22 +161,28 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let config = coven_domain::joining::config::build_config(
         store_id,
         "device",
-        &store_dir,
         "store",
         &join_info,
         &CloudCipher::Plaintext,
     );
     let cloud_keys = keys.clone();
     let master_keys: Arc<dyn MasterKeyCustody> = Arc::new(NoKeyCustody);
-    let security = store_security(keys, master_keys.clone(), established_identity_custody());
-    let database = StoreDatabase::from_database(
-        coven_replication::sync::test_helpers::open_test_db()
-            .database()
-            .clone(),
+    let security = store_security(
+        keys,
+        master_keys.clone(),
+        established_identity_custody(),
+        &store_dir,
     );
-    let owners = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+    let database = StoreDatabase::from_database(
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()).clone(),
+    );
+    let local_blob_access = LocalStoreBlobAccess::new(
         database.clone(),
         store_dir.clone(),
+        coven_replication::sync::store::blob::StoreBlobCache::new(
+            database.clone(),
+            store_dir.clone(),
+        ),
     );
     let config_provider: ConfigProvider = Arc::new(move || config.clone());
     let clock: ClockRef = Arc::new(SystemClock);
@@ -176,7 +191,11 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         database.clone(),
         config_provider.clone(),
         cloud_storage.clone(),
-        owners.local_access(),
+        local_blob_access.clone(),
+    );
+    let local_blob_transitions = coven_replication::blob::transition::LocalBlobTransitions::new(
+        database.clone(),
+        store_dir.clone(),
     );
     let sync = StoreSync::new(
         config_provider,
@@ -188,9 +207,8 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         None,
         StoreOpenGuard::acquire_for_test(&store_dir),
         cloud_storage,
-        owners.local_access(),
         blob_storage,
-        owners.local_transitions(),
+        local_blob_transitions,
     );
     let membership = StoreMembership::new(sync);
 
@@ -215,7 +233,6 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
     let mut config = Config::with_defaults(
         "sync-opaque-no-encryption".to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Test Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);
@@ -233,7 +250,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
         store_keys,
         Arc::new(NoKeyCustody),
         established_identity_custody(),
-        coven_replication::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
     );
 
@@ -253,17 +270,18 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     let mut initial_config = Config::with_defaults(
         "immutable-admission-before-stop".to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Blob Store".to_string(),
     );
     initial_config.cloud_home.storage = HomeStorage::Browsable;
     let config = Arc::new(RwLock::new(initial_config));
-    let database =
-        coven_replication::sync::test_helpers::open_test_db_with_blob(crate::BlobDecl::new(
+    let database = coven_replication::sync::test_helpers::open_test_db_with_blob(
+        store_dir.clone(),
+        crate::BlobDecl::new(
             "photos",
             crate::Provenance::HostProvided,
             crate::CacheFill::CacheLazy,
-        ));
+        ),
+    );
     let sync = store_sync(
         {
             let config = config.clone();
@@ -310,7 +328,6 @@ async fn probe_applies_exact_slot_admission_before_opening_the_provider() {
     let mut config = Config::with_defaults(
         "probe-exact-slot-admission".to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Blob Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::Dropbox);
@@ -321,7 +338,7 @@ async fn probe_applies_exact_slot_admission_before_opening_the_provider() {
         StoreKeys::bind("probe-exact-slot-admission".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
-        coven_replication::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
     );
 
@@ -344,7 +361,6 @@ async fn test_home_replacement_stops_the_previous_loop() {
     let mut config = Config::with_defaults(
         "sync-restart".to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Test Store".to_string(),
     );
     config.cloud_home.storage = HomeStorage::Browsable;
@@ -353,7 +369,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
         StoreKeys::bind("sync-restart".to_string()),
         Arc::new(NoKeyCustody),
         established_identity_custody(),
-        coven_replication::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
     );
     let home = Arc::new(InMemoryCloudHome::new());
@@ -375,7 +391,6 @@ async fn failed_restart_leaves_no_stale_connection() {
     let mut initial_config = Config::with_defaults(
         "sync-failed-restart".to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Test Store".to_string(),
     );
     initial_config.cloud_home.storage = HomeStorage::Browsable;
@@ -391,7 +406,7 @@ async fn failed_restart_leaves_no_stale_connection() {
         store_keys,
         custody,
         established_identity_custody(),
-        coven_replication::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
     );
     connect_test_home(
@@ -426,7 +441,6 @@ async fn connect_rejects_a_missing_device_identity() {
     let mut config = Config::with_defaults(
         store_id.clone(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Test Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);
@@ -438,7 +452,7 @@ async fn connect_rejects_a_missing_device_identity() {
         keys,
         Arc::new(NoKeyCustody),
         Arc::new(NoIdentityCustody),
-        coven_replication::sync::test_helpers::open_test_db(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
     );
 
@@ -459,7 +473,6 @@ async fn foreign_founder_installs_no_connection() {
     let mut config = Config::with_defaults(
         store_id.to_string(),
         "test-device".to_string(),
-        store_dir.clone(),
         "Test Store".to_string(),
     );
     config.cloud_home.storage = HomeStorage::Browsable;
@@ -472,9 +485,12 @@ async fn foreign_founder_installs_no_connection() {
         store_id,
         attacker.clone(),
     ));
-    let attacker_db = coven_replication::sync::test_helpers::open_test_db();
+    let attacker_db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+    let attacker_db =
+        coven_replication::sync::test_helpers::open_test_db(attacker_db_store_dir.clone());
     let _attacker_device = coven_replication::sync::test_helpers::TestDevice::create(
         &attacker_db,
+        attacker_db_store_dir,
         attacker_storage.clone(),
         store_id,
         attacker,
@@ -483,7 +499,7 @@ async fn foreign_founder_installs_no_connection() {
     .expect("publish attacker Store root");
 
     let victim = coven_keys::keys::UserKeypair::generate();
-    let database = coven_replication::sync::test_helpers::open_test_db();
+    let database = coven_replication::sync::test_helpers::open_test_db(store_dir.clone());
     let store_keys = StoreKeys::bind(store_id.to_string());
     let identity_custody = coven_keys::identity_custody::IdentityCustody::InMemory(victim)
         .resolve(&store_keys, &store_dir);
@@ -507,7 +523,6 @@ async fn foreign_founder_installs_no_connection() {
     assert!(!sync.has_remote_storage_for_test());
     assert_eq!(
         database
-            .database()
             .get_protocol_state(coven_protocol::membership::OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),
@@ -524,24 +539,23 @@ fn cipher_resolution_reads_current_custody_each_time() {
     let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
     let key_a = MasterKeyring::generate();
     custody.persist(&key_a).expect("establish key A");
-    let security = store_security(store_keys, custody.clone(), established_identity_custody());
+    let security = store_security(
+        store_keys,
+        custody.clone(),
+        established_identity_custody(),
+        &store_dir,
+    );
 
-    let fingerprint_a = match security
-        .cloud_cipher_for_test(HomeStorage::Opaque)
+    let fingerprint_a = security
+        .cloud_cipher_fingerprint_for_test(HomeStorage::Opaque)
         .expect("resolve key A")
-    {
-        CloudCipher::Encrypted(encryption) => encryption.fingerprint(),
-        CloudCipher::Plaintext => panic!("opaque storage must resolve an encrypted cipher"),
-    };
+        .expect("opaque storage must resolve an encrypted cipher");
     let key_b = MasterKeyring::generate();
     custody.persist(&key_b).expect("replace custody with key B");
-    let fingerprint_b = match security
-        .cloud_cipher_for_test(HomeStorage::Opaque)
+    let fingerprint_b = security
+        .cloud_cipher_fingerprint_for_test(HomeStorage::Opaque)
         .expect("resolve key B")
-    {
-        CloudCipher::Encrypted(encryption) => encryption.fingerprint(),
-        CloudCipher::Plaintext => panic!("opaque storage must resolve an encrypted cipher"),
-    };
+        .expect("opaque storage must resolve an encrypted cipher");
 
     assert_eq!(fingerprint_a, key_a.fingerprint());
     assert_eq!(fingerprint_b, key_b.fingerprint());

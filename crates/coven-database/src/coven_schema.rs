@@ -7,7 +7,7 @@
 //! row-bound blob locators — all
 //! created STRICT by `apply_coven_schema`, which coven
 //! runs against the connection it owns during open. The host does not implement
-//! any of this; app SQL goes through `CovenHandle::sql` or `CovenHandle::write`.
+//! any of this; app SQL goes through `CovenHandle::write` or `CovenHandle::read`.
 
 use crate::{query_mapped_rows, DbError};
 

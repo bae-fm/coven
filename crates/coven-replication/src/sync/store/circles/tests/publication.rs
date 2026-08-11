@@ -1,5 +1,5 @@
 use super::*;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use std::collections::BTreeSet;
 
 fn circle_routing_test_schema() -> (
@@ -24,15 +24,19 @@ fn circle_routing_test_schema() -> (
     )
 }
 
-fn open_circle_routing_test_db() -> SyntheticStoreFixture {
+fn open_circle_routing_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     let (tables, migrations) = circle_routing_test_schema();
-    crate::sync::test_helpers::open_test_db_schema(tables, migrations)
+    crate::sync::test_helpers::open_test_db_schema(store_dir, tables, migrations)
 }
 
-fn open_circle_routing_test_db_at(path: &std::path::Path) -> SyntheticStoreFixture {
+fn open_circle_routing_test_db_at(
+    path: &std::path::Path,
+) -> (Database, coven_foundation::store_dir::StoreDir) {
     let (tables, migrations) = circle_routing_test_schema();
-    SyntheticStoreFixture::open(
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
+    let database = Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -40,14 +44,19 @@ fn open_circle_routing_test_db_at(path: &std::path::Path) -> SyntheticStoreFixtu
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
-    .expect("open copied Circle routing database")
+    .expect("open copied Circle routing database");
+    (database, store_dir)
 }
 
 /// The Circle operation database on disk, so the restart cases can close it and
 /// open the same file again.
-fn open_persistent_circle_test_db(path: &std::path::Path) -> SyntheticStoreFixture {
-    SyntheticStoreFixture::open(
+fn open_persistent_circle_test_db(
+    path: &std::path::Path,
+) -> (Database, coven_foundation::store_dir::StoreDir) {
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
+    let database = Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -55,12 +64,14 @@ fn open_persistent_circle_test_db(path: &std::path::Path) -> SyntheticStoreFixtu
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &test_migrations(),
     )
-    .expect("open circle database")
+    .expect("open circle database");
+    (database, store_dir)
 }
 
 /// A Circle-scoped `documents` table whose rows carry a blob.
-fn open_circle_blob_test_db() -> SyntheticStoreFixture {
+fn open_circle_blob_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
             coven_protocol::synced_schema::RowIdentity::IndependentUuid,
@@ -87,8 +98,9 @@ fn open_circle_blob_test_db() -> SyntheticStoreFixture {
 
 /// A Circle-scoped `documents` table whose rows carry their bytes inline, so a
 /// single row can make the Circle's database image arbitrarily large.
-fn open_circle_bulk_row_test_db() -> SyntheticStoreFixture {
+fn open_circle_bulk_row_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
             coven_protocol::synced_schema::RowIdentity::IndependentUuid,
@@ -110,11 +122,11 @@ fn open_circle_bulk_row_test_db() -> SyntheticStoreFixture {
 /// The materialized `documents` row a recipient installed, as
 /// `(audience, size, hash, stamp)`.
 async fn installed_document_row(
-    db: &SyntheticStoreFixture,
+    db: &Database,
     row_id: &str,
 ) -> Result<(String, i64, String, String), DbError> {
     let row_id = row_id.to_string();
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(db)
         .read(move |sql| {
             sql.query_row(
                 "SELECT audience, size, hash, _updated_at
@@ -168,7 +180,8 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
         for after_visible_write in [false, true] {
             let mut call = 1;
             loop {
-                let db = open_test_db();
+                let db_store_dir = crate::sync::test_helpers::test_store_dir();
+                let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
                 let name = format!(
                     "circle-replay-{}-{call}",
                     if after_visible_write {
@@ -177,18 +190,19 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         "before"
                     }
                 );
-                let (store, _home, signer, expected) = persist_merge_operation(&db, &name).await;
+                let (store, _home, signer, expected) =
+                    persist_merge_operation(&db, db_store_dir.clone(), &name).await;
                 if call > expected.operation().prepared_objects.len() {
                     break;
                 }
                 assert_eq!(
-                    StoreDatabase::new(db.database())
+                    StoreDatabase::new(&db)
                         .circle_control_activation_count_for_test(expected.circle_id())
                         .await
                         .expect("count circle activations"),
                     0
                 );
-                assert!(coven_database::StoreDatabase::new(db.database())
+                assert!(coven_database::StoreDatabase::new(&db)
                     .get_circles(
                         &keys::public_key_hex(&signer),
                         BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -197,7 +211,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     .expect("read active circles")
                     .is_empty());
                 assert_eq!(
-                    coven_database::StoreDatabase::new(db.database())
+                    coven_database::StoreDatabase::new(&db)
                         .get_circle_operations()
                         .await
                         .expect("read pending circle operations"),
@@ -215,7 +229,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                 }
 
                 let first = store
-                    .bind_device(&db, &signer)
+                    .bind_device_in(&db, db_store_dir.clone(), &signer)
                     .await
                     .expect("bind Circle test Store")
                     .resume_circle_operations()
@@ -226,7 +240,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     let error =
                         first.expect_err("failure before exact create interrupts activation");
                     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-                    let persisted = coven_database::StoreDatabase::new(db.database())
+                    let persisted = coven_database::StoreDatabase::new(&db)
                         .circle_operation(&expected.operation_id)
                         .await
                         .expect("read interrupted operation")
@@ -234,7 +248,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     assert_exact_operation(&expected, &persisted);
                     assert_eq!(persisted.state(), CircleOperationState::Pending);
                     assert_eq!(
-                        StoreDatabase::new(db.database())
+                        StoreDatabase::new(&db)
                             .circle_control_activation_count_for_test(expected.circle_id())
                             .await
                             .expect("count circle activations"),
@@ -242,27 +256,27 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                     );
 
                     store
-                        .bind_device(&db, &signer)
+                        .bind_device_in(&db, db_store_dir.clone(), &signer)
                         .await
                         .expect("bind Circle test Store")
                         .resume_circle_operations()
                         .await
                         .expect("resume exact circle operation");
                 }
-                assert!(coven_database::StoreDatabase::new(db.database())
+                assert!(coven_database::StoreDatabase::new(&db)
                     .circle_operation(&expected.operation_id)
                     .await
                     .expect("read completed operation")
                     .is_none());
                 assert_eq!(
-                    StoreDatabase::new(db.database())
+                    StoreDatabase::new(&db)
                         .circle_control_activation_count_for_test(expected.circle_id())
                         .await
                         .expect("count circle activations"),
                     1
                 );
                 assert_eq!(
-                    coven_database::StoreDatabase::new(db.database())
+                    coven_database::StoreDatabase::new(&db)
                         .get_circles(
                             &keys::public_key_hex(&signer),
                             BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -276,7 +290,7 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
                         rotation_required: false,
                     }]
                 );
-                assert!(coven_database::StoreDatabase::new(db.database())
+                assert!(coven_database::StoreDatabase::new(&db)
                     .get_circle_operations()
                     .await
                     .expect("read completed circle operations")
@@ -293,10 +307,11 @@ async fn merge_publication_handles_every_exact_create_failure_boundary() {
 async fn pending_circle_operation_reopens_with_identical_signed_state() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-restart.sqlite3");
-    let db = open_persistent_circle_test_db(&path);
-    let (store, _home, signer, expected) = persist_merge_operation(&db, "circle-restart").await;
+    let (db, db_store_dir) = open_persistent_circle_test_db(&path);
+    let (store, _home, signer, expected) =
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-restart").await;
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(expected.circle_id())
             .await
             .expect("count circle activations"),
@@ -306,9 +321,9 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
         .join()
         .expect("close circle database");
 
-    let reopened = open_persistent_circle_test_db(&path);
+    let (reopened, reopened_store_dir) = open_persistent_circle_test_db(&path);
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .get_circle_operations()
             .await
             .expect("list reopened Circle operations")
@@ -317,7 +332,7 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
             .collect::<Vec<_>>(),
         vec![expected.operation_id.clone()]
     );
-    let persisted = StoreDatabase::new(reopened.database())
+    let persisted = StoreDatabase::new(&reopened)
         .circle_operation(&expected.operation_id)
         .await
         .expect("read reopened circle operation")
@@ -326,14 +341,14 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
     assert_eq!(persisted.state(), CircleOperationState::Pending);
 
     store
-        .bind_device(&reopened, &signer)
+        .bind_device_in(&reopened, reopened_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume reopened circle operation");
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .circle_control_activation_count_for_test(expected.circle_id())
             .await
             .expect("count circle activations"),
@@ -345,12 +360,12 @@ async fn pending_circle_operation_reopens_with_identical_signed_state() {
 async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-rename-restart.sqlite3");
-    let db = open_persistent_circle_test_db(&path);
+    let (db, db_store_dir) = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-rename-restart").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-rename-restart").await;
     let circle_id = founder.circle_id();
     let owner_device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store");
     owner_device
@@ -359,14 +374,14 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .expect("activate founder transition");
     _home.fail_exact_create_before_call(1);
     let error = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle rename Store")
         .rename_circle("0000000002000-0000-creator", circle_id, "Household money")
         .await
         .expect_err("failed exact create interrupts rename publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-    let operation_id = coven_database::StoreDatabase::new(db.database())
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted rename")
@@ -374,7 +389,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted rename is listed")
         .operation_id;
-    let expected = coven_database::StoreDatabase::new(db.database())
+    let expected = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted rename")
@@ -382,7 +397,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     assert_eq!(expected.kind(), CircleOperationKind::Rename);
     assert_eq!(expected.state(), CircleOperationState::Pending);
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
@@ -400,8 +415,8 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
         .join()
         .expect("close circle database");
 
-    let reopened = open_persistent_circle_test_db(&path);
-    let persisted = StoreDatabase::new(reopened.database())
+    let (reopened, reopened_store_dir) = open_persistent_circle_test_db(&path);
+    let persisted = StoreDatabase::new(&reopened)
         .circle_operation(&operation_id)
         .await
         .expect("read reopened rename")
@@ -409,21 +424,21 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
     assert_exact_operation(&expected, &persisted);
 
     store
-        .bind_device(&reopened, &signer)
+        .bind_device_in(&reopened, reopened_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume reopened rename");
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         2
     );
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .get_circles(
                 &keys::public_key_hex(&signer),
                 BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -437,7 +452,7 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
             rotation_required: false,
         }]
     );
-    assert!(StoreDatabase::new(reopened.database())
+    assert!(StoreDatabase::new(&reopened)
         .get_circle_operations()
         .await
         .expect("read completed rename operations")
@@ -448,12 +463,12 @@ async fn interrupted_rename_reopens_and_resumes_the_same_signed_transition() {
 async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-delete-restart.sqlite3");
-    let db = open_persistent_circle_test_db(&path);
+    let (db, db_store_dir) = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-delete-restart").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-delete-restart").await;
     let circle_id = founder.circle_id();
     let owner_device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store");
     owner_device
@@ -462,14 +477,14 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .expect("activate founder transition");
     _home.fail_exact_create_before_call(1);
     let error = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle deletion Store")
         .delete_circle(circle_id)
         .await
         .expect_err("failed exact create interrupts delete publication");
     assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
-    let operation_id = coven_database::StoreDatabase::new(db.database())
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted delete")
@@ -477,7 +492,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted delete is listed")
         .operation_id;
-    let expected = coven_database::StoreDatabase::new(db.database())
+    let expected = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted delete")
@@ -485,7 +500,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     assert_eq!(expected.kind(), CircleOperationKind::Delete);
     assert_eq!(expected.state(), CircleOperationState::Pending);
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
@@ -495,8 +510,8 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
         .join()
         .expect("close circle database");
 
-    let reopened = open_persistent_circle_test_db(&path);
-    let persisted = StoreDatabase::new(reopened.database())
+    let (reopened, reopened_store_dir) = open_persistent_circle_test_db(&path);
+    let persisted = StoreDatabase::new(&reopened)
         .circle_operation(&operation_id)
         .await
         .expect("read reopened delete")
@@ -504,21 +519,21 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
     assert_exact_operation(&expected, &persisted);
 
     store
-        .bind_device(&reopened, &signer)
+        .bind_device_in(&reopened, reopened_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume reopened delete");
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         2
     );
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .get_circles(
                 &keys::public_key_hex(&signer),
                 BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -527,7 +542,7 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
             .expect("read deleted circle"),
         vec![coven_protocol::circle::CircleInfo::Deleted { id: circle_id }]
     );
-    assert!(StoreDatabase::new(reopened.database())
+    assert!(StoreDatabase::new(&reopened)
         .get_circle_operations()
         .await
         .expect("read completed delete operations")
@@ -538,12 +553,12 @@ async fn interrupted_delete_reopens_and_resumes_the_same_signed_transition() {
 async fn a_forged_deletion_control_is_held_invalid() {
     let temp = tempfile::tempdir().expect("create database directory");
     let path = temp.path().join("circle-delete-forged.sqlite3");
-    let db = open_persistent_circle_test_db(&path);
+    let (db, db_store_dir) = open_persistent_circle_test_db(&path);
     let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-delete-forged").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-delete-forged").await;
     let circle_id = founder.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -551,13 +566,13 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .expect("activate founder transition");
     _home.fail_exact_create_before_call(1);
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle deletion Store")
         .delete_circle(circle_id)
         .await
         .expect_err("interrupt delete before its first exact upload");
-    let operation_id = coven_database::StoreDatabase::new(db.database())
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted delete")
@@ -565,7 +580,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted delete is pending")
         .operation_id;
-    let mut journal = coven_database::StoreDatabase::new(db.database())
+    let mut journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted delete")
@@ -579,20 +594,20 @@ async fn a_forged_deletion_control_is_held_invalid() {
         .control
         .value
         .corrupt_signature_for_test();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .substitute_circle_operation_for_test(journal)
         .await
         .expect("persist forged deletion");
 
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect_err("a forged deletion control is held invalid");
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
@@ -600,7 +615,7 @@ async fn a_forged_deletion_control_is_held_invalid() {
     );
     assert!(
         matches!(
-            coven_database::StoreDatabase::new(db.database())
+            coven_database::StoreDatabase::new(&db)
                 .get_circles(
                     &keys::public_key_hex(&signer),
                     BTreeSet::from([keys::public_key_hex(&signer)]),
@@ -621,12 +636,13 @@ async fn a_forged_deletion_control_is_held_invalid() {
 /// written once rather than rewritten with them at every upload step.
 #[tokio::test]
 async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
-    let db = open_circle_bulk_row_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = open_circle_bulk_row_test_db(db_store_dir.clone());
     let (store, _home, signer, founder) =
-        persist_merge_operation(&db, "circle-journal-payload").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-journal-payload").await;
     let circle_id = founder.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -639,7 +655,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
          VALUES ('00000000-0000-4000-8000-000000000001', '{circle_id}', '{body}',
                  '0000000001500-0000-owner')"
     );
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -647,7 +663,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
         )
         .await
         .expect("capture the Circle's bulk row");
-    let (_temp, store_dir) = temp_store_dir();
+    let store_dir = db_store_dir.clone();
     let components = prepare_owner_sync_components(
         &db,
         &store,
@@ -667,6 +683,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &signer,
             &member_pubkey,
             None,
@@ -676,9 +693,17 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
         )
         .await
         .expect("invite Store member");
-    let member_db = open_circle_bulk_row_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = open_circle_bulk_row_test_db(member_db_store_dir.clone());
     store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .activate_joined_device(
+            &db,
+            db_store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-23T00:00:00Z",
+        )
         .await
         .expect("activate Store member device");
 
@@ -690,7 +715,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
         .await
         .expect_err("interrupt the member addition before its first upload");
 
-    let operation_id = coven_database::StoreDatabase::new(db.database())
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list journaled Circle operations")
@@ -698,7 +723,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
         .find(|operation| operation.circle_id == circle_id)
         .expect("the interrupted member addition remains journaled")
         .operation_id;
-    let journal = coven_database::StoreDatabase::new(db.database())
+    let journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read the journaled member addition")
@@ -726,13 +751,14 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
 
 #[tokio::test]
 async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
-    let db = open_circle_blob_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = open_circle_blob_test_db(db_store_dir.clone());
     let (store_fixture, _home, signer, founder) =
-        persist_merge_operation_fixture(&db, "circle-member-bootstrap").await;
-    let (store, cloud_storage) = (store_fixture).into_parts();
+        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-member-bootstrap").await;
+    let (store, cloud_storage) = store_fixture;
     let circle_id = founder.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -743,6 +769,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &signer,
             &member_pubkey,
             None,
@@ -752,12 +779,20 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("invite Store member");
-    let member_db = open_circle_blob_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = open_circle_blob_test_db(member_db_store_dir.clone());
     store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .activate_joined_device(
+            &db,
+            db_store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-23T00:00:00Z",
+        )
         .await
         .expect("activate Store member device");
-    let (_temp, store_dir) = temp_store_dir();
+    let store_dir = db_store_dir.clone();
     let blob_id = "00000000-0000-4000-8000-000000000001";
     let blob_bytes = b"Circle bootstrap attachment";
     let insert = format!(
@@ -767,7 +802,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         coven_protocol::blob::content_hash(blob_bytes),
     );
     let routing = EncryptionService::from_key([42; 32]);
-    let write_id = coven_database::StoreDatabase::new(db.database())
+    let write_id = coven_database::StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |transaction| {
             transaction.execute_batch(&insert).map_err(DbError::from)
         })
@@ -792,7 +827,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish Circle row and blob");
-    let historical_commit = match coven_database::StoreDatabase::new(db.database())
+    let historical_commit = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("load historical Circle write status")
@@ -801,7 +836,6 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         status => panic!("historical Circle write was not published: {status:?}"),
     };
     let historical_blob = db
-        .database()
         .row_blob_ref("documents", blob_id)
         .await
         .expect("load blob reference from the founder control");
@@ -811,6 +845,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &signer,
             &concurrent_writer_pubkey,
             None,
@@ -820,11 +855,14 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
         .await
         .expect("invite concurrent Store writer");
-    let concurrent_db = open_circle_blob_test_db();
+    let concurrent_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let concurrent_db = open_circle_blob_test_db(concurrent_db_store_dir.clone());
     store
         .activate_joined_device(
             &db,
+            db_store_dir.clone(),
             &concurrent_db,
+            concurrent_db_store_dir.clone(),
             &concurrent_writer,
             "2026-07-23T00:00:01Z",
         )
@@ -834,16 +872,20 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .add_circle_member(circle_id, concurrent_writer_pubkey, CircleRole::Member)
         .await
         .expect("add concurrent Circle writer");
-    let concurrent_bootstrap_commit = coven_database::StoreDatabase::new(db.database())
+    let concurrent_bootstrap_commit = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load concurrent writer Circle bootstrap commit")
         .1;
     let concurrent_store = store
-        .bind_device(&concurrent_db, &concurrent_writer)
+        .bind_device_in(
+            &concurrent_db,
+            concurrent_db_store_dir.clone(),
+            &concurrent_writer,
+        )
         .await
         .expect("load concurrent Circle writer Store");
-    let (_concurrent_temp, concurrent_store_dir) = temp_store_dir();
+    let concurrent_store_dir = concurrent_db_store_dir.clone();
     concurrent_store
         .authorize_writer()
         .await
@@ -859,7 +901,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         late_bytes.len(),
         coven_protocol::blob::content_hash(late_bytes),
     );
-    let late_write_id = coven_database::StoreDatabase::new(concurrent_db.database())
+    let late_write_id = coven_database::StoreDatabase::new(&concurrent_db)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -890,7 +932,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("activate Circle member successor");
     let concurrent_store = crate::sync::store::Store::load(
-        StoreDatabase::new(concurrent_db.database()),
+        StoreDatabase::new(&concurrent_db),
         concurrent_storage.clone(),
         concurrent_store_dir.clone(),
         concurrent_writer.clone(),
@@ -916,7 +958,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .expect("publish late concurrent Circle package"),
         1
     );
-    let late_commit = match coven_database::StoreDatabase::new(concurrent_db.database())
+    let late_commit = match coven_database::StoreDatabase::new(&concurrent_db)
         .write_status(&late_write_id)
         .await
         .expect("load late concurrent Circle write status")
@@ -925,10 +967,10 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         status => panic!("late concurrent Circle write was not published: {status:?}"),
     };
     let member_store = store
-        .bind_device(&member_db, &member)
+        .bind_device_in(&member_db, member_db_store_dir.clone(), &member)
         .await
         .expect("load Circle member Store");
-    let target_control = coven_database::StoreDatabase::new(db.database())
+    let target_control = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load target Circle bootstrap control")
@@ -944,7 +986,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             .object(),
     )
     .to_string();
-    member_db.database().fail_next_merge_materialization_at(
+    member_db.fail_next_merge_materialization_at(
         coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
     );
     let injected = member_store
@@ -958,7 +1000,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         injected.to_string().contains("injected failure"),
         "{injected}"
     );
-    let partial_state = StoreDatabase::new(member_db.database())
+    let partial_state = StoreDatabase::new(&member_db)
         .circle_bootstrap_failure_state_for_test(
             blob_id.to_string(),
             circle_id,
@@ -980,7 +1022,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{:?}",
         member_pull.held_positions
     );
-    let installed_ids = StoreDatabase::new(member_db.database())
+    let installed_ids = StoreDatabase::new(&member_db)
         .read(|sql| {
             sql.query("SELECT id FROM documents ORDER BY id", [], |row| {
                 row.get::<_, String>(0)
@@ -1019,7 +1061,6 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         )
     );
     let installed_blob = member_db
-        .database()
         .row_blob_ref("documents", blob_id)
         .await
         .expect("recipient bootstrap installs the exact row blob graph");
@@ -1029,7 +1070,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         store.root().store_root_hash,
     )
     .expect("derive bootstrap replay routing key");
-    let member_database = StoreDatabase::new(member_db.database());
+    let member_database = StoreDatabase::new(&member_db);
     let (retained_count, retained_late_count, sabotaged_count, sabotaged_late_count) =
         member_database
             .compare_circle_bootstrap_replay_with_missing_coverage_for_test(
@@ -1054,7 +1095,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .await
         .expect("reject Circle bootstrap coverage without its payload claim");
     assert!(error.contains("payload claims differ"), "{error}");
-    let (current, member_bootstrap_commit) = StoreDatabase::new(member_db.database())
+    let (current, member_bootstrap_commit) = StoreDatabase::new(&member_db)
         .circle_authoring_context(circle_id, &member_pubkey)
         .await
         .expect("load Circle member successor state");
@@ -1071,7 +1112,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         "{error}"
     );
     let blob_owners = crate::sync::test_owner_graph::TestOwnerGraph::new(
-        coven_database::StoreDatabase::new(db.database()),
+        coven_database::StoreDatabase::new(&db),
         store_dir.clone(),
     );
     blob_owners
@@ -1118,11 +1159,8 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     else {
         panic!("successor access must carry its bootstrap image");
     };
-    assert_eq!(bootstrap.schema_version, db.database().schema_version());
-    assert_eq!(
-        bootstrap.sync_routing_hash,
-        db.database().sync_routing_hash()
-    );
+    assert_eq!(bootstrap.schema_version, db.schema_version());
+    assert_eq!(bootstrap.sync_routing_hash, db.sync_routing_hash());
     assert!(
         !bootstrap.coverage.covers_commit(&late_commit),
         "the bootstrap must not claim the concurrently published package"
@@ -1139,19 +1177,18 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     );
     let blob = blob.clone();
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         3
     );
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list completed Circle operations")
         .is_empty());
     let record = db
-        .database()
         .remote_object_for_test(bootstrap.image.object.clone())
         .await
         .expect("load bootstrap image ownership");
@@ -1169,7 +1206,6 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
         .object()
         .clone();
     let blob_record = db
-        .database()
         .remote_object_for_test(blob_object)
         .await
         .expect("read bootstrap blob ownership");
@@ -1205,13 +1241,14 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
 
 #[tokio::test]
 async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses() {
-    let db = open_circle_routing_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = open_circle_routing_test_db(db_store_dir.clone());
     let (store_fixture, _home, signer, founder) =
-        persist_merge_operation_fixture(&db, "circle-member-removal").await;
-    let (store, cloud_storage) = (store_fixture).into_parts();
+        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-member-removal").await;
+    let (store, cloud_storage) = store_fixture;
     let circle_id = founder.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -1223,6 +1260,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &signer,
             &member_pubkey,
             None,
@@ -1237,6 +1275,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &signer,
             &remaining_member_pubkey,
             None,
@@ -1246,13 +1285,21 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect("invite remaining Store member");
-    let member_db = open_circle_routing_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
     store
-        .activate_joined_device(&db, &member_db, &member, "2026-07-23T00:00:00Z")
+        .activate_joined_device(
+            &db,
+            db_store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-23T00:00:00Z",
+        )
         .await
         .expect("activate Store member device");
 
-    let (_temp, store_dir) = temp_store_dir();
+    let store_dir = db_store_dir.clone();
     let components = prepare_owner_sync_components(
         &db,
         &store,
@@ -1274,7 +1321,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect("add remaining Circle member");
-    let prior = coven_database::StoreDatabase::new(db.database())
+    let prior = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load pre-close Circle control")
@@ -1283,7 +1330,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let prior_epoch = prior.control.value.epoch_id();
     let prior_fingerprint = prior.control.value.key_fingerprint();
     let routing = EncryptionService::from_key([42; 32]);
-    let write_id = coven_database::StoreDatabase::new(db.database())
+    let write_id = coven_database::StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |transaction| {
             transaction
                 .execute(
@@ -1305,7 +1352,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("publish pre-close Circle package");
-    let package_commit_ref = match coven_database::StoreDatabase::new(db.database())
+    let package_commit_ref = match coven_database::StoreDatabase::new(&db)
         .write_status(&write_id)
         .await
         .expect("load pre-close Circle write status")
@@ -1314,7 +1361,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         status => panic!("pre-close Circle write was not published: {status:?}"),
     };
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind pre-close Circle package Store");
     let package_commit = device
@@ -1357,7 +1404,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .await
         .expect("activate Circle epoch close");
 
-    let operation = coven_database::StoreDatabase::new(db.database())
+    let operation = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read Circle removal operation")
@@ -1368,18 +1415,18 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         CircleOperationState::WaitingForCloseResponses
     );
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         4
     );
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .is_err());
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind historical Circle access Store");
     let historical_access = device
@@ -1401,16 +1448,15 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         tempfile::tempdir().expect("create candidate base database directory");
     let candidate_base_path = candidate_base_temp.path().join("pre-close.sqlite3");
     let copied_path = candidate_base_path.clone();
-    db.database()
-        .vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
+    db.vacuum_into_for_test(copied_path.to_string_lossy().into_owned())
         .await
         .expect("copy pre-close Circle database");
     crate::sync::test_helpers::copy_payload_files(
-        db.store_dir(),
+        &db_store_dir,
         &coven_foundation::store_dir::StoreDir::new_ephemeral(candidate_base_temp.path()),
     );
 
-    let controls = coven_database::StoreDatabase::new(db.database())
+    let controls = coven_database::StoreDatabase::new(&db)
         .closing_circle_controls()
         .await
         .expect("load closing Circle controls");
@@ -1433,12 +1479,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         store.root().store_root_hash,
         ProtocolObjectDomain::CircleEpochCloseResponse,
     );
-    let registration = coven_database::StoreDatabase::new(db.database())
+    let registration = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(participant.registration.clone())
         .await
         .expect("load response author registration");
     let loaded_store = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("load Circle close response Store");
     let mut authorized_store = loaded_store
@@ -1511,17 +1557,17 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("activate the exact Circle epoch-close outcome");
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read finalized Circle removal operation")
         .is_none());
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .closing_circle_controls()
         .await
         .expect("read closing Circle controls after finalization")
         .is_empty());
-    let (successor, successor_commit_ref) = coven_database::StoreDatabase::new(db.database())
+    let (successor, successor_commit_ref) = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
         .await
         .expect("load successor Circle authoring state");
@@ -1624,7 +1670,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     assert!(cutoff.covers_commit(&package_commit_ref));
 
     let activation = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind successor Circle Store")
         .verified_circle_activation_for_test(circle_id, successor.control.coord.clone())
@@ -1682,7 +1728,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response),
         )],
     ));
-    assert!(StoreDatabase::new(db.database())
+    assert!(StoreDatabase::new(&db)
         .read(|sql| {
             sql.query_row(
                 "SELECT EXISTS(
@@ -1736,7 +1782,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         candidate_family,
         candidate_write_id.clone(),
         candidate_coord.clone(),
-        db.database().schema_version(),
+        db.schema_version(),
         circle_id,
         prior_control.clone(),
         prior_fingerprint,
@@ -1782,7 +1828,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         key_fingerprint: prior_fingerprint,
         package: coven_protocol::store_commit::StorePackageInput {
             candidate_family,
-            schema_version: db.database().schema_version(),
+            schema_version: db.schema_version(),
             bytes: &candidate_package_bytes,
             object: candidate_package_object.reference().clone(),
         },
@@ -1851,9 +1897,14 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         .verify_circle_package(circle_id, &candidate_package_bytes)
         .expect("combined Circle candidate binds its exact old-control package");
 
-    let candidate_base_database = open_circle_routing_test_db_at(&candidate_base_path);
+    let (candidate_base_database, candidate_base_database_store_dir) =
+        open_circle_routing_test_db_at(&candidate_base_path);
     let candidate_device = store
-        .bind_device(&candidate_base_database, &signer)
+        .bind_device_in(
+            &candidate_base_database,
+            candidate_base_database_store_dir.clone(),
+            &signer,
+        )
         .await
         .expect("bind candidate successor Circle Store");
     _home.clear_exact_reads();
@@ -1886,7 +1937,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         &successor_bootstrap.coverage, cutoff,
         "the successor bootstrap covers exactly the accepted close cutoff"
     );
-    let retained_bootstrap = StoreDatabase::new(db.database())
+    let retained_bootstrap = StoreDatabase::new(&db)
         .circle_bootstrap_replay_for_control_for_test(circle_id, successor.control.coord.clone())
         .await
         .expect("read retained successor bootstrap replay input")
@@ -1923,18 +1974,22 @@ async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activa
         } else {
             "circle-missing-upload.sqlite3"
         });
-        let db = open_persistent_circle_test_db(&path);
-        let (store, _home, signer, expected) =
-            persist_merge_operation(&db, if corrupt { "corrupt" } else { "missing" }).await;
+        let (db, db_store_dir) = open_persistent_circle_test_db(&path);
+        let (store, _home, signer, expected) = persist_merge_operation(
+            &db,
+            db_store_dir.clone(),
+            if corrupt { "corrupt" } else { "missing" },
+        )
+        .await;
         _home.fail_exact_create_before_call(2);
         store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store")
             .resume_circle_operations()
             .await
             .expect_err("second exact create failure interrupts publication");
-        let persisted = coven_database::StoreDatabase::new(db.database())
+        let persisted = coven_database::StoreDatabase::new(&db)
             .circle_operation(&expected.operation_id)
             .await
             .expect("read interrupted circle operation")
@@ -1946,7 +2001,7 @@ async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activa
             .prepared_objects
             .get("metadata")
             .expect("operation carries exact metadata object");
-        let database = coven_database::StoreDatabase::new(db.database());
+        let database = coven_database::StoreDatabase::new(&db);
         let exact_reads = _home.exact_reads().len();
         if corrupt {
             database
@@ -1966,9 +2021,9 @@ async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activa
             .join()
             .expect("close circle database");
 
-        let reopened = open_persistent_circle_test_db(&path);
+        let (reopened, reopened_store_dir) = open_persistent_circle_test_db(&path);
         store
-            .bind_device(&reopened, &signer)
+            .bind_device_in(&reopened, reopened_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store")
             .resume_circle_operations()
@@ -1981,13 +2036,13 @@ async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activa
             "restart downloaded an uploaded Circle step",
         );
         assert_eq!(
-            StoreDatabase::new(reopened.database())
+            StoreDatabase::new(&reopened)
                 .circle_control_activation_count_for_test(expected.circle_id())
                 .await
                 .expect("count circle activations"),
             0
         );
-        assert!(StoreDatabase::new(reopened.database())
+        assert!(StoreDatabase::new(&reopened)
             .circle_operation(&expected.operation_id)
             .await
             .expect("read rejected circle operation")
@@ -1997,9 +2052,14 @@ async fn uploaded_circle_steps_reopen_local_payloads_after_restart_before_activa
 
 #[tokio::test]
 async fn an_upload_step_fails_when_its_object_has_no_ownership_record() {
-    let db = open_test_db();
-    let (_store, _home, _signer, journal) =
-        persist_merge_operation(&db, "circle-missing-candidate-ownership").await;
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (_store, _home, _signer, journal) = persist_merge_operation(
+        &db,
+        db_store_dir.clone(),
+        "circle-missing-candidate-ownership",
+    )
+    .await;
     let step = "access-leaf-0";
     let object = journal
         .operation()
@@ -2007,17 +2067,16 @@ async fn an_upload_step_fails_when_its_object_has_no_ownership_record() {
         .get(step)
         .expect("operation carries its access leaf")
         .clone();
-    db.database()
-        .delete_remote_object_for_test(object)
+    db.delete_remote_object_for_test(object)
         .await
         .expect("remove candidate ownership record");
 
-    let error = coven_database::StoreDatabase::new(db.database())
+    let error = coven_database::StoreDatabase::new(&db)
         .complete_circle_operation_upload_step(&journal.operation_id, step)
         .await
         .expect_err("an uploaded candidate must retain its ownership record");
     assert!(error.to_string().contains("remote object"), "{error}");
-    let persisted = coven_database::StoreDatabase::new(db.database())
+    let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read operation after rejected step")
@@ -2027,17 +2086,18 @@ async fn an_upload_step_fails_when_its_object_has_no_ownership_record() {
 
 #[tokio::test]
 async fn an_upload_step_must_name_a_prepared_object() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (_store, _home, _signer, journal) =
-        persist_merge_operation(&db, "circle-unknown-upload-marker").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-unknown-upload-marker").await;
     let unknown_step = "absent-prepared-object";
 
-    let error = coven_database::StoreDatabase::new(db.database())
+    let error = coven_database::StoreDatabase::new(&db)
         .complete_circle_operation_upload_step(&journal.operation_id, unknown_step)
         .await
         .expect_err("an upload step must name a prepared object");
     assert!(error.to_string().contains(unknown_step), "{error}");
-    let persisted = coven_database::StoreDatabase::new(db.database())
+    let persisted = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read operation after rejected upload step")
@@ -2051,13 +2111,20 @@ async fn an_upload_step_must_name_a_prepared_object() {
 /// plaintext no longer matches the objects prepared from it.
 #[tokio::test]
 async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let store =
-        create_test_store_in_its_own_task(&db, "circle-tampered-local-access", &signer, home).await;
+    let store = create_test_store_in_its_own_task(
+        &db,
+        db_store_dir.clone(),
+        "circle-tampered-local-access",
+        &signer,
+        home,
+    )
+    .await;
     let mut prepared = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-creator", "Household")
@@ -2079,7 +2146,7 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
     own_access.leaf.value.body_mut().disposition = CircleAccessDisposition::Inactive;
     let circle_id = prepared.journal.circle_id();
     let operation_id = prepared.journal.operation_id.clone();
-    let error = coven_database::StoreDatabase::new(db.database())
+    let error = coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect_err("journaling must verify its closed candidate graph");
@@ -2089,13 +2156,13 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
     );
 
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(circle_id)
             .await
             .expect("count circle activations"),
         0
     );
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read rejected operation")
@@ -2103,8 +2170,8 @@ async fn journaling_an_operation_rejects_a_tampered_leaf_disposition() {
 }
 
 struct ClosingFounderCircle {
-    _temp: tempfile::TempDir,
-    db: SyntheticStoreFixture,
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     store: std::sync::Arc<TestStore>,
     cloud_storage: Arc<coven_storage::CloudSyncConnection>,
     home: Arc<coven_storage::InMemoryCloudHome>,
@@ -2112,8 +2179,8 @@ struct ClosingFounderCircle {
     components: crate::sync::cycle::SyncComponents,
     circle_id: CircleId,
     member: UserKeypair,
-    member_db: SyntheticStoreFixture,
-    _member_temp: tempfile::TempDir,
+    member_db: Database,
+    member_db_store_dir: coven_foundation::store_dir::StoreDir,
     member_pubkey: String,
     remaining_member_pubkey: String,
     operation_id: CircleOperationId,
@@ -2125,13 +2192,14 @@ impl ClosingFounderCircle {
     /// Drive a founder Circle to a member removal waiting on close responses.
     /// The returned fixture resumes from `CircleOperationState::WaitingForCloseResponses`.
     async fn build(name: &str) -> Self {
-        let db = open_circle_routing_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = open_circle_routing_test_db(db_store_dir.clone());
         let (store_fixture, _home, signer, founder) =
-            persist_merge_operation_fixture(&db, name).await;
-        let (store, cloud_storage) = (store_fixture).into_parts();
+            persist_merge_operation_fixture(&db, db_store_dir.clone(), name).await;
+        let (store, cloud_storage) = store_fixture;
         let circle_id = founder.circle_id();
         let owner_device = store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store");
         owner_device
@@ -2144,6 +2212,7 @@ impl ClosingFounderCircle {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &member_pubkey,
                 None,
@@ -2158,6 +2227,7 @@ impl ClosingFounderCircle {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &remaining_member_pubkey,
                 None,
@@ -2167,15 +2237,22 @@ impl ClosingFounderCircle {
             )
             .await
             .expect("invite remaining Store member");
-        let member_db = open_circle_routing_test_db();
+        let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
         store
-            .activate_joined_device(&db, &member_db, &member, "2026-07-24T00:00:00Z")
+            .activate_joined_device(
+                &db,
+                db_store_dir.clone(),
+                &member_db,
+                member_db_store_dir.clone(),
+                &member,
+                "2026-07-24T00:00:00Z",
+            )
             .await
             .expect("activate Store member device");
 
-        let (_temp, store_dir) = temp_store_dir();
         let components =
-            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, name).await;
+            prepare_owner_sync_components(&db, &store, &_home, &db_store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, member_pubkey.clone(), CircleRole::Member)
             .await
@@ -2192,11 +2269,10 @@ impl ClosingFounderCircle {
         // The member's own device installs the Circle bootstrap and becomes an active
         // effective member holding the epoch key.
         let member_storage = Arc::new(circle_test_cloud_storage(&_home, name, &member));
-        let (_member_temp, member_store_dir) = temp_store_dir();
         crate::sync::store::Store::load(
-            StoreDatabase::new(member_db.database()),
+            StoreDatabase::new(&member_db),
             member_storage.clone(),
-            member_store_dir.clone(),
+            member_db_store_dir.clone(),
             member.clone(),
         )
         .await
@@ -2208,7 +2284,7 @@ impl ClosingFounderCircle {
         .await
         .expect("member installs the Circle bootstrap");
 
-        let prior = coven_database::StoreDatabase::new(db.database())
+        let prior = coven_database::StoreDatabase::new(&db)
             .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
             .await
             .expect("load pre-close Circle control")
@@ -2221,7 +2297,7 @@ impl ClosingFounderCircle {
             .await
             .expect("activate Circle epoch close");
         assert_eq!(
-            coven_database::StoreDatabase::new(db.database())
+            coven_database::StoreDatabase::new(&db)
                 .circle_operation(&operation_id)
                 .await
                 .expect("read Circle removal operation")
@@ -2231,8 +2307,8 @@ impl ClosingFounderCircle {
         );
 
         Self {
-            _temp,
             db,
+            db_store_dir,
             store,
             cloud_storage,
             home: _home,
@@ -2241,7 +2317,7 @@ impl ClosingFounderCircle {
             circle_id,
             member,
             member_db,
-            _member_temp,
+            member_db_store_dir,
             member_pubkey,
             remaining_member_pubkey,
             operation_id,
@@ -2255,7 +2331,7 @@ impl ClosingFounderCircle {
     async fn begin_cancellation_finalization(&self) {
         let device = self
             .store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.db_store_dir.clone(), &self.signer)
             .await
             .expect("load Circle cancellation Store");
         let mut writer = device
@@ -2272,7 +2348,11 @@ impl ClosingFounderCircle {
 
     async fn member_pull(&self) {
         self.store
-            .bind_device(&self.member_db, &self.member)
+            .bind_device(
+                &self.member_db,
+                self.member_db_store_dir.clone(),
+                &self.member,
+            )
             .await
             .expect("load Circle member Store")
             .authorize_writer()
@@ -2288,7 +2368,11 @@ impl ClosingFounderCircle {
     /// frozen — the closing Circle has no active control to resolve.
     async fn member_push(&self) -> Result<u64, String> {
         self.store
-            .bind_device(&self.member_db, &self.member)
+            .bind_device(
+                &self.member_db,
+                self.member_db_store_dir.clone(),
+                &self.member,
+            )
             .await
             .map_err(|error| error.to_string())?
             .authorize_writer()
@@ -2304,7 +2388,6 @@ impl ClosingFounderCircle {
     async fn publish_owner_circle_row(&self, row_id: &str, stamp: &str) {
         let write_id = self
             .db
-            .database()
             .capture_circle_document_for_test(row_id, self.circle_id, stamp)
             .await
             .expect("capture owner Circle row");
@@ -2312,7 +2395,7 @@ impl ClosingFounderCircle {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish owner Circle row");
-        match coven_database::StoreDatabase::new(self.db.database())
+        match coven_database::StoreDatabase::new(&self.db)
             .write_status(&write_id)
             .await
             .expect("read owner Circle write status")
@@ -2323,12 +2406,12 @@ impl ClosingFounderCircle {
     }
 
     async fn assert_cancellation_reopened(&self) {
-        assert!(StoreDatabase::new(self.db.database())
+        assert!(StoreDatabase::new(&self.db)
             .circle_operation(&self.operation_id)
             .await
             .expect("read completed cancellation operation")
             .is_none());
-        let (reopened, _) = StoreDatabase::new(self.db.database())
+        let (reopened, _) = StoreDatabase::new(&self.db)
             .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
             .await
             .expect("load reopened Circle authoring state");
@@ -2347,7 +2430,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
 
     // Authoring is frozen while the epoch is closing; capture the exact close
     // control the reopen must name as its predecessor.
-    let close_control = StoreDatabase::new(fixture.db.database())
+    let close_control = StoreDatabase::new(&fixture.db)
         .closing_circle_controls()
         .await
         .expect("read closing Circle controls")
@@ -2356,7 +2439,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         .expect("member removal leaves one closing Circle")
         .coord
         .clone();
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .is_err());
@@ -2366,7 +2449,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     // write does not reach the Store.
     let member_row = "00000000-0000-4000-8000-0000000000c1";
     let member_circle_id = fixture.circle_id;
-    let member_write_id = coven_database::StoreDatabase::new(fixture.member_db.database())
+    let member_write_id = coven_database::StoreDatabase::new(&fixture.member_db)
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([42; 32])),
             None,
@@ -2395,7 +2478,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     );
     assert!(
         !matches!(
-            coven_database::StoreDatabase::new(fixture.member_db.database())
+            coven_database::StoreDatabase::new(&fixture.member_db)
                 .write_status(&member_write_id)
                 .await
                 .expect("read member write status during close"),
@@ -2411,19 +2494,19 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         .expect("cancel the Circle epoch close");
 
     // The durable removal operation is complete and no close remains.
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read cancelled Circle removal operation")
         .is_none());
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .closing_circle_controls()
         .await
         .expect("read closing Circle controls after cancellation")
         .is_empty());
 
     // Authoring resumes on the identical epoch and key; the removal is undone.
-    let (reopened, _) = StoreDatabase::new(fixture.db.database())
+    let (reopened, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load reopened Circle authoring state");
@@ -2457,7 +2540,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     // The reopening control retains its exact cancellation binding.
     let activation = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind reopened Circle Store")
         .verified_circle_activation_for_test(fixture.circle_id, reopened.control.coord.clone())
@@ -2487,7 +2570,7 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
         1,
         "the member publishes its old-epoch package after the reopen"
     );
-    let published = match coven_database::StoreDatabase::new(fixture.member_db.database())
+    let published = match coven_database::StoreDatabase::new(&fixture.member_db)
         .write_status(&member_write_id)
         .await
         .expect("read member write status after reopen")
@@ -2497,7 +2580,11 @@ async fn cancelling_a_waiting_close_reopens_the_frozen_epoch() {
     };
     let member_device = fixture
         .store
-        .bind_device(&fixture.member_db, &fixture.member)
+        .bind_device(
+            &fixture.member_db,
+            fixture.member_db_store_dir.clone(),
+            &fixture.member,
+        )
         .await
         .expect("bind member Circle package Store");
     let member_package_commit = member_device
@@ -2525,11 +2612,12 @@ async fn cancelling_a_finalized_close_is_refused() {
     finalize_circle_epoch_close(
         &fixture.store,
         &fixture.db,
+        fixture.db_store_dir.clone(),
         &fixture.signer,
         &fixture.components,
     )
     .await;
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read finalized Circle removal operation")
@@ -2550,7 +2638,7 @@ async fn cancelling_a_finalized_close_is_refused() {
         ),
         "{error}"
     );
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load finalized successor Circle authoring state");
@@ -2579,11 +2667,12 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     finalize_circle_epoch_close(
         &fixture.store,
         &fixture.db,
+        fixture.db_store_dir.clone(),
         &fixture.signer,
         &fixture.components,
     )
     .await;
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load closed-origin successor authoring state");
@@ -2619,7 +2708,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     // removed-interval package stays unreadable to it.
     fixture.member_pull().await;
     assert!(
-        StoreDatabase::new(fixture.member_db.database())
+        StoreDatabase::new(&fixture.member_db)
             .circle_authoring_context(fixture.circle_id, &fixture.member_pubkey)
             .await
             .is_err(),
@@ -2628,7 +2717,6 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     assert!(
         !fixture
             .member_db
-            .database()
             .circle_document_present_for_test(interval_row)
             .await
             .expect("query member Circle document presence"),
@@ -2651,7 +2739,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     // The re-add operates within the same closed-origin epoch: same epoch id and
     // key, and no close outcome of its own — the outcome was settled once, at
     // finalization.
-    let (readded, _) = StoreDatabase::new(fixture.db.database())
+    let (readded, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load re-added authoring state");
@@ -2666,7 +2754,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
         .contains_key(&fixture.member_pubkey));
     let readded_activation = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind re-added Circle Store")
         .verified_circle_activation_for_test(fixture.circle_id, readded.control.coord.clone())
@@ -2692,7 +2780,7 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     // leaf is active under the current epoch and it reads the Circle's current
     // state.
     fixture.member_pull().await;
-    let (member_current, _) = StoreDatabase::new(fixture.member_db.database())
+    let (member_current, _) = StoreDatabase::new(&fixture.member_db)
         .circle_authoring_context(fixture.circle_id, &fixture.member_pubkey)
         .await
         .expect("re-added member resolves its current authoring state");
@@ -2710,7 +2798,6 @@ async fn re_adding_a_removed_member_after_close_activates_a_current_epoch_leaf()
     assert!(
         fixture
             .member_db
-            .database()
             .circle_document_present_for_test(current_row)
             .await
             .expect("query member Circle document presence"),
@@ -2724,13 +2811,13 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let owner_pubkey = keys::public_key_hex(&fixture.signer);
 
     // Prepare a legitimate reopen but do not publish it.
-    let (current, activation_commit_ref) = StoreDatabase::new(fixture.db.database())
+    let (current, activation_commit_ref) = StoreDatabase::new(&fixture.db)
         .circle_closing_context(fixture.circle_id, &owner_pubkey)
         .await
         .expect("load closing Circle context");
     let loaded_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Circle preparation Store");
     let activation_commit = loaded_store
@@ -2798,7 +2885,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     );
     let device = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind forged Circle commit Store");
     let mut writer = device
@@ -2814,7 +2901,7 @@ async fn reopen_control_without_a_slot_cancellation_is_invalid() {
     let forged_commit = journal.commit().expect("parse forged reopen commit");
     let error = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind forged Circle activation Store")
         .load_circle_activations(&journal.operation().commit_ref, &forged_commit, author)
@@ -2882,7 +2969,7 @@ async fn interrupted_cancellation_flow() {
     let before_publication = ClosingFounderCircle::build("circle-cancel-restart-before").await;
     before_publication.begin_cancellation_finalization().await;
     assert_eq!(
-        StoreDatabase::new(before_publication.db.database())
+        StoreDatabase::new(&before_publication.db)
             .circle_operation(&before_publication.operation_id)
             .await
             .expect("read persisted cancellation operation")
@@ -2892,7 +2979,11 @@ async fn interrupted_cancellation_flow() {
     );
     before_publication
         .store
-        .bind_device(&before_publication.db, &before_publication.signer)
+        .bind_device(
+            &before_publication.db,
+            before_publication.db_store_dir.clone(),
+            &before_publication.signer,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -2900,7 +2991,11 @@ async fn interrupted_cancellation_flow() {
         .expect("resume the interrupted cancellation");
     before_publication
         .store
-        .bind_device(&before_publication.db, &before_publication.signer)
+        .bind_device(
+            &before_publication.db,
+            before_publication.db_store_dir.clone(),
+            &before_publication.signer,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -2917,12 +3012,12 @@ async fn interrupted_cancellation_flow() {
     // final head create leaves the commit published and activation not recorded.
     let after_publication = ClosingFounderCircle::build("circle-cancel-restart-after").await;
     after_publication.begin_cancellation_finalization().await;
-    let journal = StoreDatabase::new(after_publication.db.database())
+    let journal = StoreDatabase::new(&after_publication.db)
         .circle_operation(&after_publication.operation_id)
         .await
         .expect("read finalizing cancellation operation")
         .expect("cancellation operation is durable");
-    let activations_before = StoreDatabase::new(after_publication.db.database())
+    let activations_before = StoreDatabase::new(&after_publication.db)
         .circle_control_activation_count_for_test(after_publication.circle_id)
         .await
         .expect("count circle activations");
@@ -2933,7 +3028,11 @@ async fn interrupted_cancellation_flow() {
 
     let interrupted = after_publication
         .store
-        .bind_device(&after_publication.db, &after_publication.signer)
+        .bind_device(
+            &after_publication.db,
+            after_publication.db_store_dir.clone(),
+            &after_publication.signer,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -2944,7 +3043,7 @@ async fn interrupted_cancellation_flow() {
         "{interrupted}"
     );
     assert_eq!(
-        StoreDatabase::new(after_publication.db.database())
+        StoreDatabase::new(&after_publication.db)
             .circle_control_activation_count_for_test(after_publication.circle_id)
             .await
             .expect("count circle activations"),
@@ -2952,7 +3051,7 @@ async fn interrupted_cancellation_flow() {
         "the interrupted cancellation has not activated"
     );
     assert_eq!(
-        StoreDatabase::new(after_publication.db.database())
+        StoreDatabase::new(&after_publication.db)
             .circle_operation(&after_publication.operation_id)
             .await
             .expect("read interrupted cancellation")
@@ -2963,7 +3062,11 @@ async fn interrupted_cancellation_flow() {
 
     after_publication
         .store
-        .bind_device(&after_publication.db, &after_publication.signer)
+        .bind_device(
+            &after_publication.db,
+            after_publication.db_store_dir.clone(),
+            &after_publication.signer,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -2971,7 +3074,7 @@ async fn interrupted_cancellation_flow() {
         .expect("resume completes the published-but-unactivated cancellation");
     after_publication.assert_cancellation_reopened().await;
     assert_eq!(
-        StoreDatabase::new(after_publication.db.database())
+        StoreDatabase::new(&after_publication.db)
             .circle_control_activation_count_for_test(after_publication.circle_id)
             .await
             .expect("count circle activations"),
@@ -2985,7 +3088,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     let fixture = ClosingFounderCircle::build("circle-finalize-durable-first").await;
     let store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Owner Store");
     let mut authorized = store
@@ -3015,7 +3118,7 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
         "{interrupted}"
     );
 
-    let recorded = StoreDatabase::new(fixture.db.database())
+    let recorded = StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read recorded finalization")
@@ -3066,18 +3169,18 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
     // nothing: the successor epoch, key, and commit object are byte-identical.
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume completes the recorded finalization");
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read completed finalization")
         .is_none());
-    let (successor, successor_commit_ref) = StoreDatabase::new(fixture.db.database())
+    let (successor, successor_commit_ref) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load finalized successor");
@@ -3092,8 +3195,8 @@ async fn interrupted_finalization_resumes_from_its_recorded_payload() {
 /// second device (`silent`) holds its own Store view so a test can drive it
 /// independently: pull the old epoch, author under it, or reset from a successor.
 struct SilentParticipantCircle {
-    _temp: tempfile::TempDir,
-    db: SyntheticStoreFixture,
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     owner_device: crate::sync::test_helpers::TestDevice,
@@ -3103,14 +3206,15 @@ struct SilentParticipantCircle {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_device_id: coven_protocol::store_commit::StoreDeviceId,
-    silent_db: SyntheticStoreFixture,
+    silent_db: Database,
+    silent_db_store_dir: coven_foundation::store_dir::StoreDir,
     silent_storage: Arc<coven_storage::CloudSyncConnection>,
     prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 
 struct SilentParticipantClose {
-    _temp: tempfile::TempDir,
-    db: SyntheticStoreFixture,
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     store: std::sync::Arc<TestStore>,
     home: Arc<coven_storage::InMemoryCloudHome>,
     signer: UserKeypair,
@@ -3119,18 +3223,21 @@ struct SilentParticipantClose {
     removed_pubkey: String,
     silent: UserKeypair,
     silent_device_id: coven_protocol::store_commit::StoreDeviceId,
-    silent_db: SyntheticStoreFixture,
+    silent_db: Database,
+    silent_db_store_dir: coven_foundation::store_dir::StoreDir,
     operation_id: CircleOperationId,
     prior_epoch: coven_protocol::circle::CircleEpochId,
 }
 
 impl SilentParticipantCircle {
     async fn build(name: &str) -> Self {
-        let db = open_circle_routing_test_db();
-        let (store, _home, signer, founder) = persist_merge_operation(&db, name).await;
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = open_circle_routing_test_db(db_store_dir.clone());
+        let (store, _home, signer, founder) =
+            persist_merge_operation(&db, db_store_dir.clone(), name).await;
         let circle_id = founder.circle_id();
         let owner_device = store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("bind Circle test Store");
         owner_device
@@ -3143,6 +3250,7 @@ impl SilentParticipantCircle {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &removed_pubkey,
                 None,
@@ -3157,6 +3265,7 @@ impl SilentParticipantCircle {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &signer,
                 &silent_pubkey,
                 None,
@@ -3166,20 +3275,26 @@ impl SilentParticipantCircle {
             )
             .await
             .expect("invite silent Store member");
-        let silent_db = open_circle_routing_test_db();
+        let silent_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let silent_db = open_circle_routing_test_db(silent_db_store_dir.clone());
         store
-            .activate_joined_device(&db, &silent_db, &silent, "2026-07-24T01:00:00Z")
+            .activate_joined_device(
+                &db,
+                db_store_dir.clone(),
+                &silent_db,
+                silent_db_store_dir.clone(),
+                &silent,
+                "2026-07-24T01:00:00Z",
+            )
             .await
             .expect("activate silent participant device");
         let silent_device_id = silent_db
-            .database()
             .local_store_device_id_for_test()
             .await
             .expect("read silent participant device id");
 
-        let (_temp, store_dir) = temp_store_dir();
         let components =
-            prepare_owner_sync_components(&db, &store, &_home, &store_dir, &signer, name).await;
+            prepare_owner_sync_components(&db, &store, &_home, &db_store_dir, &signer, name).await;
         components
             .add_circle_member(circle_id, removed_pubkey.clone(), CircleRole::Member)
             .await
@@ -3191,7 +3306,7 @@ impl SilentParticipantCircle {
 
         let silent_storage = Arc::new(circle_test_cloud_storage(&_home, name, &silent));
 
-        let prior_epoch = coven_database::StoreDatabase::new(db.database())
+        let prior_epoch = coven_database::StoreDatabase::new(&db)
             .circle_authoring_context(circle_id, &keys::public_key_hex(&signer))
             .await
             .expect("load pre-close Circle control")
@@ -3201,8 +3316,8 @@ impl SilentParticipantCircle {
             .epoch_id();
 
         Self {
-            _temp,
             db,
+            db_store_dir,
             store,
             home: _home,
             owner_device,
@@ -3213,6 +3328,7 @@ impl SilentParticipantCircle {
             silent,
             silent_device_id,
             silent_db,
+            silent_db_store_dir,
             silent_storage,
             prior_epoch,
         }
@@ -3225,7 +3341,11 @@ impl SilentParticipantCircle {
     ) -> Result<crate::sync::store::pull::StorePullResult, crate::sync::cycle::SyncCycleFailure>
     {
         self.store
-            .bind_device(&self.silent_db, &self.silent)
+            .bind_device(
+                &self.silent_db,
+                self.silent_db_store_dir.clone(),
+                &self.silent,
+            )
             .await
             .expect("load silent participant Store")
             .authorize_writer()
@@ -3240,7 +3360,11 @@ impl SilentParticipantCircle {
     async fn silent_publish_pending_write(&self) {
         let device = self
             .store
-            .bind_device(&self.silent_db, &self.silent)
+            .bind_device(
+                &self.silent_db,
+                self.silent_db_store_dir.clone(),
+                &self.silent,
+            )
             .await
             .expect("load silent participant Store");
         let mut writer = device
@@ -3259,7 +3383,7 @@ impl SilentParticipantCircle {
 
     /// The finalized successor control coordinate, read from the Owner.
     async fn successor_control_coord(&self) -> coven_protocol::circle::CircleControlCoord {
-        StoreDatabase::new(self.db.database())
+        StoreDatabase::new(&self.db)
             .circle_authoring_context(self.circle_id, &keys::public_key_hex(&self.signer))
             .await
             .expect("load finalized successor Circle authoring state")
@@ -3272,7 +3396,7 @@ impl SilentParticipantCircle {
     /// a full cycle, so reclamation is driven explicitly afterwards.
     async fn owner_pull(&self) {
         self.store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.db_store_dir.clone(), &self.signer)
             .await
             .expect("load Owner Store")
             .authorize_writer()
@@ -3289,7 +3413,6 @@ impl SilentParticipantCircle {
     async fn close_and_exclude_silent(&self, covered_id: &str) -> StoreBatchCommitRef {
         let covered_write = self
             .db
-            .database()
             .capture_circle_document_for_test(
                 covered_id,
                 self.circle_id,
@@ -3301,7 +3424,7 @@ impl SilentParticipantCircle {
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .expect("publish the accepted old-epoch Circle row");
-        let covered_commit_ref = match coven_database::StoreDatabase::new(self.db.database())
+        let covered_commit_ref = match coven_database::StoreDatabase::new(&self.db)
             .write_status(&covered_write)
             .await
             .expect("read the accepted pre-close write status")
@@ -3317,7 +3440,7 @@ impl SilentParticipantCircle {
             .await
             .expect("activate the Circle epoch close");
         self.store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.db_store_dir.clone(), &self.signer)
             .await
             .expect("bind Circle test Store")
             .publish_circle_epoch_close_response()
@@ -3341,7 +3464,11 @@ impl SilentParticipantClose {
     async fn silent_publish_response(&self) {
         let device = self
             .store
-            .bind_device(&self.silent_db, &self.silent)
+            .bind_device(
+                &self.silent_db,
+                self.silent_db_store_dir.clone(),
+                &self.silent,
+            )
             .await
             .expect("load silent participant Store");
         let mut writer = device
@@ -3361,7 +3488,7 @@ impl SilentParticipantClose {
 
     async fn finalized_close_outcome(&self) -> coven_protocol::circle::CircleEpochCloseOutcome {
         self.store
-            .bind_device(&self.db, &self.signer)
+            .bind_device(&self.db, self.db_store_dir.clone(), &self.signer)
             .await
             .expect("bind finalized Circle Store")
             .finalized_circle_close_outcome_for_test(self.circle_id)
@@ -3375,8 +3502,8 @@ impl SilentParticipantClose {
 /// response slot, stalling the close until the Owner excludes it.
 async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantClose {
     let SilentParticipantCircle {
-        _temp,
         db,
+        db_store_dir,
         store,
         home,
         owner_device: _,
@@ -3387,6 +3514,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         silent,
         silent_device_id,
         silent_db,
+        silent_db_store_dir,
         silent_storage: _,
         prior_epoch,
     } = SilentParticipantCircle::build(name).await;
@@ -3396,7 +3524,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         .await
         .expect("activate Circle epoch close");
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read Circle removal operation")
@@ -3406,8 +3534,8 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
     );
 
     SilentParticipantClose {
-        _temp,
         db,
+        db_store_dir,
         store,
         home,
         signer,
@@ -3417,6 +3545,7 @@ async fn setup_closing_with_silent_participant(name: &str) -> SilentParticipantC
         silent,
         silent_device_id,
         silent_db,
+        silent_db_store_dir,
         operation_id,
         prior_epoch,
     }
@@ -3429,7 +3558,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
     // The Owner responds; the silent participant does not, so the close stalls.
     let store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Circle close response Store");
     let mut authorized = store
@@ -3447,7 +3576,7 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .await
         .expect("cycle cannot finalize the stalled close");
     assert_eq!(
-        StoreDatabase::new(fixture.db.database())
+        StoreDatabase::new(&fixture.db)
             .circle_operation(&fixture.operation_id)
             .await
             .expect("read stalled close operation")
@@ -3469,13 +3598,13 @@ async fn owner_exclusion_completes_a_stalled_close() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read completed close operation")
         .is_none());
 
-    let (successor, _) = StoreDatabase::new(fixture.db.database())
+    let (successor, _) = StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load finalized successor Circle authoring state");
@@ -3534,7 +3663,7 @@ async fn close_status_reports_a_response_and_an_exclusion() {
     // The Owner responds; the silent participant does not. Its slot is empty.
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Circle close response Store")
         .authorize_writer()
@@ -3629,7 +3758,6 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     let covered_id = "00000000-0000-4000-8000-000000000001";
     fixture
         .db
-        .database()
         .capture_circle_document_for_test(covered_id, fixture.circle_id, "0000000003000-0000-owner")
         .await
         .expect("capture Circle document row");
@@ -3648,7 +3776,6 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -3664,7 +3791,7 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
         .expect("activate the Circle epoch close");
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_epoch_close_response()
@@ -3688,7 +3815,6 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(beyond_id, fixture.circle_id, "0000000009000-0000-silent")
         .await
         .expect("capture Circle document row");
@@ -3696,7 +3822,6 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(beyond_id)
             .await
             .expect("query Circle document presence"),
@@ -3712,7 +3837,6 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     assert!(
         !fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(beyond_id)
             .await
             .expect("query Circle document presence"),
@@ -3721,14 +3845,13 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
         "the covered rows are restored by the reset"
     );
     assert_eq!(
-        StoreDatabase::new(fixture.silent_db.database())
+        StoreDatabase::new(&fixture.silent_db)
             .circle_bootstrap_coverage_count_for_test(fixture.circle_id)
             .await
             .expect("count Circle bootstrap coverage"),
@@ -3740,14 +3863,13 @@ async fn excluded_device_resets_its_circle_from_the_successor_bootstrap() {
     let after_id = "00000000-0000-4000-8000-000000000003";
     let after_write = fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(after_id, fixture.circle_id, "0000000010000-0000-silent")
         .await
         .expect("capture Circle document row");
     fixture.silent_publish_pending_write().await;
     assert!(
         matches!(
-            coven_database::StoreDatabase::new(fixture.silent_db.database())
+            coven_database::StoreDatabase::new(&fixture.silent_db)
                 .write_status(&after_write)
                 .await
                 .expect("read post-reset Circle write status"),
@@ -3772,12 +3894,11 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     let beyond_write = fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(beyond_id, fixture.circle_id, "0000000009000-0000-silent")
         .await
         .expect("capture Circle document row");
     fixture.silent_publish_pending_write().await;
-    let beyond_commit_ref = match coven_database::StoreDatabase::new(fixture.silent_db.database())
+    let beyond_commit_ref = match coven_database::StoreDatabase::new(&fixture.silent_db)
         .write_status(&beyond_write)
         .await
         .expect("read the beyond-cutoff write status")
@@ -3797,7 +3918,6 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
     assert!(
         !fixture
             .db
-            .database()
             .circle_document_present_for_test(beyond_id)
             .await
             .expect("query Circle document presence"),
@@ -3806,7 +3926,6 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
     assert!(
         fixture
             .db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -3843,7 +3962,6 @@ async fn circle_package_beyond_the_close_cutoff_reclaims_without_coverage() {
     assert!(
         fixture
             .db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -3865,7 +3983,6 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
     let covered_id = "00000000-0000-4000-8000-000000000001";
     fixture
         .db
-        .database()
         .capture_circle_document_for_test(covered_id, fixture.circle_id, "0000000003000-0000-owner")
         .await
         .expect("capture Circle document row");
@@ -3881,7 +3998,6 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -3895,11 +4011,10 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .remove_circle_member(fixture.circle_id, fixture.removed_pubkey.clone())
         .await
         .expect("activate the Circle epoch close");
-    let (_temp, respond_dir) = temp_store_dir();
     let member_store = crate::sync::store::Store::load(
-        StoreDatabase::new(fixture.silent_db.database()),
+        StoreDatabase::new(&fixture.silent_db),
         fixture.silent_storage.clone(),
-        respond_dir,
+        fixture.silent_db_store_dir.clone(),
         fixture.silent.clone(),
     )
     .await
@@ -3919,7 +4034,7 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
         .expect("member publishes its close response");
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Owner close response Store")
         .authorize_writer()
@@ -3944,13 +4059,12 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
         "prior retained content survives the successor transition"
     );
-    StoreDatabase::new(fixture.silent_db.database())
+    StoreDatabase::new(&fixture.silent_db)
         .circle_publication_context(fixture.circle_id, fixture.successor_control_coord().await)
         .await
         .expect("an ordinary member is never gated by the exclusion reset");
@@ -3959,14 +4073,13 @@ async fn responding_member_pulls_the_successor_with_prior_retained_content() {
     let after_id = "00000000-0000-4000-8000-000000000003";
     let after_write = fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(after_id, fixture.circle_id, "0000000010000-0000-silent")
         .await
         .expect("capture Circle document row");
     fixture.silent_publish_pending_write().await;
     assert!(
         matches!(
-            coven_database::StoreDatabase::new(fixture.silent_db.database())
+            coven_database::StoreDatabase::new(&fixture.silent_db)
                 .write_status(&after_write)
                 .await
                 .expect("read post-successor Circle write status"),
@@ -3993,7 +4106,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     let successor_control = fixture.successor_control_coord().await;
     let activation = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind finalized successor Circle Store")
         .verified_circle_activation_for_test(fixture.circle_id, successor_control.clone())
@@ -4032,7 +4145,6 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     // The silent participant authors a beyond-cutoff row on the old epoch.
     fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(
             "00000000-0000-4000-8000-000000000002",
             fixture.circle_id,
@@ -4077,7 +4189,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
     );
 
     // Between detection and reseed completion, publication refuses typed.
-    let refusal = StoreDatabase::new(fixture.silent_db.database())
+    let refusal = StoreDatabase::new(&fixture.silent_db)
         .circle_publication_context(fixture.circle_id, successor_control.clone())
         .await
         .err()
@@ -4095,7 +4207,7 @@ async fn excluded_device_publication_is_gated_until_the_reset_completes() {
         .silent_pull()
         .await
         .expect("silent participant resets from the restored bootstrap");
-    StoreDatabase::new(fixture.silent_db.database())
+    StoreDatabase::new(&fixture.silent_db)
         .circle_publication_context(fixture.circle_id, successor_control)
         .await
         .expect("publication clears derivationally once the reset lands");
@@ -4110,7 +4222,6 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
     let covered_id = "00000000-0000-4000-8000-000000000001";
     fixture
         .db
-        .database()
         .capture_circle_document_for_test(covered_id, fixture.circle_id, "0000000003000-0000-owner")
         .await
         .expect("capture Circle document row");
@@ -4126,7 +4237,6 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -4135,7 +4245,7 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
 
     // Forge an exclusions row directly — no verified outcome names this device.
     let circle_id = fixture.circle_id;
-    StoreDatabase::new(fixture.silent_db.database())
+    StoreDatabase::new(&fixture.silent_db)
         .forge_circle_close_exclusion_for_test(circle_id)
         .await
         .expect("forge the exclusion row");
@@ -4149,7 +4259,6 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -4158,7 +4267,7 @@ async fn a_forged_exclusion_row_drives_the_gate_but_no_reset() {
 
     // The forged row is durable state the gate reads: publication is refused,
     // never cleared by an unverified reset.
-    let refusal = StoreDatabase::new(fixture.silent_db.database())
+    let refusal = StoreDatabase::new(&fixture.silent_db)
         .circle_publication_context(fixture.circle_id, fixture.successor_control_coord().await)
         .await
         .err()
@@ -4180,7 +4289,6 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     let beyond_id = "00000000-0000-4000-8000-000000000002";
     fixture
         .silent_db
-        .database()
         .capture_circle_document_for_test(beyond_id, fixture.circle_id, "0000000009000-0000-silent")
         .await
         .expect("capture Circle document row");
@@ -4188,12 +4296,9 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
 
     // Crash at the reset's projection-replacement boundary: the whole pull rolls
     // back, leaving the pre-reset state exactly as it was.
-    fixture
-        .silent_db
-        .database()
-        .fail_next_merge_materialization_at(
-            coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
-        );
+    fixture.silent_db.fail_next_merge_materialization_at(
+        coven_database::MergeMaterializationFailurePoint::ProjectionReplacement,
+    );
     fixture
         .silent_pull()
         .await
@@ -4201,7 +4306,6 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(beyond_id)
             .await
             .expect("query Circle document presence"),
@@ -4216,7 +4320,6 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     assert!(
         !fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(beyond_id)
             .await
             .expect("query Circle document presence"),
@@ -4225,7 +4328,6 @@ async fn excluded_device_reset_resumes_idempotently_after_a_crash() {
     assert!(
         fixture
             .silent_db
-            .database()
             .circle_document_present_for_test(covered_id)
             .await
             .expect("query Circle document presence"),
@@ -4241,7 +4343,7 @@ async fn slot_race_response_first_adopts_the_response() {
     fixture.silent_publish_response().await;
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_epoch_close_response()
@@ -4261,7 +4363,7 @@ async fn slot_race_response_first_adopts_the_response() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close");
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read completed close operation")
@@ -4290,7 +4392,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
     // The Owner responds and then excludes the participant before it responds.
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Owner Store")
         .authorize_writer()
@@ -4315,7 +4417,7 @@ async fn slot_race_exclusion_first_drops_the_late_response() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read completed close operation")
@@ -4345,7 +4447,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
     let fixture = setup_closing_with_silent_participant("circle-exclude-restart").await;
     fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Owner Store")
         .authorize_writer()
@@ -4386,7 +4488,7 @@ async fn interrupted_exclusion_publication_resumes_idempotently() {
         .run_cycle(&coven_foundation::clock::SystemClock, None, None)
         .await
         .expect("finalize the close after exclusion");
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read completed close operation")
@@ -4414,7 +4516,7 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
     fixture.silent_publish_response().await;
     let owner_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.signer)
+        .bind_device(&fixture.db, fixture.db_store_dir.clone(), &fixture.signer)
         .await
         .expect("load Owner Store");
     let mut owner = owner_store
@@ -4429,12 +4531,12 @@ async fn outcome_claiming_an_exclusion_for_a_responded_slot_is_refused() {
 
     // Capture the exact close control, its signed intent, and the actual slot
     // settlements (both device responses) before finalizing.
-    let (current, _) = StoreDatabase::new(fixture.db.database())
+    let (current, _) = StoreDatabase::new(&fixture.db)
         .circle_closing_context(fixture.circle_id, &keys::public_key_hex(&fixture.signer))
         .await
         .expect("load closing context");
     let close_control = current.control.clone();
-    let intent = StoreDatabase::new(fixture.db.database())
+    let intent = StoreDatabase::new(&fixture.db)
         .circle_operation(&fixture.operation_id)
         .await
         .expect("read close operation")
@@ -4514,7 +4616,7 @@ async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
     // The Circle is mid-close: its winning control is an EpochClose waiting for
     // responses, so the Active-only authoring context refuses it. A deletion must
     // still succeed from the closing state, superseding the in-flight close.
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_authoring_context(fixture.circle_id, &owner_pubkey)
         .await
         .is_err());
@@ -4524,12 +4626,12 @@ async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
         .await
         .expect("delete a closing Circle");
 
-    assert!(StoreDatabase::new(fixture.db.database())
+    assert!(StoreDatabase::new(&fixture.db)
         .circle_is_deleted(fixture.circle_id)
         .await
         .expect("read deleted state"));
     assert_eq!(
-        StoreDatabase::new(fixture.db.database())
+        StoreDatabase::new(&fixture.db)
             .get_circles(&owner_pubkey, BTreeSet::from([owner_pubkey.clone()]))
             .await
             .expect("list Circles after deleting the closing Circle"),
@@ -4541,20 +4643,21 @@ async fn deleting_a_closing_circle_terminates_the_in_flight_close() {
 
 #[tokio::test]
 async fn cancelling_a_deleted_circles_close_is_refused() {
-    let db = open_circle_routing_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = open_circle_routing_test_db(db_store_dir.clone());
     let (store_fixture, _home, signer, founder) =
-        persist_merge_operation_fixture(&db, "circle-cancel-deleted").await;
-    let (store, cloud_storage) = (store_fixture).into_parts();
+        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-cancel-deleted").await;
+    let (store, cloud_storage) = store_fixture;
     let circle_id = founder.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("activate founder transition");
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle deletion Store")
         .delete_circle(circle_id)
@@ -4563,11 +4666,10 @@ async fn cancelling_a_deleted_circles_close_is_refused() {
 
     // A deleted Circle is terminal: every lifecycle command refuses it with the
     // typed `Deleted` reason rather than a generic missing-close error.
-    let (_store_dir_temp, store_dir) = temp_store_dir();
     let error = crate::sync::store::Store::load(
-        coven_database::StoreDatabase::new(db.database()),
+        coven_database::StoreDatabase::new(&db),
         cloud_storage,
-        store_dir,
+        db_store_dir,
         signer.clone(),
     )
     .await

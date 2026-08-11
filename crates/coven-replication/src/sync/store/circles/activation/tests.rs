@@ -503,13 +503,13 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         state
     }
 
-    let db = crate::sync::test_helpers::open_test_db();
-    let circle_id = coven_database::StoreDatabase::new(db.database())
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let circle_id = coven_database::StoreDatabase::new(&db)
         .install_test_active_circle("current-control-conflict".to_string())
         .await
         .expect("install founder current state");
     let founder = db
-        .database()
         .circle_current_state_for_test(circle_id)
         .await
         .expect("load founder current state")

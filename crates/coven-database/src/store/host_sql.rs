@@ -125,6 +125,7 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         row_id: &str,
         path: &Path,
     ) -> Result<(), DbError> {
+        crate::observe_host_sql_write();
         crate::with_coven_sql_authority(|| {
             let declared = self.blob_table(table)?;
             let reference =
@@ -143,6 +144,7 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
         &self,
         blob: &coven_protocol::blob::RowBlobRef,
     ) -> Result<(), DbError> {
+        crate::observe_host_sql_write();
         let stored = blob.stored().ok_or_else(|| {
             DbError::Message(format!(
                 "blob {:?} in {:?} has no cloud object to remove",
@@ -156,6 +158,7 @@ impl<'context, 'connection> SqlContext<'context, 'connection> {
     }
 
     pub fn clear_external_blob(&self, table: &str, row_id: &str) -> Result<(), DbError> {
+        crate::observe_host_sql_write();
         crate::with_coven_sql_authority(|| {
             let declared = self.blob_table(table)?;
             let reference =

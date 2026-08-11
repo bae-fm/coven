@@ -21,12 +21,9 @@ fn blob_owner(database: StoreDatabase, store_dir: StoreDir) -> LocalStoreBlobAcc
     LocalStoreBlobAccess::new(database, store_dir, cache)
 }
 
-pub fn local_blob_access(database: StoreDatabase, store_dir: StoreDir) -> LocalStoreBlobAccess {
-    blob_owner(database, store_dir)
-}
-
 impl TestOwnerGraph {
     pub fn new(database: StoreDatabase, store_dir: StoreDir) -> Self {
+        database.assert_owns_payload_directory_for_test(&store_dir);
         let local_access = blob_owner(database.clone(), store_dir.clone());
         let local_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         Self {
@@ -85,7 +82,7 @@ impl TestOwnerGraph {
             .register_external_blob_for_test("note_photos", photo_id, &source)
             .await;
         store
-            .open_into_store_database(&self.database)
+            .open_into_store_database(&self.database, self.store_dir.clone())
             .await
             .expect("open exact test Store");
         self.make_remote("notes", note_id, false)
@@ -140,12 +137,13 @@ impl TestOwnerGraph {
             .expect("enqueue exact Local row upload");
     }
 
-    pub fn local_access(&self) -> LocalStoreBlobAccess {
-        self.local_access.clone()
-    }
-
-    pub fn local_transitions(&self) -> LocalBlobTransitions {
-        self.local_transitions.clone()
+    pub async fn drain_published_blob_drop_intents(
+        &self,
+        through_sequence: u64,
+    ) -> Result<(), String> {
+        self.local_access
+            .drain_published_blob_drop_intents(through_sequence)
+            .await
     }
 
     pub async fn make_remote(
@@ -250,7 +248,7 @@ impl TestOwnerGraph {
         }
     }
 
-    pub fn connected_blob_transitions(
+    fn connected_blob_transitions(
         &self,
         storage: Arc<dyn CloudSyncObjectStorage>,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
@@ -270,11 +268,11 @@ impl TestOwnerGraph {
         )
     }
 
-    pub async fn prepare_sync(
+    pub async fn run_sync_cycle(
         &self,
         storage: impl Into<std::sync::Arc<coven_storage::CloudSyncConnection>>,
         identity: coven_keys::keys::UserKeypair,
-    ) -> Result<crate::sync::cycle::SyncComponents, String> {
+    ) -> Result<crate::sync::cycle::SyncCycleResult, String> {
         let expected_store_root = self
             .database
             .local_store_root_ref()
@@ -284,7 +282,6 @@ impl TestOwnerGraph {
         let components = Box::pin(crate::sync::cycle::PreparedSyncComponents::prepare(
             self.database.clone(),
             self.store_dir.clone(),
-            self.local_access.clone(),
             storage,
             identity,
             crate::sync::cycle::StoreInitialization::OpenStore {
@@ -294,8 +291,27 @@ impl TestOwnerGraph {
         ))
         .await
         .map_err(|error| error.to_string())?;
-        Box::pin(components.initialize())
+        let components = Box::pin(components.initialize())
+            .await
+            .map_err(|error| error.to_string())?;
+        components
+            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
             .await
             .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "payload directory does not belong to this database")]
+    fn owner_graph_rejects_a_database_payload_directory_mismatch() {
+        let database_store_dir = crate::sync::test_helpers::test_store_dir();
+        let database = crate::sync::test_helpers::open_test_db(database_store_dir);
+        let unrelated_store_dir = crate::sync::test_helpers::test_store_dir();
+
+        TestOwnerGraph::new(StoreDatabase::new(&database), unrelated_store_dir);
     }
 }

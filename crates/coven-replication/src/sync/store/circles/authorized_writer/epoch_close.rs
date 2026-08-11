@@ -195,21 +195,21 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             let prepared = self
                 .preparer()
                 .prepare_request(CircleOperationRequest::FinalizeEpochClose(Box::new(
-                    CircleFinalizeEpochCloseRequest {
-                        operation_id: journal.operation_id.clone(),
-                        circle_id: journal.circle_id,
+                    CircleFinalizeEpochCloseRequest::new(
+                        journal.operation_id.clone(),
+                        journal.circle_id,
                         member_pubkey,
-                        metadata_stamp: metadata_stamp.to_string(),
+                        metadata_stamp.to_string(),
                         current,
-                        previous_control: reference.clone(),
+                        reference.clone(),
                         roster_chain,
                         intent,
-                        responses: settlements
+                        settlements
                             .into_iter()
                             .map(|(settlement, _)| settlement)
                             .collect(),
                         bootstrap,
-                    },
+                    ),
                 )))
                 .await?;
             if prepared.journal.operation_id != journal.operation_id

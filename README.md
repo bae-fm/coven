@@ -26,7 +26,7 @@ builds your schema. Tables you don't declare stay local to the device.
 ```rust
 use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
-let handle = Coven::builder(config)
+let handle = Coven::builder(store_dir, config)
     .synced_tables(vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid),
         SyncedTable::new("photos", RowIdentity::IndependentUuid)
@@ -48,7 +48,7 @@ minted with `sql.stamp()`, the register concurrent edits are ordered by.
 
 ```rust
 let id = uuid::Uuid::new_v4().to_string();
-let receipt = handle.sql(move |sql| {
+let receipt = handle.write(move |sql| {
     sql.execute(
         "INSERT INTO notes (id, body, _updated_at) VALUES (?1, ?2, ?3)",
         coven::rusqlite::params![id, body, sql.stamp()],
@@ -59,10 +59,10 @@ let receipt = handle.sql(move |sql| {
 
 The receipt identifies this transaction in coven's durable write ledger.
 `LocalOnly` will never publish; `Pending` means the shared changes are committed
-locally and waiting for their Store commit. Separate `sql` calls always receive
+locally and waiting for their Store commit. Separate `write` calls always receive
 separate write ids and Store commits.
 
-Pure reads go through `handle.sql_read`, which runs on a read-only companion
+Pure reads go through `handle.read`, which runs on a read-only companion
 connection: no change capture, and reads run concurrently with the writer
 instead of queuing behind it.
 
@@ -77,7 +77,7 @@ handle.connect_sync().await?;
 handle.sync_now();
 ```
 
-`handle.write` commits a row and its file bytes in one transaction.
+`handle.write_with_blobs` commits a row and its file bytes in one transaction.
 `handle.pending_writes` reconstructs unpublished write state after restart;
 `blocked_writes`, `retry_blocked_write`, and `discard_blocked_write` expose the
 explicit recovery path for a write stopped by a missing blob or invalid package

@@ -9,10 +9,10 @@ pub(crate) trait CircleBootstrapBlobVerification {
     async fn verify_snapshot_blobs(
         &self,
         circle_id: coven_protocol::circle::CircleId,
-        snapshot: &coven_database::CreatedSnapshot,
+        snapshot_blobs: &[coven_database::SnapshotBlobFact],
     ) -> Result<Vec<coven_protocol::blob::RowBlobRef>, CircleOperationError> {
-        let mut blobs = Vec::with_capacity(snapshot.blobs.len());
-        for captured in &snapshot.blobs {
+        let mut blobs = Vec::with_capacity(snapshot_blobs.len());
+        for captured in snapshot_blobs {
             let coven_database::SnapshotBlobAudience::Circle {
                 circle_id: captured_circle,
                 ..

@@ -495,12 +495,13 @@ impl PreparedSyncComponents {
     pub async fn prepare(
         database: coven_database::StoreDatabase,
         store_dir: StoreDir,
-        local_blob_access: super::store::blob::LocalStoreBlobAccess,
         storage: impl Into<std::sync::Arc<CloudSyncConnection>>,
         identity: coven_keys::keys::UserKeypair,
         initialization: StoreInitialization,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     ) -> Result<Self, InitSyncError> {
+        #[cfg(any(test, feature = "test-utils"))]
+        database.assert_owns_payload_directory_for_test(&store_dir);
         let storage = storage.into();
         if !storage.uses_identity(&identity) {
             return Err(InitSyncError::StorageIdentityMismatch);
@@ -537,6 +538,11 @@ impl PreparedSyncComponents {
         }
 
         let store_id = storage.store_id().to_string();
+        let local_blob_access = super::store::blob::LocalStoreBlobAccess::new(
+            database.clone(),
+            store_dir.clone(),
+            super::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone()),
+        );
         Ok(Self {
             database,
             store_dir,
@@ -586,14 +592,15 @@ impl PreparedSyncComponents {
             }
         })?;
 
-        info!("Sync initialized (device: {})", initialized.device_id);
+        let (store, device_id) = initialized.into_parts();
+        info!("Sync initialized (device: {})", device_id);
         Ok(SyncComponents {
-            store: std::sync::Arc::new(initialized.store),
+            store: std::sync::Arc::new(store),
             database: self.database,
             local_blob_access: self.local_blob_access,
             storage,
             store_id: self.store_id,
-            device_id: initialized.device_id,
+            device_id,
             routing_encryption: self.routing_encryption,
         })
     }
@@ -1120,7 +1127,7 @@ impl SyncComponents {
     pub(crate) fn from_retained_test_device<S>(
         store: std::sync::Arc<Store>,
         database: coven_database::StoreDatabase,
-        local_blob_access: super::store::blob::LocalStoreBlobAccess,
+        store_dir: StoreDir,
         storage: std::sync::Arc<S>,
         store_id: String,
         device_id: String,
@@ -1128,7 +1135,13 @@ impl SyncComponents {
     where
         S: CloudSyncCycleConnection + 'static,
     {
+        database.assert_owns_payload_directory_for_test(&store_dir);
         let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = storage;
+        let local_blob_access = super::store::blob::LocalStoreBlobAccess::new(
+            database.clone(),
+            store_dir.clone(),
+            super::store::blob::StoreBlobCache::new(database.clone(), store_dir),
+        );
         Self {
             store,
             database,
@@ -1156,6 +1169,11 @@ impl SyncComponents {
         let actual: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
             self.storage.clone();
         std::sync::Arc::ptr_eq(&actual, expected)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn uses_store_dir_for_test(&self, expected: &StoreDir) -> bool {
+        self.local_blob_access.uses_store_dir_for_test(expected)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

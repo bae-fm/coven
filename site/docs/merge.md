@@ -32,8 +32,8 @@ The clock is an [`Hlc`](rustdoc:struct:coven_protocol::hlc::Hlc).
 [`Hlc::now`](rustdoc:method:coven_protocol::hlc::Hlc::now) mints the next stamp: if
 wall-clock millis moved forward it adopts them and resets the counter, otherwise
 it bumps the counter, so each stamp is strictly greater than the last. The host
-never calls this directly. It calls `sql.stamp()` inside `handle.sql` or
-`handle.write`, binding the result into every synced-row write. The SQL context
+never calls this directly. It calls `sql.stamp()` inside `handle.write`,
+binding the result into every synced-row write. The SQL context
 and the sync layer share one `Arc<Hlc>`.
 
 The handle open path seeds that clock before it returns, so every stamp minted

@@ -25,9 +25,21 @@ use std::collections::BTreeMap;
 /// head, or until the candidate is durably persisted for a later publisher to
 /// activate.
 pub struct LocalCommitBase {
-    pub authorship: super::OwnStreamAuthorship,
-    pub predecessor: Option<StoreBatchCommitRef>,
-    pub frontier: BTreeMap<String, StoreBatchCommitRef>,
+    authorship: super::OwnStreamAuthorship,
+    predecessor: Option<StoreBatchCommitRef>,
+    frontier: BTreeMap<String, StoreBatchCommitRef>,
+}
+
+impl LocalCommitBase {
+    pub fn into_parts(
+        self,
+    ) -> (
+        super::OwnStreamAuthorship,
+        Option<StoreBatchCommitRef>,
+        BTreeMap<String, StoreBatchCommitRef>,
+    ) {
+        (self.authorship, self.predecessor, self.frontier)
+    }
 }
 
 impl StoreSession<'_> {

@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::test_helpers::TestStore;
-use coven_database::{StoreDatabase, SyntheticStoreFixture};
+use coven_database::{Database, StoreDatabase};
 
 struct CircleSnapshotFixture {
     directory: tempfile::TempDir,
-    database: SyntheticStoreFixture,
+    database: Database,
+    database_store_dir: coven_foundation::store_dir::StoreDir,
     store_database: StoreDatabase,
     store: std::sync::Arc<TestStore>,
 }
@@ -14,8 +15,10 @@ struct CircleSnapshotFixture {
 impl CircleSnapshotFixture {
     async fn initialize(local_device_id: &str) -> Self {
         let directory = tempfile::tempdir().expect("snapshot database directory");
-        let database = SyntheticStoreFixture::open(
+        let database_store_dir = coven_foundation::store_dir::StoreDir::new(directory.path());
+        let database = Database::open_synthetic_for_test(
             &directory.path().join("store.sqlite3"),
+            database_store_dir.clone(),
             crate::sync::test_helpers::test_synced_tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -24,9 +27,10 @@ impl CircleSnapshotFixture {
             &crate::sync::test_helpers::test_migrations(),
         )
         .expect("open Circle snapshot test database");
-        let store_database = StoreDatabase::new(database.database());
+        let store_database = StoreDatabase::new(&database);
         let store = TestStore::create_browsable(
             &database,
+            database_store_dir.clone(),
             "circle-snapshot-store",
             coven_keys::keys::UserKeypair::generate(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -36,6 +40,7 @@ impl CircleSnapshotFixture {
         Self {
             directory,
             database,
+            database_store_dir,
             store_database,
             store,
         }
@@ -43,7 +48,6 @@ impl CircleSnapshotFixture {
 
     async fn apply_routing_schema(&self) {
         self.database
-            .database()
             .apply_coven_routing_schema_for_test()
             .await
             .expect("apply routing schema");
@@ -65,8 +69,9 @@ impl CircleSnapshotFixture {
         self.store
             .push_circle_snapshots(
                 &self.database,
+                self.database_store_dir.clone(),
                 self.directory.path().join("snap-temp"),
-                self.database.database().schema_version(),
+                self.database.schema_version(),
                 "2026-07-16T00:00:00Z",
                 &coven_keys::encryption::EncryptionService::from_key([42; 32]),
             )
@@ -91,7 +96,12 @@ impl CircleSnapshotFixture {
         access: &coven_protocol::circle_activation::CircleEpochAccess,
     ) -> Vec<CircleSnapshotMeta> {
         self.store
-            .load_circle_snapshot_metas(&self.database, circle_id, access)
+            .load_circle_snapshot_metas(
+                &self.database,
+                self.database_store_dir.clone(),
+                circle_id,
+                access,
+            )
             .await
             .expect("load Circle snapshot stream")
     }

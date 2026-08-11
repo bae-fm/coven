@@ -5,7 +5,6 @@ use crate::cloud::cloudkit::{
 };
 use coven_foundation::clock::FixedClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
-use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::StoreKeys;
 use std::sync::Mutex;
 
@@ -153,7 +152,6 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
     let mut config = Config::with_defaults(
         "store-1".to_string(),
         "device-1".to_string(),
-        StoreDir::new_ephemeral("unused-store-dir"),
         "CloudKit Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::CloudKit);
@@ -170,7 +168,6 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     let mut config = Config::with_defaults(
         "s3-config-error".to_string(),
         "device-1".to_string(),
-        StoreDir::new_ephemeral("unused-store-dir"),
         "S3 Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);

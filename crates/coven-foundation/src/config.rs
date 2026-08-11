@@ -3,8 +3,8 @@
 //! `Config` is the runtime struct the sync manager reads. coven persists the
 //! sync-relevant fields to `config.yaml` in the store directory
 //! ([`Config::save_to_config_yaml`]) and reads them back
-//! ([`Config::load_from_config_yaml`]); the store directory itself is not
-//! part of the file — the caller supplies it at both save and load.
+//! ([`Config::load_from_config_yaml`]). The store directory is part of the
+//! owner graph, not configuration, so callers supply it to those operations.
 
 use serde::{Deserialize, Serialize};
 
@@ -164,7 +164,6 @@ pub struct Config {
     pub store_id: String,
     /// Unique device identifier for sync changeset namespacing.
     pub device_id: String,
-    pub store_dir: StoreDir,
     pub store_name: String,
     /// Cloud home provider + its settings.
     pub cloud_home: CloudHomeConfig,
@@ -172,42 +171,34 @@ pub struct Config {
 
 impl Config {
     /// Construct a config with defaults for a new or joined store.
-    pub fn with_defaults(
-        store_id: String,
-        device_id: String,
-        store_dir: StoreDir,
-        store_name: String,
-    ) -> Self {
+    pub fn with_defaults(store_id: String, device_id: String, store_name: String) -> Self {
         Self {
             store_id,
             device_id,
-            store_dir,
             store_name,
             cloud_home: CloudHomeConfig::default(),
         }
     }
 
     /// Persist the sync config to `store_dir/config.yaml`.
-    pub fn save_to_config_yaml(&self) -> Result<(), ConfigError> {
+    pub fn save_to_config_yaml(&self, store_dir: &StoreDir) -> Result<(), ConfigError> {
         let yaml: ConfigYaml = self.into();
         let text =
             serde_yaml::to_string(&yaml).map_err(|e| ConfigError::Serialization(e.to_string()))?;
-        crate::atomic_file::AtomicFile::new(self.store_dir.config_path())
+        crate::atomic_file::AtomicFile::new(store_dir.config_path())
             .replace(text.as_bytes())
             .map_err(ConfigError::Config)
     }
 
-    /// Read `store_dir/config.yaml` back into a runtime `Config`; `store_dir`
-    /// is supplied by the caller, since it is not itself persisted (see the
-    /// module doc). A missing or unparseable file is a loud [`ConfigError`]
-    /// naming the path.
-    pub fn load_from_config_yaml(store_dir: StoreDir) -> Result<Config, ConfigError> {
+    /// Read `store_dir/config.yaml` back into a runtime `Config`. A missing or
+    /// unparseable file is a loud [`ConfigError`] naming the path.
+    pub fn load_from_config_yaml(store_dir: &StoreDir) -> Result<Config, ConfigError> {
         let path = store_dir.config_path();
         let text = std::fs::read_to_string(&path)
             .map_err(|e| ConfigError::Config(format!("failed to read {}: {e}", path.display())))?;
         let yaml: ConfigYaml = serde_yaml::from_str(&text)
             .map_err(|e| ConfigError::Config(format!("failed to parse {}: {e}", path.display())))?;
-        Ok(yaml.into_config(store_dir))
+        Ok(yaml.into_config())
     }
 }
 
@@ -237,13 +228,11 @@ impl From<&Config> for ConfigYaml {
 }
 
 impl ConfigYaml {
-    /// Pair to [`From<&Config> for ConfigYaml`]: rebuild a runtime `Config`
-    /// from its on-disk form plus the `store_dir` the file doesn't carry.
-    fn into_config(self, store_dir: StoreDir) -> Config {
+    /// Pair to [`From<&Config> for ConfigYaml`]: rebuild the runtime config.
+    fn into_config(self) -> Config {
         Config {
             store_id: self.store_id,
             device_id: self.device_id,
-            store_dir,
             store_name: self.store_name,
             cloud_home: self.cloud_home,
         }
@@ -263,11 +252,8 @@ mod tests {
         assert!(CloudProvider::OneDrive.needs_oauth());
     }
 
-    /// Saving a `Config` and loading it back must reproduce every field,
-    /// including `store_dir` — the caller supplies the same `store_dir` to
-    /// both `save_to_config_yaml` (via `self`) and `load_from_config_yaml`,
-    /// so it must come back unchanged along with everything the file does
-    /// carry.
+    /// Saving a `Config` and loading it back must reproduce every configured
+    /// field; the store directory selects the file but is not configuration.
     #[test]
     fn round_trips_through_save_and_load() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -275,7 +261,6 @@ mod tests {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
-            store_dir.clone(),
             "My Store".to_string(),
         );
         config.cloud_home = CloudHomeConfig {
@@ -287,11 +272,11 @@ mod tests {
             ..CloudHomeConfig::default()
         };
 
-        config.save_to_config_yaml().expect("save");
-        let config_yaml = std::fs::read_to_string(config.store_dir.config_path())
-            .expect("read saved local config");
+        config.save_to_config_yaml(&store_dir).expect("save");
+        let config_yaml =
+            std::fs::read_to_string(store_dir.config_path()).expect("read saved local config");
         assert!(config_yaml.contains("exact_upload_verification: readback"));
-        let loaded = Config::load_from_config_yaml(store_dir).expect("load");
+        let loaded = Config::load_from_config_yaml(&store_dir).expect("load");
 
         assert_eq!(loaded, config);
     }
@@ -306,7 +291,6 @@ mod tests {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
-            store_dir.clone(),
             "Shared CloudKit Store".to_string(),
         );
         config.cloud_home = CloudHomeConfig {
@@ -317,8 +301,8 @@ mod tests {
             ..CloudHomeConfig::default()
         };
 
-        config.save_to_config_yaml().expect("save");
-        let loaded = Config::load_from_config_yaml(store_dir).expect("load");
+        config.save_to_config_yaml(&store_dir).expect("save");
+        let loaded = Config::load_from_config_yaml(&store_dir).expect("load");
         assert_eq!(loaded, config);
     }
 
@@ -337,13 +321,12 @@ mod tests {
         )
         .expect("write config.yaml");
 
-        let loaded = Config::load_from_config_yaml(store_dir.clone()).expect("load");
+        let loaded = Config::load_from_config_yaml(&store_dir).expect("load");
 
         assert_eq!(loaded.store_id, "store-1");
         assert_eq!(loaded.store_name, "My Store");
         assert_eq!(loaded.device_id, "device-1");
         assert_eq!(loaded.cloud_home, CloudHomeConfig::default());
-        assert_eq!(loaded.store_dir, store_dir);
     }
 
     /// `device_id` is a required field on the wire, unlike the designed-default
@@ -359,7 +342,7 @@ mod tests {
         )
         .expect("write config.yaml");
 
-        let err = Config::load_from_config_yaml(store_dir).expect_err("missing device_id");
+        let err = Config::load_from_config_yaml(&store_dir).expect_err("missing device_id");
         assert!(matches!(err, ConfigError::Config(_)));
     }
 
@@ -370,7 +353,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new_ephemeral(dir.path());
 
-        let err = Config::load_from_config_yaml(store_dir.clone()).expect_err("no file");
+        let err = Config::load_from_config_yaml(&store_dir).expect_err("no file");
         let message = err.to_string();
         assert!(
             message.contains(&store_dir.config_path().display().to_string()),

@@ -56,26 +56,4 @@ impl StoreJoining {
     ) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
         Ok(self.database.device_join_actions().await?)
     }
-
-    #[cfg(test)]
-    pub(crate) async fn prepare_test_join_snapshot(
-        &self,
-        store: &coven_replication::sync::test_helpers::TestStore,
-        owner: &coven_keys::keys::UserKeypair,
-        snapshot_path: std::path::PathBuf,
-    ) -> Result<(), String> {
-        let owner_device = store.bind_store_device(&self.database, owner).await?;
-        let snapshot = self
-            .database
-            .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        let coverage =
-            coven_protocol::store_commit::CommitFrontier(std::collections::BTreeMap::new());
-        owner_device
-            .publish_snapshot(snapshot, coverage.clone())
-            .await?;
-        owner_device.publish_acknowledgement(coverage).await?;
-        Ok(())
-    }
 }

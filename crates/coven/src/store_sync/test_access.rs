@@ -63,7 +63,7 @@ impl StoreSync {
         coven_replication::sync::cycle::SyncCycleFailure,
     > {
         let device = store
-            .open_into_store_database(&self.database)
+            .open_into_store_database(&self.database, self.store_dir.clone())
             .await
             .map_err(coven_replication::sync::cycle::SyncCycleFailure::from)?;
         let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
@@ -80,6 +80,30 @@ impl StoreSync {
             .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
             .collect();
         Ok((sequences, result))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_test_join_snapshot(
+        &self,
+        store: &coven_replication::sync::test_helpers::TestStore,
+        owner: &coven_keys::keys::UserKeypair,
+        snapshot_path: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let owner_device = store
+            .bind_store_device(&self.database, self.store_dir.clone(), owner)
+            .await?;
+        let snapshot = self
+            .database
+            .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        let coverage =
+            coven_protocol::store_commit::CommitFrontier(std::collections::BTreeMap::new());
+        owner_device
+            .publish_snapshot(snapshot, coverage.clone())
+            .await?;
+        owner_device.publish_acknowledgement(coverage).await?;
+        Ok(())
     }
 
     #[cfg(test)]

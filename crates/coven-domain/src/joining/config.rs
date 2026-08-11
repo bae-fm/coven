@@ -1,5 +1,4 @@
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
-use coven_foundation::store_dir::StoreDir;
 use coven_storage::cloud::CloudHomeJoinInfo;
 use coven_storage::CloudCipher;
 
@@ -9,7 +8,6 @@ use coven_storage::CloudCipher;
 pub fn build_config(
     store_id: &str,
     device_id: &str,
-    store_dir: &StoreDir,
     store_name: &str,
     join_info: &CloudHomeJoinInfo,
     cipher: &CloudCipher,
@@ -17,7 +15,6 @@ pub fn build_config(
     let mut config = Config::with_defaults(
         store_id.to_string(),
         device_id.to_string(),
-        store_dir.clone(),
         store_name.to_string(),
     );
 

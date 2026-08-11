@@ -1,9 +1,7 @@
 use super::*;
-use crate::sync::test_helpers::{
-    open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore, TestStoreFixture,
-};
+use crate::sync::test_helpers::{pubkey_hex, TestCustody, TestStore};
+use coven_database::Database;
 use coven_database::StoreDatabase;
-use coven_database::SyntheticStoreFixture;
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{MasterKeyCustody, UserKeypair};
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
@@ -23,31 +21,34 @@ struct MergeFixture {
     home: Arc<coven_storage::InMemoryCloudHome>,
     store_id: String,
     device: crate::sync::test_helpers::TestDevice,
-    db: SyntheticStoreFixture,
+    db: Database,
     database: StoreDatabase,
     owner: UserKeypair,
     owner_pubkey: String,
-    _store_dir_temp: tempfile::TempDir,
     store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl MergeFixture {
     async fn new(store_id: &str) -> Self {
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let owner = UserKeypair::generate();
         let owner_pubkey = pubkey_hex(&owner);
         let home = crate::sync::test_helpers::test_cloud_home();
-        let (store, storage) =
-            (TestStoreFixture::create(&db, store_id, owner.clone(), home.clone())
-                .await
-                .expect("create exact Store"))
-            .into_parts();
+        let (store, storage) = TestStore::create_with_connection(
+            &db,
+            db_store_dir.clone(),
+            store_id,
+            owner.clone(),
+            home.clone(),
+        )
+        .await
+        .expect("create exact Store");
         let device = store
-            .bind_device(&db, &owner)
+            .bind_device_in(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind exact Store");
-        let database = coven_database::StoreDatabase::new(db.database());
-        let (store_dir_temp, store_dir) = temp_store_dir();
+        let database = coven_database::StoreDatabase::new(&db);
         Self {
             store,
             storage,
@@ -58,8 +59,7 @@ impl MergeFixture {
             database,
             owner,
             owner_pubkey,
-            _store_dir_temp: store_dir_temp,
-            store_dir,
+            store_dir: db_store_dir,
         }
     }
 
@@ -82,6 +82,7 @@ impl MergeFixture {
         self.store
             .invite_member(
                 &self.db,
+                self.store_dir.clone(),
                 &self.owner,
                 &pubkey_hex(member),
                 None,
@@ -98,6 +99,7 @@ impl MergeFixture {
         self.store
             .remove_member(
                 &self.db,
+                self.store_dir.clone(),
                 &self.owner,
                 &pubkey_hex(member),
                 &EncryptionService::from_key([42; 32]),
@@ -230,7 +232,6 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
     let chain = fixture.load().await;
     let before_owner = fixture
         .db
-        .database()
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .unwrap();
@@ -259,7 +260,6 @@ async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
     assert_eq!(
         fixture
             .db
-            .database()
             .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
             .await
             .unwrap(),
@@ -449,7 +449,6 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
     .expect("load Store owner");
     fixture
         .db
-        .database()
         .delete_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .expect("remove the installed owner anchor");
@@ -488,7 +487,6 @@ async fn store_membership_reads_reject_tampered_founder_state() {
     .expect("load Store owner");
     fixture
         .db
-        .database()
         .set_protocol_state(coven_database::STORE_DEVICE_GENESIS_STATE_KEY, "{}")
         .await
         .expect("tamper with the installed founder state");
@@ -546,10 +544,18 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     let fixture = MergeFixture::new("project-store-bound-membership").await;
     let member = UserKeypair::generate();
     fixture.invite_member(&member, MemberRole::Member).await;
-    let member_db = open_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture
         .store
-        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate member device");
     let before_promotion = fixture.load().await;
@@ -557,7 +563,9 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
         .store
         .promote_active_member_fixture(
             &fixture.db,
+            fixture.store_dir.clone(),
             &member_db,
+            member_db_store_dir.clone(),
             &fixture.owner,
             &member,
             &EncryptionService::from_key([42; 32]),
@@ -598,7 +606,7 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
         .load_membership_head_for_test(&founder_ref)
         .await
         .expect("load founder membership head");
-    let registration = coven_database::StoreDatabase::new(fixture.db.database())
+    let registration = coven_database::StoreDatabase::new(&fixture.db)
         .activated_store_device_registration(founder_head.body.author_registration.clone())
         .await
         .expect("load founder device registration");
@@ -675,6 +683,7 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
         .store
         .invite_member(
             &fixture.db,
+            fixture.store_dir.clone(),
             &fixture.owner,
             &fixture.owner_pubkey,
             None,
@@ -808,12 +817,13 @@ async fn head_cursor_rejects_a_reference_from_another_author_stream() {
 
 #[tokio::test]
 async fn pruned_membership_author_stream_is_replaced_and_persisted() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let author = hex::encode([3; coven_keys::keys::SIGN_PUBLICKEYBYTES]);
     let grant = MembershipGrantId(coven_protocol::store_commit::ObjectHash::digest(
         b"local author stream grant",
     ));
-    let database = coven_database::StoreDatabase::new(db.database());
+    let database = coven_database::StoreDatabase::new(&db);
     let first = database
         .select_membership_author_stream(&author, &grant, Default::default())
         .await
@@ -860,7 +870,8 @@ fn membership_floor_rejects_unsorted_author_streams() {
 #[tokio::test]
 async fn seeding_a_complete_head_floor_is_atomic() {
     let fixture = MergeFixture::new("atomic-floor").await;
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let first = fixture
         .load()
         .await
@@ -879,12 +890,11 @@ async fn seeding_a_complete_head_floor_is_atomic() {
     floor.sort_by_key(|reference| reference.coord.stream_key());
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&second);
-    db.database()
-        .install_protocol_state_key_insert_failure_for_test(rejected_key)
+    db.install_protocol_state_key_insert_failure_for_test(rejected_key)
         .await
         .unwrap();
 
-    let database = coven_database::StoreDatabase::new(db.database());
+    let database = coven_database::StoreDatabase::new(&db);
     assert!(database
         .persist_membership_head_cursors(floor)
         .await
@@ -900,7 +910,8 @@ async fn seeding_a_complete_head_floor_is_atomic() {
 #[tokio::test]
 async fn owner_pin_and_complete_head_floor_commit_atomically() {
     let fixture = MergeFixture::new("atomic-owner-pin").await;
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let head = fixture
         .load()
         .await
@@ -910,13 +921,12 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
         .clone();
     let rejected_key =
         coven_database::InitialStoreMembershipAuthority::cursor_state_key_for_test(&head);
-    db.database()
-        .install_protocol_state_key_insert_failure_for_test(rejected_key)
+    db.install_protocol_state_key_insert_failure_for_test(rejected_key)
         .await
         .unwrap();
 
     assert!(crate::sync::store::Store::open(
-        coven_database::StoreDatabase::new(db.database()),
+        coven_database::StoreDatabase::new(&db),
         fixture.storage.clone(),
         fixture.store_dir.clone(),
         &fixture.store.root(),
@@ -925,13 +935,10 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
     .await
     .is_err());
     assert_eq!(
-        db.database()
-            .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
-            .await
-            .unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None
     );
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .membership_head_cursors()
         .await
         .unwrap()
@@ -1000,10 +1007,18 @@ async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
     let fixture = MergeFixture::new("mutation-journal-names-its-objects").await;
     let member = UserKeypair::generate();
     fixture.invite_member(&member, MemberRole::Member).await;
-    let member_db = open_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture
         .store
-        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate the member's device");
 
@@ -1047,15 +1062,25 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     let encryption = EncryptionService::from_key([42; 32]);
     let member = UserKeypair::generate();
     fixture.invite_member(&member, MemberRole::Member).await;
-    let member_db = open_test_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture
         .store
-        .activate_joined_device(&fixture.db, &member_db, &member, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &fixture.db,
+            fixture.store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate the member's device");
     Box::pin(fixture.store.promote_active_member_fixture(
         &fixture.db,
+        fixture.store_dir.clone(),
         &member_db,
+        member_db_store_dir.clone(),
         &fixture.owner,
         &member,
         &encryption,
@@ -1067,7 +1092,6 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     // will, and takes it the moment it drains.
     fixture
         .db
-        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('contended-note', 'contended', NULL, 1, \
@@ -1076,7 +1100,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
         .await;
     let loaded_store = fixture
         .store
-        .bind_device(&fixture.db, &fixture.owner)
+        .bind_device(&fixture.db, fixture.store_dir.clone(), &fixture.owner)
         .await
         .expect("load owner Store");
     let mut writer = loaded_store

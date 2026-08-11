@@ -21,7 +21,7 @@ metadata refuses the open. The writer then runs any host
 migration rungs above the database's version, seeds its clock off the rows
 already on disk, attaches the change-capture session to the synced tables, and
 spawns the threads that own the connections — a writer, and a read-only
-companion that backs `handle.sql_read`.
+companion that backs `handle.read`.
 
 ```rust
 use coven::{Coven, Migration, RowIdentity, SyncedTable};
@@ -48,7 +48,7 @@ CREATE TABLE todos (
 ) STRICT;
 ";
 
-let handle = Coven::builder(config)
+let handle = Coven::builder(store_dir, config)
     .synced_tables(vec![
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
@@ -84,7 +84,7 @@ stamp that sorts behind an existing row.
 
 ## Write a row
 
-The host runs SQL through [`handle.sql`](rustdoc:struct:coven::CovenHandle), an
+The host runs SQL through [`handle.write`](rustdoc:struct:coven::CovenHandle), an
 async method that takes a closure over a SQL context. coven re-exports the exact
 rusqlite it owns, so use `coven::rusqlite` rather than depending on rusqlite
 directly. Bind `sql.stamp()` into the `_updated_at` column of every synced-row
@@ -95,7 +95,7 @@ initial publication status commit together.
 ```rust
 use coven::rusqlite::params;
 
-let receipt = handle.sql(move |sql| {
+let receipt = handle.write(move |sql| {
     let todo_id = uuid::Uuid::new_v4().to_string();
     sql.execute(
         "INSERT INTO todos (id, list_id, title, done, _updated_at)
@@ -109,8 +109,8 @@ let receipt = handle.sql(move |sql| {
 
 `receipt.value` is the closure's result. `receipt.write_id` remains stable across
 restart, and `receipt.status` is `LocalOnly` when no shared rows changed or
-`Pending` when this transaction awaits publication. One successful `sql` or
-`write` call creates one write id and one Store commit.
+`Pending` when this transaction awaits publication. One successful `write`
+call creates one write id and one Store commit.
 
 Don't read the stamp as a wall-clock time or compare two of them as dates. It is
 an opaque clock value coven advances past pulled rows so a later local write
@@ -118,16 +118,17 @@ always sorts after them.
 
 ## Read a row
 
-Reads go through [`handle.sql_read`](rustdoc:struct:coven::CovenHandle), which
+Reads go through [`handle.read`](rustdoc:struct:coven::CovenHandle), which
 runs the closure on a read-only companion connection: no change capture, and
 reads run concurrently with the writer instead of queuing behind it. The
-closure gets the `&Connection` directly (there is no stamp to mint on a read),
-and a write inside it is refused by SQLite — the connection is read-only. A
+closure gets a `SqlReadContext` with query operations but no retained connection
+(and no stamp to mint on a read), and a write inside it is refused by SQLite —
+the connection is read-only. A
 read issued after an awaited write sees that write.
 
 ```rust
 let titles: Vec<String> = handle
-    .sql_read(move |conn| {
+    .read(move |conn| {
         let mut stmt = conn.prepare(
             "SELECT title FROM todos WHERE list_id = ?1 ORDER BY _updated_at",
         )?;
@@ -139,8 +140,8 @@ let titles: Vec<String> = handle
     .await?;
 ```
 
-A local-only app stops here: open the handle, write through `handle.sql`, read
-through `handle.sql_read`, and never build any of the sync machinery below.
+A local-only app stops here: open the handle, write through `handle.write`, read
+through `handle.read`, and never build any of the sync machinery below.
 
 ## Turn on sync
 
@@ -278,7 +279,7 @@ It encrypts the file on upload; on pull it downloads, decrypts, and writes the
 plaintext into its own [cache](/docs/cache), which the host reads back through
 `handle.read_blob`. Where the bytes come from is the blob's provenance: the
 user's own file (user-provided) or coven's local store (host-provided). Use
-`handle.write(...)` when writing a row together with host-provided bytes. A blob
+`handle.write_with_blobs(...)` when writing a row together with host-provided bytes. A blob
 table under `remote_root()` has no Local state: rows sync normally, host-provided
 blobs upload before the row is pushed, and reads resolve through the cache/cloud.
 The [Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud
@@ -335,7 +336,7 @@ rows to a Circle by updating that column.
 let family = handle.circles().create("Family").await?;
 handle.circles().add_member(family, &housemate_pubkey_hex).await?;
 
-handle.sql(move |sql| {
+handle.write(move |sql| {
     sql.execute(
         "UPDATE lists SET audience = ?1 WHERE id = ?2",
         params![family.to_string(), list_id],

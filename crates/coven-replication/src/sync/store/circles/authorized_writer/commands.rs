@@ -552,15 +552,15 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let journal = self
             .preparer()
             .prepare_request(CircleOperationRequest::AddMember(Box::new(
-                CircleAddMemberRequest {
+                CircleAddMemberRequest::new(
                     circle_id,
                     member_pubkey,
                     role,
                     bootstrap,
                     current,
-                    previous_control: reference,
+                    reference,
                     roster_chain,
-                },
+                ),
             )))
             .await?;
         if journal.journal.circle_id() != circle_id {

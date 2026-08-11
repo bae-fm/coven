@@ -656,7 +656,7 @@ impl DeviceJoinClient {
         let pending = self.open_pending_journal()?;
         let store_dir = self.layout.store_dir(&self.code.store_id);
         let completed_config = if store_dir.config_path().exists() {
-            Some(Config::load_from_config_yaml(store_dir.clone())?)
+            Some(Config::load_from_config_yaml(&store_dir)?)
         } else {
             None
         };
@@ -738,13 +738,12 @@ impl DeviceJoinClient {
         let mut config = super::build_config(
             &self.code.store_id,
             &device_id,
-            &store_dir,
             &self.code.store_name,
             &self.code.join_info,
             &cipher,
         );
         config.cloud_home.exact_upload_verification = self.exact_upload_verification;
-        config.save_to_config_yaml()?;
+        config.save_to_config_yaml(&store_dir)?;
         joining.complete(activation).await?;
         coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
         info!(store_id = %self.code.store_id, "joined Store device");
@@ -793,7 +792,7 @@ impl DeviceJoinClient {
     /// through this: the transport's objects carry their own per-attempt seal,
     /// so they need no store key — which is what lets a joiner publish its
     /// access request before it has unwrapped the store keyring at all.
-    pub(crate) async fn transport_storage(&self) -> Result<CloudSyncConnection, BootstrapError> {
+    pub(super) async fn transport_storage(&self) -> Result<CloudSyncConnection, BootstrapError> {
         let signer = coven_keys::keys::peek_pending_identity(&self.member_pubkey)?;
         let cloud = self.build_cloud_home().await?;
         self.plaintext_storage(cloud, &signer)

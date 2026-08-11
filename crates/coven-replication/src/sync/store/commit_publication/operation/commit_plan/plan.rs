@@ -31,21 +31,21 @@ pub struct StoreOperationPlanCommon {
     /// position this plan's order extends was read. A plan is the live claim on
     /// that position: hold it until the commit has published its head, or until
     /// the candidate is durably persisted for a later publisher to activate.
-    pub(super) _authorship: coven_database::OwnStreamAuthorship,
-    pub(super) writer: std::sync::Arc<LocalStoreWriter>,
-    pub(super) root: StoreRootRef,
-    pub(super) coord: StoreCommitCoord,
-    pub(super) order: StoreCommitOrder,
-    pub(super) membership_state: super::circle_control::StoreMembershipStateRef,
-    pub(super) device_state: super::store_commit::StoreDeviceStateRef,
-    pub(super) membership_authority: StoreOperationMembershipAuthority,
-    pub(super) owner_grant: Option<super::membership::MembershipGrantId>,
+    _authorship: coven_database::OwnStreamAuthorship,
+    writer: std::sync::Arc<LocalStoreWriter>,
+    root: StoreRootRef,
+    coord: StoreCommitCoord,
+    order: StoreCommitOrder,
+    membership_state: super::circle_control::StoreMembershipStateRef,
+    device_state: super::store_commit::StoreDeviceStateRef,
+    membership_authority: StoreOperationMembershipAuthority,
+    owner_grant: Option<super::membership::MembershipGrantId>,
 }
 
 pub struct StoreOperationCommitPlan {
-    pub(super) common: StoreOperationPlanCommon,
-    pub(super) membership: MembershipChain,
-    pub(super) predecessor_state: super::store_commit::ResolvedStoreDeviceState,
+    common: StoreOperationPlanCommon,
+    membership: MembershipChain,
+    predecessor_state: super::store_commit::ResolvedStoreDeviceState,
 }
 
 impl std::ops::Deref for StoreOperationCommitPlan {
@@ -136,10 +136,6 @@ impl StoreOperationCommitPlan {
         }
     }
 
-    pub(crate) fn common(&self) -> &StoreOperationPlanCommon {
-        &self.common
-    }
-
     pub(crate) fn membership(&self) -> &MembershipChain {
         &self.membership
     }
@@ -154,6 +150,13 @@ impl StoreOperationCommitPlan {
         batch: StoreOperationBatch,
     ) -> Result<(StoreBatchCommit, Option<ActivatedStoreDeviceRegistration>), StoreError> {
         self.common.sign_batch(write_id, batch)
+    }
+
+    pub(crate) fn validate_acknowledgement(
+        &self,
+        acknowledgement: &super::store_commit::StoreAck,
+    ) -> Result<(), StoreError> {
+        self.common.validate_acknowledgement(acknowledgement)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -191,6 +194,11 @@ impl StoreOperationCommitPlan {
 
     pub(crate) fn membership_state(&self) -> &super::circle_control::StoreMembershipStateRef {
         &self.membership_state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn membership_authority(&self) -> &StoreOperationMembershipAuthority {
+        &self.membership_authority
     }
 
     pub(crate) fn device_state(&self) -> &super::store_commit::StoreDeviceStateRef {

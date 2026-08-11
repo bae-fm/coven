@@ -87,13 +87,12 @@ use tokio::sync::watch;
 /// # async fn use_store(handle: &CovenHandle, cover: &RowBlobRef)
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
-/// let note_count = handle
-///     .sql(|sql| {
+/// let note_count: i64 = handle
+///     .read(|sql| {
 ///         sql.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
 ///             .map_err(coven::CovenError::from)
 ///     })
 ///     .await?;
-/// let note_count: i64 = note_count.value;
 ///
 /// // Blobs: read an exact row version. coven resolves locality — the user's own
 /// // file, its local store, the cache, or a cloud fetch — and returns plaintext.
@@ -148,7 +147,12 @@ impl CovenHandle {
         let database = StoreDatabase::from_database(db);
         let cloud_homes =
             coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
-        let security = StoreSecurity::new(key_service, key_custody.clone(), identity_custody);
+        let security = StoreSecurity::new(
+            key_service,
+            key_custody.clone(),
+            identity_custody,
+            store_dir.clone(),
+        );
         let cloud_storage = StoreCloudStorage::new(
             security.clone(),
             cloud_homes,
@@ -172,12 +176,12 @@ impl CovenHandle {
             security.clone(),
             key_custody.clone(),
             database.clone(),
+            #[cfg(test)]
             store_dir.clone(),
             clock,
             observer,
             open_guard,
             cloud_storage,
-            local_blob_access.clone(),
             blob_access.clone(),
             local_blob_transitions,
         );
@@ -209,7 +213,7 @@ impl CovenHandle {
         }
     }
 
-    pub async fn sql<F, R>(&self, sql: F) -> crate::CovenResult<crate::WriteReceipt<R>>
+    pub async fn write<F, R>(&self, sql: F) -> crate::CovenResult<crate::WriteReceipt<R>>
     where
         F: for<'context, 'connection> FnOnce(
                 crate::SqlContext<'context, 'connection>,
@@ -218,10 +222,10 @@ impl CovenHandle {
             + 'static,
         R: Send + 'static,
     {
-        self.rows.sql(sql).await
+        self.rows.write(sql).await
     }
 
-    pub async fn sql_read<F, R>(&self, read: F) -> crate::CovenResult<R>
+    pub async fn read<F, R>(&self, read: F) -> crate::CovenResult<R>
     where
         F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> crate::CovenResult<R>
             + Send
@@ -231,7 +235,7 @@ impl CovenHandle {
         self.rows.read(read).await
     }
 
-    pub async fn write<F, S, R>(
+    pub async fn write_with_blobs<F, S, R>(
         &self,
         build: F,
         sql: S,
@@ -245,7 +249,7 @@ impl CovenHandle {
             + 'static,
         R: Send + 'static,
     {
-        self.rows.write(build, sql).await
+        self.rows.write_with_blobs(build, sql).await
     }
 
     // =========================================================================
@@ -1251,7 +1255,7 @@ impl CovenHandle {
         owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
     ) -> Result<(), String> {
-        self.joining
+        self.sync
             .prepare_test_join_snapshot(store, owner, snapshot_path)
             .await
     }

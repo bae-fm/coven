@@ -2,7 +2,6 @@ use coven_foundation::store_dir::StoreDir;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord};
 use coven_protocol::store_commit::ObjectHash;
 use coven_protocol::write::{AffectedRow, WriteId, WriteResolution, WriteStatus};
-use tracing::warn;
 
 use super::candidate_records::{
     load_merge_candidate_head_cleanup_on, parse_prepared_merge_candidate_on,
@@ -268,7 +267,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
         changeset_hash: ObjectHash,
         base: &StoreWriteBase,
         blob_facts: &StoreWriteBlobFacts,
-        rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
         let tx = self.transaction;
         let remote_partitions = partitions
@@ -276,14 +274,6 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             .filter(|partition| partition.audience != coven_protocol::circle::Audience::Local)
             .collect::<Vec<_>>();
         let affected_rows = if remote_partitions.is_empty() {
-            if partitions.is_empty() && rows_changed == 0 {
-                warn!("journaled sql transaction changed nothing; pure reads belong on sql_read");
-                #[cfg(debug_assertions)]
-                warn!(
-                    "zero-change sql transaction backtrace:\n{}",
-                    std::backtrace::Backtrace::force_capture()
-                );
-            }
             Vec::new()
         } else {
             let mut affected = Vec::new();

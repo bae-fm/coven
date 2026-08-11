@@ -39,7 +39,7 @@ Coven applies it over `PRAGMA user_version` at every open, after installing or
 verifying its one current internal schema:
 
 ```rust
-let handle = Coven::builder(config)
+let handle = Coven::builder(store_dir, config)
     .synced_tables(synced_tables)
     .migrations(vec![
         Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),

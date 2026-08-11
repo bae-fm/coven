@@ -58,7 +58,6 @@ pub(crate) struct CapturedStoreWriteTransaction<'connection, 'operation> {
     /// Where this store's payload files are. Staging an audience blob move
     /// resolves the Circle authority behind it, whose records name payloads.
     store_dir: &'operation coven_foundation::store_dir::StoreDir,
-    changes_before: u64,
     synced_tables: &'operation [SyncedTable],
     gates: &'operation Gates,
     blob_decls: &'operation BlobDecls,
@@ -547,12 +546,10 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
     ) -> Result<Self, DbError> {
         let routing =
             StoreDatabase::store_write_routing(gates.has_scoped_graph(), routing_encryption)?;
-        let changes_before = connection.total_changes();
         let transaction = connection.unchecked_transaction().map_err(DbError::from)?;
         Ok(Self {
             transaction,
             store_dir,
-            changes_before,
             synced_tables,
             gates,
             blob_decls,
@@ -635,7 +632,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
 
             let host_sql = HostSqlAuthorization::begin(transaction)?;
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                host_sql.run(|| {
+                host_sql.run_observing_write(|| {
                     sql(super::SqlContext::new(
                         transaction,
                         stamper,
@@ -644,7 +641,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     ))
                 })
             })) {
-                Ok(Ok(value)) => {
+                Ok((Ok(value), true)) => {
                     for (blob, intent) in deleted.iter().zip(&cleanup_intents) {
                         let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
                         if blob_decls
@@ -664,7 +661,8 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                     }
                     Ok(value)
                 }
-                Ok(Err(error)) => Err(HostWriteError::Host(error)),
+                Ok((Ok(_), false)) => Err(HostWriteError::from(DbError::ReadOnlyWriteTransaction)),
+                Ok((Err(error), _)) => Err(HostWriteError::Host(error)),
                 Err(_) => Err(HostWriteError::WriteClosurePanicked),
             }
         });
@@ -827,7 +825,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
         let Self {
             transaction: tx,
             store_dir,
-            changes_before,
             synced_tables,
             gates,
             blob_decls,
@@ -983,7 +980,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
             };
             drop(journal);
             let committed = (|| {
-                let rows_changed = tx.total_changes().saturating_sub(changes_before);
                 let local_stream_id =
                     crate::store::store_session::StoreTransaction::new(&tx, store_dir)
                         .local_merge_stream_id(verified_authority)?;
@@ -1001,7 +997,6 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         changeset_hash,
                         &base,
                         &blob_facts,
-                        rows_changed,
                     )?;
                 tx.commit().map_err(DbError::from)?;
                 Ok::<_, DbError>(status)

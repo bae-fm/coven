@@ -61,13 +61,12 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     let config = Config::with_defaults(
         "open-no-keys-test".to_string(),
         "device".to_string(),
-        dir,
         "Test".to_string(),
     );
     // Both custodies default to `Keyring`, so `open()` resolves both to a
     // trait object over the panicking store above and must still succeed —
     // resolving a policy is not consulting it.
-    Coven::builder(config)
+    Coven::builder(dir, config)
         .synced_tables(vec![SyncedTable::new(
             "notes",
             coven::RowIdentity::SharedKey,
@@ -77,13 +76,13 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
         .expect("open must succeed while performing no keyring credential build");
 
     let invalid_tmp = tempfile::tempdir().expect("independent UUID temp dir");
+    let invalid_dir = StoreDir::new_ephemeral(invalid_tmp.path());
     let invalid_config = Config::with_defaults(
         "open-independent-identity-test".to_string(),
         "device".to_string(),
-        StoreDir::new_ephemeral(invalid_tmp.path()),
         "Test".to_string(),
     );
-    let invalid = Coven::builder(invalid_config)
+    let invalid = Coven::builder(invalid_dir, invalid_config)
         .synced_tables(vec![SyncedTable::new(
             "notes",
             coven::RowIdentity::IndependentUuid,

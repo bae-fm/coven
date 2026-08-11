@@ -35,18 +35,6 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn with_test_store_dir(&self, store_dir: StoreDir) -> Self {
-        Self::new(
-            self.database.clone(),
-            self.storage.clone(),
-            store_dir,
-            self.identity.clone(),
-            self.device_id.clone(),
-            self.root.clone(),
-        )
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn owner_recovery_for_test(&self) -> Result<RestoringStore<'_>, String> {
         Ok(self
             .authorize()
@@ -69,12 +57,12 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) async fn open_membership_keyring_for_test(
+    pub(crate) async fn membership_keyring_facts_for_test(
         &self,
-    ) -> Result<coven_keys::encryption::EncryptionService, String> {
+    ) -> Result<([u8; 32], usize), String> {
         let authorization = self.authorize().await.map_err(|error| error.to_string())?;
         authorization
-            .open_membership_keyring_for_test()
+            .membership_keyring_facts_for_test()
             .await
             .map_err(|error| error.to_string())
     }

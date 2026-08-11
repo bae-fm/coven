@@ -86,7 +86,7 @@ list stay local to the device.
 ```rust
 use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
-let handle = Coven::builder(config)
+let handle = Coven::builder(store_dir, config)
     .synced_tables(vec![
         SyncedTable::new("todos", RowIdentity::IndependentUuid),
         SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
@@ -108,7 +108,7 @@ across devices.
 
 ```rust
 let id = uuid::Uuid::new_v4().to_string();
-let receipt = handle.sql(move |sql| {
+let receipt = handle.write(move |sql| {
     sql.execute(
         "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",
         coven::rusqlite::params![id, title, sql.stamp()],
@@ -122,22 +122,22 @@ ledger. Its initial status is `LocalOnly` when the transaction changed no shared
 rows, otherwise `Pending`. Separate calls produce separate write ids and Store
 commits.
 
-**Read on the read connection.** Pure reads go through `handle.sql_read`,
+**Read on the read connection.** Pure reads go through `handle.read`,
 which runs on a read-only companion connection: no change capture, and reads
 run concurrently with the writer instead of queuing behind it. The connection
 is read-only at the SQLite layer, so a write inside the closure is refused. A
 read issued after an awaited write sees that write.
 
 ```rust
-let titles: Vec<String> = handle.sql_read(|conn| {
+let titles: Vec<String> = handle.read(|conn| {
     let mut stmt = conn.prepare("SELECT title FROM todos ORDER BY _updated_at")?;
     let rows = stmt.query_map([], |row| row.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }).await?;
 ```
 
-Everything else follows the same ownership boundary: `handle.write` commits a
-row and its file bytes in one transaction, `handle.pending_writes` reconstructs
+Everything else follows the same ownership boundary: `handle.write_with_blobs`
+commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs
 unpublished writes after restart, `handle.connect_sync` starts the background
 loop, `handle.subscribe_sync_status` exposes its current state, and
 `handle.invite_member` adds a teammate.

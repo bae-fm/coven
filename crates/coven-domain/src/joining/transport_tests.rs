@@ -38,7 +38,7 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
     owner_store: TestDevice,
-    owner_db: coven_database::SyntheticStoreFixture,
+    owner_db: coven_database::Database,
     owner_database: coven_database::StoreDatabase,
     /// The owner's own `TestStore`, kept so a test can publish an ordinary Store
     /// commit of the owner's while a join is mid-flight.
@@ -95,10 +95,11 @@ impl TransportFixture {
     ) -> Self {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
-        let owner_db = open_test_db();
-        let owner_database =
-            coven_database::StoreDatabase::from_database(owner_db.database().clone());
+        let (owner_store_tmp, owner_db_store_dir) = temp_store_dir();
+        let owner_db = open_test_db(owner_db_store_dir.clone());
+        let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
         let create_store_db = owner_db.clone();
+        let create_store_db_store_dir = owner_db_store_dir.clone();
         let create_store_owner = owner.clone();
         let store_id_owned = store_id.to_string();
         let cross_principal = joiner_principal.is_some();
@@ -118,8 +119,9 @@ impl TransportFixture {
         };
         let create_store_home = home.clone();
         let fixture = tokio::spawn(async move {
-            TestStoreFixture::create(
+            TestStore::create_with_connection(
                 &create_store_db,
+                create_store_db_store_dir,
                 &store_id_owned,
                 create_store_owner,
                 create_store_home,
@@ -129,8 +131,7 @@ impl TransportFixture {
         .await
         .expect("Store creation task")
         .expect("create Owner Store");
-        let store = fixture.store();
-        let owner_storage = fixture.storage();
+        let (store, owner_storage) = fixture;
         let join_request =
             crate::joining::generate_join_request(None).expect("generate join request");
         let member_pubkey = crate::joining::decode_join_request(&join_request)
@@ -139,6 +140,7 @@ impl TransportFixture {
         let invite = store
             .invite_member(
                 &owner_db,
+                owner_db_store_dir.clone(),
                 &owner,
                 &member_pubkey,
                 None,
@@ -149,7 +151,7 @@ impl TransportFixture {
             .await
             .expect("invite joiner identity");
         let owner_device = store
-            .open_into(&owner_db)
+            .open_into(&owner_db, owner_db_store_dir.clone())
             .await
             .expect("load membership including joiner");
         let tables = test_synced_tables();
@@ -189,14 +191,13 @@ impl TransportFixture {
                 namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
             }
         });
-        let (owner_store_tmp, owner_store_dir) = temp_store_dir();
         Self {
             owner_store,
             owner_db,
             owner_database,
             owner_storage,
             owner_test_store: store,
-            owner_store_dir,
+            owner_store_dir: owner_db_store_dir,
             home,
             member_pubkey,
             invite_code: encode(&invite),
@@ -219,7 +220,6 @@ impl TransportFixture {
         id: &str,
     ) -> coven_protocol::store_commit::StoreBatchCommitRef {
         self.owner_db
-            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('{id}', '{id}', 1, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z')"
@@ -384,7 +384,11 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
     let config = joined(config);
     let activation = activated(activation);
 
-    assert!(config.store_dir.config_path().exists());
+    assert!(fixture
+        .layout
+        .store_dir(&config.store_id)
+        .config_path()
+        .exists());
     assert_eq!(
         activation.outcome.attempt().attempt_id,
         bundle.offer.attempt_id,
@@ -507,7 +511,11 @@ async fn run_transport_carries_a_cross_principal_join() {
     let config = joined(config);
     let activation = activated(activation);
 
-    assert!(config.store_dir.config_path().exists());
+    assert!(fixture
+        .layout
+        .store_dir(&config.store_id)
+        .config_path()
+        .exists());
     assert_eq!(
         activation.outcome.attempt().attempt_id,
         bundle.offer.attempt_id,
@@ -646,7 +654,11 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
 
     // The joiner's last restart consumes the activation and saves the store.
     let config = joined(Box::pin(join_once(timing())).await);
-    assert!(config.store_dir.config_path().exists());
+    assert!(fixture
+        .layout
+        .store_dir(&config.store_id)
+        .config_path()
+        .exists());
     for kind in DeviceJoinTransportKind::ALL {
         assert!(
             fixture.slot_bytes(&bundle, kind).await.is_none(),
@@ -733,11 +745,12 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
     );
 
     let config = joined(Box::pin(join_once(timing())).await);
-    assert!(config.store_dir.config_path().exists());
+    let joined_store_dir = fixture.layout.store_dir(&config.store_id);
+    assert!(joined_store_dir.config_path().exists());
     // Completing is not enough: the joining device has to hold the row the
     // owner's intervening commit carried, which is what converging over that
     // commit rather than stepping past it means.
-    let joined_db = coven_database::DatabaseImageTest::open(&config.store_dir.db_path())
+    let joined_db = coven_database::DatabaseImageTest::open(&joined_store_dir.db_path())
         .expect("open the joined device's database");
     assert_eq!(
         joined_db

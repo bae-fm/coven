@@ -3,7 +3,7 @@
 //! and slots, and provider rollback at the correct slot fails the stored hash
 //! check before any plaintext is published locally.
 
-use crate::sync::test_helpers::TestStoreFixture;
+use crate::sync::test_helpers::TestStore;
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocatorError, StoredBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
@@ -32,17 +32,18 @@ async fn ephemeral_stage(
 
 #[tokio::test]
 async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
-    let database = crate::sync::test_helpers::open_test_db();
+    let database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let database = crate::sync::test_helpers::open_test_db(database_store_dir.clone());
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (store, cloud_storage) = (TestStoreFixture::create(
+    let (store, cloud_storage) = TestStore::create_with_connection(
         &database,
+        database_store_dir.clone(),
         "blob-reference-substitution",
         coven_keys::keys::UserKeypair::generate(),
         home,
     )
     .await
-    .expect("create blob substitution test Store"))
-    .into_parts();
+    .expect("create blob substitution test Store");
     let real = b"THE-OWNERS-REAL-BLOB";
     let planted = b"THE-ATTACKERS-FAKED!";
     assert_eq!(real.len(), planted.len(), "fixture uses equal-size blobs");
@@ -79,17 +80,18 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
 
 #[tokio::test]
 async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publication() {
-    let database = crate::sync::test_helpers::open_test_db();
+    let database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let database = crate::sync::test_helpers::open_test_db(database_store_dir.clone());
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (store, cloud_storage) = (TestStoreFixture::create(
+    let (store, cloud_storage) = TestStore::create_with_connection(
         &database,
+        database_store_dir.clone(),
         "blob-provider-rollback",
         coven_keys::keys::UserKeypair::generate(),
         home.clone(),
     )
     .await
-    .expect("create provider rollback test Store"))
-    .into_parts();
+    .expect("create provider rollback test Store");
     let previous = b"blob-content-VERSION1";
     let current = b"blob-content-VERSION2";
     assert_eq!(

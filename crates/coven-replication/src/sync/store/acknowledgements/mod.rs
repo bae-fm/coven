@@ -211,8 +211,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             let candidate = match outbound.activation.clone() {
                 coven_database::OutboundStoreAckActivation::AwaitingCandidate => {
                     let plan = self.writer.prepare_plan().await?;
-                    plan.common()
-                        .validate_acknowledgement(&outbound.ack.value)?;
+                    plan.validate_acknowledgement(&outbound.ack.value)?;
                     let candidate = Box::pin(self.writer.prepare_candidate(
                         plan,
                         crate::sync::store::commit_publication::operation::commit_plan::StoreOperationBatch::Acknowledgement {

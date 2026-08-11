@@ -66,14 +66,12 @@ pub struct SetupError(pub String);
 mod tests {
     use super::*;
     use crate::cloud::CloudHomeJoinInfo;
-    use coven_foundation::store_dir::StoreDir;
 
     #[test]
     fn exact_slot_admission_rejects_upload_checksums_where_the_provider_cannot_enforce_them() {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
-            StoreDir::new_ephemeral("unused-store-dir"),
             "Provider matrix".to_string(),
         );
 

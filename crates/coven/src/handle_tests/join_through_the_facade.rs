@@ -44,12 +44,14 @@ impl FacadeFixture {
         let store_dir = crate::StoreDir::new_ephemeral(store_tmp.path());
         let tables = test_synced_tables();
 
-        let handle = crate::Coven::builder(crate::Config::with_defaults(
-            store_id.to_string(),
-            "owner-device".to_string(),
+        let handle = crate::Coven::builder(
             store_dir.clone(),
-            "Facade Join Store".to_string(),
-        ))
+            crate::Config::with_defaults(
+                store_id.to_string(),
+                "owner-device".to_string(),
+                "Facade Join Store".to_string(),
+            ),
+        )
         .synced_tables(tables.clone())
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(keyring))
@@ -356,7 +358,11 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
         }
     };
 
-    assert!(config.store_dir.config_path().exists());
+    assert!(fixture
+        .layout
+        .store_dir("facade-device-join")
+        .config_path()
+        .exists());
     assert_eq!(config.store_id, "facade-device-join");
     assert_eq!(
         activation.outcome.attempt().attempt_id,

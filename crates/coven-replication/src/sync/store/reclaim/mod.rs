@@ -346,8 +346,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     ) -> Result<(), StoreReclaimError> {
         let database = self.database.clone();
         for input in database.circle_acknowledgement_publication_inputs().await? {
-            let circle_id = input.circle_id;
-            let control = input.control;
+            let circle_id = input.circle_id();
+            let control = input.control().clone();
             // A package beyond its epoch's accepted cutoff never materializes anywhere,
             // so it needs no snapshot coverage and is enumerated whether or not this
             // Circle has a stable snapshot.

@@ -38,14 +38,14 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     };
     let candidate_family = store_commit::CandidateFamilyId::derive(
         store_root_hash,
-        &device.reference,
+        device.reference(),
         &operation_id,
         &order,
     );
     let creation = CircleTransitionDraft::founder(
         store_root_hash,
         candidate_family,
-        &device.reference.device_id.to_string(),
+        &device.reference().device_id.to_string(),
         "Household",
         "0000000001000-0000-device-a",
         membership.clone(),
@@ -74,41 +74,39 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     };
     let reference = device.circle_control_reference(&control, "multi-owner");
     let first_coord = store_commit::StoreCommitCoord {
-        stream_id: device.stream_id,
+        stream_id: device.stream_id(),
         sequence: 1,
     };
-    let commit = store_commit::StoreBatchCommit::signed_operations(
-        store_root_hash,
-        operation_id,
-        first_coord.clone(),
-        device.reference.clone(),
-        &device.registration,
-        order,
-        membership.clone(),
-        store_commit::StoreDeviceStateRef::from_resolved(
-            store_commit::CommitFrontier(BTreeMap::new()),
-            &store_commit::ResolvedStoreDeviceState {
-                devices: BTreeMap::new(),
-                recovery: Vec::new(),
-                state_hash: ObjectHash::digest(b"multi-owner initial device state"),
+    let commit = device
+        .sign_operations(
+            store_root_hash,
+            operation_id,
+            first_coord.clone(),
+            order,
+            membership.clone(),
+            store_commit::StoreDeviceStateRef::from_resolved(
+                store_commit::CommitFrontier(BTreeMap::new()),
+                &store_commit::ResolvedStoreDeviceState {
+                    devices: BTreeMap::new(),
+                    recovery: Vec::new(),
+                    state_hash: ObjectHash::digest(b"multi-owner initial device state"),
+                },
+            )
+            .expect("bind initial device state"),
+            store_commit::StoreOperationMembershipAuthority {
+                predecessor: membership_authority.clone(),
+            },
+            store_commit::StoreCommitOperationsInput {
+                circle_controls: vec![reference.clone()],
+                ..store_commit::StoreCommitOperationsInput::empty()
             },
         )
-        .expect("bind initial device state"),
-        store_commit::StoreOperationMembershipAuthority {
-            predecessor: membership_authority.clone(),
-        },
-        store_commit::StoreCommitOperationsInput {
-            circle_controls: vec![reference.clone()],
-            ..store_commit::StoreCommitOperationsInput::empty()
-        },
-        &device.device_signer,
-    )
-    .expect("sign Store commit");
+        .expect("sign Store commit");
     let first_commit_path = format!(
         "{}.json",
         store_commit::commit_semantic_prefix(
             commit.candidate_family(),
-            &device.stream_id.to_string(),
+            &device.stream_id().to_string(),
             1,
             commit.commit_hash(),
         )
@@ -123,7 +121,7 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         &commit.to_bytes(),
         store_root_hash,
         &commit_ref,
-        &device.registration,
+        device.registration(),
     )
     .expect("authenticate first Store commit");
     let own_access = creation
@@ -144,21 +142,19 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
             }),
         }),
     };
-    let db = crate::synthetic_store::open_test_db();
-    let store_database = crate::StoreDatabase::new(db.database());
+    let db_store_dir = crate::synthetic_store::test_store_dir();
+    let db = crate::synthetic_store::open_test_db(db_store_dir.clone());
+    let store_database = crate::StoreDatabase::new(&db);
     let first_commit = verified_commit.clone();
-    db.database()
-        .record_verified_circle_activations_for_test(first_commit, vec![verified])
+    db.record_verified_circle_activations_for_test(first_commit, vec![verified])
         .await
         .expect("record multi-Owner control");
     let cached_owner = db
-        .database()
         .circle_access_owner_for_test(creation.circle_id)
         .await
         .expect("read cached access owner");
     assert_eq!(cached_owner, author_pubkey);
-    db.database()
-        .clear_circle_access_cache_for_test()
+    db.clear_circle_access_cache_for_test()
         .await
         .expect("remove historical Circle projections");
     let circles = store_database
@@ -200,45 +196,48 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
     };
     let second_reference = device.circle_control_reference(&second_control, "second-founder");
     let second_coord = store_commit::StoreCommitCoord {
-        stream_id: device.stream_id,
+        stream_id: device.stream_id(),
         sequence: 2,
     };
-    let second_commit = store_commit::StoreBatchCommit::signed_operations(
-        store_root_hash,
-        coven_protocol::write::WriteId::from_generated("second-founder-control-commit".to_string()),
-        second_coord.clone(),
-        device.reference,
-        &device.registration,
-        store_commit::StoreCommitOrder {
-            seq: 2,
-            predecessor: Some(commit_ref.clone()),
-            dependencies: BTreeMap::new(),
-        },
-        membership,
-        store_commit::StoreDeviceStateRef::from_resolved(
-            store_commit::CommitFrontier(BTreeMap::from([(device.stream_id, commit_ref.clone())])),
-            &store_commit::ResolvedStoreDeviceState {
-                devices: BTreeMap::new(),
-                recovery: Vec::new(),
-                state_hash: ObjectHash::digest(b"multi-owner second device state"),
+    let second_commit = device
+        .sign_operations(
+            store_root_hash,
+            coven_protocol::write::WriteId::from_generated(
+                "second-founder-control-commit".to_string(),
+            ),
+            second_coord.clone(),
+            store_commit::StoreCommitOrder {
+                seq: 2,
+                predecessor: Some(commit_ref.clone()),
+                dependencies: BTreeMap::new(),
+            },
+            membership,
+            store_commit::StoreDeviceStateRef::from_resolved(
+                store_commit::CommitFrontier(BTreeMap::from([(
+                    device.stream_id(),
+                    commit_ref.clone(),
+                )])),
+                &store_commit::ResolvedStoreDeviceState {
+                    devices: BTreeMap::new(),
+                    recovery: Vec::new(),
+                    state_hash: ObjectHash::digest(b"multi-owner second device state"),
+                },
+            )
+            .expect("bind second device state"),
+            store_commit::StoreOperationMembershipAuthority {
+                predecessor: control.value.membership_authority().clone(),
+            },
+            store_commit::StoreCommitOperationsInput {
+                circle_controls: vec![second_reference.clone()],
+                ..store_commit::StoreCommitOperationsInput::empty()
             },
         )
-        .expect("bind second device state"),
-        store_commit::StoreOperationMembershipAuthority {
-            predecessor: control.value.membership_authority().clone(),
-        },
-        store_commit::StoreCommitOperationsInput {
-            circle_controls: vec![second_reference.clone()],
-            ..store_commit::StoreCommitOperationsInput::empty()
-        },
-        &device.device_signer,
-    )
-    .expect("sign second founder Store commit");
+        .expect("sign second founder Store commit");
     let second_commit_path = format!(
         "{}.json",
         store_commit::commit_semantic_prefix(
             second_commit.candidate_family(),
-            &device.stream_id.to_string(),
+            &device.stream_id().to_string(),
             2,
             second_commit.commit_hash(),
         )
@@ -253,11 +252,10 @@ async fn control_history_caches_the_verified_access_owner_and_rejects_second_gen
         &second_commit.to_bytes(),
         store_root_hash,
         &second_commit_ref,
-        &device.registration,
+        device.registration(),
     )
     .expect("authenticate second Store commit");
     let error = db
-        .database()
         .record_verified_circle_activations_for_test(
             second_commit,
             vec![coven_protocol::circle_activation::VerifiedCircleReference {

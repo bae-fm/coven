@@ -2,13 +2,15 @@ use super::*;
 
 #[tokio::test]
 async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut() {
-    let owner_db = open_test_db();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
     let writer = UserKeypair::generate();
     let writer_pubkey = pubkey_hex(&writer);
     let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
+        owner_db_store_dir.clone(),
         "operation-predecessor-membership",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -18,6 +20,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     store
         .invite_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &writer_pubkey,
             None,
@@ -27,17 +30,33 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         )
         .await
         .expect("invite operation author");
-    let writer_db = open_test_db();
+    let writer_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let writer_db = crate::sync::test_helpers::open_test_db(writer_db_store_dir.clone());
     let writer_device = store
-        .activate_joined_device(&owner_db, &writer_db, &writer, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &writer_db,
+            writer_db_store_dir.clone(),
+            &writer,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate operation author device");
     store
-        .promote_active_member_fixture(&owner_db, &writer_db, &owner, &writer, &encryption)
+        .promote_active_member_fixture(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &writer_db,
+            writer_db_store_dir.clone(),
+            &owner,
+            &writer,
+            &encryption,
+        )
         .await
         .expect("promote operation author to Owner");
     let owner_device = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind operation owner");
     let before_removal = owner_device
@@ -51,7 +70,14 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
 
     let custody = TestCustody::default();
     store
-        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &custody)
+        .remove_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &writer_pubkey,
+            &encryption,
+            &custody,
+        )
         .await
         .expect("remove operation author after its predecessor cut");
     let candidate = owner_device
@@ -64,32 +90,34 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
         .prepare_store_operation_plan_for_test()
         .await
         .expect("authorize operation at its predecessor cut");
-    let state = &plan.membership_state;
+    let state = plan.membership_state();
 
     assert_eq!(state.heads, before_removal.head_refs());
     assert_eq!(state.resolutions, before_removal.resolution_refs());
     assert_ne!(state.heads, candidate.head_refs());
     assert_eq!(
-        plan.membership_authority,
+        plan.membership_authority().clone(),
         StoreOperationMembershipAuthority {
             predecessor: predecessor_authority,
         }
     );
     assert_eq!(
-        plan.owner_grant,
+        plan.owner_grant().cloned(),
         before_removal.active_owner_grant(&writer_pubkey)
     );
 }
 
 #[tokio::test]
 async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predecessor() {
-    let owner_db = open_test_db();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
     let writer = UserKeypair::generate();
     let writer_pubkey = pubkey_hex(&writer);
     let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
+        owner_db_store_dir.clone(),
         "direct-removal-predecessor-membership",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -99,6 +127,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     store
         .invite_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &writer_pubkey,
             None,
@@ -108,13 +137,21 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
         )
         .await
         .expect("invite operation author");
-    let writer_db = open_test_db();
+    let writer_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let writer_db = crate::sync::test_helpers::open_test_db(writer_db_store_dir.clone());
     store
-        .activate_joined_device(&owner_db, &writer_db, &writer, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &writer_db,
+            writer_db_store_dir.clone(),
+            &writer,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate operation author device");
     let owner_device = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("bind direct-removal owner");
     let before_removal = owner_device
@@ -125,7 +162,14 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 
     let custody = TestCustody::default();
     store
-        .remove_member(&owner_db, &owner, &writer_pubkey, &encryption, &custody)
+        .remove_member(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &owner,
+            &writer_pubkey,
+            &encryption,
+            &custody,
+        )
         .await
         .expect("remove operation author directly");
     let after_removal = owner_device
@@ -135,19 +179,17 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     assert!(!after_removal.can_write_now(&writer_pubkey));
 
     owner_db
-        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('direct-removal-witness', 'witness', NULL, 1, \
                  '0000000001000-0000-owner', '2026-01-01')",
         )
         .await;
-    let (_temp, store_dir) = temp_store_dir();
     assert!(owner_device
-        .prepare_pending_store_write(&store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare removal-witnessing predecessor commit"));
-    let prepared = coven_database::StoreDatabase::new(owner_db.database())
+    let prepared = coven_database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
         .expect("load removal-witnessing predecessor")
@@ -158,7 +200,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     assert_eq!(owner_device.drain_store_writes().await.unwrap(), 1);
 
     let writer_device = store
-        .bind_device(&writer_db, &writer)
+        .bind_device_in(&writer_db, writer_db_store_dir.clone(), &writer)
         .await
         .expect("bind removed writer");
     let coven_protocol::store_commit::StoreCommitCoord { stream_id, .. } = predecessor.coord;
@@ -179,11 +221,13 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
 
 #[tokio::test]
 async fn merge_outbound_authorization_admits_direct_membership_after_its_predecessor() {
-    let owner_db = open_test_db();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
     let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     let store = TestStore::create(
         &owner_db,
+        owner_db_store_dir.clone(),
         "new-direct-predecessor-membership",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -191,23 +235,21 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     .await
     .expect("create Merge Store");
     let owner_device = store
-        .bind_device(&owner_db, &owner)
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
         .await
         .expect("load predecessor membership");
     owner_db
-        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('new-direct-witness', 'witness', NULL, 1, \
                  '0000000001000-0000-owner', '2026-01-01')",
         )
         .await;
-    let (_temp, store_dir) = temp_store_dir();
     assert!(owner_device
-        .prepare_pending_store_write(&store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare predecessor commit"));
-    let predecessor = coven_database::StoreDatabase::new(owner_db.database())
+    let predecessor = coven_database::StoreDatabase::new(&owner_db)
         .oldest_prepared_store_write()
         .await
         .expect("load predecessor commit")
@@ -223,6 +265,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     store
         .invite_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &new_member_pubkey,
             None,
@@ -255,10 +298,12 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
 
 #[tokio::test]
 async fn conflict_resolution_preparation_rejects_a_tampered_local_device_projection() {
-    let owner_db = open_test_db();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
     let owner = UserKeypair::generate();
     let store = TestStore::create(
         &owner_db,
+        owner_db_store_dir.clone(),
         "conflict-resolution-remote-device-authority",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -266,15 +311,14 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
     .await
     .expect("create Merge Store");
     let device = store
-        .open_into(&owner_db)
+        .open_into(&owner_db, owner_db_store_dir.clone())
         .await
         .expect("load exact founder membership");
     let chain = device
         .membership_for_test()
         .await
         .expect("load exact founder membership");
-    let changeset = open_test_db()
-        .database()
+    let changeset = open_test_db(crate::sync::test_helpers::test_store_dir())
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('remote-device-authority', 'authority', NULL, 1, \
@@ -282,12 +326,7 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         ])
         .await;
     store
-        .publish_changeset(
-            "founder",
-            1,
-            &changeset,
-            owner_db.database().schema_version(),
-        )
+        .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
         .await
         .expect("publish exact predecessor commit");
     let forged_device_id = coven_protocol::store_commit::StoreDeviceId::derive(
@@ -299,7 +338,6 @@ async fn conflict_resolution_preparation_rejects_a_tampered_local_device_project
         },
     );
     owner_db
-        .database()
         .forge_device_in_state_snapshots_for_test(forged_device_id)
         .await
         .expect("tamper local Store device projection");

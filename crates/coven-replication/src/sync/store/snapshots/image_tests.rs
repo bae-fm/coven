@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use coven_database::Database;
 use coven_database::StoreDatabase;
-use coven_database::SyntheticStoreFixture;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::store_commit::CommitFrontier;
 
@@ -21,8 +21,9 @@ fn scoped_snapshot_tables() -> Vec<SyncedTable> {
     ]
 }
 
-fn open_scoped_snapshot_test_db() -> SyntheticStoreFixture {
+fn open_scoped_snapshot_test_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         scoped_snapshot_tables(),
         vec![Migration::sql(
             1,
@@ -43,10 +44,8 @@ fn open_scoped_snapshot_test_db() -> SyntheticStoreFixture {
     )
 }
 
-async fn seed_scoped_snapshot_rows(
-    source: &SyntheticStoreFixture,
-) -> coven_protocol::circle::CircleId {
-    let database = StoreDatabase::new(source.database());
+async fn seed_scoped_snapshot_rows(source: &Database) -> coven_protocol::circle::CircleId {
+    let database = StoreDatabase::new(source);
     let circle = database
         .install_test_active_circle("snapshot-route-circle".to_string())
         .await
@@ -120,14 +119,14 @@ async fn seed_scoped_snapshot_rows(
 }
 
 fn circle_bootstrap_reference(
-    source: &SyntheticStoreFixture,
+    source: &Database,
     image: &[u8],
 ) -> coven_protocol::circle::CircleBootstrapRef {
     let image_hash = coven_protocol::store_commit::ObjectHash::digest(image);
     coven_protocol::circle::CircleBootstrapRef {
         coverage: CommitFrontier(BTreeMap::new()),
-        schema_version: source.database().schema_version(),
-        sync_routing_hash: source.database().sync_routing_hash(),
+        schema_version: source.schema_version(),
+        sync_routing_hash: source.sync_routing_hash(),
         image: coven_protocol::store_commit::SnapshotImageRef {
             image_hash,
             object: coven_protocol::objects::ExactObjectRef::new(
@@ -145,9 +144,11 @@ fn circle_bootstrap_reference(
 
 #[tokio::test]
 async fn circle_bootstrap_verification_requires_authenticated_routing() {
-    let source = open_scoped_snapshot_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "circle-bootstrap-routing-key",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -158,7 +159,7 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
     let image_dir = tempfile::tempdir().expect("Circle bootstrap routing image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -169,7 +170,7 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
         .expect("create Circle bootstrap routing image");
     let reference = circle_bootstrap_reference(&source, &image);
 
-    let error = StoreDatabase::new(source.database())
+    let error = StoreDatabase::new(&source)
         .verify_circle_bootstrap_image(image, reference, circle_id, None)
         .await
         .expect_err("scoped Circle bootstrap verification must require its routing key");
@@ -183,9 +184,11 @@ async fn circle_bootstrap_verification_requires_authenticated_routing() {
 
 #[tokio::test]
 async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
-    let source = open_scoped_snapshot_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "circle-bootstrap-store-row",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -196,7 +199,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     let image_dir = tempfile::tempdir().expect("Circle bootstrap Store-row image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -207,7 +210,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
         .expect("create Circle projection for Store-row tampering");
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(source.database())
+        StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
             .expect("read Store-row Store root")
@@ -240,7 +243,7 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
     });
     let reference = circle_bootstrap_reference(&source, &image);
 
-    let error = StoreDatabase::new(source.database())
+    let error = StoreDatabase::new(&source)
         .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
         .await
         .expect_err("Circle bootstrap must reject a scoped Store row");
@@ -254,7 +257,9 @@ async fn circle_bootstrap_verification_rejects_scoped_store_rows() {
 
 #[tokio::test]
 async fn circle_bootstrap_verification_rejects_unscoped_rows() {
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db_schema(
+        source_store_dir.clone(),
         vec![
             SyncedTable::new(
                 "documents",
@@ -284,20 +289,21 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     );
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "circle-bootstrap-unscoped-row",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Circle bootstrap unscoped-row Store");
-    let circle_id = StoreDatabase::new(source.database())
+    let circle_id = StoreDatabase::new(&source)
         .install_test_active_circle("circle-bootstrap-unscoped".to_string())
         .await
         .expect("install Circle bootstrap unscoped Circle");
     let image_dir = tempfile::tempdir().expect("Circle bootstrap unscoped image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -321,7 +327,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(source.database())
+        StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
             .expect("read unscoped-row Store root")
@@ -330,7 +336,7 @@ async fn circle_bootstrap_verification_rejects_unscoped_rows() {
     )
     .expect("derive unscoped-row routing key");
 
-    let error = StoreDatabase::new(source.database())
+    let error = StoreDatabase::new(&source)
         .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
         .await
         .expect_err("Circle bootstrap must reject an unscoped synced row");
@@ -360,10 +366,12 @@ struct PublishedScopedSnapshot {
 
 impl PublishedScopedSnapshot {
     async fn publish(store_id: &str, image_kind: ScopedSnapshotImage) -> Self {
-        let source = open_scoped_snapshot_test_db();
+        let source_store_dir = crate::sync::test_helpers::test_store_dir();
+        let source = open_scoped_snapshot_test_db(source_store_dir.clone());
         let signer = UserKeypair::generate();
         let store = crate::sync::test_helpers::TestStore::create(
             &source,
+            source_store_dir.clone(),
             store_id,
             signer.clone(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -371,7 +379,7 @@ impl PublishedScopedSnapshot {
         .await
         .expect("create published scoped snapshot Store");
         let device = store
-            .open_into(&source)
+            .open_into(&source, source_store_dir.clone())
             .await
             .expect("load published scoped snapshot membership");
         let membership = device
@@ -383,7 +391,7 @@ impl PublishedScopedSnapshot {
         let image_dir = tempfile::tempdir().expect("published scoped snapshot image directory");
         let image_path = image_dir.path().to_path_buf();
         let root = store.root().clone();
-        let image = StoreDatabase::new(source.database())
+        let image = StoreDatabase::new(&source)
             .capture_snapshot_image_for_test(
                 root,
                 image_path,
@@ -404,7 +412,6 @@ impl PublishedScopedSnapshot {
             }
             ScopedSnapshotImage::CircleRow => {
                 let route = source
-                    .database()
                     .document_circle_route_for_test("2f1a7bc0-5d31-4ce6-9f4b-e37de58b11b7")
                     .await
                     .expect("load Circle row route");
@@ -509,9 +516,11 @@ fn edit_snapshot_image(
 
 #[tokio::test]
 async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
-    let source = open_scoped_snapshot_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-authenticated-routes",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -523,7 +532,7 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -558,9 +567,11 @@ async fn snapshot_preserves_authenticated_routes_for_every_scoped_row() {
 
 #[tokio::test]
 async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
-    let source = open_scoped_snapshot_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-circle-projection",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -572,7 +583,7 @@ async fn circle_snapshot_contains_only_its_rows_routes_and_mirrors() {
     let image_dir = tempfile::tempdir().expect("Circle snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -633,7 +644,9 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
         )
         .scoped_by("audience"),
     ];
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db_schema(
+        source_store_dir.clone(),
         tables.clone(),
         vec![Migration::sql(
             1,
@@ -654,13 +667,14 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     );
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-circle-store-parent",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create Circle parent snapshot Store");
-    let database = StoreDatabase::new(source.database());
+    let database = StoreDatabase::new(&source);
     let circle_id = database
         .install_test_active_circle("snapshot-parent-circle".to_string())
         .await
@@ -705,7 +719,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let image_dir = tempfile::tempdir().expect("Circle parent snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_circle_snapshot_image_for_test(
             root,
             image_path,
@@ -717,7 +731,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
     let reference = circle_bootstrap_reference(&source, &image);
     let routing_key = coven_protocol::circle::derive_row_routing_key(
         &coven_keys::encryption::EncryptionService::from_key([42; 32]),
-        StoreDatabase::new(source.database())
+        StoreDatabase::new(&source)
             .local_store_root_ref()
             .await
             .expect("read Circle parent Store root")
@@ -725,7 +739,7 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
             .store_root_hash,
     )
     .expect("derive Circle parent routing key");
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .verify_circle_bootstrap_image(image, reference, circle_id, Some(routing_key))
         .await
         .expect("verify Circle bootstrap with its required Store parent");
@@ -769,9 +783,11 @@ async fn circle_snapshot_keeps_only_referenced_store_parent_rows() {
 
 #[tokio::test]
 async fn snapshot_refuses_an_unauthenticated_live_private_route() {
-    let source = open_scoped_snapshot_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = open_scoped_snapshot_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-invalid-live-route",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -780,7 +796,6 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
     .expect("create invalid-live-route Store");
     seed_scoped_snapshot_rows(&source).await;
     source
-        .database()
         .corrupt_live_document_route_id_for_test("01890a5d-ac96-774b-bcce-b302099c3f74")
         .await
         .expect("corrupt live private route");
@@ -788,7 +803,7 @@ async fn snapshot_refuses_an_unauthenticated_live_private_route() {
     let image_dir = tempfile::tempdir().expect("invalid-live-route snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let result = StoreDatabase::new(source.database())
+    let result = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -846,7 +861,9 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
         coven_protocol::synced_schema::RowIdentity::IndependentUuid,
     )
     .scoped_by("audience")];
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db_schema(
+        source_store_dir.clone(),
         source_tables.clone(),
         vec![Migration::sql(1, "document schema", DOCUMENT_SCHEMA)],
     );
@@ -854,6 +871,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
     let store_id = "snapshot-scoped-migration";
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         store_id,
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -861,14 +879,14 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
     .await
     .expect("create scoped migration Store");
     let device = store
-        .open_into(&source)
+        .open_into(&source, source_store_dir.clone())
         .await
         .expect("load scoped migration membership");
     let membership = device
         .membership_for_test()
         .await
         .expect("project scoped migration membership");
-    StoreDatabase::new(source.database())
+    StoreDatabase::new(&source)
         .run_host_store_write_for_test(
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -894,7 +912,7 @@ async fn bootstrap_migrates_before_validating_scoped_snapshot_routes() {
     let image_dir = tempfile::tempdir().expect("scoped migration snapshot directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(
             root,
             image_path,
@@ -1056,10 +1074,12 @@ async fn bootstrap_rejects_an_orphan_store_mirror() {
 
 #[tokio::test]
 async fn snapshot_retains_only_frontier_device_states_without_exclusion_authority() {
-    let source = crate::sync::test_helpers::open_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-device-state-frontier",
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1067,7 +1087,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
     .await
     .expect("create device-state snapshot Store");
     let loaded_store = store
-        .bind_device(&source, &signer)
+        .bind_device_in(&source, source_store_dir.clone(), &signer)
         .await
         .expect("load device-state snapshot Store");
     let mut writer = loaded_store
@@ -1076,7 +1096,6 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
         .expect("authorize device-state snapshot writer");
     for sequence in 1..=3 {
         source
-            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                      VALUES ('snapshot-state-{sequence}', 'state', NULL, 1, \
@@ -1095,7 +1114,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
             1,
         );
     }
-    let expected = StoreDatabase::new(source.database())
+    let expected = StoreDatabase::new(&source)
         .materialized_frontier()
         .await
         .expect("load snapshot frontier")
@@ -1105,7 +1124,7 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create scoped snapshot image");
@@ -1122,10 +1141,12 @@ async fn snapshot_retains_only_frontier_device_states_without_exclusion_authorit
 #[tokio::test]
 async fn bootstrap_installs_the_verified_exact_store_root() {
     Box::pin(async {
-        let source = crate::sync::test_helpers::open_test_db();
+        let source_store_dir = crate::sync::test_helpers::test_store_dir();
+        let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
         let signer = UserKeypair::generate();
         let store = crate::sync::test_helpers::TestStore::create(
             &source,
+            source_store_dir.clone(),
             "snapshot-bootstrap-exact-root",
             signer.clone(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -1133,7 +1154,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         .await
         .expect("create exact bootstrap Store");
         let device = store
-            .open_into(&source)
+            .open_into(&source, source_store_dir.clone())
             .await
             .expect("open bootstrap Store membership");
         let membership = device
@@ -1144,7 +1165,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
         let image_path = image_dir.path().to_path_buf();
         let tables = crate::sync::test_helpers::test_synced_tables();
         let root = store.root().clone();
-        let image = StoreDatabase::new(source.database())
+        let image = StoreDatabase::new(&source)
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create bootstrap database image");
@@ -1235,10 +1256,12 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
 
 #[tokio::test]
 async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements() {
-    let source = crate::sync::test_helpers::open_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-bootstrap-requires-stability",
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1246,7 +1269,7 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     .await
     .expect("create unstable bootstrap Store");
     let device = store
-        .open_into(&source)
+        .open_into(&source, source_store_dir.clone())
         .await
         .expect("open unstable bootstrap Store membership");
     let membership = device
@@ -1256,7 +1279,7 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create unstable bootstrap database image");
@@ -1282,9 +1305,11 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
 
 #[tokio::test]
 async fn snapshot_removes_the_closed_merge_materialization_graph() {
-    let source = crate::sync::test_helpers::open_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "snapshot-merge-materialization-graph",
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1292,7 +1317,6 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
     .await
     .expect("create snapshot materialization Store");
     let changeset = source
-        .database()
         .capture_test_changeset(&[
             "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
                  VALUES ('snapshot-row', 'Snapshot', 1, \
@@ -1304,7 +1328,6 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
         .await
         .expect("publish snapshot materialization fixture");
     let live_counts = source
-        .database()
         .materialization_graph_counts_for_test()
         .await
         .expect("count live materialization graph");
@@ -1315,7 +1338,7 @@ async fn snapshot_removes_the_closed_merge_materialization_graph() {
     let image_dir = tempfile::tempdir().expect("snapshot image directory");
     let image_path = image_dir.path().to_path_buf();
     let root = store.root().clone();
-    let image = StoreDatabase::new(source.database())
+    let image = StoreDatabase::new(&source)
         .capture_snapshot_image_for_test(root, image_path, None)
         .await
         .expect("create materialization snapshot");
@@ -1343,11 +1366,16 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
             coven_protocol::blob::Provenance::HostProvided,
             coven_protocol::blob::CacheFill::CacheEager,
         );
-        let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
+        let source_store_dir = crate::sync::test_helpers::test_store_dir();
+        let source = crate::sync::test_helpers::open_test_db_with_blob(
+            source_store_dir.clone(),
+            declaration,
+        );
         let signer = UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &source,
+            source_store_dir.clone(),
             "snapshot-blob-ownership-graph",
             signer.clone(),
             home.clone(),
@@ -1355,14 +1383,12 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
         .await
         .expect("create exact blob Store");
         source
-            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
              VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
             )
             .await;
         source
-            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos
                  (id, note_id, kind, size, hash, _updated_at, created_at)
@@ -1371,7 +1397,7 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
                 coven_protocol::blob::content_hash(b"cover-bytes"),
             ))
             .await;
-        let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
+        let source_dir = source_store_dir.clone();
         coven_foundation::store_dir::StoreDir::store_local_blob(
             &source_dir,
             "photos",
@@ -1389,22 +1415,18 @@ async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
             "snapshot-blob-ownership-graph",
             signer.clone(),
         );
-        let components = crate::sync::test_owner_graph::TestOwnerGraph::new(
-            StoreDatabase::new(source.database()),
+        crate::sync::test_owner_graph::TestOwnerGraph::new(
+            StoreDatabase::new(&source),
             source_dir.clone(),
         )
-        .prepare_sync(writer, signer)
+        .run_sync_cycle(writer, signer)
         .await
-        .expect("prepare source blob publication");
-        components
-            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
-            .await
-            .expect("publish source blob");
+        .expect("publish source blob");
 
         let image_dir = tempfile::tempdir().expect("snapshot image directory");
         let image_path = image_dir.path().to_path_buf();
         let root = store.root().clone();
-        let image = StoreDatabase::new(source.database())
+        let image = StoreDatabase::new(&source)
             .capture_snapshot_image_for_test(root, image_path, None)
             .await
             .expect("create blob snapshot");

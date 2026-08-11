@@ -2,7 +2,7 @@
 //!
 //! These drive the real transition owners (`LocalBlobTransitions` and
 //! `ConnectedBlobTransitions`) and the upload
-//! drain's completion flip against a real [`SyntheticStoreFixture`] and a [`TestStore`] that serves as both
+//! drain's completion flip against a real [`Database`] and a [`TestStore`] that serves as both
 //! the sync storage and the cloud home. A `Plaintext` cipher + `Plain` blob-path
 //! scheme keep what the drain writes and what a read fetches byte-identical through
 //! the mock, so a blob round-trips as plaintext across devices.
@@ -21,15 +21,11 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 
 use crate::blob::transition::LocalBlobTransitions;
-use crate::sync::test_helpers::{
-    open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, remote_root_db, temp_store_dir, TestStore,
-    TestStoreFixture,
-};
+use crate::sync::test_helpers::{TestStore, TestStoreParts};
 use crate::sync::test_owner_graph::TestOwnerGraph;
+use coven_database::Database;
 use coven_database::Migration;
 use coven_database::StoreDatabase;
-use coven_database::SyntheticStoreFixture;
 use coven_foundation::clock::SystemClock;
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::keys::UserKeypair;
@@ -81,8 +77,9 @@ fn cover_lazy_decl() -> BlobDecl {
         .with_cloud_path_column("cloud_path")
 }
 
-fn scoped_blob_transition_db() -> SyntheticStoreFixture {
-    open_test_db_schema(
+fn scoped_blob_transition_db(store_dir: StoreDir) -> Database {
+    crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         vec![
             SyncedTable::new("notes", RowIdentity::SharedKey).gated_by("shared"),
             SyncedTable::new("note_tags", RowIdentity::SharedKey),
@@ -105,11 +102,12 @@ fn scoped_blob_transition_db() -> SyntheticStoreFixture {
 }
 
 async fn create_store(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: StoreDir,
     signer: UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
-) -> TestStoreFixture {
-    TestStoreFixture::create(db, "test-store", signer, home)
+) -> TestStoreParts {
+    TestStore::create_with_connection(db, db_store_dir.clone(), "test-store", signer, home)
         .await
         .expect("create exact test Store for the test database")
 }
@@ -117,35 +115,36 @@ async fn create_store(
 /// A photo-carrying test database, the Store that publishes for it, a fresh
 /// Store directory, and the owner graph over both.
 async fn photo_transition_fixture() -> (
-    SyntheticStoreFixture,
+    Database,
     std::sync::Arc<TestStore>,
     std::sync::Arc<coven_storage::CloudSyncConnection>,
     tempfile::TempDir,
     StoreDir,
     TestOwnerGraph,
 ) {
-    let db = open_test_db_with_blob(photo_decl());
-    let (storage, cloud_storage) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
+    let (storage, cloud_storage) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(db.database()), lib.clone());
-    (db, storage, cloud_storage, tmp, lib, owners)
+    .await;
+    let user_files = tempfile::tempdir().expect("create external blob fixture directory");
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), db_store_dir.clone());
+    (db, storage, cloud_storage, user_files, db_store_dir, owners)
 }
 
-async fn photo_ref(db: &SyntheticStoreFixture, id: &str) -> RowBlobRef {
-    coven_database::StoreDatabase::new(db.database())
+async fn photo_ref(db: &Database, id: &str) -> RowBlobRef {
+    coven_database::StoreDatabase::new(db)
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact photo row blob reference")
 }
 
-async fn cover_ref(db: &SyntheticStoreFixture, id: &str) -> RowBlobRef {
-    coven_database::StoreDatabase::new(db.database())
+async fn cover_ref(db: &Database, id: &str) -> RowBlobRef {
+    coven_database::StoreDatabase::new(db)
         .row_blob_ref("note_covers", id)
         .await
         .expect("load exact cover row blob reference")
@@ -191,9 +190,8 @@ impl BlobTransitionObserver for Recorder {
     }
 }
 
-async fn shared_flag(db: &SyntheticStoreFixture, note_id: &str) -> i64 {
+async fn shared_flag(db: &Database, note_id: &str) -> i64 {
     let v = db
-        .database()
         .query_test_text(&format!(
             "SELECT CAST(shared AS TEXT) FROM notes WHERE id = '{note_id}'"
         ))
@@ -203,16 +201,15 @@ async fn shared_flag(db: &SyntheticStoreFixture, note_id: &str) -> i64 {
 
 /// The note's gate stamp (`_updated_at`), to prove a refused transition leaves the
 /// gate row — value and causal stamp — untouched.
-async fn gate_stamp(db: &SyntheticStoreFixture, note_id: &str) -> String {
-    db.database()
-        .query_test_text(&format!(
-            "SELECT _updated_at FROM notes WHERE id = '{note_id}'"
-        ))
-        .await
+async fn gate_stamp(db: &Database, note_id: &str) -> String {
+    db.query_test_text(&format!(
+        "SELECT _updated_at FROM notes WHERE id = '{note_id}'"
+    ))
+    .await
 }
 
-async fn pending_uploads(db: &SyntheticStoreFixture) -> usize {
-    coven_database::StoreDatabase::new(db.database())
+async fn pending_uploads(db: &Database) -> usize {
+    coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -220,10 +217,10 @@ async fn pending_uploads(db: &SyntheticStoreFixture) -> usize {
 }
 
 async fn created_upload_blob(
-    db: &SyntheticStoreFixture,
+    db: &Database,
     blob_id: &str,
 ) -> coven_protocol::blob::locator::StoredBlobRef {
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .expect("load exact upload journals")
@@ -240,8 +237,8 @@ async fn created_upload_blob(
         .expect("blob has a Created exact upload journal")
 }
 
-async fn pending_deletes(db: &SyntheticStoreFixture) -> Vec<String> {
-    coven_database::StoreDatabase::new(db.database())
+async fn pending_deletes(db: &Database) -> Vec<String> {
+    coven_database::StoreDatabase::new(db)
         .pending_blob_deletes()
         .await
         .unwrap()
@@ -258,25 +255,22 @@ async fn pending_deletes(db: &SyntheticStoreFixture) -> Vec<String> {
 }
 
 async fn assert_scoped_flip_journaled_atomically(
-    db: &SyntheticStoreFixture,
+    db: &Database,
     expected_changes: &[(&str, coven_foundation::changeset::ChangeOp)],
 ) {
     assert!(
-        db.database()
-            .has_store_partition_for_test()
+        db.has_store_partition_for_test()
             .await
             .expect("inspect Store partition"),
         "the audience partition and its parent write commit together",
     );
     let has_routes = db
-        .database()
         .table_has_rows_for_test(coven_database::DatabaseTestTable::named(
             "_coven_row_routes",
         ))
         .await
         .expect("inspect scoped routes");
     let has_mirrors = db
-        .database()
         .table_has_rows_for_test(coven_database::DatabaseTestTable::named("_coven_audience"))
         .await
         .expect("inspect scoped mirrors");
@@ -285,7 +279,6 @@ async fn assert_scoped_flip_journaled_atomically(
         "a boolean-gated Store row does not invent scoped row routes or mirrors",
     );
     let changesets = db
-        .database()
         .store_partition_changesets_for_test()
         .await
         .expect("read routed Store partitions");
@@ -324,35 +317,33 @@ async fn assert_scoped_flip_journaled_atomically(
 
 #[tokio::test]
 async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let first = ObjectHash::digest(b"first locator");
     let second = ObjectHash::digest(b"second locator");
 
-    db.database()
-        .insert_published_blob_drop_intent_for_test(
-            1,
-            "covers",
-            "shared-id",
-            b"first",
-            first,
-            DeferredLocalBlobDisposition::Cache,
-        )
-        .await
-        .expect("insert first published blob drop intent");
-    db.database()
-        .insert_published_blob_drop_intent_for_test(
-            1,
-            "covers",
-            "shared-id",
-            b"second",
-            second,
-            DeferredLocalBlobDisposition::Pin,
-        )
-        .await
-        .expect("insert second published blob drop intent");
+    db.insert_published_blob_drop_intent_for_test(
+        1,
+        "covers",
+        "shared-id",
+        b"first",
+        first,
+        DeferredLocalBlobDisposition::Cache,
+    )
+    .await
+    .expect("insert first published blob drop intent");
+    db.insert_published_blob_drop_intent_for_test(
+        1,
+        "covers",
+        "shared-id",
+        b"second",
+        second,
+        DeferredLocalBlobDisposition::Pin,
+    )
+    .await
+    .expect("insert second published blob drop intent");
 
     let count = db
-        .database()
         .published_blob_drop_intent_count_for_test(1, "covers", "shared-id")
         .await
         .expect("count exact drop intents");
@@ -369,17 +360,20 @@ async fn published_drop_intents_preserve_distinct_locators_for_one_logical_id() 
 #[tokio::test]
 async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let kp_a = UserKeypair::generate();
-    let db_a = open_test_db_with_blob(photo_decl());
-    let store_database_a = StoreDatabase::new(db_a.database());
-    let (storage, cloud_storage) = (create_store(
+    let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_a =
+        crate::sync::test_helpers::open_test_db_with_blob(db_a_store_dir.clone(), photo_decl());
+    let store_database_a = StoreDatabase::new(&db_a);
+    let (storage, cloud_storage) = create_store(
         &db_a,
+        db_a_store_dir.clone(),
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp_a, lib_a) = temp_store_dir();
-    let owners_a = TestOwnerGraph::new(StoreDatabase::new(db_a.database()), lib_a.clone());
+    .await;
+    let tmp_a = tempfile::tempdir().unwrap();
+    let lib_a = db_a_store_dir.clone();
+    let owners_a = TestOwnerGraph::new(StoreDatabase::new(&db_a), lib_a.clone());
     let bytes = b"PHOTO-BYTES-one-file".to_vec();
 
     let src = owners_a
@@ -394,21 +388,28 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
     // A cycle while the note is gated off: nothing reaches a peer.
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
-    let db_b = open_test_db_with_blob(photo_decl());
-    let (_tmp_b, lib_b) = temp_store_dir();
-    let owners_b = TestOwnerGraph::new(StoreDatabase::new(db_b.database()), lib_b.clone());
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b =
+        crate::sync::test_helpers::open_test_db_with_blob(db_b_store_dir.clone(), photo_decl());
+    let lib_b = db_b_store_dir.clone();
+    let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
     let kp_b = UserKeypair::generate();
     let peer = storage
-        .invite_and_activate_peer(&db_a, &db_b, &kp_b)
+        .invite_and_activate_peer(
+            &db_a,
+            db_a_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &kp_b,
+        )
         .await
         .expect("invite and activate peer Store device");
-    peer.pull_store(&lib_b).await.expect("pull peer Store");
+    peer.pull_store().await.expect("pull peer Store");
     assert!(
         !db_b
-            .database()
             .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "a gated-off (Local) release does not reach a peer",
@@ -422,7 +423,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         .expect("make_remote");
     let recorder = Recorder::default();
     let result = storage
-        .run_founder_cycle(&lib_a, Some(&recorder))
+        .run_founder_cycle(Some(&recorder))
         .await
         .expect("run founder cycle");
 
@@ -432,7 +433,6 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
         !db_a
-            .database()
             .make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
@@ -468,13 +468,12 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
-    peer.pull_store(&lib_b).await.expect("pull peer Store");
+    peer.pull_store().await.expect("pull peer Store");
     assert!(
-        db_b.database()
-            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+        db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
             .await,
         "B receives the release once its blobs are up and the gate flips",
     );
@@ -489,12 +488,12 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
 }
 
 /// The mutable upload facts attached to the exact pending Local row version.
-async fn pending_upload_state(db: &SyntheticStoreFixture, id: &str) -> (PathBuf, bool) {
-    let expected = coven_database::StoreDatabase::new(db.database())
+async fn pending_upload_state(db: &Database, id: &str) -> (PathBuf, bool) {
+    let expected = coven_database::StoreDatabase::new(db)
         .row_blob_ref("note_photos", id)
         .await
         .expect("load exact pending upload row");
-    let mut matching = coven_database::StoreDatabase::new(db.database())
+    let mut matching = coven_database::StoreDatabase::new(db)
         .pending_blob_uploads()
         .await
         .expect("load pending exact row uploads")
@@ -556,7 +555,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
     );
 
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -573,7 +572,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 /// removed) one it would otherwise retry forever.
 #[tokio::test]
 async fn re_enqueue_updates_the_pending_upload_source_path() {
-    let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
+    let (db, storage, _cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
     let bytes = b"PHOTO-relocate".to_vec();
     let user_dir = tmp.path().join("user");
 
@@ -593,7 +592,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     // The user moves the file: re-register it at a new path and remove the old one.
     let src2 = user_dir.join("relocated.jpg");
     std::fs::write(&src2, &bytes).unwrap();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photoaaa", &src2)
         .await;
     std::fs::remove_file(&src1).unwrap();
@@ -609,7 +608,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
     );
 
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -629,7 +628,7 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
 #[tokio::test]
 async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"PHOTO-BYTES-completed-remote".to_vec();
 
     owners
@@ -646,14 +645,13 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         .await
         .expect("make_remote");
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the root is Remote");
     assert!(
-        !db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        !db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "completion deleted the make_remote intent",
@@ -695,21 +693,30 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
 async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     tokio::spawn(async {
         let kp_a = UserKeypair::generate();
-        let db_a = open_test_db_with_blob(photo_decl());
-        let store_database_a = StoreDatabase::new(db_a.database());
+        let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db_a =
+            crate::sync::test_helpers::open_test_db_with_blob(db_a_store_dir.clone(), photo_decl());
+        let store_database_a = StoreDatabase::new(&db_a);
         let home = crate::sync::test_helpers::test_cloud_home();
         let (storage, cloud_storage) =
-            (create_store(&db_a, kp_a.clone(), home.clone()).await).into_parts();
+            create_store(&db_a, db_a_store_dir.clone(), kp_a.clone(), home.clone()).await;
         let kp_b = UserKeypair::generate();
-        let db_b = open_test_db_with_blob(photo_decl());
-        let (tmp_a, lib_a) = temp_store_dir();
-        let owners_a = TestOwnerGraph::new(store_database_a.clone(), lib_a.clone());
-        let (_tmp_b, lib_b) = temp_store_dir();
+        let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db_b =
+            crate::sync::test_helpers::open_test_db_with_blob(db_b_store_dir.clone(), photo_decl());
+        let tmp_a = tempfile::tempdir().expect("create external blob fixture directory");
+        let owners_a = TestOwnerGraph::new(store_database_a.clone(), db_a_store_dir.clone());
         let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
-        let peer = Box::pin(storage.invite_and_activate_peer(&db_a, &db_b, &kp_b))
-            .await
-            .expect("invite and activate peer Store device");
+        let peer = Box::pin(storage.invite_and_activate_peer(
+            &db_a,
+            db_a_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &kp_b,
+        ))
+        .await
+        .expect("invite and activate peer Store device");
         Box::pin(owners_a.seed_remote_release(
             &storage,
             None,
@@ -725,13 +732,12 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
         // incremental pull.
         // A pushes the Remote release; B pulls it.
-        Box::pin(storage.run_founder_cycle(&lib_a, None))
+        Box::pin(storage.run_founder_cycle(None))
             .await
             .expect("run founder cycle");
-        peer.pull_store(&lib_b).await.expect("pull peer Store");
+        peer.pull_store().await.expect("pull peer Store");
         assert!(
-            db_b.database()
-                .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
+            db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
                 .await,
             "B has the Remote release",
         );
@@ -798,7 +804,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
         // A's retract cycle: the gate flip false emits DELETEs and the tombstone drain
         // writes the cloud tombstone.
-        Box::pin(storage.run_founder_cycle(&lib_a, None))
+        Box::pin(storage.run_founder_cycle(None))
             .await
             .expect("run founder cycle");
         assert!(
@@ -807,12 +813,11 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         );
 
         // B's next cycle pulls the retract: its subtree disappears.
-        Box::pin(peer.run_cycle(&lib_b, None))
+        Box::pin(peer.run_cycle(None))
             .await
             .expect("run peer cycle");
         assert!(
             !db_b
-                .database()
                 .test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
                 .await,
             "B's subtree is removed by the gate retract",
@@ -834,13 +839,23 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
 #[tokio::test]
 async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
-    let db = scoped_blob_transition_db();
-    let store_database = StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = scoped_blob_transition_db(db_store_dir.clone());
+    let store_database = StoreDatabase::new(&db);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, cloud_storage) =
-        (create_store(&db, UserKeypair::generate(), home.clone()).await).into_parts();
-    storage.open_into(&db).await.expect("open exact test Store");
-    let (tmp, lib) = temp_store_dir();
+    let (storage, cloud_storage) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
+    storage
+        .open_into(&db, db_store_dir.clone())
+        .await
+        .expect("open exact test Store");
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-managed-photo".to_vec();
     let routing_encryption = coven_keys::encryption::EncryptionService::from_key([5; 32]);
@@ -855,7 +870,6 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         )
         .await;
     let store_state_before = db
-        .database()
         .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
@@ -923,8 +937,7 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
         "no cloud deletion is enqueued",
     );
     assert_eq!(
-        db.database()
-            .scoped_store_state_counts_for_test()
+        db.scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -973,35 +986,44 @@ async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
 
 #[tokio::test]
 async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothing() {
-    let db = scoped_blob_transition_db();
-    let store_database = StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = scoped_blob_transition_db(db_store_dir.clone());
+    let store_database = StoreDatabase::new(&db);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, _) =
-        (create_store(&db, UserKeypair::generate(), home.clone()).await).into_parts();
+    let (storage, _) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
     let exact_creates_before = home.exact_create_count();
-    storage.open_into(&db).await.expect("open exact test Store");
-    let (tmp, lib) = temp_store_dir();
+    storage
+        .open_into(&db, db_store_dir.clone())
+        .await
+        .expect("open exact test Store");
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"scoped-user-photo";
     let routing_encryption = coven_keys::encryption::EncryptionService::from_key([7; 32]);
-    db.database()
-        .execute_test_sql(&format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n-user-scoped', 'Scoped user fixture', NULL, 0, \
                      '0000000001000-0000-A', '2026-01-01'); \
              INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('photo-user-scoped', 'n-user-scoped', 'image', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/photo-user-scoped.jpg');",
-            bytes.len(),
-            coven_protocol::blob::content_hash(bytes),
-        ))
-        .await;
+        bytes.len(),
+        coven_protocol::blob::content_hash(bytes),
+    ))
+    .await;
     let user_dir = tmp.path().join("user");
     std::fs::create_dir_all(&user_dir).unwrap();
     let source = user_dir.join("photo-user-scoped.jpg");
     std::fs::write(&source, bytes).unwrap();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-user-scoped", &source)
         .await;
     owners
@@ -1010,19 +1032,12 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         .expect("queue scoped user-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-user-scoped").await;
     let store_state_before = db
-        .database()
         .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
 
     let error = match storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
     {
         Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
@@ -1058,8 +1073,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     );
     assert_eq!(pending_uploads(&db).await, 1, "the upload remains queued");
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n-user-scoped")
+        db.make_remote_intent_exists_for_test("notes", "n-user-scoped")
             .await
             .expect("inspect make_remote intent"),
         "the transition intent remains queued",
@@ -1067,8 +1081,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     assert_eq!(shared_flag(&db, "n-user-scoped").await, 0);
     assert_eq!(gate_stamp(&db, "n-user-scoped").await, stamp_before);
     assert_eq!(
-        db.database()
-            .scoped_store_state_counts_for_test()
+        db.scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -1076,7 +1089,7 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
 
     let outcome = storage
         .drain_uploads(
-            &StoreDatabase::new(db.database()),
+            &StoreDatabase::new(&db),
             &lib,
             &SystemClock,
             Some(&routing_encryption),
@@ -1089,7 +1102,6 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
     assert_eq!(shared_flag(&db, "n-user-scoped").await, 1);
     assert_eq!(pending_uploads(&db).await, 1);
     assert!(db
-        .database()
         .make_remote_intent_exists_for_test("notes", "n-user-scoped")
         .await
         .expect("inspect make_remote intent"));
@@ -1115,7 +1127,6 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
         .expect("publish scoped user make_remote Store write"));
     assert_eq!(pending_uploads(&db).await, 0);
     assert!(!db
-        .database()
         .make_remote_intent_exists_for_test("notes", "n-user-scoped")
         .await
         .expect("inspect make_remote intent"));
@@ -1123,34 +1134,41 @@ async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothin
 
 #[tokio::test]
 async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
-    let db = scoped_blob_transition_db();
-    let store_database = StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = scoped_blob_transition_db(db_store_dir.clone());
+    let store_database = StoreDatabase::new(&db);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, _) =
-        (create_store(&db, UserKeypair::generate(), home.clone()).await).into_parts();
+    let (storage, _) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
     let exact_creates_before = home.exact_create_count();
-    storage.open_into(&db).await.expect("open exact test Store");
-    let (_tmp, lib) = temp_store_dir();
+    storage
+        .open_into(&db, db_store_dir.clone())
+        .await
+        .expect("open exact test Store");
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database, lib.clone());
     let bytes = b"scoped-host-cover";
     let routing_encryption = coven_keys::encryption::EncryptionService::from_key([9; 32]);
-    db.database()
-        .execute_test_sql(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host-scoped', 'Scoped host fixture', NULL, 0, \
                  '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db.database()
-        .execute_test_sql(&format!(
-            "INSERT INTO note_covers \
+    )
+    .await;
+    db.execute_test_sql(&format!(
+        "INSERT INTO note_covers \
              (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('cover-host-scoped', 'n-host-scoped', {}, '{}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/cover-host-scoped.jpg')",
-            bytes.len(),
-            coven_protocol::blob::content_hash(bytes),
-        ))
-        .await;
+        bytes.len(),
+        coven_protocol::blob::content_hash(bytes),
+    ))
+    .await;
     coven_foundation::store_dir::StoreDir::store_local_blob(
         &lib,
         "covers",
@@ -1165,19 +1183,12 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         .expect("queue scoped host-provided make_remote");
     let stamp_before = gate_stamp(&db, "n-host-scoped").await;
     let store_state_before = db
-        .database()
         .scoped_store_state_counts_for_test()
         .await
         .expect("read scoped Store state");
 
     let error = match storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
     {
         Err(error) => error,
@@ -1211,15 +1222,13 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     assert_eq!(shared_flag(&db, "n-host-scoped").await, 0);
     assert_eq!(gate_stamp(&db, "n-host-scoped").await, stamp_before);
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n-host-scoped")
+        db.make_remote_intent_exists_for_test("notes", "n-host-scoped")
             .await
             .expect("inspect make_remote intent"),
         "the transition intent remains queued",
     );
     assert_eq!(
-        db.database()
-            .scoped_store_state_counts_for_test()
+        db.scoped_store_state_counts_for_test()
             .await
             .expect("read scoped Store state"),
         store_state_before
@@ -1227,7 +1236,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
 
     let completed = storage
         .drain_uploads(
-            &StoreDatabase::new(db.database()),
+            &StoreDatabase::new(&db),
             &lib,
             &SystemClock,
             Some(&routing_encryption),
@@ -1240,8 +1249,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
     assert_eq!(home.exact_create_count(), exact_creates_before + 1);
     assert_eq!(shared_flag(&db, "n-host-scoped").await, 1);
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n-host-scoped")
+        db.make_remote_intent_exists_for_test("notes", "n-host-scoped")
             .await
             .expect("inspect make_remote intent"),
         "the publishing intent remains until its exact Store write activates",
@@ -1262,8 +1270,7 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
         "the host completion produces an exact Store write",
     );
     assert!(
-        !db.database()
-            .make_remote_intent_exists_for_test("notes", "n-host-scoped")
+        !db.make_remote_intent_exists_for_test("notes", "n-host-scoped")
             .await
             .expect("inspect make_remote intent"),
         "Store write activation consumes the durable publishing intent",
@@ -1283,21 +1290,32 @@ async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
 #[tokio::test]
 async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let kp_a = UserKeypair::generate();
-    let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let store_database_a = StoreDatabase::new(db_a.database());
-    let (storage, cloud_storage) = (create_store(
+    let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_a = crate::sync::test_helpers::open_test_db_with_user_and_host_blobs(
+        db_a_store_dir.clone(),
+        photo_decl(),
+        cover_decl(),
+    );
+    let store_database_a = StoreDatabase::new(&db_a);
+    let (storage, cloud_storage) = create_store(
         &db_a,
+        db_a_store_dir.clone(),
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp_a, lib_a) = temp_store_dir();
+    .await;
+    let tmp_a = tempfile::tempdir().unwrap();
+    let lib_a = db_a_store_dir.clone();
     let owners_a = TestOwnerGraph::new(store_database_a.clone(), lib_a.clone());
     let kp_b = UserKeypair::generate();
-    let db_b = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp_b, lib_b) = temp_store_dir();
-    let owners_b = TestOwnerGraph::new(StoreDatabase::new(db_b.database()), lib_b.clone());
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::open_test_db_with_user_and_host_blobs(
+        db_b_store_dir.clone(),
+        photo_decl(),
+        cover_decl(),
+    );
+    let lib_b = db_b_store_dir.clone();
+    let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
     let photo = b"PHOTO-BYTES".to_vec();
     let cover = b"RELEASE-COVER".to_vec();
 
@@ -1312,7 +1330,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
             &photo,
         )
         .await;
-    db_a.database().execute_test_sql(&format!(
+    db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coveraaa', 'n1', 13, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
             coven_protocol::blob::content_hash(&cover),
@@ -1324,13 +1342,19 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .expect("store the host-provided cover in the local store");
 
     let peer = storage
-        .invite_and_activate_peer(&db_a, &db_b, &kp_b)
+        .invite_and_activate_peer(
+            &db_a,
+            db_a_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &kp_b,
+        )
         .await
         .expect("invite and activate peer Store device");
 
     // A cycle while gated off: nothing reaches a peer.
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -1341,7 +1365,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .await
         .expect("make_remote");
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -1365,7 +1389,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
 
     // B pulls: the cover (CacheEager) lands in B's cache; the photo (CacheLazy) does not.
-    peer.pull_store(&lib_b).await.expect("pull peer Store");
+    peer.pull_store().await.expect("pull peer Store");
     assert!(
         exact_cache_path(&lib_b, &cover_ref(&db_b, "coveraaa").await).exists(),
         "B fetches the CacheEager cover eagerly into its cache",
@@ -1457,23 +1481,32 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 
 #[tokio::test]
 async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_intent() {
-    let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let store_database_a = StoreDatabase::new(db_a.database());
+    let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_a = crate::sync::test_helpers::open_test_db_with_user_and_host_blobs(
+        db_a_store_dir.clone(),
+        photo_decl(),
+        cover_decl(),
+    );
+    let store_database_a = StoreDatabase::new(&db_a);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, cloud_storage) =
-        (create_store(&db_a, UserKeypair::generate(), home.clone()).await).into_parts();
+    let (storage, cloud_storage) = create_store(
+        &db_a,
+        db_a_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
     let exact_creates_before = home.exact_create_count();
-    let (_tmp_a, lib_a) = temp_store_dir();
+    let lib_a = db_a_store_dir.clone();
     let owners_a = TestOwnerGraph::new(store_database_a, lib_a.clone());
     let cover = b"HOST-ONLY-COVER".to_vec();
 
-    db_a.database()
-        .execute_test_sql(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db_a.execute_test_sql(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host', 'Host Only', NULL, 0, '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db_a.database().execute_test_sql(&format!(
+    )
+    .await;
+    db_a.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
             coven_protocol::blob::content_hash(&cover),
@@ -1503,8 +1536,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "host-provided-only make_remote leaves the gate off until the blob uploads"
     );
     assert!(
-        db_a.database()
-            .make_remote_intent_exists_for_test("notes", "n-host")
+        db_a.make_remote_intent_exists_for_test("notes", "n-host")
             .await
             .expect("inspect make_remote intent"),
         "the pin choice is durable until inline upload consumes it"
@@ -1518,7 +1550,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
 
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -1536,7 +1568,6 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     assert!(home.exact_create_count() > exact_creates_before);
     assert!(
         !db_a
-            .database()
             .make_remote_intent_exists_for_test("notes", "n-host")
             .await
             .expect("inspect make_remote intent"),
@@ -1571,12 +1602,22 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
 /// it, removing both local-store copies while retaining the requested pin.
 #[tokio::test]
 async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
-    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
-    let store_database = StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_user_and_host_blobs(
+        db_store_dir.clone(),
+        photo_decl(),
+        cover_lazy_decl(),
+    );
+    let store_database = StoreDatabase::new(&db);
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, _) =
-        (create_store(&db, UserKeypair::generate(), home.clone()).await).into_parts();
-    let (_tmp, lib) = temp_store_dir();
+    let (storage, _) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let pin_bytes = b"PINNED-COVER".to_vec();
     let drop_bytes = b"DROPPED-COVER".to_vec();
@@ -1587,13 +1628,12 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         ("n-pin", "cover-pin", "cv/cover-pin.jpg", &pin_bytes),
         ("n-drop", "cover-drop", "cv/cover-drop.jpg", &drop_bytes),
     ] {
-        db.database()
-            .execute_test_sql(&format!(
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        db.execute_test_sql(&format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                  VALUES ('{note}', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01')"
-            ))
-            .await;
-        db.database().execute_test_sql(&format!(
+        ))
+        .await;
+        db.execute_test_sql(&format!(
                 "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
                  VALUES ('{cover}', '{note}', {}, '{}', '0000000001000-0000-A', '2026-01-01', '{path}')",
                 bytes.len(),
@@ -1617,29 +1657,17 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     // Each upload drain stops after one root becomes publishable. Both flips now
     // own exact Created handoffs and durable local-store cleanup intents.
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("create pinned exact blob and flip its root");
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("create unpinned exact blob and flip its root");
 
     // The crash: Store publication fails, so neither cleanup intent may apply.
     home.fail_exact_create_before_call(1);
-    let failed = storage.run_founder_cycle(&lib, None).await;
+    let failed = storage.run_founder_cycle(None).await;
     assert!(failed.is_err(), "the Store package append fails");
 
     assert_eq!(
@@ -1653,14 +1681,13 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the drop release flipped"
     );
     assert!(
-        db.database()
-            .test_row_exists(
-                "SELECT 1 FROM blob_make_remote_intents AS intent \
+        db.test_row_exists(
+            "SELECT 1 FROM blob_make_remote_intents AS intent \
              JOIN store_writes AS write ON write.write_id = intent.write_id \
              WHERE intent.root_id = 'n-pin' AND intent.state = 'publishing' \
                AND write.prepared IS NOT NULL",
-            )
-            .await,
+        )
+        .await,
         "the prepared Store write durably owns the pin disposition",
     );
     assert!(
@@ -1680,7 +1707,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 
     // Recovery republishes the prepared write and applies both dispositions.
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
@@ -1734,15 +1761,16 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 /// not keep failing every cycle because the source it would copy is gone.
 #[tokio::test]
 async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
-    let db = open_test_db();
-    let (storage, _) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (storage, _) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (_tmp, lib) = temp_store_dir();
+    .await;
+    let lib = db_store_dir.clone();
     let bytes = b"ALREADY-PINNED".to_vec();
 
     let pinned = lib
@@ -1757,27 +1785,25 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     coven_foundation::local_file::AtomicStagedFile::write_for_test(&pinned, &bytes)
         .await
         .unwrap();
-    let sequence = storage.publish_fixture_position(&lib, "pin-position").await;
-    db.database()
-        .insert_published_blob_drop_intent_for_test(
-            sequence,
-            "covers",
-            "cov-pin",
-            &bytes,
-            crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
-            DeferredLocalBlobDisposition::Pin,
-        )
-        .await
-        .expect("insert published pin disposition");
+    let sequence = storage.publish_fixture_position("pin-position").await;
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
+        "covers",
+        "cov-pin",
+        &bytes,
+        crate::sync::test_helpers::test_cache_locator_hash("cov-pin"),
+        DeferredLocalBlobDisposition::Pin,
+    )
+    .await
+    .expect("insert published pin disposition");
 
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
     assert!(
-        !db.database()
-            .published_blob_drop_intent_exists_for_test("cov-pin")
+        !db.published_blob_drop_intent_exists_for_test("cov-pin")
             .await
             .expect("inspect published blob drop intent"),
         "the drain recognizes the completed pin and clears its intent",
@@ -1789,15 +1815,16 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
 /// with its source dropped, so re-draining recognizes it and clears the intent.
 #[tokio::test]
 async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
-    let db = open_test_db();
-    let (storage, _) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (storage, _) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (_tmp, lib) = temp_store_dir();
+    .await;
+    let lib = db_store_dir.clone();
     let bytes = b"ALREADY-CACHED".to_vec();
 
     let cached = lib
@@ -1812,29 +1839,25 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     coven_foundation::local_file::AtomicStagedFile::write_for_test(&cached, &bytes)
         .await
         .unwrap();
-    let sequence = storage
-        .publish_fixture_position(&lib, "cache-position")
-        .await;
-    db.database()
-        .insert_published_blob_drop_intent_for_test(
-            sequence,
-            "covers",
-            "cov-cache",
-            &bytes,
-            crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
-            DeferredLocalBlobDisposition::Cache,
-        )
-        .await
-        .expect("insert published cache disposition");
+    let sequence = storage.publish_fixture_position("cache-position").await;
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
+        "covers",
+        "cov-cache",
+        &bytes,
+        crate::sync::test_helpers::test_cache_locator_hash("cov-cache"),
+        DeferredLocalBlobDisposition::Cache,
+    )
+    .await
+    .expect("insert published cache disposition");
 
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
 
     assert!(
-        !db.database()
-            .published_blob_drop_intent_exists_for_test("cov-cache")
+        !db.published_blob_drop_intent_exists_for_test("cov-cache")
             .await
             .expect("inspect published blob drop intent"),
         "the drain recognizes the completed cache write and clears its intent",
@@ -1847,41 +1870,38 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
 /// stays pending) rather than clearing it as if the work had been done.
 #[tokio::test]
 async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
-    let db = open_test_db();
-    let store_database = StoreDatabase::new(db.database());
-    let (storage, _) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let store_database = StoreDatabase::new(&db);
+    let (storage, _) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (_tmp, lib) = temp_store_dir();
+    .await;
+    let lib = db_store_dir.clone();
 
-    let sequence = storage
-        .publish_fixture_position(&lib, "lost-position")
-        .await;
-    db.database()
-        .insert_published_blob_drop_intent_for_test(
-            sequence,
-            "covers",
-            "cov-lost",
-            b"missing",
-            crate::sync::test_helpers::test_cache_locator_hash("cov-lost"),
-            DeferredLocalBlobDisposition::Pin,
-        )
-        .await
-        .expect("insert lost published pin disposition");
+    let sequence = storage.publish_fixture_position("lost-position").await;
+    db.insert_published_blob_drop_intent_for_test(
+        sequence,
+        "covers",
+        "cov-lost",
+        b"missing",
+        crate::sync::test_helpers::test_cache_locator_hash("cov-lost"),
+        DeferredLocalBlobDisposition::Pin,
+    )
+    .await
+    .expect("insert lost published pin disposition");
 
-    let error = crate::sync::test_owner_graph::local_blob_access(store_database, lib.clone())
+    let error = crate::sync::test_owner_graph::TestOwnerGraph::new(store_database, lib.clone())
         .drain_published_blob_drop_intents(sequence)
         .await
         .expect_err("a lost disposition fails the drain");
     assert!(error.contains("missing from both"), "{error}");
 
     assert!(
-        db.database()
-            .published_blob_drop_intent_exists_for_test("cov-lost")
+        db.published_blob_drop_intent_exists_for_test("cov-lost")
             .await
             .expect("inspect published blob drop intent"),
         "a disposition missing from both the local store and its destination stays pending",
@@ -1901,24 +1921,24 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
 async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let kp_a = UserKeypair::generate();
     let kp_b = UserKeypair::generate();
-    let db_a = remote_root_db(cover_decl());
-    let (storage, cloud_storage) = (create_store(
+    let db_a_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_a = crate::sync::test_helpers::remote_root_db(db_a_store_dir.clone(), cover_decl());
+    let (storage, cloud_storage) = create_store(
         &db_a,
+        db_a_store_dir.clone(),
         kp_a.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (_tmp_a, lib_a) = temp_store_dir();
+    .await;
+    let lib_a = db_a_store_dir.clone();
     let cover = b"REMOTE-ROOT-HOST-BLOB".to_vec();
 
-    db_a.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, _updated_at, created_at) \
+    db_a.execute_test_host_write(
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db_a.database().execute_test_host_write(&format!(
+    )
+    .await;
+    db_a.execute_test_host_write(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 21, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             coven_protocol::blob::content_hash(&cover),
@@ -1929,26 +1949,32 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .await
         .expect("store host-provided blob");
 
-    let db_b = remote_root_db(cover_decl());
-    let (_tmp_b, lib_b) = temp_store_dir();
-    let owners_b = TestOwnerGraph::new(StoreDatabase::new(db_b.database()), lib_b.clone());
+    let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db_b = crate::sync::test_helpers::remote_root_db(db_b_store_dir.clone(), cover_decl());
+    let lib_b = db_b_store_dir.clone();
+    let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
     let peer = storage
-        .invite_and_activate_peer(&db_a, &db_b, &kp_b)
+        .invite_and_activate_peer(
+            &db_a,
+            db_a_store_dir.clone(),
+            &db_b,
+            db_b_store_dir.clone(),
+            &kp_b,
+        )
         .await
         .expect("invite and activate peer Store device");
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     storage
-        .run_founder_cycle(&lib_a, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     assert!(
         storage
             .contains_blob_object(
                 &db_a
-                    .database()
                     .row_blob_ref("note_photos", "coverrrr")
                     .await
                     .expect("load exact remote-root cover reference"),
@@ -1957,10 +1983,9 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 
-    peer.pull_store(&lib_b).await.expect("pull peer Store");
+    peer.pull_store().await.expect("pull peer Store");
     assert!(
-        db_b.database()
-            .test_row_exists("SELECT 1 FROM notes WHERE id = 'n-remote-root'")
+        db_b.test_row_exists("SELECT 1 FROM notes WHERE id = 'n-remote-root'")
             .await,
         "the peer receives the remote-root row"
     );
@@ -1968,7 +1993,6 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         exact_cache_path(
             &lib_b,
             &db_b
-                .database()
                 .row_blob_ref("note_photos", "coverrrr")
                 .await
                 .expect("load exact remote-root cover reference"),
@@ -1980,7 +2004,6 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .read_blob(
             Some(cloud_storage.clone()),
             &db_b
-                .database()
                 .row_blob_ref("note_photos", "coverrrr")
                 .await
                 .expect("load exact remote-root cover reference"),
@@ -1992,16 +2015,16 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
 
 #[tokio::test]
 async fn make_remote_rejects_remote_root() {
-    let db = remote_root_db(cover_decl());
-    let (_tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(db.database()), lib.clone());
-    db.database()
-        .execute_test_sql(
-            "INSERT INTO notes (id, title, _updated_at, created_at) \
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::remote_root_db(db_store_dir.clone(), cover_decl());
+    let lib = db_store_dir.clone();
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    db.execute_test_sql(
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db.database().execute_test_sql(&format!(
+    )
+    .await;
+    db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             coven_protocol::blob::content_hash(b"REMOTE-ROOT"),
@@ -2029,23 +2052,24 @@ async fn make_remote_rejects_remote_root() {
 
 #[tokio::test]
 async fn make_local_rejects_remote_root() {
-    let db = remote_root_db(cover_decl());
-    let (_, cloud_storage) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::remote_root_db(db_store_dir.clone(), cover_decl());
+    let (_, cloud_storage) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(db.database()), lib.clone());
-    db.database()
-        .execute_test_sql(
-            "INSERT INTO notes (id, title, _updated_at, created_at) \
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
+    db.execute_test_sql(
+        "INSERT INTO notes (id, title, _updated_at, created_at) \
          VALUES ('n-remote-root', 'Remote Root', '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db.database().execute_test_sql(&format!(
+    )
+    .await;
+    db.execute_test_sql(&format!(
             "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverrrr', 'n-remote-root', 'cover', 11, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
             coven_protocol::blob::content_hash(b"REMOTE-ROOT"),
@@ -2076,9 +2100,10 @@ async fn make_local_rejects_remote_root() {
 
 #[tokio::test]
 async fn cancel_make_remote_rejects_remote_root() {
-    let db = remote_root_db(cover_decl());
-    let store_database = StoreDatabase::new(db.database());
-    let (_temp, store_dir) = temp_store_dir();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::remote_root_db(db_store_dir.clone(), cover_decl());
+    let store_database = StoreDatabase::new(&db);
+    let store_dir = db_store_dir.clone();
 
     let err = LocalBlobTransitions::new(store_database, store_dir)
         .cancel_make_remote("notes", "n-remote-root")
@@ -2096,18 +2121,22 @@ async fn cancel_make_remote_rejects_remote_root() {
 /// already-on gate with a fresh stamp — a spurious full-subtree re-publish.
 #[tokio::test]
 async fn make_remote_rejects_already_remote_root() {
-    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp, lib) = temp_store_dir();
-    let owners = TestOwnerGraph::new(StoreDatabase::new(db.database()), lib.clone());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_user_and_host_blobs(
+        db_store_dir.clone(),
+        photo_decl(),
+        cover_decl(),
+    );
+    let lib = db_store_dir.clone();
+    let owners = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone());
 
     // A host-provided-only root already Remote (gate on): a note plus a cover row.
-    db.database()
-        .execute_test_sql(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n-host', 'Host Only', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
-        )
-        .await;
-    db.database().execute_test_sql(&format!(
+    )
+    .await;
+    db.execute_test_sql(&format!(
             "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
              VALUES ('coverhost', 'n-host', 15, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/host-coverhost.jpg')",
             coven_protocol::blob::content_hash(&[0; 15]),
@@ -2130,8 +2159,7 @@ async fn make_remote_rejects_already_remote_root() {
     );
 
     assert!(
-        !db.database()
-            .make_remote_intent_exists_for_test("notes", "n-host")
+        !db.make_remote_intent_exists_for_test("notes", "n-host")
             .await
             .expect("inspect make_remote intent"),
         "a refused make_remote records no intent",
@@ -2156,9 +2184,11 @@ async fn make_remote_rejects_already_remote_root() {
 /// `test_manage_truncated_source_aborts_before_enqueue`.
 #[tokio::test]
 async fn make_remote_aborts_when_source_size_no_longer_matches() {
-    let db = open_test_db_with_blob(photo_decl());
-    let store_database = StoreDatabase::new(db.database());
-    let (tmp, lib) = temp_store_dir();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
+    let store_database = StoreDatabase::new(&db);
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"PHOTO-BYTES-full-length".to_vec();
 
@@ -2202,8 +2232,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
         "the source check aborts before a single upload is enqueued",
     );
     assert!(
-        !db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        !db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "an aborted make_remote records no intent",
@@ -2300,7 +2329,7 @@ async fn make_local_rejects_already_local_root() {
 #[tokio::test]
 async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let user = tmp.path().join("user");
 
     // Two photos under one release.
@@ -2309,8 +2338,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         .await;
     let src2 = user.join("photobbb.jpg");
     std::fs::write(&src2, b"second").unwrap();
-    db.database()
-        .add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
+    db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
         .await;
 
     owners
@@ -2322,13 +2350,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
     // Drain with photobbb's source removed: photoaaa uploads (not the last, no flip), photobbb fails.
     std::fs::remove_file(&src2).unwrap();
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("partial drain");
     assert_eq!(
@@ -2343,8 +2365,7 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         .await
         .expect("photoaaa is in the cloud");
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "the make_remote is still in flight"
@@ -2357,19 +2378,12 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
         .await
         .expect("cancel make_remote");
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("drain cancelled make_remote cleanup");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert!(
-        !db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        !db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "the intent is cleared"
@@ -2391,23 +2405,27 @@ async fn cancel_make_remote_clears_pending_and_exact_deletes_uploaded() {
 
 #[tokio::test]
 async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
-    let db = open_test_db_with_blob(photo_decl().with_id_column("blob_id"));
-    let store_database = StoreDatabase::new(db.database());
-    let (storage, cloud_storage) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(
+        db_store_dir.clone(),
+        photo_decl().with_id_column("blob_id"),
+    );
+    let store_database = StoreDatabase::new(&db);
+    let (storage, cloud_storage) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp, lib) = temp_store_dir();
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database.clone(), lib.clone());
     let bytes = b"same-locator-created-journals";
     let hash = coven_protocol::blob::content_hash(bytes);
 
-    db.database()
-        .execute_test_sql(&format!(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_sql(&format!(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01'); \
              INSERT INTO note_photos \
                  (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path, blob_id) \
@@ -2415,20 +2433,20 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
                      '0000000001000-0000-A', '2026-01-01', 'cv/shared.bin', 'sharedblob'), \
                     ('photo-b', 'n1', 'image', {}, '{hash}', \
                      '0000000001000-0000-A', '2026-01-01', 'cv/shared.bin', 'sharedblob')",
-            bytes.len(),
-            bytes.len(),
-        ))
-        .await;
+        bytes.len(),
+        bytes.len(),
+    ))
+    .await;
     let user_dir = tmp.path().join("user");
     std::fs::create_dir_all(&user_dir).unwrap();
     let photo_source = user_dir.join("photo.bin");
     let cover_source = user_dir.join("cover.bin");
     std::fs::write(&photo_source, bytes).unwrap();
     std::fs::write(&cover_source, bytes).unwrap();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-a", &photo_source)
         .await;
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .register_external_blob_for_test("note_photos", "photo-b", &cover_source)
         .await;
 
@@ -2436,13 +2454,16 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .make_remote("notes", "n1", false)
         .await
         .expect("queue both same-locator uploads");
-    storage.open_into(&db).await.expect("open exact test Store");
-    let registration = coven_database::StoreDatabase::new(db.database())
+    storage
+        .open_into(&db, db_store_dir.clone())
+        .await
+        .expect("open exact test Store");
+    let registration = coven_database::StoreDatabase::new(&db)
         .local_blob_write_authority()
         .await
         .expect("load local blob write authority");
     let authority = coven_protocol::objects::BlobWriteAuthority::new(&registration);
-    let entries = coven_database::StoreDatabase::new(db.database())
+    let entries = coven_database::StoreDatabase::new(&db)
         .pending_blob_uploads()
         .await
         .expect("load same-locator upload journals");
@@ -2506,7 +2527,7 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .prepare_blob_object(&locator, &authority, slot, &spool)
             .await
             .expect("prepare exact blob");
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .mark_blob_upload_prepared(
                 &pending,
                 coven_protocol::audience_package::PackageAudience::Store,
@@ -2525,14 +2546,14 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             )
             .await
             .expect("create exact blob");
-        let prepared = coven_database::StoreDatabase::new(db.database())
+        let prepared = coven_database::StoreDatabase::new(&db)
             .pending_blob_uploads()
             .await
             .expect("reload Prepared handoff")
             .into_iter()
             .find(|entry| entry.id == pending.id)
             .expect("Prepared handoff remains queued");
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .mark_blob_upload_created(&prepared)
             .await
             .expect("record Created exact handoff");
@@ -2546,19 +2567,12 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
         .await
         .expect("cancel same-locator uploads");
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("drain exact cancellation cleanup");
 
     assert_eq!(pending_uploads(&db).await, 0, "both handoffs are cleared");
     assert!(!db
-        .database()
         .make_remote_intent_exists_for_test("notes", "n1")
         .await
         .expect("inspect make_remote intent"));
@@ -2576,13 +2590,20 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
 /// semantic failure instead of guessing that either one is disposable.
 #[tokio::test]
 async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
-    let db = open_test_db_with_blob(photo_decl());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
     let home = crate::sync::test_helpers::test_cloud_home();
-    let (storage, cloud_storage) =
-        (create_store(&db, UserKeypair::generate(), home.clone()).await).into_parts();
-    let (tmp, lib) = temp_store_dir();
+    let (storage, cloud_storage) = create_store(
+        &db,
+        db_store_dir.clone(),
+        UserKeypair::generate(),
+        home.clone(),
+    )
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
 
-    let src = TestOwnerGraph::new(StoreDatabase::new(db.database()), lib.clone())
+    let src = TestOwnerGraph::new(StoreDatabase::new(&db), lib.clone())
         .seed_local_release(
             &tmp.path().join("user"),
             "n1",
@@ -2593,27 +2614,20 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
         .await;
     // Enqueue an upload with no intent to model impossible durable state directly.
     let row = photo_ref(&db, "photoaaa").await;
-    db.database()
-        .enqueue_blob_upload_with_retention_for_test(
-            "notes",
-            "n1",
-            row,
-            src,
-            true,
-            "0000000001000-0000-A",
-        )
-        .await
-        .unwrap();
+    db.enqueue_blob_upload_with_retention_for_test(
+        "notes",
+        "n1",
+        row,
+        src,
+        true,
+        "0000000001000-0000-A",
+    )
+    .await
+    .unwrap();
 
     let deletes_before = home.exact_delete_count();
     let outcome = storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("drain");
 
@@ -2648,7 +2662,7 @@ async fn drain_orphan_upload_fails_loud_and_preserves_exact_state() {
 #[tokio::test]
 async fn cancel_make_local_before_commit_stays_remote() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"still-managed".to_vec();
 
     owners
@@ -2695,7 +2709,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
 #[tokio::test]
 async fn make_local_dest_failure_stays_remote_no_tombstones() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"managed-bytes".to_vec();
 
     owners
@@ -2756,14 +2770,13 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
 #[tokio::test]
 async fn make_local_commit_failure_removes_materialized_files() {
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"materialized-before-commit-failure".to_vec();
 
     owners
         .seed_remote_release(&storage, None, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes)
         .await;
-    db.database()
-        .install_make_local_commit_failure_for_test()
+    db.install_make_local_commit_failure_for_test()
         .await
         .expect("install make_local commit failure");
 
@@ -2822,7 +2835,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
     use std::os::unix::ffi::OsStrExt;
 
     let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"managed-bytes".to_vec();
 
     owners
@@ -2888,7 +2901,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
 #[tokio::test]
 async fn make_remote_crash_before_flip_redrain_converges() {
     let (db, storage, _cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let user = tmp.path().join("user");
 
     owners
@@ -2896,8 +2909,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         .await;
     let src2 = user.join("photobbb.jpg");
     std::fs::write(&src2, b"second").unwrap();
-    db.database()
-        .add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
+    db.add_local_photo_for_test("n1", "photobbb", "cv/photobbb.jpg", b"second", &src2)
         .await;
 
     owners
@@ -2909,19 +2921,12 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // first drain uploads only photoaaa, leaving the make_remote in flight.
     std::fs::remove_file(&src2).unwrap();
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("partial drain");
     assert_eq!(shared_flag(&db, "n1").await, 0, "still Local-uploading");
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "the make_remote marker survives"
@@ -2936,24 +2941,17 @@ async fn make_remote_crash_before_flip_redrain_converges() {
     // failed-attempt backoff first (a restart/retry re-attempts past the window);
     // the drain then completes and flips.
     std::fs::write(&src2, b"second").unwrap();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .reset_outbox_backoff()
         .await
         .unwrap();
     storage
-        .drain_uploads(
-            &StoreDatabase::new(db.database()),
-            &lib,
-            &SystemClock,
-            None,
-            None,
-        )
+        .drain_uploads(&StoreDatabase::new(&db), &lib, &SystemClock, None, None)
         .await
         .expect("resume drain");
     assert_eq!(shared_flag(&db, "n1").await, 1, "converged to Remote");
     assert!(
-        db.database()
-            .make_remote_intent_exists_for_test("notes", "n1")
+        db.make_remote_intent_exists_for_test("notes", "n1")
             .await
             .expect("inspect make_remote intent"),
         "the publishing intent remains until the exact Store write activates"
@@ -2971,7 +2969,6 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         "the completed transition has a Store write to publish",
     );
     assert!(!db
-        .database()
         .make_remote_intent_exists_for_test("notes", "n1")
         .await
         .expect("inspect make_remote intent"));
@@ -2993,16 +2990,18 @@ async fn make_remote_crash_before_flip_redrain_converges() {
 /// re-commit is idempotent.
 #[tokio::test]
 async fn make_local_abort_then_retry_converges() {
-    let db = open_test_db_with_blob(photo_decl());
-    let store_database = StoreDatabase::new(db.database());
-    let (storage, cloud_storage) = (create_store(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db_with_blob(db_store_dir.clone(), photo_decl());
+    let store_database = StoreDatabase::new(&db);
+    let (storage, cloud_storage) = create_store(
         &db,
+        db_store_dir.clone(),
         UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
-    .await)
-        .into_parts();
-    let (tmp, lib) = temp_store_dir();
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = db_store_dir.clone();
     let owners = TestOwnerGraph::new(store_database, lib.clone());
     let bytes = b"materialize-me".to_vec();
 
@@ -3066,8 +3065,8 @@ async fn make_local_abort_then_retry_converges() {
 /// reclaim the replacement.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
-    let (db, storage, cloud_storage, tmp, lib, owners) = photo_transition_fixture().await;
-    let store_database = StoreDatabase::new(db.database());
+    let (db, storage, cloud_storage, tmp, _lib, owners) = photo_transition_fixture().await;
+    let store_database = StoreDatabase::new(&db);
     let bytes = b"round-trip-photo".to_vec();
 
     // Start Local, make it Remote.
@@ -3085,7 +3084,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .await
         .expect("make_remote 1");
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
@@ -3113,11 +3112,11 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .expect("make_local");
     // The retract cycle writes the tombstone.
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
@@ -3136,7 +3135,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .await
         .expect("make_remote 2");
     storage
-        .run_founder_cycle(&lib, None)
+        .run_founder_cycle(None)
         .await
         .expect("run founder cycle");
     assert_eq!(

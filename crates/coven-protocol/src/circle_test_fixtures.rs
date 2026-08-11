@@ -116,13 +116,52 @@ pub fn merge_membership_ref(
 }
 
 pub struct MergeDeviceAuthority {
-    pub registration: store_commit::StoreDeviceRegistration,
-    pub reference: store_commit::StoreDeviceRegistrationRef,
-    pub device_signer: UserKeypair,
-    pub stream_id: membership::AuthorStreamId,
+    registration: store_commit::StoreDeviceRegistration,
+    reference: store_commit::StoreDeviceRegistrationRef,
+    device_signer: UserKeypair,
+    stream_id: membership::AuthorStreamId,
 }
 
 impl MergeDeviceAuthority {
+    pub fn registration(&self) -> &store_commit::StoreDeviceRegistration {
+        &self.registration
+    }
+
+    pub fn reference(&self) -> &store_commit::StoreDeviceRegistrationRef {
+        &self.reference
+    }
+
+    pub fn stream_id(&self) -> membership::AuthorStreamId {
+        self.stream_id
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_operations(
+        &self,
+        store_root_hash: ObjectHash,
+        write_id: crate::write::WriteId,
+        coord: store_commit::StoreCommitCoord,
+        order: store_commit::StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: store_commit::StoreDeviceStateRef,
+        membership_authority: store_commit::StoreOperationMembershipAuthority,
+        input: store_commit::StoreCommitOperationsInput<'_>,
+    ) -> Result<store_commit::StoreBatchCommit, store_commit::StoreProtocolError> {
+        store_commit::StoreBatchCommit::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            self.reference.clone(),
+            &self.registration,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            input,
+            &self.device_signer,
+        )
+    }
+
     pub fn circle_control_reference(
         &self,
         control: &PreparedCircleControl,

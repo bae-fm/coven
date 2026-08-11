@@ -1,6 +1,6 @@
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
-use coven_protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleEpochId, CircleId};
+use coven_protocol::circle::{CircleBootstrapRef, CircleControlCoord, CircleId};
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{
     circle_snapshot_image_semantic_prefix, circle_snapshot_slot_prefix, CircleSnapshotMeta,
@@ -523,7 +523,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 circle_id,
             )
             .await?;
-        Ok(SnapshotCut { snapshot, coverage })
+        Ok(SnapshotCut::new(snapshot, coverage))
     }
 
     pub(crate) async fn capture_circle_snapshot_at_cutoff(
@@ -550,10 +550,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 cutoff.clone(),
             )
             .await?;
-        Ok(SnapshotCut {
-            snapshot,
-            coverage: cutoff,
-        })
+        Ok(SnapshotCut::new(snapshot, cutoff))
     }
 
     /// Author one Circle snapshot for every Circle this device holds active
@@ -590,19 +587,19 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             // another — finishing a durable operation needs no fresh capture.
             if let Some(pending) = self
                 .database
-                .outbound_circle_snapshot_publication(input.circle_id)
+                .outbound_circle_snapshot_publication(input.circle_id())
                 .await
                 .map_err(SnapshotError::from)?
             {
                 let publication = self.writer.snapshot_publication().await;
                 match publication.resume_circle(pending).await {
                     Ok(meta) => tracing::info!(
-                        circle_id = %input.circle_id,
+                        circle_id = %input.circle_id(),
                         generation = meta.generation,
                         "resumed pending Circle snapshot publication"
                     ),
                     Err(error) => tracing::warn!(
-                        circle_id = %input.circle_id,
+                        circle_id = %input.circle_id(),
                         "skip Circle snapshot: pending publication failed: {error}"
                     ),
                 }
@@ -613,54 +610,52 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             // unstable snapshot is not yet usable as coverage evidence.
             if let Some(previous) = self
                 .database
-                .latest_local_circle_snapshot(input.circle_id)
+                .latest_local_circle_snapshot(input.circle_id())
                 .await
                 .map_err(SnapshotError::from)?
             {
                 if !self
-                    .circle_snapshot_is_stable(input.circle_id, &previous.cut)
+                    .circle_snapshot_is_stable(input.circle_id(), &previous.cut)
                     .await?
                 {
                     tracing::debug!(
-                        circle_id = %input.circle_id,
+                        circle_id = %input.circle_id(),
                         "skip Circle snapshot: previous generation is not yet acknowledgement-stable"
                     );
                     continue;
                 }
             }
             let cut = match self
-                .capture_circle_snapshot_cut(store_routing, input.circle_id)
+                .capture_circle_snapshot_cut(store_routing, input.circle_id())
                 .await
             {
                 Ok(cut) => cut,
                 Err(error) => {
                     tracing::warn!(
-                        circle_id = %input.circle_id,
+                        circle_id = %input.circle_id(),
                         "skip Circle snapshot: capture failed: {error}"
                     );
                     continue;
                 }
             };
+            let (snapshot, coverage) = cut.into_parts();
             match self
                 .push_circle_snapshot(
-                    input.circle_id,
-                    input.control,
-                    input.epoch_id,
-                    input.access,
-                    cut.snapshot,
-                    cut.coverage,
+                    &input,
+                    snapshot,
+                    coverage,
                     schema_version,
                     created_at.to_string(),
                 )
                 .await
             {
                 Ok(meta) => tracing::info!(
-                    circle_id = %input.circle_id,
+                    circle_id = %input.circle_id(),
                     generation = meta.generation,
                     "Circle snapshot created and pushed"
                 ),
                 Err(error) => tracing::warn!(
-                    circle_id = %input.circle_id,
+                    circle_id = %input.circle_id(),
                     "skip Circle snapshot: publication failed: {error}"
                 ),
             }
@@ -693,18 +688,15 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .is_some())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn push_circle_snapshot(
         &self,
-        circle_id: CircleId,
-        control: CircleControlCoord,
-        epoch_id: CircleEpochId,
-        access: coven_protocol::circle_activation::CircleEpochAccess,
+        input: &coven_database::CircleAckPublicationInput,
         snapshot: CreatedSnapshot,
         coverage: CommitFrontier,
         schema_version: u32,
         created_at: String,
     ) -> Result<CircleSnapshotMeta, SnapshotError> {
+        let circle_id = input.circle_id();
         let storage = self.storage.as_ref();
         let database = &self.database;
         let db = &database;
@@ -714,16 +706,16 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         // The image references only already-published Circle blobs, verified exact —
         // the same closure a member-addition bootstrap image carries.
         let blobs = self
-            .verify_snapshot_blobs(circle_id, &snapshot)
+            .verify_snapshot_blobs(circle_id, snapshot.blobs())
             .await
             .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
-        let image = snapshot.db_image;
+        let (image, _) = snapshot.into_parts();
         let image_bytes = image
             .read()
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
         let image_hash = ObjectHash::digest(&image_bytes);
-        let image_context = access.protocol_context(
+        let image_context = input.protocol_context(
             root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotImage,
         );
@@ -776,7 +768,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             ),
             None => (0, None, stream_first_slot),
         };
-        let meta_context = access.protocol_context(
+        let meta_context = input.protocol_context(
             root.store_root_hash,
             ProtocolObjectDomain::CircleSnapshotMeta,
         );
@@ -803,9 +795,9 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .sign_circle_snapshot_meta(
                 root.store_root_hash,
                 circle_id,
-                control,
-                epoch_id,
-                access.key_fingerprint(),
+                input.control().clone(),
+                input.epoch_id(),
+                input.key_fingerprint(),
                 generation,
                 bootstrap,
                 created_at,
@@ -943,16 +935,14 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             })?;
         std::fs::create_dir_all(&temp_dir).map_err(SnapshotError::Io)?;
         let cut = self
-            .capture_circle_snapshot_cut(store_routing, input.circle_id)
+            .capture_circle_snapshot_cut(store_routing, input.circle_id())
             .await
             .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        let (snapshot, coverage) = cut.into_parts();
         self.push_circle_snapshot(
-            input.circle_id,
-            input.control,
-            input.epoch_id,
-            input.access,
-            cut.snapshot,
-            cut.coverage,
+            &input,
+            snapshot,
+            coverage,
             schema_version,
             created_at.to_string(),
         )

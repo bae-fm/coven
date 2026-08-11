@@ -4,10 +4,12 @@ use coven_protocol::store_commit::ObjectHash;
 
 #[tokio::test]
 async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
-    let db = crate::sync::test_helpers::open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let owner = UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
+        db_store_dir.clone(),
         "prepared-membership-binding",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -15,7 +17,7 @@ async fn prepared_membership_transition_rejects_substituted_slots_and_bytes() {
     .await
     .expect("create Merge Store");
     let device = store
-        .bind_device(&db, &owner)
+        .bind_device_in(&db, db_store_dir.clone(), &owner)
         .await
         .expect("bind membership publication Store");
     let chain = device

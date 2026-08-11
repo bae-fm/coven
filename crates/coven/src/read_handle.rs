@@ -6,12 +6,12 @@
 //! macOS File Provider extension) or a second in-process handle — that must read
 //! while another handle holds the writer open.
 //!
-//! It is opened with [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only)
+//! It is opened with [`Coven::builder(store_dir, cfg).open_read_only()`](crate::CovenBuilder::open_read_only)
 //! and exposes reads only: SQL queries against the connection coven owns, and blob
 //! reads (local store, pinned/evictable cache, or a cloud fetch into the cache).
 //! There is no write, sync-connection, migration, or stamp API on it — those are absent
 //! by construction, so a reader cannot mutate the synced state a concurrent writer
-//! owns. [`sql_read`](CovenReadHandle::sql_read) supplies query operations without
+//! owns. [`read`](CovenReadHandle::read) supplies query operations without
 //! exposing the retained connection.
 //!
 //! It takes no store lock: it coexists with the writer that holds the exclusive
@@ -39,13 +39,13 @@ use coven_replication::sync::{BlobCacheError, BlobStream};
 /// A read-only handle over one coven store, for a same-store secondary reader.
 ///
 /// Open it with
-/// [`Coven::builder(cfg).open_read_only()`](crate::CovenBuilder::open_read_only).
+/// [`Coven::builder(store_dir, cfg).open_read_only()`](crate::CovenBuilder::open_read_only).
 /// Cheap to [`clone`](Clone) — every field is shared (an `Arc` or a `Clone` handle),
 /// so a clone reads the same database and storage as the original.
 ///
 /// # What it can do
 ///
-/// - **Rows** — read via [`sql_read`](Self::sql_read). The closure receives a
+/// - **Rows** — read via [`read`](Self::read). The closure receives a
 ///   [`SqlReadContext`](crate::SqlReadContext) that exposes queries without the
 ///   retained connection.
 /// - **Blobs** — [`read_blob`](Self::read_blob) and
@@ -79,7 +79,12 @@ impl CovenReadHandle {
         let database = StoreDatabase::from_database(db);
         let cloud_homes =
             coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
-        let security = StoreSecurity::new(key_service, key_custody, identity_custody);
+        let security = StoreSecurity::new(
+            key_service,
+            key_custody,
+            identity_custody,
+            store_dir.clone(),
+        );
         let cloud_storage = StoreCloudStorage::new(
             security.clone(),
             cloud_homes,
@@ -107,10 +112,10 @@ impl CovenReadHandle {
     /// Run a pure read against the connection coven owns and await the result.
     ///
     /// This is the read handle's form of
-    /// [`CovenHandle::sql_read`](crate::CovenHandle::sql_read): the closure receives
+    /// [`CovenHandle::read`](crate::CovenHandle::read): the closure receives
     /// the same [`SqlReadContext`](crate::SqlReadContext), and Coven serializes the
     /// query on its retained read-only connection.
-    pub async fn sql_read<F, R>(&self, f: F) -> CovenResult<R>
+    pub async fn read<F, R>(&self, f: F) -> CovenResult<R>
     where
         F: for<'connection> FnOnce(crate::SqlReadContext<'connection>) -> CovenResult<R>
             + Send

@@ -247,7 +247,7 @@ pub struct DeviceJoinTransportParams {
     pub attempt_namespace: String,
     pub slots: BTreeMap<DeviceJoinTransportKind, ObjectSlot>,
     #[serde(with = "seal_key")]
-    pub seal_key: MasterKeyring,
+    seal_key: MasterKeyring,
 }
 
 /// `MasterKeyring` is the codebase's symmetric-key carrier and travels as its
@@ -272,6 +272,19 @@ mod seal_key {
 }
 
 impl DeviceJoinTransportParams {
+    pub(crate) fn new(
+        attempt_namespace: String,
+        slots: BTreeMap<DeviceJoinTransportKind, ObjectSlot>,
+        seal_key: MasterKeyring,
+    ) -> Self {
+        Self {
+            version: STORE_PROTOCOL_VERSION,
+            attempt_namespace,
+            slots,
+            seal_key,
+        }
+    }
+
     fn slot(&self, kind: DeviceJoinTransportKind) -> Result<&ObjectSlot, DeviceJoinTransportError> {
         self.slots
             .get(&kind)

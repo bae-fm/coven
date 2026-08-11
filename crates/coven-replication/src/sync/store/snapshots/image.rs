@@ -40,7 +40,8 @@ pub enum SnapshotError {
     /// The snapshot's synced-schema version is newer than this binary's top
     /// migration, so its DB image carries columns this binary's tables lack. The
     /// generation is refused before its image is downloaded; the same refusal is
-    /// the at-open backstop in [`coven_database::run_migrations_in_transaction`].
+    /// the at-open backstop reported as
+    /// [`coven_database::MigrationError::SchemaTooNew`].
     #[error(
         "snapshot schema version {snapshot_version} is newer than this binary supports \
          ({supported}); update the app"

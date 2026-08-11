@@ -75,7 +75,7 @@ shared root secret and never reused across stores.
 [`CovenBuilder::key_custody`](rustdoc:method:coven::CovenBuilder::key_custody):
 
 ```rust
-Coven::builder(config)
+Coven::builder(store_dir, config)
     .key_custody(coven::KeyCustody::Keyring)   // the default
     .synced_tables(tables)
     .migrations(migrations)
@@ -100,7 +100,7 @@ builder, with
 [`CovenBuilder::identity_custody`](rustdoc:method:coven::CovenBuilder::identity_custody):
 
 ```rust
-Coven::builder(config)
+Coven::builder(store_dir, config)
     .identity_custody(coven::IdentityCustody::Keyring)   // the default
     .synced_tables(tables)
     .migrations(migrations)

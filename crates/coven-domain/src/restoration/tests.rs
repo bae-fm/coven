@@ -30,7 +30,7 @@ use coven_protocol::membership::MembershipFloor;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_replication::sync::test_helpers::{
     open_test_db, open_test_db_with_blob, pubkey_hex, temp_store_dir, test_migrations,
-    test_synced_tables, test_synced_tables_with_blob, TestDevice, TestStoreFixture,
+    test_synced_tables, test_synced_tables_with_blob, TestDevice, TestStore,
 };
 use coven_storage::cloud::cloudkit::{
     CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity,
@@ -843,11 +843,17 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
     ));
 
     let tables = test_synced_tables();
-    let db = open_test_db();
-    let owner_device =
-        TestDevice::create(&db, owner_storage.clone(), store_id, owner_keypair.clone())
-            .await
-            .expect("initialize owner Store");
+    let db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+    let db = open_test_db(db_store_dir.clone());
+    let owner_device = TestDevice::create(
+        &db,
+        db_store_dir.clone(),
+        owner_storage.clone(),
+        store_id,
+        owner_keypair.clone(),
+    )
+    .await
+    .expect("initialize owner Store");
     let store_root = owner_device.store_root().clone();
     let membership = owner_device
         .membership()
@@ -855,7 +861,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         .expect("load owner membership");
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(db.database());
+    let store_database = coven_database::StoreDatabase::new(&db);
     let snapshot = store_database
         .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
         .await
@@ -1043,8 +1049,9 @@ impl OwnerRecoveryRestoreFixture {
         ))
         .await
         .expect("restore through OwnerRecovery code");
+        let store_dir = layout.store_dir(&config.store_id);
         let restored = Database::open(
-            &config.store_dir.db_path(),
+            &store_dir.db_path(),
             tables,
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -1095,11 +1102,17 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
         store_id.to_string(),
         owner.clone(),
     ));
-    let owner_db = open_test_db();
-    let owner_device =
-        TestDevice::create(&owner_db, owner_storage.clone(), store_id, owner.clone())
-            .await
-            .expect("initialize recovery Store");
+    let owner_db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+    let owner_db = open_test_db(owner_db_store_dir.clone());
+    let owner_device = TestDevice::create(
+        &owner_db,
+        owner_db_store_dir.clone(),
+        owner_storage.clone(),
+        store_id,
+        owner.clone(),
+    )
+    .await
+    .expect("initialize recovery Store");
     let root = owner_device.store_root().clone();
     let membership = owner_device
         .membership()
@@ -1109,7 +1122,7 @@ async fn prepare_owner_recovery_restore() -> OwnerRecoveryRestoreFixture {
     let tables = test_synced_tables();
     let snapshot_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_dir = snapshot_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(owner_db.database());
+    let store_database = coven_database::StoreDatabase::new(&owner_db);
     let snapshot = store_database
         .capture_snapshot_image_for_test(root.clone(), snapshot_dir, None)
         .await
@@ -1175,9 +1188,11 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 
         // Owner: a store with one shared note, captured straight into the published
         // snapshot — the shape a device sees the first time it opens a shared store.
-        let db_owner = open_test_db();
+        let db_owner_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+        let db_owner = open_test_db(db_owner_store_dir.clone());
         let owner_device = TestDevice::create(
             &db_owner,
+            db_owner_store_dir.clone(),
             owner_storage.clone(),
             store_id,
             owner_keypair.clone(),
@@ -1190,7 +1205,6 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await
             .expect("load owner membership");
         db_owner
-            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album Title', 1, '0000000001000-0000-owner', '2026-01-01')",
@@ -1198,7 +1212,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             .await;
         let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
         let snap_dir = snap_tmp.path().to_path_buf();
-        let store_database = coven_database::StoreDatabase::new(db_owner.database());
+        let store_database = coven_database::StoreDatabase::new(&db_owner);
         let snapshot = store_database
             .capture_snapshot_image_for_test(store_root.clone(), snap_dir, None)
             .await
@@ -1275,7 +1289,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         .expect("restore task completes")
         .expect("restore through code service");
         let layout = StoreLayout::new(app.path());
-        let lib_b = config.store_dir.clone();
+        let lib_b = layout.store_dir(&config.store_id);
         let store_keys = StoreKeys::bind(store_id.to_string());
         let identity_custody =
             coven_keys::identity_custody::IdentityCustody::Keyring.resolve(&store_keys, &lib_b);
@@ -1316,7 +1330,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
         .expect("open B db");
 
         // B's first real sync cycle, with no local changes of its own.
-        let joiner_storage = CloudSyncConnection::new(
+        let joiner_storage = Arc::new(CloudSyncConnection::new(
             Arc::new(
                 coven_storage::cloud::cloudkit::CloudKitCloudHome::new_private(
                     cloudkit_ops,
@@ -1327,20 +1341,16 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
             blob_paths,
             store_id.to_string(),
             joiner_keypair.clone(),
-        );
-        let components = coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
+        ));
+        coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
             coven_database::StoreDatabase::new(&db_b),
             lib_b.clone(),
         )
-        .prepare_sync(joiner_storage, joiner_keypair)
+        .run_sync_cycle(joiner_storage.clone(), joiner_keypair)
         .await
-        .expect("prepare B sync cycle");
-        components
-            .run_cycle(&SystemClock, None, None)
-            .await
-            .expect("run B sync cycle");
-        let snapshot_after = components
-            .list_storage_objects_for_test("store-v1/snapshots/")
+        .expect("run B sync cycle");
+        let snapshot_after = joiner_storage
+            .list_provider_keys_for_test("store-v1/snapshots/")
             .await
             .expect("list Store snapshot objects");
         assert!(
@@ -1381,23 +1391,25 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
 #[tokio::test]
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     let owner = UserKeypair::generate();
-    let db_owner = open_test_db();
-    let fixture = TestStoreFixture::create(
+    let db_owner_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+    let db_owner = open_test_db(db_owner_store_dir.clone());
+    let fixture = TestStore::create_with_connection(
         &db_owner,
+        db_owner_store_dir.clone(),
         "test-lib",
         owner.clone(),
         coven_replication::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create exact owner Store");
-    let storage = fixture.store();
-    let cloud_storage = fixture.storage();
+    let (storage, cloud_storage) = fixture;
     let member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
     storage
         .invite_member(
             &db_owner,
+            db_owner_store_dir.clone(),
             &owner,
             &pubkey_hex(&member),
             None,
@@ -1408,7 +1420,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .await
         .expect("add member");
     let owner_device = storage
-        .bind_device(&db_owner, &owner)
+        .bind_device(&db_owner, db_owner_store_dir.clone(), &owner)
         .await
         .expect("bind owner Store");
     let pre_removal_chain = owner_device
@@ -1421,6 +1433,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     storage
         .remove_member(
             &db_owner,
+            db_owner_store_dir.clone(),
             &owner,
             &pubkey_hex(&member),
             &encryption,
@@ -1438,7 +1451,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let membership_floor = MembershipFloor(chain.head_refs().to_vec());
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
-    let store_database = coven_database::StoreDatabase::new(db_owner.database());
+    let store_database = coven_database::StoreDatabase::new(&db_owner);
     let snapshot = store_database
         .capture_snapshot_image_for_test(storage.root(), snap_dir, None)
         .await
@@ -1511,13 +1524,14 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         ));
 
         // Owner: a shared note with a cover photo, both captured into the snapshot.
-        let db_owner = open_test_db_with_blob(BlobDecl::new(
-            "photos",
-            Provenance::HostProvided,
-            CacheFill::CacheEager,
-        ));
+        let db_owner_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+        let db_owner = open_test_db_with_blob(
+            db_owner_store_dir.clone(),
+            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager),
+        );
         let owner_device = Box::pin(TestDevice::create(
             &db_owner,
+            db_owner_store_dir.clone(),
             owner_storage,
             store_id,
             owner_keypair.clone(),
@@ -1526,23 +1540,20 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("initialize owner Store");
         let store_root = owner_device.store_root().clone();
         db_owner
-            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
          VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
             )
             .await;
         db_owner
-            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
              VALUES ('photo1', 'n1', 'cover', 11, '{}', '0000000001000-0000-owner', '2026-01-01')",
                 coven_protocol::blob::content_hash(b"cover-bytes"),
             ))
             .await;
-        let (owner_tmp, owner_dir) = temp_store_dir();
         coven_foundation::store_dir::StoreDir::store_local_blob(
-            &owner_dir,
+            &db_owner_store_dir,
             "photos",
             "photo1",
             b"cover-bytes",
@@ -1556,18 +1567,15 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             store_id.to_string(),
             owner_keypair.clone(),
         );
-        let components = Box::pin(
+        Box::pin(
             coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
-                coven_database::StoreDatabase::new(db_owner.database()),
-                owner_dir.clone(),
+                coven_database::StoreDatabase::new(&db_owner),
+                db_owner_store_dir.clone(),
             )
-            .prepare_sync(cycle_storage, owner_keypair.clone()),
+            .run_sync_cycle(cycle_storage, owner_keypair.clone()),
         )
         .await
-        .expect("prepare owner row and blob publication");
-        Box::pin(components.run_cycle(&SystemClock, None, None))
-            .await
-            .expect("publish owner row and blob");
+        .expect("publish owner row and blob");
         let membership = owner_device
             .membership()
             .await
@@ -1576,7 +1584,6 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         let layout = StoreLayout::new(restore_app.path());
         let lib_b = layout.store_dir(store_id);
         let owner_blob = db_owner
-            .database()
             .row_blob_ref("note_photos", "photo1")
             .await
             .expect("capture exact snapshot blob");
@@ -1597,13 +1604,11 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             .await
             .expect("export exact activated continuation");
         let materialized_commits_without_device_state = db_owner
-            .database()
             .materialized_commits_without_device_state_count_for_test()
             .await
             .expect("verify source device-state snapshots");
         assert_eq!(materialized_commits_without_device_state, 0);
         let published_snapshot_bytes = db_owner
-            .database()
             .latest_published_store_snapshot_bytes_for_test()
             .await
             .expect("read published snapshot metadata");
@@ -1685,7 +1690,6 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             "the backfilled file must hold the blob's plaintext bytes",
         );
 
-        drop(owner_tmp);
         let restored = Database::open(
             &lib_b.db_path(),
             tables,
@@ -1731,18 +1735,15 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             store_id.to_string(),
             joiner_keypair.clone(),
         );
-        let components = Box::pin(
+        Box::pin(
             coven_replication::sync::test_owner_graph::TestOwnerGraph::new(
                 coven_database::StoreDatabase::new(&restored),
                 lib_b.clone(),
             )
-            .prepare_sync(restored_storage, joiner_keypair),
+            .run_sync_cycle(restored_storage, joiner_keypair),
         )
         .await
-        .expect("prepare restored row publication");
-        Box::pin(components.run_cycle(&SystemClock, None, None))
-            .await
-            .expect("publish restored row by reusing its exact remote blob");
+        .expect("publish restored row by reusing its exact remote blob");
     })
     .await;
 }

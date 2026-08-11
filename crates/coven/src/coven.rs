@@ -11,8 +11,8 @@ use crate::{Migration, MigrationError};
 use coven_database::{Database, DbError, OpenError};
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::{Config, HomeStorage};
-use coven_foundation::store_dir::StoreOpenGuard;
 use coven_foundation::store_dir::{LocalBlobStoreError, PathTokenError};
+use coven_foundation::store_dir::{StoreDir, StoreOpenGuard};
 use coven_keys::custody::KeyCustody;
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::StoreKeys;
@@ -123,9 +123,10 @@ where
 pub struct Coven;
 
 impl Coven {
-    pub fn builder(config: impl Into<CovenConfig>) -> CovenBuilder {
+    pub fn builder(store_dir: StoreDir, config: impl Into<CovenConfig>) -> CovenBuilder {
         let config = config.into();
         CovenBuilder {
+            store_dir,
             config,
             synced_tables: None,
             migrations: None,
@@ -143,6 +144,7 @@ impl Coven {
 }
 
 pub struct CovenBuilder {
+    store_dir: StoreDir,
     config: CovenConfig,
     synced_tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
@@ -274,9 +276,9 @@ impl CovenBuilder {
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
         }
-        let db_path = config.store_dir.db_path();
+        let store_dir = self.store_dir;
+        let db_path = store_dir.db_path();
         let provider = self.config.provider();
-        let store_dir = config.store_dir.clone();
         let transfer_limits = coven_protocol::blob::TransferLimits {
             uploads: self.max_concurrent_uploads,
             downloads: self.max_concurrent_downloads,
@@ -294,7 +296,7 @@ impl CovenBuilder {
         )?;
         // A second, read-only connection on the same WAL database, opened after the
         // writer completed its migrations so the schema exists. It backs
-        // [`CovenHandle::sql_read`]: a pure read runs here on its own connection
+        // [`CovenHandle::read`]: a pure read runs here on its own connection
         // thread, concurrent with the writer rather than queued behind it, and
         // attaches no changeset session. Opening it fails `open()` loudly — there is
         // no full handle without its read path.
@@ -308,7 +310,7 @@ impl CovenBuilder {
             &migrations,
         )?;
         let (key_service, key_custody, identity_custody) =
-            resolve_custody(&config, self.key_custody, self.identity_custody);
+            resolve_custody(&config, &store_dir, self.key_custody, self.identity_custody);
         Ok(CovenHandle::new(
             db,
             read_db,
@@ -349,9 +351,9 @@ impl CovenBuilder {
         let config = self.config.current();
         let tables = validated_synced_tables(&config, self.synced_tables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
-        let db_path = config.store_dir.db_path();
+        let store_dir = self.store_dir;
+        let db_path = store_dir.db_path();
         let provider = self.config.provider();
-        let store_dir = config.store_dir.clone();
         // No StoreOpenGuard and no orphan-temp cleanup: both are writer concerns
         // (see StoreOpenGuard). A reader must not take the exclusive lock the
         // writer holds, nor write the filesystem the writer owns.
@@ -368,7 +370,7 @@ impl CovenBuilder {
             &migrations,
         )?;
         let (key_service, key_custody, identity_custody) =
-            resolve_custody(&config, self.key_custody, self.identity_custody);
+            resolve_custody(&config, &store_dir, self.key_custody, self.identity_custody);
         Ok(crate::read_handle::CovenReadHandle::new(
             db,
             store_dir,
@@ -401,6 +403,7 @@ fn validated_synced_tables(
 /// them can write, so both kinds of open resolve them identically.
 fn resolve_custody(
     config: &Config,
+    store_dir: &StoreDir,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
 ) -> (
@@ -409,8 +412,8 @@ fn resolve_custody(
     Arc<dyn coven_keys::keys::DeviceIdentityCustody>,
 ) {
     let key_service = StoreKeys::bind(config.store_id.clone());
-    let master = key_custody.resolve(&key_service, &config.store_dir);
-    let identity = identity_custody.resolve(&key_service, &config.store_dir);
+    let master = key_custody.resolve(&key_service, store_dir);
+    let identity = identity_custody.resolve(&key_service, store_dir);
     (key_service, master, identity)
 }
 

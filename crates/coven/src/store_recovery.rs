@@ -22,10 +22,9 @@ impl StoreRecovery {
         if !self.sync.is_command_configured() {
             return Err(SyncError::NotConfigured);
         }
-        let identity = self.security.established_identity()?;
         let restore_membership = self.sync.restore_membership().await?;
         let authority = coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(
-            identity
+            self.security
                 .export_activated_device_continuation(&self.database)
                 .await?,
         );

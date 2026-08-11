@@ -89,9 +89,9 @@ cannot happen, because the only connection that can write is the one capture
 is attached to.
 
 The host opens the store once through
-`Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
+`Coven::builder(store_dir, config).synced_tables(...).migrations(...).open()`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
-through `handle.sql(...)`. The writer connection lives on one dedicated
+through `handle.write(...)`. The writer connection lives on one dedicated
 thread (an actor). Each host transaction gets a SQLite session attached to every
 declared table. Its insert, update, and delete operations become one changeset;
 the session ends with that transaction. The host writes as usual, and there is
@@ -104,8 +104,8 @@ keys. Before the host transaction commits, coven validates introduced ids and
 records a primary-key change as deletion of the old identity plus insertion of
 the new one. The app rows, shared changeset, exact materialized dependency
 frontier, stable `WriteId`, affected row identities, and initial `WriteStatus`
-commit together or all roll back. `handle.sql` and `handle.write` return a
-`WriteReceipt`; separate successful calls never combine into one Store commit.
+commit together or all roll back. `handle.write` returns a `WriteReceipt`;
+separate successful calls never combine into one Store commit.
 
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so sync initialization treats an
@@ -124,14 +124,14 @@ both hold the invariant above the same way: they run on read-only SQLite
 connections, so a write through them is refused by SQLite itself — a read
 cannot bypass capture because it cannot write at all.
 
-- **In the host's own process**: `handle.sql_read(...)`. The full handle
+- **In the host's own process**: `handle.read(...)`. The full handle
   opens a read-only companion connection on the same WAL database, on its own
   thread; a pure read runs there, concurrent with the writer instead of
   queued behind it, with no session attached. Read-your-writes holds for
-  committed writes: a `sql_read` after an awaited `sql`/`write` sees that
+  committed writes: a `read` after an awaited `write` sees that
   data.
 - **From a second process (or a second handle)**:
-  `Coven::builder(config).synced_tables(...).migrations(...).open_read_only()` returns a
+  `Coven::builder(store_dir, config).synced_tables(...).migrations(...).open_read_only()` returns a
   [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
   reader for something like a macOS File Provider extension that must serve
   reads while the app holds the full handle open. It takes no store lock
@@ -140,10 +140,10 @@ cannot bypass capture because it cannot write at all.
   the device cache. WAL makes the coexistence safe: many readers, one writer,
   each read seeing the last committed state.
 
-The write path polices itself: a `handle.sql(...)` transaction that changed
-no rows at all logs a warning — that is a pure read left on the write path;
-move it to `sql_read`. A write to a device-local (undeclared) table changes
-rows while capturing nothing, which is routine and silent.
+The write path polices itself: a `handle.write(...)` callback that prepares no
+`INSERT`, `UPDATE`, or `DELETE` statement is rejected as a pure read on the
+write path; move it to `read`. A write to a device-local (undeclared) table is
+still a write even though its rows do not enter a synced changeset.
 
 ## The sync cycle
 

@@ -49,6 +49,15 @@ impl StoreDatabase {
         self.database.store_schema_version()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn assert_owns_payload_directory_for_test(
+        &self,
+        store_dir: &coven_foundation::store_dir::StoreDir,
+    ) {
+        self.database
+            .assert_owns_payload_directory_for_test(store_dir);
+    }
+
     pub fn sync_routing_hash(&self) -> coven_protocol::store_commit::ObjectHash {
         self.database.store_sync_routing_hash()
     }

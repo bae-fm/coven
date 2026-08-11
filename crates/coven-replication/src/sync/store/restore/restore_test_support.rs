@@ -46,8 +46,7 @@ impl<'storage> RestoringStore<'storage> {
     ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
         let reference = self.database.row_blob_ref(table, row_id).await?;
         crate::sync::test_owner_graph::TestOwnerGraph::new(self.database.clone(), store_dir.clone())
-            .local_access()
-            .read(&reference)
+            .read_blob(None, &reference)
             .await
     }
 

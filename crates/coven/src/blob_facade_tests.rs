@@ -22,19 +22,21 @@ fn note_tables() -> Vec<crate::SyncedTable> {
     test_synced_tables_with_blob(user_file_decl())
 }
 
-fn config(dir: crate::StoreDir) -> crate::Config {
-    crate::Config::with_defaults(
-        "blob-facade-test".to_string(),
-        "owner-device".to_string(),
+fn builder(dir: crate::StoreDir) -> crate::CovenBuilder {
+    crate::Coven::builder(
         dir,
-        "Blob Facade Store".to_string(),
+        crate::Config::with_defaults(
+            "blob-facade-test".to_string(),
+            "owner-device".to_string(),
+            "Blob Facade Store".to_string(),
+        ),
     )
 }
 
 /// Open a store whose blobs are user files, with nothing connected: an upload
 /// queue reader must work before sync exists.
 fn open_local(dir: crate::StoreDir) -> crate::CovenHandle {
-    crate::Coven::builder(config(dir))
+    builder(dir)
         .synced_tables(note_tables())
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::from(
@@ -73,7 +75,7 @@ impl ExternalPhotoTestHost for crate::CovenHandle {
         let note = note_id.to_string();
         let photo = photo_id.to_string();
         let path = path.to_path_buf();
-        self.sql(move |sql| {
+        self.write(move |sql| {
             sql.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES (?1, 'Note', 0, ?2, ?2)",
@@ -123,7 +125,7 @@ async fn an_external_file_reads_back_through_the_handle() {
     // Clearing the registration leaves the row, and the blob has nowhere to be
     // read from until it is registered again.
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.clear_external_blob("note_photos", "photo-1")?;
             Ok(())
         })
@@ -143,7 +145,7 @@ async fn an_external_file_reads_back_through_the_handle() {
     let moved = user_dir.path().join("photo-moved.jpg");
     std::fs::rename(&path, &moved).expect("the user moves their file");
     handle
-        .sql({
+        .write({
             let moved = moved.clone();
             move |sql| {
                 sql.execute(
@@ -173,7 +175,7 @@ async fn an_external_file_reads_back_through_the_handle() {
 async fn a_host_provided_table_refuses_an_external_file() {
     coven_keys::keys::test_keyring::install();
     let tmp = tempfile::tempdir().expect("store directory");
-    let handle = crate::Coven::builder(config(crate::StoreDir::new_ephemeral(tmp.path())))
+    let handle = builder(crate::StoreDir::new_ephemeral(tmp.path()))
         .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
             "photos",
             crate::Provenance::HostProvided,
@@ -208,7 +210,7 @@ async fn registering_against_a_table_with_no_blob_is_refused() {
     let handle = open_local(crate::StoreDir::new_ephemeral(tmp.path()));
 
     let refused = handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.execute(
                 "INSERT INTO notes (id, title, shared, _updated_at, created_at)
                  VALUES ('n', 'N', 0, ?1, ?1)",
@@ -234,7 +236,7 @@ fn reopen(
     keyring: crate::MasterKeyring,
     owner: coven_keys::keys::UserKeypair,
 ) -> crate::CovenHandle {
-    crate::Coven::builder(config(dir))
+    builder(dir)
         .synced_tables(note_tables())
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(keyring))
@@ -260,7 +262,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     let owner = coven_keys::keys::UserKeypair::generate();
     let encryption = crate::EncryptionService::from_key([42; 32]);
     let keyring = crate::MasterKeyring::from(encryption.clone());
-    let handle = crate::Coven::builder(config(dir.clone()))
+    let handle = builder(dir.clone())
         .synced_tables(note_tables())
         .migrations(test_migrations())
         .key_custody(crate::KeyCustody::InMemory(keyring.clone()))
@@ -422,7 +424,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
     let encryption = crate::EncryptionService::from_key([42; 32]);
     // A blob coven copies and publishes, so the row ends up with a cloud
     // object behind it — the thing a tombstone removes.
-    let handle = crate::Coven::builder(config(dir.clone()))
+    let handle = builder(dir.clone())
         .synced_tables(test_synced_tables_with_blob(crate::BlobDecl::new(
             "photos",
             crate::Provenance::HostProvided,
@@ -447,7 +449,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
     let hash = crate::content_hash(&bytes);
     let size = bytes.len() as i64;
     handle
-        .write(
+        .write_with_blobs(
             {
                 let bytes = bytes.clone();
                 move |batch| {
@@ -496,7 +498,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
     );
 
     handle
-        .sql({
+        .write({
             let reference = reference.clone();
             move |sql| {
                 sql.execute("DELETE FROM note_photos WHERE id = 'photo-1'", [])?;
@@ -519,7 +521,7 @@ async fn run_deleting_a_published_row_queues_its_cloud_object_for_removal() {
 
     // Queueing the same object again is the same tombstone, not a second one.
     handle
-        .sql(move |sql| {
+        .write(move |sql| {
             sql.enqueue_blob_delete(&reference)?;
             Ok(())
         })
@@ -557,7 +559,7 @@ async fn a_local_only_blob_has_no_cloud_object_to_remove() {
         .await
         .expect("resolve the row's blob reference");
     let refused = handle
-        .sql(move |sql| {
+        .write(move |sql| {
             sql.enqueue_blob_delete(&reference)?;
             Ok(())
         })
@@ -604,7 +606,7 @@ async fn the_handle_reports_where_a_row_s_user_file_lives() {
     );
 
     handle
-        .sql(|sql| {
+        .write(|sql| {
             sql.clear_external_blob("note_photos", "photo-1")?;
             Ok(())
         })

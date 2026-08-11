@@ -17,10 +17,12 @@ impl PackageFailure {
 
 #[tokio::test]
 async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() {
-    let owner_database = open_scoped_replay_database();
+    let owner_database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_database = open_scoped_replay_database(owner_database_store_dir.clone());
     let owner = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &owner_database,
+        owner_database_store_dir.clone(),
         "unresolved-effective-access",
         owner.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -28,11 +30,14 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     .await
     .expect("create unresolved-membership Store");
     let second_owner = coven_keys::keys::UserKeypair::generate();
-    let second_owner_database = open_scoped_replay_database();
+    let second_owner_database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let second_owner_database =
+        open_scoped_replay_database(second_owner_database_store_dir.clone());
     let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     store
         .invite_member(
             &owner_database,
+            owner_database_store_dir.clone(),
             &owner,
             &coven_keys::keys::public_key_hex(&second_owner),
             None,
@@ -45,7 +50,9 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     store
         .activate_joined_device(
             &owner_database,
+            owner_database_store_dir.clone(),
             &second_owner_database,
+            second_owner_database_store_dir.clone(),
             &second_owner,
             "2026-07-23T00:00:00Z",
         )
@@ -54,7 +61,9 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     store
         .promote_active_member_fixture(
             &owner_database,
+            owner_database_store_dir.clone(),
             &second_owner_database,
+            second_owner_database_store_dir.clone(),
             &owner,
             &second_owner,
             &encryption,
@@ -63,11 +72,15 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .expect("promote the second owner");
 
     let owner_store = store
-        .bind_device(&owner_database, &owner)
+        .bind_device_in(&owner_database, owner_database_store_dir.clone(), &owner)
         .await
         .expect("bind the founder");
     let second_owner_store = store
-        .bind_device(&second_owner_database, &second_owner)
+        .bind_device_in(
+            &second_owner_database,
+            second_owner_database_store_dir.clone(),
+            &second_owner,
+        )
         .await
         .expect("bind the second owner");
     let mut founder_writer = owner_store
@@ -119,14 +132,12 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
 #[tokio::test]
 async fn active_store_member_holds_unavailable_circle_package_without_partial_materialization() {
     for failure in [PackageFailure::Missing, PackageFailure::Corrupt] {
-        let member_database = open_scoped_replay_database();
-        let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-        let (_member_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let member_database_store_dir = crate::sync::test_helpers::test_store_dir();
+        let member_database = open_scoped_replay_database(member_database_store_dir.clone());
         let fixture = EffectiveAccessFixture::create(
             failure.store_id(),
             &member_database,
-            &owner_store_dir,
-            &member_store_dir,
+            member_database_store_dir.clone(),
         )
         .await;
         let first = fixture
@@ -137,7 +148,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             )
             .await;
         let first_pull = fixture
-            .pull_member(&member_store_dir)
+            .pull_member()
             .await
             .expect("pull unavailable-package baseline");
         assert!(
@@ -162,7 +173,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         }
         fixture.home.clear_exact_reads();
         let pull = fixture
-            .pull_member(&member_store_dir)
+            .pull_member()
             .await
             .expect("active member records unavailable private package as held");
         assert!(
@@ -173,7 +184,6 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
         );
         assert!(fixture.home.exact_reads().contains(&unavailable_slot));
         let state = member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await;
         assert_eq!(
@@ -187,7 +197,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}"
         );
         assert_eq!(
-            StoreDatabase::new(member_database.database())
+            StoreDatabase::new(&member_database)
                 .exact_materialized_ref(&commit_stream_id(&first.coord), first.coord.sequence())
                 .await
                 .expect("load unavailable-package baseline position"),
@@ -195,7 +205,7 @@ async fn active_store_member_holds_unavailable_circle_package_without_partial_ma
             "{failure:?}"
         );
         assert!(
-            StoreDatabase::new(member_database.database())
+            StoreDatabase::new(&member_database)
                 .exact_materialized_ref(
                     &commit_stream_id(&unavailable.coord),
                     unavailable.coord.sequence(),

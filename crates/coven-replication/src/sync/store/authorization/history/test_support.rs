@@ -13,15 +13,13 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn open_keyring(
+    pub(crate) async fn membership_keyring_facts(
         &self,
         identity: &UserKeypair,
         membership: &MembershipChain,
-    ) -> Result<
-        coven_keys::encryption::EncryptionService,
-        crate::sync::store::membership::InviteError,
-    > {
-        self.keyrings.open(identity, membership).await
+    ) -> Result<([u8; 32], usize), crate::sync::store::membership::InviteError> {
+        let keyring = self.keyrings.open(identity, membership).await?;
+        Ok((keyring.key_bytes(), keyring.key_count()))
     }
 
     #[cfg(test)]

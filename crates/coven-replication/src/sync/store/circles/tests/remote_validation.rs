@@ -2,13 +2,14 @@ use super::*;
 
 #[tokio::test]
 async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (fixture, _home, signer, journal) =
-        persist_merge_operation_fixture(&db, "circle-invented-access-refs").await;
-    let store = fixture.store();
-    let cloud_storage = fixture.storage();
+        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-invented-access-refs")
+            .await;
+    let (store, cloud_storage) = fixture;
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind invented-access Circle object Store");
     let old_commit = journal.commit().expect("parse prepared Store commit");
@@ -84,7 +85,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         },
         bootstrap: None,
     });
-    let author = coven_database::StoreDatabase::new(db.database())
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -134,7 +135,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     .expect("bind re-signed Store commit reference");
 
     let error = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind invented-access Circle Store")
         .load_circle_activations(&commit_ref, &commit, author.value())
@@ -155,7 +156,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     )
     .expect("authenticate re-signed Store commit");
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind forged Circle Store")
         .prepare_merge_history_successor_for_test(
@@ -196,7 +197,7 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
     );
 
     let loaded_store = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("load Store pull");
     let pull = loaded_store
@@ -218,13 +219,13 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
         pull.held_positions
     );
     assert_eq!(
-        StoreDatabase::new(db.database())
+        StoreDatabase::new(&db)
             .circle_control_activation_count_for_test(journal.circle_id())
             .await
             .expect("count circle activations"),
         0
     );
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .exact_materialized_ref(&stream_id.to_string(), commit.seq())
         .await
         .expect("read invented access commit position")
@@ -233,20 +234,21 @@ async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
 
 #[tokio::test]
 async fn remote_activation_rejects_active_access_for_a_nonmember() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
-    let fixture = TestStoreFixture::create(
+    let fixture = TestStore::create_with_connection(
         &db,
+        db_store_dir.clone(),
         "circle-active-access-nonmember",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create exact Circle test Store");
-    let store = fixture.store();
-    let cloud_storage = fixture.storage();
+    let (store, cloud_storage) = fixture;
     let device = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind promoted-access Circle object Store");
     let peer = UserKeypair::generate();
@@ -254,6 +256,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &founder,
             &peer_pubkey,
             None,
@@ -264,7 +267,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .await
         .expect("invite Store member outside the Circle roster");
     let journal = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
@@ -273,7 +276,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
         .journal;
     let old_commit = journal.commit().expect("parse prepared Store commit");
     let candidate_family = old_commit.candidate_family();
-    let author = coven_database::StoreDatabase::new(db.database())
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -330,7 +333,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     .expect("bind promoted access Store commit");
 
     let error = store
-        .bind_device(&db, &peer)
+        .bind_device_in(&db, db_store_dir.clone(), &peer)
         .await
         .expect("bind promoted-access Circle Store")
         .load_circle_activations(&commit_ref, &commit, author.value())
@@ -346,10 +349,12 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
 
 #[tokio::test]
 async fn candidate_graph_rejects_partial_circle_access_ownership() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = TestStore::create(
         &db,
+        db_store_dir.clone(),
         "circle-partial-access-graph",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -357,7 +362,7 @@ async fn candidate_graph_rejects_partial_circle_access_ownership() {
     .await
     .expect("create exact Circle test Store");
     let mut prepared = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Partial access graph")
@@ -397,10 +402,12 @@ async fn candidate_graph_rejects_partial_circle_access_ownership() {
 
 #[tokio::test]
 async fn inactive_circle_member_verifies_public_first_head_activations() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = TestStore::create(
         &db,
+        db_store_dir.clone(),
         "circle-inactive-member",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -412,6 +419,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &founder,
             &peer_pubkey,
             None,
@@ -422,7 +430,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .await
         .expect("invite Store member outside the Circle");
     let prepared = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
@@ -433,23 +441,23 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
         .commit()
         .expect("parse founder Circle commit");
     let commit_ref = prepared.journal.operation().commit_ref.clone();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist founder Circle operation");
     store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("publish founder Circle");
-    let author = coven_database::StoreDatabase::new(db.database())
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load founder device registration");
     let verified = store
-        .bind_device(&db, &peer)
+        .bind_device_in(&db, db_store_dir.clone(), &peer)
         .await
         .expect("bind inactive-member Circle Store")
         .load_circle_activations(&commit_ref, &commit, author.value())
@@ -472,17 +480,26 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
 
 #[tokio::test]
 async fn remote_activation_rejects_metadata_with_a_different_historical_roster() {
-    let baseline_db = open_test_db();
-    let (baseline_store, _home, baseline_signer, baseline) =
-        persist_merge_operation(&baseline_db, "circle-remote-metadata-baseline").await;
+    let baseline_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let baseline_db = crate::sync::test_helpers::open_test_db(baseline_db_store_dir.clone());
+    let (baseline_store, _home, baseline_signer, baseline) = persist_merge_operation(
+        &baseline_db,
+        baseline_db_store_dir.clone(),
+        "circle-remote-metadata-baseline",
+    )
+    .await;
     let baseline_commit = baseline.commit().expect("parse baseline Store commit");
     publish_prepared_objects(&baseline_store, &baseline_db, &baseline).await;
-    let baseline_author = StoreDatabase::new(baseline_db.database())
+    let baseline_author = StoreDatabase::new(&baseline_db)
         .activated_store_device_registration(baseline_commit.author_registration.clone())
         .await
         .expect("load baseline exact Circle commit author");
     baseline_store
-        .bind_device(&baseline_db, &baseline_signer)
+        .bind_device_in(
+            &baseline_db,
+            baseline_db_store_dir.clone(),
+            &baseline_signer,
+        )
         .await
         .expect("bind baseline Circle activation Store")
         .load_circle_activations(
@@ -493,18 +510,19 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .await
         .expect("baseline exact Circle activation verifies remotely");
 
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (fixture, _home, signer, founder_journal) =
-        persist_merge_operation_fixture(&db, "circle-remote-metadata-roster").await;
-    let store = fixture.store();
-    let cloud_storage = fixture.storage();
+        persist_merge_operation_fixture(&db, db_store_dir.clone(), "circle-remote-metadata-roster")
+            .await;
+    let (store, cloud_storage) = fixture;
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind mismatched-roster Circle object Store");
     let circle_id = founder_journal.circle_id();
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -515,7 +533,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .rename_circle("0000000002000-0000-creator", circle_id, "Renamed household")
         .await
         .expect_err("interrupt rename before its first exact upload");
-    let operation_id = coven_database::StoreDatabase::new(db.database())
+    let operation_id = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list interrupted Circle rename")
@@ -523,7 +541,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
         .find(|operation| operation.circle_id == circle_id)
         .expect("interrupted Circle rename remains pending")
         .operation_id;
-    let journal = coven_database::StoreDatabase::new(db.database())
+    let journal = coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read interrupted Circle rename")
@@ -535,7 +553,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     let roster = &mut draft.roster;
     roster.state_hash = ObjectHash::digest(b"different historical roster state");
     let candidate_family = old_commit.candidate_family();
-    let author = coven_database::StoreDatabase::new(db.database())
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(old_commit.author_registration.clone())
         .await
         .expect("load exact Circle commit author");
@@ -589,7 +607,7 @@ async fn remote_activation_rejects_metadata_with_a_different_historical_roster()
     .expect("bind forged exact Store commit reference");
 
     let error = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind mismatched-roster Circle Store")
         .load_circle_activations(&commit_ref, &commit, author.value())

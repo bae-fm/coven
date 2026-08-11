@@ -471,6 +471,11 @@ impl LocalStoreBlobAccess {
     pub async fn evict(&self, blob: &RowBlobRef) -> Result<(), BlobCacheError> {
         self.cache.evict(blob).await
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn uses_store_dir_for_test(&self, expected: &StoreDir) -> bool {
+        &self.store_dir == expected
+    }
 }
 
 #[derive(Clone)]

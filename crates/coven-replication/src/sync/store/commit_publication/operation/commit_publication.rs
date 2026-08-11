@@ -31,8 +31,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let author = self.writer.author_pubkey();
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
-        let previous = base.predecessor;
-        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(base.frontier)
+        let (authorship, previous, frontier) = base.into_parts();
+        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map(|frontier| frontier.commits().clone())
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let seq = commit_plan::next_store_sequence(previous.as_ref())?;
@@ -61,7 +61,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             })?;
         Ok(commit_plan::StoreOperationCommitPlan::new(
             commit_plan::StoreOperationPlanCommon::new(
-                base.authorship,
+                authorship,
                 Arc::clone(&self.writer),
                 root,
                 coord,
@@ -96,8 +96,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let root = self.store_root().clone();
         let stream_id = self.announcement_stream_id();
         let base = self.database.local_commit_base(stream_id).await?;
-        let previous = base.predecessor;
-        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(base.frontier)
+        let (authorship, previous, frontier) = base.into_parts();
+        let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         let seq = commit_plan::next_store_sequence(previous.as_ref())?;
         let coord = coven_protocol::store_commit::StoreCommitCoord {
@@ -119,7 +119,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
             .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
         Ok(MergeConflictResolutionCommitPlan::new(
-            base.authorship,
+            authorship,
             Arc::clone(&self.writer),
             root,
             coord,

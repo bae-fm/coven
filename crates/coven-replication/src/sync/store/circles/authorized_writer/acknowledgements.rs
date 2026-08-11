@@ -16,13 +16,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         for input in inputs {
             let previous = self
                 .database
-                .latest_published_circle_ack(input.circle_id)
+                .latest_published_circle_ack(input.circle_id())
                 .await?;
             if previous.as_ref().is_some_and(|previous| {
-                &previous.store_cut == frontier && previous.control == input.control
+                &previous.store_cut == frontier && &previous.control == input.control()
             }) {
                 tracing::debug!(
-                    circle_id = %input.circle_id,
+                    circle_id = %input.circle_id(),
                     "skip Circle acknowledgement: accepted frontier and control unchanged"
                 );
                 continue;
@@ -38,13 +38,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 ),
                 None => (1, None),
             };
-            let context = input.access.protocol_context(
+            let context = input.protocol_context(
                 self.root.store_root_hash,
                 ProtocolObjectDomain::CircleAcknowledgement,
             );
             let semantic_prefix = self
                 .local_writer
-                .circle_ack_semantic_prefix(input.circle_id, sequence);
+                .circle_ack_semantic_prefix(input.circle_id(), sequence);
             let current_slot = match &previous {
                 Some(previous) => previous.successor_slot.clone(),
                 None => self
@@ -58,7 +58,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .allocate_protocol_slot(
                     &context,
                     &self.local_writer.circle_ack_semantic_prefix(
-                        input.circle_id,
+                        input.circle_id(),
                         sequence.checked_add(1).ok_or_else(|| {
                             StoreAckError::InvalidOutbound(
                                 "Circle acknowledgement sequence overflow".to_string(),
@@ -73,13 +73,13 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .local_writer
                 .sign_circle_acknowledgement(
                     self.root.store_root_hash,
-                    input.circle_id,
+                    input.circle_id(),
                     sequence,
                     frontier.clone(),
-                    input.control,
-                    input.epoch_id,
-                    input.access.key_fingerprint(),
-                    input.seeded_from,
+                    input.control().clone(),
+                    input.epoch_id(),
+                    input.key_fingerprint(),
+                    input.seeded_from().cloned(),
                     sync_time.to_owned(),
                     predecessor,
                     next_slot,

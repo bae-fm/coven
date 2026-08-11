@@ -712,30 +712,25 @@ pub(crate) fn circle_blob_opening_protection_on(
                 "Circle {circle_id} activation index lost control {control:?}"
             ))
         })?;
-        let Some(keyring) = activation
-            .retained_keyring()
+        let Some((generation, key)) = activation
+            .retained_key_entry(expected_key_fingerprint)
             .map_err(|error| DbError::Message(error.to_string()))?
         else {
             continue;
         };
-        for (generation, key) in keyring.keyring_entries() {
-            let candidate = EncryptionService::from_key_at_generation(generation, key);
-            if candidate.seal_key_fingerprint() != expected_key_fingerprint {
-                continue;
-            }
-            if retained_key
-                .as_ref()
-                .is_some_and(|existing: &EncryptionService| {
-                    existing.current_generation() != generation || existing.key_bytes() != key
-                })
-            {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} retains inconsistent key material for fingerprint \
-                         {expected_key_fingerprint}"
-                )));
-            }
-            retained_key = Some(candidate);
+        let candidate = EncryptionService::from_key_at_generation(generation, key);
+        if retained_key
+            .as_ref()
+            .is_some_and(|existing: &EncryptionService| {
+                existing.current_generation() != generation || existing.key_bytes() != key
+            })
+        {
+            return Err(DbError::Message(format!(
+                "Circle {circle_id} retains inconsistent key material for fingerprint \
+                     {expected_key_fingerprint}"
+            )));
         }
+        retained_key = Some(candidate);
     }
     retained_key
         .map(coven_protocol::objects::BlobSpoolProtection::Opaque)

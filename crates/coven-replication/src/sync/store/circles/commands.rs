@@ -201,10 +201,46 @@ pub(crate) struct CircleAddMemberRequest {
     pub(super) circle_id: CircleId,
     pub(super) member_pubkey: String,
     pub(super) role: CircleRole,
-    pub(super) bootstrap: crate::sync::store::SnapshotCut,
+    bootstrap: crate::sync::store::SnapshotCut,
     pub(super) current: CircleAuthoringState,
     pub(super) previous_control: CircleControlRef,
     pub(super) roster_chain: CircleRosterChain,
+}
+
+impl CircleAddMemberRequest {
+    pub(super) fn new(
+        circle_id: CircleId,
+        member_pubkey: String,
+        role: CircleRole,
+        bootstrap: crate::sync::store::SnapshotCut,
+        current: CircleAuthoringState,
+        previous_control: CircleControlRef,
+        roster_chain: CircleRosterChain,
+    ) -> Self {
+        Self {
+            circle_id,
+            member_pubkey,
+            role,
+            bootstrap,
+            current,
+            previous_control,
+            roster_chain,
+        }
+    }
+
+    pub(super) fn bootstrap_blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+        self.bootstrap.blobs()
+    }
+
+    pub(super) async fn read_bootstrap_image(
+        &self,
+    ) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
+        self.bootstrap.read_image().await
+    }
+
+    pub(super) fn bootstrap_coverage(&self) -> &coven_protocol::store_commit::CommitFrontier {
+        self.bootstrap.coverage()
+    }
 }
 
 pub(crate) struct CircleRemoveMemberRequest {
@@ -257,7 +293,50 @@ pub(crate) struct CircleFinalizeEpochCloseRequest {
     pub(super) roster_chain: CircleRosterChain,
     pub(super) intent: coven_protocol::circle::CircleEpochCloseIntent,
     pub(super) responses: Vec<coven_protocol::circle::CircleEpochCloseSettlement>,
-    pub(super) bootstrap: crate::sync::store::SnapshotCut,
+    bootstrap: crate::sync::store::SnapshotCut,
+}
+
+impl CircleFinalizeEpochCloseRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        operation_id: coven_protocol::circle::CircleOperationId,
+        circle_id: CircleId,
+        member_pubkey: String,
+        metadata_stamp: String,
+        current: CircleAuthoringState,
+        previous_control: CircleControlRef,
+        roster_chain: CircleRosterChain,
+        intent: coven_protocol::circle::CircleEpochCloseIntent,
+        responses: Vec<coven_protocol::circle::CircleEpochCloseSettlement>,
+        bootstrap: crate::sync::store::SnapshotCut,
+    ) -> Self {
+        Self {
+            operation_id,
+            circle_id,
+            member_pubkey,
+            metadata_stamp,
+            current,
+            previous_control,
+            roster_chain,
+            intent,
+            responses,
+            bootstrap,
+        }
+    }
+
+    pub(super) fn bootstrap_blobs(&self) -> &[coven_database::SnapshotBlobFact] {
+        self.bootstrap.blobs()
+    }
+
+    pub(super) async fn read_bootstrap_image(
+        &self,
+    ) -> Result<Vec<u8>, coven_database::SnapshotImageError> {
+        self.bootstrap.read_image().await
+    }
+
+    pub(super) fn bootstrap_coverage(&self) -> &coven_protocol::store_commit::CommitFrontier {
+        self.bootstrap.coverage()
+    }
 }
 
 pub(crate) struct CircleCancelEpochCloseRequest {

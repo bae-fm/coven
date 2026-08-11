@@ -203,7 +203,8 @@ site is gone. Enqueuing an upload also cancels any pending delete of the same ke
 
 The outbox is coven's `cloud_outbox` table, created by the handle open path. The
 host does not mutate it by hand; user-provided transitions and sync enqueue rows
-through coven, and host-provided row+blob writes go through `handle.write(...)`.
+through coven, and host-provided row+blob writes go through
+`handle.write_with_blobs(...)`.
 Each row is an
 `OutboxEntry` whose
 `OutboxOperation` is an `Upload`,

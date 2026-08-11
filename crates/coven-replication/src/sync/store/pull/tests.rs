@@ -3,7 +3,7 @@ use crate::sync::store::pull::{
     insert_latest_acknowledgement, merge_retained_merge_history, Readiness,
     VerifiedMergePrefixHeadStatus,
 };
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use coven_keys::keys::MasterKeyCustody;
 use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 
@@ -11,16 +11,19 @@ use coven_protocol::store_commit::OpenedRetainedMergeHistorySummary;
 mod effective_access_failure;
 
 async fn one_retained_checkpoint() -> (
-    SyntheticStoreFixture,
+    Database,
+    coven_foundation::store_dir::StoreDir,
     std::sync::Arc<crate::sync::test_helpers::TestStore>,
     coven_keys::keys::UserKeypair,
     MembershipChain,
     OpenedRetainedMergeHistorySummary,
 ) {
-    let db = crate::sync::test_helpers::open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let signer = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &db,
+        db_store_dir.clone(),
         "retained-checkpoint-conflict",
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -28,20 +31,19 @@ async fn one_retained_checkpoint() -> (
     .await
     .expect("create retained-checkpoint Store");
     let loaded_store = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("load checkpoint Store");
     let membership = loaded_store
         .membership_for_test()
         .await
         .expect("load checkpoint membership");
-    db.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('checkpoint-conflict', 'checkpoint', NULL, 1, \
                  '0000000001000-0000-checkpoint', '2026-07-21')",
-        )
-        .await;
+    )
+    .await;
     let mut writer = loaded_store
         .authorize_writer()
         .await
@@ -63,7 +65,7 @@ async fn one_retained_checkpoint() -> (
         .expect("load checkpoint position")
         .expect("checkpoint position exists");
     let snapshot_dir = tempfile::tempdir().expect("create checkpoint snapshot directory");
-    let database = coven_database::StoreDatabase::new(db.database());
+    let database = coven_database::StoreDatabase::new(&db);
     let image = database
         .capture_snapshot_image_for_test(
             store.root().clone(),
@@ -101,12 +103,13 @@ async fn one_retained_checkpoint() -> (
         summary,
         post_state,
     };
-    (db, store, signer, membership, checkpoint)
+    (db, db_store_dir, store, signer, membership, checkpoint)
 }
 
 #[tokio::test]
 async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
-    let (_db, store, _signer, membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+    let (_db, _db_store_dir, store, _signer, membership, checkpoint) =
+        Box::pin(one_retained_checkpoint()).await;
 
     let mut conflicting_commit = checkpoint.clone();
     let (coordinate, reference) = conflicting_commit
@@ -145,16 +148,17 @@ async fn retained_checkpoint_merge_rejects_same_coordinate_competitors() {
 
 #[tokio::test]
 async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_forks() {
-    let (db, store, signer, _membership, checkpoint) = Box::pin(one_retained_checkpoint()).await;
+    let (db, db_store_dir, store, signer, _membership, checkpoint) =
+        Box::pin(one_retained_checkpoint()).await;
     let coverage = CommitFrontier::from_refs(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .materialized_frontier()
             .await
             .expect("load acknowledgement coverage"),
     )
     .expect("derive acknowledgement coverage");
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind retained-checkpoint device");
     device
@@ -204,10 +208,12 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
 
 #[tokio::test]
 async fn progressive_discovery_replays_same_history_in_canonical_order() {
-    let founder = crate::sync::test_helpers::open_test_db();
+    let founder_store_dir = crate::sync::test_helpers::test_store_dir();
+    let founder = crate::sync::test_helpers::open_test_db(founder_store_dir.clone());
     let identity = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &founder,
+        founder_store_dir.clone(),
         "progressive-canonical-replay",
         identity.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -215,84 +221,85 @@ async fn progressive_discovery_replays_same_history_in_canonical_order() {
     .await
     .expect("create canonical replay Store");
     founder
-        .database()
         .execute_test_host_write(
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
          VALUES ('canonical-row', 'c0', 'b0', 1,
                  '0000000001000-0000-base', '2026-07-21')",
         )
         .await;
-    let (_founder_temp, founder_store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(store
         .publish_pending(&founder, &founder_store_dir)
         .await
         .expect("publish canonical replay base"));
 
-    let writer = crate::sync::test_helpers::open_test_db();
+    let writer_store_dir = crate::sync::test_helpers::test_store_dir();
+    let writer = crate::sync::test_helpers::open_test_db(writer_store_dir.clone());
     store
-        .activate_joined_device(&founder, &writer, &identity, "2026-07-21T00:00:00Z")
+        .activate_joined_device(
+            &founder,
+            founder_store_dir.clone(),
+            &writer,
+            writer_store_dir.clone(),
+            &identity,
+            "2026-07-21T00:00:00Z",
+        )
         .await
         .expect("activate concurrent writer");
     let mut producers = Vec::new();
-    for database in [founder.clone(), writer] {
+    for (database, database_store_dir) in [
+        (founder.clone(), founder_store_dir.clone()),
+        (writer, writer_store_dir),
+    ] {
         let stream_id = store
-            .bind_device(&database, &identity)
+            .bind_device_in(&database, database_store_dir.clone(), &identity)
             .await
             .expect("bind canonical replay Store device")
             .announcement_stream_id_for_test()
             .await
             .expect("derive canonical replay Store stream through writer authority");
-        producers.push((stream_id, database));
+        producers.push((stream_id, database, database_store_dir));
     }
     producers.sort_by_key(|producer| producer.0);
 
-    let progressive = crate::sync::test_helpers::open_test_db();
-    let canonical = crate::sync::test_helpers::open_test_db();
-    let (_progressive_temp, progressive_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_canonical_temp, canonical_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let progressive_store_dir = crate::sync::test_helpers::test_store_dir();
+    let progressive = crate::sync::test_helpers::open_test_db(progressive_store_dir.clone());
+    let canonical_store_dir = crate::sync::test_helpers::test_store_dir();
+    let canonical = crate::sync::test_helpers::open_test_db(canonical_store_dir.clone());
     store.pull_into(&progressive, &progressive_store_dir).await;
     store.pull_into(&canonical, &canonical_store_dir).await;
 
-    let x2_producer = &producers[0].1;
-    let chain_producer = &producers[1].1;
+    let (_, x2_producer, x2_store_dir) = &producers[0];
+    let (_, chain_producer, chain_store_dir) = &producers[1];
     for update in [
         "UPDATE notes SET title = 'c1', _updated_at = '0000000003000-0000-x1'
          WHERE id = 'canonical-row'",
         "UPDATE notes SET body = 'bM', _updated_at = '0000000009000-0000-m'
          WHERE id = 'canonical-row'",
     ] {
-        chain_producer
-            .database()
-            .execute_test_host_write(update)
-            .await;
-        let (_producer_temp, producer_store_dir) = crate::sync::test_helpers::temp_store_dir();
+        chain_producer.execute_test_host_write(update).await;
         assert!(store
-            .publish_pending(chain_producer, &producer_store_dir)
+            .publish_pending(chain_producer, chain_store_dir)
             .await
             .unwrap_or_else(|error| panic!("publish chained concurrent update: {error}")));
         store.pull_into(&progressive, &progressive_store_dir).await;
     }
     x2_producer
-        .database()
         .execute_test_host_write(
             "UPDATE notes SET title = 'c2', _updated_at = '0000000004000-0000-x2'
          WHERE id = 'canonical-row'",
         )
         .await;
-    let (_x2_temp, x2_store_dir) = crate::sync::test_helpers::temp_store_dir();
     assert!(store
-        .publish_pending(x2_producer, &x2_store_dir)
+        .publish_pending(x2_producer, x2_store_dir)
         .await
         .unwrap_or_else(|error| panic!("publish independent concurrent update: {error}")));
     store.pull_into(&progressive, &progressive_store_dir).await;
     store.pull_into(&canonical, &canonical_store_dir).await;
 
     let progressive_title = progressive
-        .database()
         .query_test_text("SELECT title FROM notes WHERE id = 'canonical-row'")
         .await;
     let canonical_title = canonical
-        .database()
         .query_test_text("SELECT title FROM notes WHERE id = 'canonical-row'")
         .await;
     assert_eq!(progressive_title, canonical_title);
@@ -321,15 +328,19 @@ fn scoped_replay_schema() -> (
     )
 }
 
-fn open_scoped_replay_database() -> SyntheticStoreFixture {
+fn open_scoped_replay_database(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     let (tables, migrations) = scoped_replay_schema();
-    crate::sync::test_helpers::open_test_db_schema(tables, migrations)
+    crate::sync::test_helpers::open_test_db_schema(store_dir, tables, migrations)
 }
 
-fn open_scoped_replay_database_at(path: &std::path::Path) -> SyntheticStoreFixture {
+fn open_scoped_replay_database_at(
+    path: &std::path::Path,
+) -> (Database, coven_foundation::store_dir::StoreDir) {
     let (tables, migrations) = scoped_replay_schema();
-    SyntheticStoreFixture::open(
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
+    let database = Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         tables,
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -337,7 +348,8 @@ fn open_scoped_replay_database_at(path: &std::path::Path) -> SyntheticStoreFixtu
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
-    .expect("open scoped replay database")
+    .expect("open scoped replay database");
+    (database, store_dir)
 }
 
 fn exact_circle_package_slot(commit: &StoreBatchCommit) -> coven_protocol::objects::ObjectSlot {
@@ -348,7 +360,8 @@ fn exact_circle_package_slot(commit: &StoreBatchCommit) -> coven_protocol::objec
 }
 
 struct EffectiveAccessFixture {
-    owner_database: SyntheticStoreFixture,
+    owner_database: Database,
+    owner_database_store_dir: coven_foundation::store_dir::StoreDir,
     owner_device: crate::sync::test_helpers::TestDevice,
     member_device: crate::sync::test_helpers::TestDevice,
     owner: coven_keys::keys::UserKeypair,
@@ -382,10 +395,9 @@ impl EffectiveAccessFixture {
 
     async fn pull_member(
         &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> Result<StorePullResult, crate::sync::test_helpers::TestPullError> {
         self.member_device
-            .pull_store(store_dir)
+            .pull_store()
             .await
             .map(|(_, result)| result)
     }
@@ -393,7 +405,6 @@ impl EffectiveAccessFixture {
     async fn publish_row(&self, row_id: &str, body: &str, stamp: &str) -> StoreBatchCommitRef {
         let statement = if self
             .owner_database
-            .database()
             .scoped_routing_state_for_test(row_id)
             .await
             .row
@@ -412,7 +423,6 @@ impl EffectiveAccessFixture {
             )
         };
         self.owner_database
-            .database()
             .run_scoped_host_write_for_test(statement)
             .await;
         let mut writer = self
@@ -440,16 +450,17 @@ impl EffectiveAccessFixture {
 
     async fn create(
         label: &str,
-        member_database: &SyntheticStoreFixture,
-        owner_store_dir: &coven_foundation::store_dir::StoreDir,
-        member_store_dir: &coven_foundation::store_dir::StoreDir,
+        member_database: &Database,
+        member_database_store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Self {
-        let owner_database = open_scoped_replay_database();
+        let owner_database_store_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_database = open_scoped_replay_database(owner_database_store_dir.clone());
         let owner = coven_keys::keys::UserKeypair::generate();
         let member = coven_keys::keys::UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &owner_database,
+            owner_database_store_dir.clone(),
             label,
             owner.clone(),
             home.clone(),
@@ -457,12 +468,13 @@ impl EffectiveAccessFixture {
         .await
         .expect("create effective-access Store");
         store
-            .open_into(&owner_database)
+            .open_into(&owner_database, owner_database_store_dir.clone())
             .await
             .expect("open effective-access owner Store");
         store
             .invite_member(
                 &owner_database,
+                owner_database_store_dir.clone(),
                 &owner,
                 &coven_keys::keys::public_key_hex(&member),
                 None,
@@ -475,7 +487,9 @@ impl EffectiveAccessFixture {
         let member_device = store
             .activate_joined_device(
                 &owner_database,
+                owner_database_store_dir.clone(),
                 member_database,
+                member_database_store_dir.clone(),
                 &member,
                 "2026-07-23T00:00:00Z",
             )
@@ -483,7 +497,7 @@ impl EffectiveAccessFixture {
             .expect("activate effective-access member device");
 
         let owner_store = store
-            .bind_device(&owner_database, &owner)
+            .bind_device_in(&owner_database, owner_database_store_dir.clone(), &owner)
             .await
             .expect("load effective-access owner Store");
         let circle_id = owner_store
@@ -500,12 +514,8 @@ impl EffectiveAccessFixture {
             owner.clone(),
         );
         let components = crate::sync::cycle::PreparedSyncComponents::prepare(
-            StoreDatabase::new(owner_database.database()),
-            owner_store_dir.clone(),
-            crate::sync::test_owner_graph::local_blob_access(
-                StoreDatabase::new(owner_database.database()),
-                owner_store_dir.clone(),
-            ),
+            StoreDatabase::new(&owner_database),
+            owner_database_store_dir.clone(),
             owner_storage,
             owner.clone(),
             crate::sync::cycle::StoreInitialization::OpenStore {
@@ -530,7 +540,7 @@ impl EffectiveAccessFixture {
             .expect("add effective-access Circle member");
 
         let initial_pull = member_device
-            .pull_store(member_store_dir)
+            .pull_store()
             .await
             .expect("pull effective-access Circle activation")
             .1;
@@ -538,6 +548,7 @@ impl EffectiveAccessFixture {
 
         Self {
             owner_database,
+            owner_database_store_dir,
             owner_device: owner_store,
             member_device,
             owner,
@@ -587,19 +598,17 @@ fn later_readd_does_not_grant_removed_interval_circle_access() {
 
 #[tokio::test]
 async fn newly_discovered_store_admission_activates_circle_access() {
-    let member_database = open_scoped_replay_database();
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let member_database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_database = open_scoped_replay_database(member_database_store_dir.clone());
     let fixture = EffectiveAccessFixture::create(
         "newly-admitted-member-effective-access",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
     assert_eq!(
-        StoreDatabase::new(member_database.database())
+        StoreDatabase::new(&member_database)
             .get_circles(
                 &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
@@ -620,14 +629,11 @@ async fn newly_discovered_store_admission_activates_circle_access() {
 async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_rows() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let member_database = open_scoped_replay_database_at(&member_path);
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
     let fixture = EffectiveAccessFixture::create(
         "removed-member-effective-access",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
@@ -639,13 +645,12 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         )
         .await;
     let first_pull = fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("pull pre-removal Circle row");
     assert!(first_pull.held_positions.is_empty(), "{first_pull:?}");
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -684,6 +689,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .store
         .remove_member(
             &fixture.owner_database,
+            fixture.owner_database_store_dir.clone(),
             &fixture.owner,
             &coven_keys::keys::public_key_hex(&fixture.member),
             &coven_keys::encryption::EncryptionService::from_key([42; 32]),
@@ -708,18 +714,15 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .any(|(member, _)| member == &coven_keys::keys::public_key_hex(&fixture.member)));
 
     fixture.home.clear_exact_reads();
-    member_database
-        .database()
-        .fail_next_merge_materialization_at(
-            coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
-        );
+    member_database.fail_next_merge_materialization_at(
+        coven_database::MergeMaterializationFailurePoint::SummaryMaterialization,
+    );
     fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect_err("injected transaction failure interrupts removed-member materialization");
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -727,7 +730,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
             .map(|row| row.1.as_str()),
         Some("visible before removal")
     );
-    assert!(StoreDatabase::new(member_database.database())
+    assert!(StoreDatabase::new(&member_database)
         .exact_materialized_ref(&commit_stream_id(&late.coord), late.coord.sequence(),)
         .await
         .expect("check rolled-back late position")
@@ -739,7 +742,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     fixture.home.remove_exact_object(&late_package_slot);
     fixture.home.clear_exact_reads();
     let pull = fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("pull Store state after membership removal");
     assert!(pull.held_positions.is_empty(), "{pull:?}");
@@ -749,12 +752,11 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .contains(&hidden_before_removal_package_slot));
     assert!(!fixture.home.exact_reads().contains(&late_package_slot));
     let state = member_database
-        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(state.row, None);
     assert_eq!(state.route, None);
-    assert!(StoreDatabase::new(member_database.database())
+    assert!(StoreDatabase::new(&member_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             std::collections::BTreeSet::from([coven_keys::keys::public_key_hex(&fixture.owner)]),
@@ -762,7 +764,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .expect("list Circles after Store membership removal")
         .is_empty());
-    assert!(StoreDatabase::new(member_database.database())
+    assert!(StoreDatabase::new(&member_database)
         .circle_authoring_context(
             fixture.circle_id,
             &coven_keys::keys::public_key_hex(&fixture.member),
@@ -770,7 +772,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .await
         .is_err());
     let (public_circle_state, private_circle_state): (i64, i64) = member_database
-        .database()
         .circle_state_table_counts_for_test()
         .await
         .expect("count Circle state after Store membership removal");
@@ -785,7 +786,7 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     );
     for reference in [&first, &hidden_before_removal, &late, &removal] {
         assert_eq!(
-            StoreDatabase::new(member_database.database())
+            StoreDatabase::new(&member_database)
                 .exact_materialized_ref(
                     &commit_stream_id(&reference.coord),
                     reference.coord.sequence(),
@@ -803,9 +804,8 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
     std::thread::spawn(move || drop(member_database))
         .join()
         .expect("close effective-access member database");
-    let reopened = open_scoped_replay_database_at(&member_path);
+    let (reopened, _reopened_store_dir) = open_scoped_replay_database_at(&member_path);
     let reopened_state = reopened
-        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(reopened_state.row, None);
@@ -818,13 +818,13 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         ))
     );
     assert_eq!(
-        StoreDatabase::new(reopened.database())
+        StoreDatabase::new(&reopened)
             .exact_materialized_ref(&commit_stream_id(&removal.coord), removal.coord.sequence(),)
             .await
             .expect("load reopened removal position"),
         Some(removal)
     );
-    assert!(StoreDatabase::new(reopened.database())
+    assert!(StoreDatabase::new(&reopened)
         .get_circles(
             &member_pubkey,
             std::collections::BTreeSet::from([owner_pubkey]),
@@ -833,7 +833,6 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
         .expect("list reopened Circles after Store membership removal")
         .is_empty());
     let reopened_public_circle_state: i64 = reopened
-        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "circle_current_state",
         ))
@@ -844,14 +843,12 @@ async fn removed_store_member_skips_late_circle_package_and_atomically_prunes_ro
 
 #[tokio::test]
 async fn readded_store_member_restores_circle_access_from_a_stale_removed_membership() {
-    let member_database = open_scoped_replay_database();
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let member_database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_database = open_scoped_replay_database(member_database_store_dir.clone());
     let fixture = EffectiveAccessFixture::create(
         "readded-member-effective-access",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
@@ -863,7 +860,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         )
         .await;
     let initial_pull = fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("pull Circle row before Store removal");
     assert!(initial_pull.held_positions.is_empty(), "{initial_pull:?}");
@@ -887,6 +884,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .store
         .remove_member(
             &fixture.owner_database,
+            fixture.owner_database_store_dir.clone(),
             &fixture.owner,
             &coven_keys::keys::public_key_hex(&fixture.member),
             &coven_keys::encryption::EncryptionService::from_key([42; 32]),
@@ -900,7 +898,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     // re-add restores access to the Circle's current state alone.
     fixture.home.clear_exact_reads();
     let removal_pull = fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("pull Store membership removal");
     assert!(removal_pull.held_positions.is_empty(), "{removal_pull:?}");
@@ -913,7 +911,6 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
     );
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row,
@@ -924,6 +921,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .store
         .invite_member(
             &fixture.owner_database,
+            fixture.owner_database_store_dir.clone(),
             &fixture.owner,
             &coven_keys::keys::public_key_hex(&fixture.member),
             None,
@@ -945,7 +943,11 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         .expect("adopt the Store key wrapped by the re-add");
     let owner_store = fixture
         .store
-        .bind_device(&fixture.owner_database, &fixture.owner)
+        .bind_device(
+            &fixture.owner_database,
+            fixture.owner_database_store_dir.clone(),
+            &fixture.owner,
+        )
         .await
         .expect("load owner Store for Circle successor");
     owner_store
@@ -966,13 +968,12 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
 
     fixture.home.clear_exact_reads();
     let readd_pull = fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("pull Store re-add and Circle successor");
     assert!(readd_pull.held_positions.is_empty(), "{readd_pull:?}");
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -981,7 +982,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
         Some("visible after re-add")
     );
     assert_eq!(
-        StoreDatabase::new(member_database.database())
+        StoreDatabase::new(&member_database)
             .get_circles(
                 &coven_keys::keys::public_key_hex(&fixture.member),
                 std::collections::BTreeSet::from([
@@ -1027,11 +1028,13 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         RoutingConflict::DeleteMove,
         RoutingConflict::MoveLocal,
     ] {
-        let founder = open_scoped_replay_database();
+        let founder_store_dir = crate::sync::test_helpers::test_store_dir();
+        let founder = open_scoped_replay_database(founder_store_dir.clone());
         let identity = coven_keys::keys::UserKeypair::generate();
         let home = crate::sync::test_helpers::test_cloud_home();
         let store = crate::sync::test_helpers::TestStore::create(
             &founder,
+            founder_store_dir.clone(),
             conflict.store_id(),
             identity.clone(),
             home.clone(),
@@ -1040,11 +1043,11 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         .expect("create scoped replay Store");
         home.sort_listings();
         store
-            .open_into(&founder)
+            .open_into(&founder, founder_store_dir.clone())
             .await
             .expect("open founder scoped replay Store");
         let loaded = store
-            .bind_device(&founder, &identity)
+            .bind_device_in(&founder, founder_store_dir.clone(), &identity)
             .await
             .expect("load founder Store operations");
         let first_circle = loaded
@@ -1056,57 +1059,67 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             .await
             .expect("create second routing-conflict Circle");
         founder
-            .database()
             .run_scoped_host_write_for_test(format!(
                 "INSERT INTO notes VALUES (
                      '{ROW_ID}', NULL, 'base', '0000000002000-0000-base'
                  );"
             ))
             .await;
-        let (_founder_temp, founder_dir) = crate::sync::test_helpers::temp_store_dir();
         assert!(store
-            .publish_pending(&founder, &founder_dir)
+            .publish_pending(&founder, &founder_store_dir)
             .await
             .expect("publish scoped replay base"));
 
-        let first_writer = open_scoped_replay_database();
-        let second_writer = open_scoped_replay_database();
-        let progressive = open_scoped_replay_database();
-        let complete = open_scoped_replay_database();
-        for participant in [&first_writer, &second_writer, &progressive, &complete] {
+        let first_writer_store_dir = crate::sync::test_helpers::test_store_dir();
+        let first_writer = open_scoped_replay_database(first_writer_store_dir.clone());
+        let second_writer_store_dir = crate::sync::test_helpers::test_store_dir();
+        let second_writer = open_scoped_replay_database(second_writer_store_dir.clone());
+        let progressive_store_dir = crate::sync::test_helpers::test_store_dir();
+        let progressive = open_scoped_replay_database(progressive_store_dir.clone());
+        let complete_store_dir = crate::sync::test_helpers::test_store_dir();
+        let complete = open_scoped_replay_database(complete_store_dir.clone());
+        for (participant, participant_store_dir) in [
+            (&first_writer, first_writer_store_dir.clone()),
+            (&second_writer, second_writer_store_dir.clone()),
+            (&progressive, progressive_store_dir.clone()),
+            (&complete, complete_store_dir.clone()),
+        ] {
             store
-                .activate_joined_device(&founder, participant, &identity, "2026-07-22T00:00:00Z")
+                .activate_joined_device(
+                    &founder,
+                    founder_store_dir.clone(),
+                    participant,
+                    participant_store_dir.clone(),
+                    &identity,
+                    "2026-07-22T00:00:00Z",
+                )
                 .await
                 .expect("activate scoped replay device");
         }
-        let (_first_temp, first_dir) = crate::sync::test_helpers::temp_store_dir();
-        let (_second_temp, second_dir) = crate::sync::test_helpers::temp_store_dir();
-        let (_progressive_temp, progressive_dir) = crate::sync::test_helpers::temp_store_dir();
-        let (_complete_temp, complete_dir) = crate::sync::test_helpers::temp_store_dir();
         let first_writer_device = store
-            .bind_device(&first_writer, &identity)
+            .bind_device_in(&first_writer, first_writer_store_dir.clone(), &identity)
             .await
             .expect("bind first routing-conflict writer");
         let second_writer_device = store
-            .bind_device(&second_writer, &identity)
+            .bind_device_in(&second_writer, second_writer_store_dir.clone(), &identity)
             .await
             .expect("bind second routing-conflict writer");
         let progressive_device = store
-            .bind_device(&progressive, &identity)
+            .bind_device_in(&progressive, progressive_store_dir.clone(), &identity)
             .await
             .expect("bind progressive routing-conflict reader");
         let complete_device = store
-            .bind_device(&complete, &identity)
+            .bind_device_in(&complete, complete_store_dir.clone(), &identity)
             .await
             .expect("bind complete routing-conflict reader");
-        for (device, directory) in [
-            (&first_writer_device, &first_dir),
-            (&second_writer_device, &second_dir),
-            (&progressive_device, &progressive_dir),
-            (&complete_device, &complete_dir),
+        for device in [
+            &first_writer_device,
+            &second_writer_device,
+            &progressive_device,
+            &complete_device,
         ] {
             let pulled = device
-                .pull_store(directory)
+                .pull_store()
                 .await
                 .expect("pull scoped replay Store")
                 .1;
@@ -1120,7 +1133,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
                     .await
                     .expect("derive first routing-conflict writer stream"),
                 &first_writer,
-                &first_dir,
+                &first_writer_store_dir,
             ),
             (
                 second_writer_device
@@ -1128,7 +1141,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
                     .await
                     .expect("derive second routing-conflict writer stream"),
                 &second_writer,
-                &second_dir,
+                &second_writer_store_dir,
             ),
         ];
         writers.sort_by_key(|writer| writer.0);
@@ -1189,7 +1202,6 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         };
 
         canonical_later
-            .database()
             .run_scoped_host_write_for_test(canonical_later_sql)
             .await;
         assert!(store
@@ -1197,7 +1209,7 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             .await
             .expect("publish canonical-later routing conflict"));
         let first_pull = progressive_device
-            .pull_store(&progressive_dir)
+            .pull_store()
             .await
             .expect("pull canonical-later routing conflict")
             .1;
@@ -1207,7 +1219,6 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
         );
 
         canonical_earlier
-            .database()
             .run_scoped_host_write_for_test(canonical_earlier_sql)
             .await;
         assert!(store
@@ -1215,12 +1226,12 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             .await
             .expect("publish canonical-earlier routing conflict"));
         let progressive_pull = progressive_device
-            .pull_store(&progressive_dir)
+            .pull_store()
             .await
             .expect("pull complete progressive routing history")
             .1;
         let complete_pull = complete_device
-            .pull_store(&complete_dir)
+            .pull_store()
             .await
             .expect("pull complete routing history")
             .1;
@@ -1233,14 +1244,8 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
             "{conflict:?}: {complete_pull:?}"
         );
 
-        let progressive_state = progressive
-            .database()
-            .scoped_routing_state_for_test(ROW_ID)
-            .await;
-        let complete_state = complete
-            .database()
-            .scoped_routing_state_for_test(ROW_ID)
-            .await;
+        let progressive_state = progressive.scoped_routing_state_for_test(ROW_ID).await;
+        let complete_state = complete.scoped_routing_state_for_test(ROW_ID).await;
         assert_eq!(
             progressive_state, complete_state,
             "{conflict:?} must converge regardless of discovery grouping"
@@ -1276,9 +1281,11 @@ async fn routing_conflicts_converge_after_progressive_and_complete_discovery() {
 #[tokio::test]
 async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let founder = crate::sync::test_helpers::user_keypair_from_seed([42; 32]);
-    let founder_db = crate::sync::test_helpers::open_test_db();
+    let founder_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let founder_db = crate::sync::test_helpers::open_test_db(founder_db_store_dir.clone());
     let store = crate::sync::test_helpers::TestStore::create(
         &founder_db,
+        founder_db_store_dir.clone(),
         "causal-membership-proof",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
@@ -1290,6 +1297,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     store
         .invite_member(
             &founder_db,
+            founder_db_store_dir.clone(),
             &founder,
             &crate::sync::test_helpers::pubkey_hex(&candidate),
             None,
@@ -1300,11 +1308,14 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("invite exact Store member");
 
-    let candidate_db = crate::sync::test_helpers::open_test_db();
+    let candidate_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let candidate_db = crate::sync::test_helpers::open_test_db(candidate_db_store_dir.clone());
     store
         .activate_joined_device(
             &founder_db,
+            founder_db_store_dir.clone(),
             &candidate_db,
+            candidate_db_store_dir.clone(),
             &candidate,
             "2026-07-21T00:00:00Z",
         )
@@ -1313,7 +1324,9 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     store
         .promote_active_member_fixture(
             &founder_db,
+            founder_db_store_dir.clone(),
             &candidate_db,
+            candidate_db_store_dir.clone(),
             &founder,
             &candidate,
             &encryption,
@@ -1321,7 +1334,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("promote candidate Owner");
     let candidate_device = store
-        .bind_device(&candidate_db, &candidate)
+        .bind_device_in(&candidate_db, candidate_db_store_dir.clone(), &candidate)
         .await
         .expect("bind candidate Owner");
     let mut candidate_writer = candidate_device
@@ -1335,12 +1348,14 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     assert!(candidate_pull.held_positions.is_empty());
 
     let earlier_db = &candidate_db;
+    let earlier_db_store_dir = &candidate_db_store_dir;
     let earlier_owner = &candidate;
     let later_db = &founder_db;
+    let later_db_store_dir = &founder_db_store_dir;
     let later_owner = &founder;
 
     let earlier_device = store
-        .bind_device(earlier_db, earlier_owner)
+        .bind_device_in(earlier_db, earlier_db_store_dir.clone(), earlier_owner)
         .await
         .expect("bind earlier Owner device");
     let mut earlier_writer = earlier_device
@@ -1371,20 +1386,20 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         panic!("earlier Owner position is not a Merge membership control");
     };
 
-    let changeset = crate::sync::test_helpers::open_test_db()
-        .database()
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('causal-proof-row', 'causal proof', NULL, \
                    '0000000001000-0000-causal-proof', '2026-07-21')",
-        ])
-        .await;
-    coven_database::StoreDatabase::new(later_db.database())
+            ])
+            .await;
+    coven_database::StoreDatabase::new(later_db)
         .enqueue_store_changeset_for_test(changeset)
         .await
         .expect("enqueue later concurrent write");
     let later_membership = store
-        .bind_device(later_db, later_owner)
+        .bind_device_in(later_db, later_db_store_dir.clone(), later_owner)
         .await
         .expect("bind later Owner Store")
         .membership()
@@ -1402,7 +1417,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
         .await
         .expect("load concurrent membership head");
     let later_device = store
-        .bind_device(later_db, later_owner)
+        .bind_device_in(later_db, later_db_store_dir.clone(), later_owner)
         .await
         .expect("bind later Owner device");
     let mut later_writer = later_device
@@ -1452,33 +1467,35 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
 
 #[tokio::test]
 async fn merge_gap_reports_the_exact_signed_predecessor() {
-    let source = crate::sync::test_helpers::open_test_db();
+    let source_store_dir = crate::sync::test_helpers::test_store_dir();
+    let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = coven_keys::keys::UserKeypair::generate();
     let store = crate::sync::test_helpers::TestStore::create(
         &source,
+        source_store_dir.clone(),
         "exact-predecessor-test",
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create exact predecessor test Store");
-    let changeset = crate::sync::test_helpers::open_test_db()
-        .database()
-        .capture_test_changeset(&[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+    let changeset =
+        crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+            .capture_test_changeset(&[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
            VALUES ('gap-row', 'gap', NULL, '0000000001000-0000-gap', '2026-01-01')",
-        ])
-        .await;
+            ])
+            .await;
     let first = store
-        .publish_changeset("founder", 1, &changeset, source.database().schema_version())
+        .publish_changeset("founder", 1, &changeset, source.schema_version())
         .await
         .expect("publish first exact commit");
     let second = store
-        .publish_changeset("founder", 2, &changeset, source.database().schema_version())
+        .publish_changeset("founder", 2, &changeset, source.schema_version())
         .await
         .expect("publish second exact commit");
     let third = store
-        .publish_changeset("founder", 3, &changeset, source.database().schema_version())
+        .publish_changeset("founder", 3, &changeset, source.schema_version())
         .await
         .expect("publish third exact commit");
     let founder_authority = store
@@ -1486,7 +1503,7 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
         .await
         .expect("load founder authority");
     let source_device = store
-        .bind_device(&source, &signer)
+        .bind_device_in(&source, source_store_dir.clone(), &signer)
         .await
         .expect("bind source Store device");
     let commit = source_device
@@ -1498,14 +1515,15 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
     let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
     let coverage = CommitFrontier::from_refs(frontier.clone()).expect("build exact frontier");
     let device_cut = coverage.commits().clone();
-    let source_database = StoreDatabase::new(source.database());
+    let source_database = StoreDatabase::new(&source);
     let (_, device_state) = source_database
         .store_device_state_for_history_cut(&StoreHistoryCut(device_cut))
         .await
         .expect("load exact device state");
-    let target = crate::sync::test_helpers::open_test_db();
+    let target_store_dir = crate::sync::test_helpers::test_store_dir();
+    let target = crate::sync::test_helpers::open_test_db(target_store_dir.clone());
     let target_device = store
-        .open_into(&target)
+        .open_into(&target, target_store_dir.clone())
         .await
         .expect("open target Store device");
 
@@ -1534,14 +1552,11 @@ async fn merge_gap_reports_the_exact_signed_predecessor() {
 async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let member_database = open_scoped_replay_database_at(&member_path);
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
     let fixture = EffectiveAccessFixture::create(
         "delete-circle-prunes",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
@@ -1553,12 +1568,11 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
         )
         .await;
     fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("member pulls the pre-deletion Circle row");
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1572,17 +1586,14 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // must prune along with the row.
     fixture
         .owner_database
-        .database()
         .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     member_database
-        .database()
         .bind_circle_row_blob_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert_eq!(
         fixture
             .owner_database
-            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         1,
@@ -1590,7 +1601,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert_eq!(
         member_database
-            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         1,
@@ -1611,7 +1621,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // The owner converges to Deleted: rows pruned, control spine retained.
     assert!(fixture
         .owner_database
-        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await
         .row
@@ -1619,7 +1628,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert!(
         fixture
             .owner_database
-            .database()
             .circle_control_activation_count_for_test(fixture.circle_id)
             .await
             > 0,
@@ -1628,13 +1636,12 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     assert_eq!(
         fixture
             .owner_database
-            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         0,
         "the owner's Circle row blob binding is pruned on deletion"
     );
-    let owner_circles = StoreDatabase::new(fixture.owner_database.database())
+    let owner_circles = StoreDatabase::new(&fixture.owner_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.owner),
             fixture.effective_access_members(),
@@ -1650,11 +1657,10 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     // The member pulls the deletion (and the late pre-deletion package) and
     // converges identically: rows, routes, and the late package are gone.
     fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("member pulls the deletion");
     let pruned = member_database
-        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await;
     assert!(pruned.row.is_none(), "the member's Circle row is pruned");
@@ -1664,7 +1670,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert!(
         member_database
-            .database()
             .scoped_routing_state_for_test(READD_EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1673,7 +1678,6 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert!(
         member_database
-            .database()
             .circle_control_activation_count_for_test(fixture.circle_id)
             .await
             > 0,
@@ -1681,13 +1685,12 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
     );
     assert_eq!(
         member_database
-            .database()
             .row_blob_binding_count_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await,
         0,
         "the member's Circle row blob binding is pruned on deletion"
     );
-    let member_circles = StoreDatabase::new(member_database.database())
+    let member_circles = StoreDatabase::new(&member_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1702,7 +1705,7 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
 
     // A new host write destined to the deleted Circle is refused at capture.
     let circle_id = fixture.circle_id;
-    let error = StoreDatabase::new(fixture.owner_database.database())
+    let error = StoreDatabase::new(&fixture.owner_database)
         .run_host_store_write_for_test(
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
@@ -1727,21 +1730,22 @@ async fn deleting_a_circle_prunes_receivers_and_refuses_new_writes() {
 async fn a_non_owner_is_refused_circle_deletion() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let member_database = open_scoped_replay_database_at(&member_path);
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
     let fixture = EffectiveAccessFixture::create(
         "delete-non-owner",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
     // The member holds active access but is not the Circle Owner.
     let member_store = fixture
         .store
-        .bind_device(&member_database, &fixture.member)
+        .bind_device_in(
+            &member_database,
+            member_database_store_dir.clone(),
+            &fixture.member,
+        )
         .await
         .expect("load member Store");
     let refused = member_store
@@ -1754,7 +1758,7 @@ async fn a_non_owner_is_refused_circle_deletion() {
     );
 
     // The Circle is untouched — still active on the member.
-    let circles = StoreDatabase::new(member_database.database())
+    let circles = StoreDatabase::new(&member_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1772,14 +1776,11 @@ async fn a_non_owner_is_refused_circle_deletion() {
 async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_order() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let member_database = open_scoped_replay_database_at(&member_path);
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
     let fixture = EffectiveAccessFixture::create(
         "delete-two-order",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
@@ -1793,12 +1794,11 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
         )
         .await;
     fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("member applies the pre-deletion package");
     assert_eq!(
         member_database
-            .database()
             .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
             .await
             .row
@@ -1812,16 +1812,15 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
     // (or after) the deletion and is omitted: rows gone, Circle deleted.
     fixture.delete_circle().await;
     fixture
-        .pull_member(&member_store_dir)
+        .pull_member()
         .await
         .expect("member pulls the later deletion");
     assert!(member_database
-        .database()
         .scoped_routing_state_for_test(EFFECTIVE_ACCESS_ROW_ID)
         .await
         .row
         .is_none());
-    let circles = StoreDatabase::new(member_database.database())
+    let circles = StoreDatabase::new(&member_database)
         .get_circles(
             &coven_keys::keys::public_key_hex(&fixture.member),
             fixture.effective_access_members(),
@@ -1839,14 +1838,11 @@ async fn a_pre_deletion_package_applied_then_pruned_converges_with_the_omitted_o
 async fn a_deleted_circles_authority_spine_retains_historical_controls() {
     let member_temp = tempfile::tempdir().expect("create effective-access database directory");
     let member_path = member_temp.path().join("member.sqlite3");
-    let member_database = open_scoped_replay_database_at(&member_path);
-    let (_owner_temp, owner_store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let (_member_store_temp, member_store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let (member_database, member_database_store_dir) = open_scoped_replay_database_at(&member_path);
     let fixture = EffectiveAccessFixture::create(
         "delete-historical-spine",
         &member_database,
-        &owner_store_dir,
-        &member_store_dir,
+        member_database_store_dir.clone(),
     )
     .await;
 
@@ -1871,7 +1867,7 @@ async fn a_deleted_circles_authority_spine_retains_historical_controls() {
 
     // Live materialization is gone, but the authority spine still resolves the
     // historical control the package was signed under.
-    assert!(StoreDatabase::new(fixture.owner_database.database())
+    assert!(StoreDatabase::new(&fixture.owner_database)
         .circle_is_deleted(fixture.circle_id)
         .await
         .expect("read deleted state"));

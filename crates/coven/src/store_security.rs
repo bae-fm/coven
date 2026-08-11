@@ -9,66 +9,12 @@ use coven_keys::keys::{
 use coven_storage::cloud::ExactCloudHome;
 use coven_storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-pub(crate) struct EstablishedStoreIdentity {
-    keypair: UserKeypair,
-}
-
-impl EstablishedStoreIdentity {
-    pub(crate) fn public_key_hex(&self) -> String {
-        coven_keys::keys::public_key_hex(&self.keypair)
-    }
-
-    pub(crate) async fn initialize_sync_components(
-        &self,
-        database: coven_database::StoreDatabase,
-        store_dir: coven_foundation::store_dir::StoreDir,
-        local_blob_access: coven_replication::sync::store::blob::LocalStoreBlobAccess,
-        storage: Arc<CloudSyncConnection>,
-        initialization: coven_replication::sync::cycle::StoreInitialization,
-        routing_encryption: Option<EncryptionService>,
-    ) -> Result<
-        coven_replication::sync::cycle::SyncComponents,
-        coven_replication::sync::cycle::InitSyncError,
-    > {
-        coven_replication::sync::cycle::PreparedSyncComponents::prepare(
-            database,
-            store_dir,
-            local_blob_access,
-            storage,
-            self.keypair.clone(),
-            initialization,
-            routing_encryption,
-        )
-        .await?
-        .initialize()
-        .await
-    }
-
-    pub(crate) async fn load_store(
-        &self,
-        database: coven_database::StoreDatabase,
-        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
-        store_dir: coven_foundation::store_dir::StoreDir,
-    ) -> Result<coven_replication::sync::Store, coven_replication::sync::store::StoreError> {
-        coven_replication::sync::Store::load(database, storage, store_dir, self.keypair.clone())
-            .await
-    }
-
-    pub(crate) async fn export_activated_device_continuation(
-        &self,
-        database: &coven_database::StoreDatabase,
-    ) -> Result<coven_protocol::recovery::ActivatedContinuation, coven_database::DbError> {
-        database
-            .export_activated_device_continuation(&self.keypair)
-            .await
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct StoreSecurity {
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
     identity: Arc<dyn DeviceIdentityCustody>,
+    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl StoreSecurity {
@@ -76,12 +22,63 @@ impl StoreSecurity {
         keys: StoreKeys,
         master_keys: Arc<dyn MasterKeyCustody>,
         identity: Arc<dyn DeviceIdentityCustody>,
+        store_dir: coven_foundation::store_dir::StoreDir,
     ) -> Self {
         Self {
             keys,
             master_keys,
             identity,
+            store_dir,
         }
+    }
+
+    pub(crate) async fn initialize_sync_components(
+        &self,
+        database: coven_database::StoreDatabase,
+        storage: Arc<CloudSyncConnection>,
+        initialization: coven_replication::sync::cycle::StoreInitialization,
+        routing_encryption: Option<EncryptionService>,
+    ) -> Result<coven_replication::sync::cycle::SyncComponents, crate::store_sync::SyncError> {
+        coven_replication::sync::cycle::PreparedSyncComponents::prepare(
+            database,
+            self.store_dir.clone(),
+            storage,
+            self.required_identity()?,
+            initialization,
+            routing_encryption,
+        )
+        .await
+        .map_err(crate::store_sync::SyncError::from)?
+        .initialize()
+        .await
+        .map_err(crate::store_sync::SyncError::from)
+    }
+
+    pub(crate) async fn load_store(
+        &self,
+        database: coven_database::StoreDatabase,
+        storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
+    ) -> Result<coven_replication::sync::Store, crate::store_sync::SyncError> {
+        coven_replication::sync::Store::load(
+            database,
+            storage,
+            self.store_dir.clone(),
+            self.required_identity()?,
+        )
+        .await
+        .map_err(crate::store_sync::SyncError::from)
+    }
+
+    pub(crate) async fn export_activated_device_continuation(
+        &self,
+        database: &coven_database::StoreDatabase,
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, coven_database::DbError> {
+        let identity = self
+            .required_identity()
+            .map_err(|error| coven_database::DbError::Message(error.to_string()))?;
+        database
+            .export_activated_device_continuation(&identity)
+            .await
     }
 
     pub(crate) fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
@@ -115,10 +112,12 @@ impl StoreSecurity {
         Ok(coven_keys::keys::public_key_hex(&identity))
     }
 
-    pub(crate) fn established_identity(&self) -> Result<EstablishedStoreIdentity, KeyError> {
-        Ok(EstablishedStoreIdentity {
-            keypair: coven_keys::keys::require_identity(self.identity.as_ref())?,
-        })
+    fn required_identity(&self) -> Result<UserKeypair, KeyError> {
+        coven_keys::keys::require_identity(self.identity.as_ref())
+    }
+
+    pub(crate) fn required_identity_public_key_hex(&self) -> Result<String, KeyError> {
+        Ok(coven_keys::keys::public_key_hex(&self.required_identity()?))
     }
 
     pub(crate) fn identity_public_key(&self) -> Result<Option<[u8; 32]>, KeyError> {
@@ -164,13 +163,13 @@ impl StoreSecurity {
             Some(cipher) => cipher,
             None => self.cloud_cipher(config.cloud_home.storage)?,
         };
-        let identity = self.established_identity()?;
+        let identity = self.required_identity()?;
         Ok(CloudSyncConnection::new(
             home,
             cipher,
             BlobPathScheme::for_storage(config.cloud_home.storage),
             config.store_id.clone(),
-            identity.keypair,
+            identity,
         )
         .with_blob_chunking(blob_chunking))
     }
@@ -190,11 +189,14 @@ impl StoreSecurity {
     }
 
     #[cfg(test)]
-    pub(crate) fn cloud_cipher_for_test(
+    pub(crate) fn cloud_cipher_fingerprint_for_test(
         &self,
         storage: HomeStorage,
-    ) -> Result<CloudCipher, coven_storage::cloud::setup::StorageSetupError> {
-        self.cloud_cipher(storage)
+    ) -> Result<Option<String>, coven_storage::cloud::setup::StorageSetupError> {
+        Ok(match self.cloud_cipher(storage)? {
+            CloudCipher::Encrypted(encryption) => Some(encryption.fingerprint()),
+            CloudCipher::Plaintext => None,
+        })
     }
 
     pub(crate) fn generate_restore_code(

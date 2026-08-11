@@ -22,16 +22,20 @@ const CAPABILITY_TYPES: &[&str] = &[
     "ClockRef",
     "CloudHome",
     "CloudSyncConnection",
+    "CloudSyncCipherStateAccess",
     "Database",
     "DeviceIdentityCustody",
     "EncryptionService",
     "Hlc",
     "MasterKeyCustody",
     "OAuthClients",
+    "OwnStreamAuthorship",
     "Runtime",
+    "SnapshotDatabaseImage",
     "StoreDatabase",
     "StoreDir",
     "StoreKeys",
+    "UserKeypair",
     "CloudSyncObjectStorage",
 ];
 
@@ -46,15 +50,21 @@ const CONSTRUCTION_ONLY_CAPABILITY_TYPES: &[&str] = &["StoreDir"];
 const NON_OWNER_TYPES: &[&str] = &[
     "AdmittedStoreCloudConfig",
     "AdmittedStoreCloudHome",
+    "AuthorizedMembershipRevocation",
     "BlobSpoolProtection",
     "CircleAckPublicationInput",
     "CloudCipher",
-    "Config",
     "ConnectionThread",
+    "CreatedSnapshot",
     "InitializedStore",
+    "IdentityCustody",
+    "KeyCustody",
+    "LocalCommitBase",
+    "ProtocolObjectContext",
     "RemoteBlobSourceInner",
     "ResolvedBlobAccess",
     "ResolvedBlobConnection",
+    "SnapshotCut",
     "StoreRecords",
 ];
 
@@ -142,7 +152,23 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
+    (
+        "crates/coven/src/handle.rs",
+        "CovenHandle",
+        "create_test_store",
+    ),
     ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
+    ("crates/coven/src/coven.rs", "CovenBuilder", "open"),
+    (
+        "crates/coven/src/store_security.rs",
+        "StoreSecurity",
+        "initialize_sync_components",
+    ),
+    (
+        "crates/coven/src/store_security.rs",
+        "StoreSecurity",
+        "load_store",
+    ),
     (
         "crates/coven-replication/src/sync/store/device_join/joiner.rs",
         "PendingDeviceJoinObservation",
@@ -162,19 +188,29 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "install",
     ),
     (
+        "crates/coven-replication/src/sync/cycle.rs",
+        "PreparedSyncComponents",
+        "prepare",
+    ),
+    (
+        "crates/coven-replication/src/sync/cycle.rs",
+        "SyncComponents",
+        "from_retained_test_device",
+    ),
+    (
         "crates/coven-replication/src/sync/test_owner_graph.rs",
         "TestOwnerGraph",
         "new",
     ),
     (
         "crates/coven-database/src/test_support/synthetic_store.rs",
-        "SyntheticStoreFixture",
-        "open",
+        "Database",
+        "open_synthetic_for_test",
     ),
     (
         "crates/coven-database/src/test_support/synthetic_store.rs",
-        "SyntheticStoreFixture",
-        "open_with_hlc",
+        "Database",
+        "open_synthetic_with_hlc_for_test",
     ),
     (
         "crates/coven-domain/src/joining/transport_tests.rs",
@@ -328,17 +364,17 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
-        "TestStoreFixture",
+        "TestStore",
         "create",
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
-        "TestStoreFixture",
+        "TestStore",
         "create_encrypted",
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
-        "TestStoreFixture",
+        "TestStore",
         "create_browsable",
     ),
     (
@@ -349,7 +385,62 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
-        "create_fixture_with_protection_database",
+        "create_with_protection_database",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "bind_founder_device",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "open_store_with_identity",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "open_store_with_storage",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "open_founder_store_with_storage",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "bind_device_in",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "bind_device",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "activate_joined_device",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "bind_store_device",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "invite_and_activate_peer",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "open_into",
+    ),
+    (
+        "crates/coven-replication/src/sync/test_helpers.rs",
+        "TestStore",
+        "open_into_store_database",
     ),
 ];
 

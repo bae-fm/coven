@@ -95,7 +95,7 @@ features:
 The phone inserts a row. It commits on-device; nothing waits on a network.
 
 ```rust
-handle.sql(|sql| {
+handle.write(|sql| {
     sql.execute("INSERT …", params)?;
     Ok(())
 }).await?;
@@ -217,7 +217,7 @@ A photo commits in the row's transaction. The laptop takes the row now and
 streams the photo on first view.
 
 ```rust
-handle.write(
+handle.write_with_blobs(
     |b| { b.put_blob(ns, id, bytes); Ok(()) },
     |sql| { /* INSERT the row */ Ok(()) },
 ).await?;

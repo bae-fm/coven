@@ -18,11 +18,12 @@ async fn capture_scoped_write_then_reopen(
     name: &str,
 ) -> (
     tempfile::TempDir,
-    SyntheticStoreFixture,
+    Database,
     Vec<(String, Option<String>, Vec<u8>)>,
 ) {
     let temp = tempfile::tempdir().expect("temporary scoped Store");
     let path = temp.path().join(format!("{name}.db"));
+    let db_store_dir = coven_foundation::store_dir::StoreDir::new(temp.path());
     let tables = vec![SyncedTable::new(
         "accounts",
         coven_protocol::synced_schema::RowIdentity::SharedKey,
@@ -37,8 +38,9 @@ async fn capture_scoped_write_then_reopen(
             _updated_at TEXT NOT NULL
          ) STRICT;",
     )];
-    let db = SyntheticStoreFixture::open(
+    let db = Database::open_synthetic_for_test(
         &path,
+        db_store_dir.clone(),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -49,6 +51,7 @@ async fn capture_scoped_write_then_reopen(
     .expect("open scoped Store");
     TestStore::create(
         &db,
+        db_store_dir.clone(),
         name,
         coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
@@ -56,7 +59,7 @@ async fn capture_scoped_write_then_reopen(
     .await
     .expect("install exact scoped Store authority");
     let circle_label = format!("{name}-circle");
-    let circle_id = StoreDatabase::new(db.database())
+    let circle_id = StoreDatabase::new(&db)
         .install_test_active_circle(circle_label)
         .await
         .expect("install active Circle current state");
@@ -64,7 +67,7 @@ async fn capture_scoped_write_then_reopen(
 
     let routing = EncryptionService::from_key([7; 32]);
     let capture_circle_id = circle_id.clone();
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "INSERT INTO accounts (id, audience, _updated_at)
@@ -86,7 +89,6 @@ async fn capture_scoped_write_then_reopen(
         .await
         .expect("capture Store and Circle partitions");
     let expected = db
-        .database()
         .store_write_partitions_in_audience_order_for_test()
         .await
         .expect("read exact persisted audience partitions");
@@ -96,8 +98,9 @@ async fn capture_scoped_write_then_reopen(
     }));
     drop(db);
 
-    let reopened = SyntheticStoreFixture::open(
+    let reopened = Database::open_synthetic_for_test(
         &path,
+        db_store_dir,
         tables,
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -139,7 +142,7 @@ fn assert_prepared_partitions(
 #[tokio::test]
 async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
     let (_temp, reopened, expected) = capture_scoped_write_then_reopen("merge-restart").await;
-    let prepared = StoreDatabase::new(reopened.database())
+    let prepared = StoreDatabase::new(&reopened)
         .prepare_store_write()
         .await
         .expect("prepare restarted Merge write")
@@ -151,7 +154,7 @@ async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
 #[tokio::test]
 async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
     let (_temp, reopened, _) = capture_scoped_write_then_reopen("missing-partition-payload").await;
-    let database = StoreDatabase::new(reopened.database());
+    let database = StoreDatabase::new(&reopened);
     let write_id = database
         .pending_writes()
         .await
@@ -161,7 +164,6 @@ async fn merge_preparation_fails_when_a_partition_payload_is_missing() {
         .expect("captured write exists")
         .write_id;
     let hash = reopened
-        .database()
         .first_store_write_partition_hash_for_test(write_id)
         .await
         .expect("read partition payload hash");
@@ -185,15 +187,11 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
     let (_temp, reopened, _expected) =
         capture_scoped_write_then_reopen("controlled-local-restart").await;
     reopened
-        .database()
         .plant_control_on_local_partition_for_test()
         .await
         .expect("plant controlled Local partition");
 
-    let error = match StoreDatabase::new(reopened.database())
-        .prepare_store_write()
-        .await
-    {
+    let error = match StoreDatabase::new(&reopened).prepare_store_write().await {
         Err(error) => error,
         Ok(_) => panic!("controlled Local partition must fail preparation"),
     };
@@ -205,7 +203,7 @@ async fn preparation_rejects_a_local_partition_with_circle_control() {
 #[tokio::test]
 async fn merge_local_only_scoped_write_is_not_pending() {
     let (_temp, db, _) = capture_scoped_write_then_reopen("merge-local-only").await;
-    let store_database = StoreDatabase::new(db.database());
+    let store_database = StoreDatabase::new(&db);
     let routing = EncryptionService::from_key([7; 32]);
     let receipt = store_database
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
@@ -234,7 +232,6 @@ async fn merge_local_only_scoped_write_is_not_pending() {
         .iter()
         .all(|write| write.write_id != receipt.write_id));
     let ((affected_rows, captured_changeset), partition) = db
-        .database()
         .store_write_row_and_only_partition_for_test(receipt.write_id.clone())
         .await
         .expect("verify durable local-only journal");
@@ -252,12 +249,12 @@ async fn merge_local_only_scoped_write_is_not_pending() {
 #[tokio::test]
 async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
     let (_temp, db, _) = capture_scoped_write_then_reopen("discard-scoped-routing").await;
-    let circle_id = StoreDatabase::new(db.database())
+    let circle_id = StoreDatabase::new(&db)
         .install_test_active_circle("discard-scoped-circle".to_string())
         .await
         .expect("install discard test Circle");
     let write_circle_id = circle_id;
-    let database = StoreDatabase::new(db.database());
+    let database = StoreDatabase::new(&db);
     let receipt = database
         .run_host_store_write_for_test(
             Some(EncryptionService::from_key([7; 32])),
@@ -291,7 +288,6 @@ async fn discarding_a_scoped_write_reverses_its_private_routing_rows() {
         coven_database::BlockedWriteDiscard::Discarded(vec![receipt.write_id])
     );
     let state = db
-        .database()
         .row_and_private_routing_presence_for_test("accounts", "discarded-circle-account")
         .await
         .expect("read discarded scoped state");
@@ -311,8 +307,10 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
         coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
-    let db = SyntheticStoreFixture::open(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = Database::open_synthetic_for_test(
         Path::new(":memory:"),
+        db_store_dir.clone(),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -331,13 +329,14 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
     .expect("open Circle-only Store");
     TestStore::create(
         &db,
+        db_store_dir.clone(),
         "circle-only",
         coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");
-    let circles = StoreDatabase::new(db.database())
+    let circles = StoreDatabase::new(&db)
         .install_test_active_circles(vec![
             "circle-only-first".to_string(),
             "circle-only-second".to_string(),
@@ -349,7 +348,7 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
     let routing = EncryptionService::from_key([7; 32]);
     let (first_audience, second_audience) = (first.to_string(), second.to_string());
     let (write_first, write_second) = (first_audience.clone(), second_audience.clone());
-    let receipt = StoreDatabase::new(db.database())
+    let receipt = StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "INSERT INTO accounts VALUES ('first-account', ?1, '0000000001000-0000-circle')",
@@ -366,7 +365,6 @@ async fn circle_only_write_emits_a_mirror_only_store_package() {
     let stored_write_id = receipt.write_id;
 
     let partitions = db
-        .database()
         .store_write_partition_changesets_for_test(stored_write_id)
         .await
         .expect("read Circle-only partitions");
@@ -421,8 +419,10 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         coven_protocol::synced_schema::RowIdentity::SharedKey,
     )
     .scoped_by("audience")];
-    let db = SyntheticStoreFixture::open(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = Database::open_synthetic_for_test(
         Path::new(":memory:"),
+        db_store_dir.clone(),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -441,13 +441,14 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     .expect("open scoped move Store");
     TestStore::create(
         &db,
+        db_store_dir.clone(),
         "cross-circle-move",
         coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");
-    let circles = StoreDatabase::new(db.database())
+    let circles = StoreDatabase::new(&db)
         .install_test_active_circles(vec![
             "move-source".to_string(),
             "move-destination".to_string(),
@@ -456,7 +457,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         .expect("install source and destination Circles");
     let [source, destination]: [_; 2] = circles.try_into().expect("installed exactly two Circles");
     let routing = EncryptionService::from_key([7; 32]);
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "INSERT INTO accounts VALUES ('account', ?1, '0000000001000-0000-move')",
@@ -468,7 +469,7 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
         .expect("insert source Circle row");
 
     let routing = EncryptionService::from_key([7; 32]);
-    let receipt = StoreDatabase::new(db.database())
+    let receipt = StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "UPDATE accounts
@@ -483,7 +484,6 @@ async fn cross_circle_move_emits_only_the_destination_image_and_store_mirror() {
     let stored_move_id = receipt.write_id;
 
     let partitions = db
-        .database()
         .store_write_partition_changesets_for_test(stored_move_id)
         .await
         .expect("read move partitions");
@@ -542,8 +542,10 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         )
         .inherits_audience_through("note_id"),
     ];
-    let db = SyntheticStoreFixture::open(
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = Database::open_synthetic_for_test(
         Path::new(":memory:"),
+        db_store_dir.clone(),
         tables.clone(),
         BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -573,13 +575,14 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     .expect("open scoped relationship Store");
     TestStore::create(
         &db,
+        db_store_dir.clone(),
         "foreign-key-move",
         coven_keys::keys::UserKeypair::generate(),
         test_cloud_home(),
     )
     .await
     .expect("install scoped Store authority");
-    let circles = StoreDatabase::new(db.database())
+    let circles = StoreDatabase::new(&db)
         .install_test_active_circles(vec![
             "relationship-source".to_string(),
             "relationship-destination".to_string(),
@@ -588,7 +591,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         .expect("install relationship Circles");
     let [source, destination]: [_; 2] = circles.try_into().expect("installed exactly two Circles");
     let routing = EncryptionService::from_key([7; 32]);
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "INSERT INTO notes VALUES ('note', ?1, '0000000001000-0000-move')",
@@ -609,7 +612,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
         .expect("insert valid scoped relationship");
 
     let routing = EncryptionService::from_key([7; 32]);
-    let error = StoreDatabase::new(db.database())
+    let error = StoreDatabase::new(&db)
         .run_host_store_write_for_test(Some(routing), None, move |tx| {
             tx.execute(
                 "UPDATE notes
@@ -624,7 +627,7 @@ async fn root_move_rejects_an_unchanged_descendants_cross_circle_foreign_key() {
     assert!(error
         .to_string()
         .contains("relationship through category_id"));
-    let audience = StoreDatabase::new(db.database())
+    let audience = StoreDatabase::new(&db)
         .read(|sql| {
             sql.query_row("SELECT audience FROM notes WHERE id = 'note'", [], |row| {
                 row.get::<_, String>(0)

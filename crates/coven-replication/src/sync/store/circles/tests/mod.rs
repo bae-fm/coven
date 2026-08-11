@@ -3,11 +3,10 @@ use std::sync::Arc;
 use super::commands::{CircleCancelEpochCloseRequest, CircleOperationRequest};
 use super::*;
 use crate::sync::test_helpers::{
-    open_test_db, temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore,
-    TestStoreFixture,
+    temp_store_dir, test_migrations, test_synced_tables, TestCustody, TestStore, TestStoreParts,
 };
 use coven_database::StoreDatabase;
-use coven_database::{DbError, SyntheticStoreFixture};
+use coven_database::{Database, DbError};
 use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::circle::{
@@ -30,33 +29,38 @@ use coven_storage::cloud::CloudHome;
 use coven_storage::CloudSyncObjectStorage;
 
 async fn create_test_store_in_its_own_task(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     name: &str,
     signer: &UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
 ) -> std::sync::Arc<TestStore> {
-    create_test_store_fixture_in_its_own_task(db, name, signer, home)
-        .await
-        .store()
+    let (store, _connection) =
+        create_test_store_fixture_in_its_own_task(db, db_store_dir, name, signer, home).await;
+    store
 }
 
 async fn create_test_store_fixture_in_its_own_task(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     name: &str,
     signer: &UserKeypair,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
-) -> TestStoreFixture {
+) -> TestStoreParts {
     let db = db.clone();
     let name = name.to_string();
     let signer = signer.clone();
-    tokio::spawn(async move { TestStoreFixture::create(&db, &name, signer, home).await })
-        .await
-        .expect("join Circle test Store creation")
-        .expect("create exact Circle test Store")
+    tokio::spawn(async move {
+        TestStore::create_with_connection(&db, db_store_dir.clone(), &name, signer, home).await
+    })
+    .await
+    .expect("join Circle test Store creation")
+    .expect("create exact Circle test Store")
 }
 
 async fn persist_merge_operation(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     name: &str,
 ) -> (
     std::sync::Arc<TestStore>,
@@ -64,40 +68,50 @@ async fn persist_merge_operation(
     UserKeypair,
     CircleOperationJournal,
 ) {
-    let (fixture, home, signer, journal) = persist_merge_operation_fixture(db, name).await;
-    (fixture.store(), home, signer, journal)
+    let (fixture, home, signer, journal) =
+        persist_merge_operation_fixture(db, db_store_dir, name).await;
+    let (store, _connection) = fixture;
+    (store, home, signer, journal)
 }
 
 async fn persist_merge_operation_fixture(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     name: &str,
 ) -> (
-    TestStoreFixture,
+    TestStoreParts,
     std::sync::Arc<coven_storage::InMemoryCloudHome>,
     UserKeypair,
     CircleOperationJournal,
 ) {
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let fixture = create_test_store_fixture_in_its_own_task(db, name, &signer, home.clone()).await;
-    let prepared = fixture
-        .store()
-        .bind_device(db, &signer)
+    let fixture = create_test_store_fixture_in_its_own_task(
+        db,
+        db_store_dir.clone(),
+        name,
+        &signer,
+        home.clone(),
+    )
+    .await;
+    let (store, connection) = fixture;
+    let prepared = store
+        .bind_device_in(db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-creator", "Household")
         .await
         .expect("prepare circle operation");
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(db)
         .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
         .await
         .expect("persist circle operation");
-    (fixture, home, signer, prepared.journal)
+    ((store, connection), home, signer, prepared.journal)
 }
 
 /// The bytes an operation's durable row owns for one exact object.
-async fn stored_bytes(db: &SyntheticStoreFixture, object: &ExactObjectRef) -> Vec<u8> {
-    StoreDatabase::new(db.database())
+async fn stored_bytes(db: &Database, object: &ExactObjectRef) -> Vec<u8> {
+    StoreDatabase::new(db)
         .payload_for_test(object.stored_hash())
         .await
         .expect("read a prepared Circle object's payload")
@@ -106,7 +120,7 @@ async fn stored_bytes(db: &SyntheticStoreFixture, object: &ExactObjectRef) -> Ve
 /// Publish every object an operation names from the bytes its durable row owns.
 async fn publish_prepared_objects(
     store: &TestStore,
-    db: &SyntheticStoreFixture,
+    db: &Database,
     journal: &CircleOperationJournal,
 ) {
     for object in journal.operation().prepared_objects.values() {
@@ -118,11 +132,8 @@ async fn publish_prepared_objects(
 }
 
 /// Which of an operation's objects still have storage owned by the database.
-async fn stored_objects(
-    db: &SyntheticStoreFixture,
-    journal: &CircleOperationJournal,
-) -> Vec<String> {
-    let database = StoreDatabase::new(db.database());
+async fn stored_objects(db: &Database, journal: &CircleOperationJournal) -> Vec<String> {
+    let database = StoreDatabase::new(db);
     let mut present = Vec::new();
     for (step, object) in &journal.operation().prepared_objects {
         if database
@@ -138,8 +149,8 @@ async fn stored_objects(
 
 /// Install a substituted object's bytes before a test gives its reference to a
 /// durable operation.
-async fn install_substituted_object(db: &SyntheticStoreFixture, prepared: &PreparedExactObject) {
-    StoreDatabase::new(db.database())
+async fn install_substituted_object(db: &Database, prepared: &PreparedExactObject) {
+    StoreDatabase::new(db)
         .install_payload_for_test(prepared.stored_bytes().to_vec())
         .await
         .expect("install a substituted Circle object");
@@ -223,7 +234,7 @@ fn circle_test_cloud_storage(
 
 /// The initialized production sync components a Circle test's owner drives.
 async fn prepare_owner_sync_components(
-    db: &SyntheticStoreFixture,
+    db: &Database,
     store: &TestStore,
     home: &Arc<coven_storage::InMemoryCloudHome>,
     store_dir: &coven_foundation::store_dir::StoreDir,
@@ -231,12 +242,8 @@ async fn prepare_owner_sync_components(
     store_id: &str,
 ) -> crate::sync::cycle::SyncComponents {
     crate::sync::cycle::PreparedSyncComponents::prepare(
-        coven_database::StoreDatabase::new(db.database()),
+        coven_database::StoreDatabase::new(db),
         store_dir.clone(),
-        crate::sync::test_owner_graph::local_blob_access(
-            coven_database::StoreDatabase::new(db.database()),
-            store_dir.clone(),
-        ),
         circle_test_cloud_storage(home, store_id, signer),
         signer.clone(),
         crate::sync::cycle::StoreInitialization::OpenStore {
@@ -256,12 +263,13 @@ async fn prepare_owner_sync_components(
 /// after the operation that opened the close.
 async fn finalize_circle_epoch_close(
     store: &TestStore,
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     signer: &UserKeypair,
     components: &crate::sync::cycle::SyncComponents,
 ) {
     store
-        .bind_device(db, signer)
+        .bind_device(db, db_store_dir, signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_epoch_close_response()

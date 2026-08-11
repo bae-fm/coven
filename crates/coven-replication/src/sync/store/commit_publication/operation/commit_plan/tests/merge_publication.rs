@@ -634,9 +634,11 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
     ] {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("store.sqlite3");
+        let db_store_dir = crate::sync::test_helpers::store_dir_for_test_database(&path);
         let open = || {
-            SyntheticStoreFixture::open(
+            Database::open_synthetic_for_test(
                 &path,
+                db_store_dir.clone(),
                 crate::sync::test_helpers::test_synced_tables(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
                 coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -658,25 +660,24 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
         let db = open();
         let device = crate::sync::test_helpers::TestDevice::create(
             &db,
+            db_store_dir.clone(),
             storage.clone(),
             "prepared-root-status",
             keypair.clone(),
         )
         .await
         .expect("create prepared-root-status Store");
-        db.database()
-            .execute_test_host_write(
-                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+        db.execute_test_host_write(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('root-status', 'outbound', NULL, 1, \
                      '0000000001000-0000-writer', '2026-01-01')",
-            )
-            .await;
-        let (_store_temp, store_dir) = temp_store_dir();
+        )
+        .await;
         assert!(device
-            .prepare_pending_store_write(&store_dir)
+            .prepare_pending_store_write()
             .await
             .expect("prepare write"));
-        let write_id = coven_database::StoreDatabase::new(db.database())
+        let write_id = coven_database::StoreDatabase::new(&db)
             .oldest_prepared_store_write()
             .await
             .expect("load prepared write")
@@ -685,17 +686,17 @@ async fn restart_fails_loud_when_a_prepared_write_has_no_usable_exact_root() {
             .value
             .write_id
             .clone();
-        db.database()
-            .replace_store_root_hash_for_test(invalid_root.map(str::to_string))
+        db.replace_store_root_hash_for_test(invalid_root.map(str::to_string))
             .await
             .expect("make root unusable");
         drop(device);
         drop(db);
 
         let reopened = open();
-        let reopened_database = coven_database::StoreDatabase::new(reopened.database());
+        let reopened_database = coven_database::StoreDatabase::new(&reopened);
         let result = match crate::sync::test_helpers::TestDevice::load(
             &reopened,
+            db_store_dir.clone(),
             storage.clone(),
             keypair.clone(),
         )
@@ -739,23 +740,24 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         "blocked-retry",
         keypair.clone(),
     ));
-    let db = open_test_db();
-    let database = coven_database::StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let database = coven_database::StoreDatabase::new(&db);
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
+        db_store_dir.clone(),
         storage.clone(),
         "blocked-retry",
         keypair.clone(),
     )
     .await
     .expect("create blocked-retry Store");
-    db.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('blocked-first', 'first', NULL, 1, \
                  '0000000001000-0000-writer', '2026-01-01')",
-        )
-        .await;
+    )
+    .await;
     let writes = database
         .pending_writes()
         .await
@@ -765,7 +767,7 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         .authorize_writer()
         .await
         .expect("authorize writer before invalidating its durable root");
-    db.database().remove_store_protocol_root_for_test().await;
+    db.remove_store_protocol_root_for_test().await;
     assert!(writer
         .prepare_pending_store_write()
         .await
@@ -775,9 +777,14 @@ async fn authorized_writer_retains_its_exact_root_without_reloading_durable_auth
         coven_protocol::write::WriteStatus::Publishing
     );
     drop(writer);
-    crate::sync::test_helpers::TestDevice::load(&db, storage.clone(), keypair.clone())
-        .await
-        .expect("same connection retains its verified Store authority");
+    crate::sync::test_helpers::TestDevice::load(
+        &db,
+        db_store_dir.clone(),
+        storage.clone(),
+        keypair.clone(),
+    )
+    .await
+    .expect("same connection retains its verified Store authority");
 }
 
 #[tokio::test]
@@ -791,34 +798,33 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         "blocked-discard",
         keypair.clone(),
     ));
-    let db = open_test_db();
-    let database = coven_database::StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let database = coven_database::StoreDatabase::new(&db);
     let device = crate::sync::test_helpers::TestDevice::create(
         &db,
+        db_store_dir.clone(),
         storage.clone(),
         "blocked-discard",
         keypair.clone(),
     )
     .await
     .expect("create blocked-discard Store");
-    db.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-first', 'first', NULL, 1, \
                  '0000000001000-0000-writer', '2026-01-01')",
-        )
-        .await;
-    db.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    )
+    .await;
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('discard-second', 'second', NULL, 1, \
                  '0000000001001-0000-writer', '2026-01-01')",
-        )
-        .await;
+    )
+    .await;
     let writes = database.pending_writes().await.unwrap();
     let first = writes[0].write_id.clone();
     let second = writes[1].write_id.clone();
-    let (_store_temp, store_dir) = temp_store_dir();
     database
         .set_write_status(
             &first,
@@ -851,15 +857,14 @@ async fn discarding_a_blocked_write_atomically_reverses_its_unpublished_suffix()
         );
     }
 
-    db.database()
-        .execute_test_host_write(
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('after-discard', 'after', NULL, 1, \
                  '0000000001002-0000-writer', '2026-01-01')",
-        )
-        .await;
+    )
+    .await;
     assert!(device
-        .prepare_pending_store_write(&store_dir)
+        .prepare_pending_store_write()
         .await
         .expect("prepare write after discarded blocked writes"));
     assert_eq!(device.drain_store_writes().await.unwrap(), 1);

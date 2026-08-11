@@ -99,7 +99,6 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
     let mut config = Config::with_defaults(
         "store-1".to_string(),
         "device-1".to_string(),
-        StoreDir::new_ephemeral("unused-store-dir"),
         "CloudKit Store".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::CloudKit);
@@ -112,23 +111,23 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
 }
 
 fn store_security(
-    config: &Config,
+    store_dir: &StoreDir,
     keys: StoreKeys,
     master_keys: Arc<dyn MasterKeyCustody>,
 ) -> StoreSecurity {
     let identity = coven_keys::identity_custody::IdentityCustody::InMemory(UserKeypair::generate())
-        .resolve(&keys, &config.store_dir);
-    StoreSecurity::new(keys, master_keys, identity)
+        .resolve(&keys, store_dir);
+    StoreSecurity::new(keys, master_keys, identity, store_dir.clone())
 }
 
 #[test]
 fn local_exact_upload_verification_stays_out_of_restore_wire() {
     coven_keys::keys::test_keyring::install();
     let dir = tempfile::tempdir().expect("store directory");
+    let store_dir = StoreDir::new_ephemeral(dir.path());
     let mut config = Config::with_defaults(
         "local-assertion-wire-test".to_string(),
         "device-1".to_string(),
-        StoreDir::new_ephemeral(dir.path()),
         "Wire Test".to_string(),
     );
     config.cloud_home.provider = Some(CloudProvider::S3);
@@ -147,8 +146,8 @@ fn local_exact_upload_verification_stays_out_of_restore_wire() {
     let custody = coven_keys::custody::KeyCustody::InMemory(
         coven_keys::encryption::MasterKeyring::generate(),
     )
-    .resolve(&key_service, &config.store_dir);
-    let security = store_security(&config, key_service, custody);
+    .resolve(&key_service, &store_dir);
+    let security = store_security(&store_dir, key_service, custody);
     let encoded = security
         .generate_restore_code(
             &config,
@@ -181,9 +180,10 @@ fn generate_restore_code_rejects_a_share_joined_cloudkit_config() {
     coven_keys::keys::test_keyring::install();
 
     let config = cloudkit_config(Some(("owner-name", "zone-name")));
+    let store_dir = StoreDir::new_ephemeral("unused-store-dir");
     let key_service = StoreKeys::bind(config.store_id.clone());
-    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
-    let security = store_security(&config, key_service, custody);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
+    let security = store_security(&store_dir, key_service, custody);
     let err = security
         .generate_restore_code(
             &config,
@@ -207,9 +207,10 @@ fn generate_restore_code_private_cloudkit_round_trips() {
     coven_keys::keys::test_keyring::install();
 
     let config = cloudkit_config(None);
+    let store_dir = StoreDir::new_ephemeral("unused-store-dir");
     let key_service = StoreKeys::bind(config.store_id.clone());
-    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &config.store_dir);
-    let security = store_security(&config, key_service, custody);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&key_service, &store_dir);
+    let security = store_security(&store_dir, key_service, custody);
     let code = security
         .generate_restore_code(
             &config,

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::sync::test_helpers::{
-    open_test_db, temp_store_dir, test_migrations, test_synced_tables,
-};
+use crate::sync::test_helpers::{temp_store_dir, test_migrations, test_synced_tables};
 use coven_database::Database;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
@@ -23,11 +21,12 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
         "exact-founder-graph",
         founder.clone(),
     ));
-    let db = open_test_db();
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let store_dir = db_store_dir.clone();
 
     let initialized = crate::sync::store::Store::create(
-        store_database(db.database()),
+        store_database(&db),
         storage,
         store_dir,
         "0000000000001-0000-founder",
@@ -35,19 +34,19 @@ async fn created_merge_store_immediately_has_its_exact_founder_chain() {
     )
     .await
     .expect("create Store with founder graph");
-    let root_ref = store_database(db.database())
+    let root_ref = store_database(&db)
         .local_store_root_ref()
         .await
         .expect("read exact Store root")
         .expect("created Store root exists");
 
-    let membership = initialized
-        .store
+    let (store, _device_id) = initialized.into_parts();
+    let membership = store
         .membership_for_test()
         .await
         .expect("created Store founder chain is immediately readable");
     assert!(membership.is_founded_by(&coven_keys::keys::public_key_hex(&founder)));
-    assert_eq!(initialized.store.store_root(), &root_ref);
+    assert_eq!(store.store_root(), &root_ref);
 }
 
 #[tokio::test]
@@ -62,17 +61,15 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             format!("founder-rollback-{failing_create}"),
             founder.clone(),
         ));
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let (_store_dir_temp, store_dir) = temp_store_dir();
         let timestamp = "0000000000001-0000-founder";
         let staged = FounderStoreCreation::begin(
-            store_database(db.database()),
+            store_database(&db),
             storage.clone(),
             &store_dir,
-            crate::sync::store::blob::StoreBlobCache::new(
-                store_database(db.database()),
-                store_dir.clone(),
-            ),
+            crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
             timestamp,
             &founder,
         )
@@ -103,7 +100,7 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
             );
         }
         crate::sync::store::Store::create(
-            store_database(db.database()),
+            store_database(&db),
             storage.clone(),
             store_dir,
             timestamp,
@@ -187,17 +184,15 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
         "concurrent-founder-publication",
         founder.clone(),
     ));
-    let db = open_test_db();
-    let (_store_dir_temp, store_dir) = temp_store_dir();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let store_dir = db_store_dir.clone();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(db.database()),
+        store_database(&db),
         storage.clone(),
         &store_dir,
-        crate::sync::store::blob::StoreBlobCache::new(
-            store_database(db.database()),
-            store_dir.clone(),
-        ),
+        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
     )
@@ -214,7 +209,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let first_store_dir = store_dir.clone();
     let first = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(first_db.database()),
+            store_database(&first_db),
             first_storage,
             first_store_dir,
             timestamp,
@@ -229,7 +224,7 @@ async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
     let second_store_dir = store_dir;
     let second = tokio::spawn(async move {
         crate::sync::store::Store::create(
-            store_database(second_db.database()),
+            store_database(&second_db),
             second_storage,
             second_store_dir,
             timestamp,
@@ -266,17 +261,15 @@ async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
         "founder-rollback-slot-collision",
         founder.clone(),
     ));
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (_store_dir_temp, store_dir) = temp_store_dir();
     let timestamp = "0000000000001-0000-founder";
     let staged = FounderStoreCreation::begin(
-        store_database(db.database()),
+        store_database(&db),
         storage,
         &store_dir,
-        crate::sync::store::blob::StoreBlobCache::new(
-            store_database(db.database()),
-            store_dir.clone(),
-        ),
+        crate::sync::store::blob::StoreBlobCache::new(store_database(&db), store_dir.clone()),
         timestamp,
         &founder,
     )
@@ -323,11 +316,12 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         "opaque-founder-graph",
         founder.clone(),
     ));
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (_store_dir_temp, store_dir) = temp_store_dir();
 
     crate::sync::store::Store::create(
-        store_database(db.database()),
+        store_database(&db),
         storage.clone(),
         store_dir.clone(),
         "0000000000001-0000-opaque-founder",
@@ -335,13 +329,13 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     )
     .await
     .expect("create opaque Store");
-    let root_ref = store_database(db.database())
+    let root_ref = store_database(&db)
         .local_store_root_ref()
         .await
         .expect("read Store root reference")
         .expect("Store root exists");
     let opened = crate::sync::store::Store::open(
-        store_database(db.database()),
+        store_database(&db),
         storage,
         store_dir,
         &root_ref,
@@ -349,15 +343,14 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
     )
     .await
     .expect("open exact opaque root");
-    let founder_slot = opened
-        .store
+    let (store, _device_id) = opened.into_parts();
+    let founder_slot = store
         .protocol_root_for_test()
         .descriptor
         .founder_registration
         .clone();
     home.clear_exact_reads();
-    opened
-        .store
+    store
         .load_founder_registration_twice_for_test()
         .await
         .expect("open the founder registration twice in one verifier");
@@ -369,24 +362,22 @@ async fn opaque_store_reopens_exact_founder_root_registration_and_ack() {
         1,
         "one verifier must reuse its exact founder registration"
     );
-    let registration = opened
-        .store
+    let registration = store
         .load_founder_registration_for_test()
         .await
         .expect("open exact opaque founder registration");
-    let durable = coven_database::StoreDatabase::new(db.database())
+    let durable = coven_database::StoreDatabase::new(&db)
         .latest_local_store_device_registration()
         .await
         .expect("read durable founder registration")
         .expect("founder registration exists");
-    let ack = opened
-        .store
+    let ack = store
         .load_store_ack_for_test(&durable.initial_ack_ref, &registration.value)
         .await
         .expect("open exact opaque founder acknowledgement");
 
     assert_eq!(
-        opened.store.protocol_root_for_test().object_hash(),
+        store.protocol_root_for_test().object_hash(),
         root_ref.store_root_hash
     );
     assert_eq!(registration.value.device_id, durable.device_id);

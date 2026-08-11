@@ -9,8 +9,31 @@ use coven_protocol::synced_schema::SyncedTable;
 use super::*;
 
 pub struct CreatedSnapshot {
-    pub db_image: SnapshotDatabaseImage,
-    pub blobs: Vec<SnapshotBlobFact>,
+    db_image: SnapshotDatabaseImage,
+    blobs: Vec<SnapshotBlobFact>,
+}
+
+impl CreatedSnapshot {
+    pub fn new(db_image: SnapshotDatabaseImage, blobs: Vec<SnapshotBlobFact>) -> Self {
+        Self { db_image, blobs }
+    }
+
+    pub fn blobs(&self) -> &[SnapshotBlobFact] {
+        &self.blobs
+    }
+
+    pub async fn read_image(&self) -> Result<Vec<u8>, SnapshotImageError> {
+        self.db_image.read().await
+    }
+
+    pub fn into_parts(self) -> (SnapshotDatabaseImage, Vec<SnapshotBlobFact>) {
+        (self.db_image, self.blobs)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn image_path_for_test(&self) -> &Path {
+        self.db_image.path()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -193,10 +216,7 @@ impl SnapshotDatabaseImage {
             Err(error) => return snapshot.finish(Err(SnapshotImageError::Io(error))),
         };
         info!(plaintext_size, "created snapshot");
-        Ok(CreatedSnapshot {
-            db_image: snapshot,
-            blobs,
-        })
+        Ok(CreatedSnapshot::new(snapshot, blobs))
     }
 
     fn write_new(mut self, plaintext: &[u8]) -> Result<Self, SnapshotImageError> {
@@ -714,7 +734,7 @@ impl StoreSession<'_> {
                         &audience,
                     )
             })
-            .and_then(|snapshot| snapshot.db_image.read_and_discard())
+            .and_then(|snapshot| snapshot.into_parts().0.read_and_discard())
             .map_err(snapshot_image_db_error)
     }
 }

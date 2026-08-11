@@ -3,7 +3,7 @@
 //! files-on-disk model is exercised directly.
 
 use crate::sync::store::blob::StoreBlobCache;
-use crate::sync::test_helpers::{open_test_db, temp_store_dir};
+use crate::sync::test_helpers::temp_store_dir;
 use coven_database::StoreDatabase;
 use coven_protocol::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 
@@ -60,8 +60,9 @@ async fn store_read_drop_round_trip() {
 /// store under `storage/local/`.
 #[tokio::test]
 async fn local_store_blob_survives_an_evict_to_budget_sweep() {
-    let db = open_test_db();
-    let store_database = StoreDatabase::new(db.database());
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let store_database = StoreDatabase::new(&db);
     let (_tmp, ld) = temp_store_dir();
 
     // A host-provided blob in the local store.

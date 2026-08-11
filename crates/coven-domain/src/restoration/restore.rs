@@ -430,11 +430,9 @@ pub async fn restore_from_cloud(
         // The config is the completion marker, so report this phase after all
         // other durable local state is present and immediately before saving it.
         on_status("Saving configuration...");
-        let mut config = build_config(
-            store_id, &device_id, &store_dir, store_name, join_info, &cipher,
-        );
+        let mut config = build_config(store_id, &device_id, store_name, join_info, &cipher);
         config.cloud_home.exact_upload_verification = exact_upload_verification;
-        config.save_to_config_yaml()?;
+        config.save_to_config_yaml(&store_dir)?;
         Ok(config)
     }
     .await;
@@ -442,10 +440,7 @@ pub async fn restore_from_cloud(
     match result {
         Ok(config) => {
             // The host records this as the active store after this returns.
-            info!(
-                "Cloud restore complete: store at {}",
-                config.store_dir.display()
-            );
+            info!("Cloud restore complete: store at {}", store_dir.display());
             Ok(config)
         }
         Err(err) => Err(cleanup.after_failure(err)),

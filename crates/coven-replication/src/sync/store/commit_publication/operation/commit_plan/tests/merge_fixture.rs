@@ -1,5 +1,5 @@
 use super::*;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use coven_protocol::store_commit::StoreCommitOperationsInput;
 use coven_protocol::store_commit::StoreDeviceHead;
 use coven_protocol::store_commit::StorePackageInput;
@@ -9,7 +9,7 @@ use coven_protocol::store_commit::{commit_semantic_prefix, package_semantic_pref
 pub(super) struct PreparedWriteFixture {
     home: InMemoryCloudHome,
     storage: Arc<CloudSyncConnection>,
-    db: SyntheticStoreFixture,
+    db: Database,
     database: StoreDatabase,
     device: crate::sync::test_helpers::TestDevice,
     keypair: UserKeypair,
@@ -160,7 +160,6 @@ impl PreparedWriteFixture {
     pub(super) async fn retained_canonical_input(&self) -> Vec<u8> {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
-            .database()
             .retained_canonical_input_for_test(stream_id, 1)
             .await
             .expect("load retained local package application")
@@ -169,7 +168,6 @@ impl PreparedWriteFixture {
     pub(super) async fn corrupt_retained_input(&self) {
         let stream_id = commit_stream(&self.commit_ref);
         self.db
-            .database()
             .corrupt_retained_materialization_input_for_test(stream_id, 1)
             .await
             .expect("corrupt retained local materialization");
@@ -186,7 +184,6 @@ impl PreparedWriteFixture {
 
     pub(super) async fn write_retains_prepared(&self) -> bool {
         self.db
-            .database()
             .write_retains_prepared_for_test(self.write_id.clone())
             .await
             .expect("check durable losing candidate")
@@ -194,7 +191,6 @@ impl PreparedWriteFixture {
 
     pub(super) async fn install_outbound_completion_failure(&self) {
         self.db
-            .database()
             .install_outbound_completion_failure_for_test()
             .await
             .expect("install completion fault");
@@ -202,7 +198,6 @@ impl PreparedWriteFixture {
 
     pub(super) async fn remove_outbound_completion_failure(&self) {
         self.db
-            .database()
             .remove_outbound_completion_failure_for_test()
             .await
             .expect("remove completion fault");
@@ -271,9 +266,11 @@ impl PreparedWriteFixture {
                 "outbound-crash-test",
                 keypair.clone(),
             ));
-            let db = open_test_db();
+            let db_store_dir = crate::sync::test_helpers::test_store_dir();
+            let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
             let device = crate::sync::test_helpers::TestDevice::create(
                 &db,
+                db_store_dir.clone(),
                 storage.clone(),
                 "outbound-crash-test",
                 keypair.clone(),
@@ -282,16 +279,14 @@ impl PreparedWriteFixture {
             .expect("create outbound crash test Store");
             let root = device.store_root().clone();
             let device_id = device.device_id().clone();
-            let database = coven_database::StoreDatabase::new(db.database());
-            db.database()
-                .execute_test_host_write(
-                    "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+            let database = coven_database::StoreDatabase::new(&db);
+            db.execute_test_host_write(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'outbound', NULL, 1, '0000000001000-0000-writer', '2026-01-01')",
-                )
-                .await;
-            let (_temp, store_dir) = temp_store_dir();
+            )
+            .await;
             assert!(device
-                .prepare_pending_store_write(&store_dir)
+                .prepare_pending_store_write()
                 .await
                 .expect("prepare outbound write"));
             let batch = database
@@ -352,7 +347,7 @@ impl PreparedWriteFixture {
             candidate.candidate_family(),
             candidate.write_id.clone(),
             batch.head.value.commit.coord.clone(),
-            self.db.database().schema_version(),
+            self.db.schema_version(),
             b"competing valid package".to_vec(),
             Vec::new(),
         )
@@ -407,7 +402,7 @@ impl PreparedWriteFixture {
             StoreCommitOperationsInput {
                 store_package: Some(StorePackageInput {
                     candidate_family: candidate.candidate_family(),
-                    schema_version: self.db.database().schema_version(),
+                    schema_version: self.db.schema_version(),
                     bytes: &package_bytes,
                     object: package_prepared.reference().clone(),
                 }),
@@ -548,7 +543,6 @@ impl PreparedWriteFixture {
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> coven_protocol::remote_object::RemoteObjectRecord {
         self.db
-            .database()
             .remote_object_for_test(object.clone())
             .await
             .expect("load stored remote object")
@@ -559,7 +553,6 @@ impl PreparedWriteFixture {
         object: &coven_protocol::objects::ExactObjectRef,
     ) -> bool {
         self.db
-            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("check stored remote object")

@@ -3,14 +3,16 @@ use std::sync::Arc;
 
 use super::*;
 use crate::sync::test_helpers::TestDevice;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use coven_keys::keys::UserKeypair;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
-    SyntheticStoreFixture::open(
+fn open(path: &Path, device_id: &str) -> (Database, coven_foundation::store_dir::StoreDir) {
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
+    let database = Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -18,11 +20,12 @@ fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
     )
-    .expect("open acknowledgement test database")
+    .expect("open acknowledgement test database");
+    (database, store_dir)
 }
 
-fn store_database(database: &SyntheticStoreFixture) -> StoreDatabase {
-    StoreDatabase::new(database.database())
+fn store_database(database: &Database) -> StoreDatabase {
+    StoreDatabase::new(database)
 }
 
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
@@ -36,20 +39,27 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConne
 }
 
 async fn initialize(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> TestDevice {
-    TestDevice::create(db, storage.clone(), "ack-exact-store", signer.clone())
-        .await
-        .expect("create acknowledgement test Store")
+    TestDevice::create(
+        db,
+        db_store_dir.clone(),
+        storage.clone(),
+        "ack-exact-store",
+        signer.clone(),
+    )
+    .await
+    .expect("create acknowledgement test Store")
 }
 
 struct LosingAckFixture {
     home: InMemoryCloudHome,
     signer: UserKeypair,
     storage: Arc<CloudSyncConnection>,
-    db: SyntheticStoreFixture,
+    db: Database,
     device: TestDevice,
     outbound: coven_database::OutboundStoreAck,
     losing: coven_protocol::prepared_commit::PreparedStoreOperationCommit,
@@ -60,8 +70,8 @@ impl LosingAckFixture {
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
-        let db = open(path, "ack-loser-device");
-        let device = Box::pin(initialize(&db, &storage, &signer)).await;
+        let (db, db_store_dir) = open(path, "ack-loser-device");
+        let device = Box::pin(initialize(&db, db_store_dir.clone(), &storage, &signer)).await;
         Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
             .await
             .expect("stage exact acknowledgement");
@@ -132,8 +142,8 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "ack-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "ack-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let founder_ack = store_database(&db)
         .latest_local_store_ack()
         .await
@@ -156,10 +166,15 @@ async fn staged_acknowledgement_reuses_its_exact_object_after_restart_and_lost_r
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "ack-test-device");
-    let reopened_device = TestDevice::load(&reopened, storage.clone(), signer.clone())
-        .await
-        .expect("bind reopened acknowledgement Store");
+    let (reopened, reopened_store_dir) = open(&path, "ack-test-device");
+    let reopened_device = TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind reopened acknowledgement Store");
     home.fail_exact_create_after_call(1);
     assert_eq!(
         reopened_device
@@ -188,8 +203,8 @@ async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "ack-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let founder_ack = store_database(&db)
         .latest_local_store_ack()
         .await
@@ -238,25 +253,29 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
-        let seed = open(&seed_path, "ack-slot-race-device");
-        let seed_device = initialize(&seed, &storage, &signer).await;
+        let (seed, seed_store_dir) = open(&seed_path, "ack-slot-race-device");
+        let seed_device = initialize(&seed, seed_store_dir.clone(), &storage, &signer).await;
         for destination in [&winner_path, &loser_path] {
             let destination = destination
                 .to_str()
                 .expect("temporary database path is UTF-8")
                 .to_string();
-            seed.database()
-                .vacuum_into_for_test(destination)
+            seed.vacuum_into_for_test(destination)
                 .await
                 .expect("copy acknowledgement database");
         }
         drop(seed_device);
         drop(seed);
 
-        let winner_db = open(&winner_path, "ack-slot-race-device");
-        let winner_device = TestDevice::load(&winner_db, storage.clone(), signer.clone())
-            .await
-            .expect("bind winner acknowledgement Store");
+        let (winner_db, winner_db_store_dir) = open(&winner_path, "ack-slot-race-device");
+        let winner_device = TestDevice::load(
+            &winner_db,
+            winner_db_store_dir.clone(),
+            storage.clone(),
+            signer.clone(),
+        )
+        .await
+        .expect("bind winner acknowledgement Store");
         winner_device
             .stage_current_acknowledgement("2026-07-16T00:00:01Z")
             .await
@@ -271,10 +290,15 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .await
             .expect("publish winner acknowledgement");
 
-        let loser_db = open(&loser_path, "ack-slot-race-device");
-        let loser_device = TestDevice::load(&loser_db, storage.clone(), signer.clone())
-            .await
-            .expect("bind loser acknowledgement Store");
+        let (loser_db, loser_db_store_dir) = open(&loser_path, "ack-slot-race-device");
+        let loser_device = TestDevice::load(
+            &loser_db,
+            loser_db_store_dir.clone(),
+            storage.clone(),
+            signer.clone(),
+        )
+        .await
+        .expect("bind loser acknowledgement Store");
         loser_device
             .stage_current_acknowledgement("2026-07-16T00:00:02Z")
             .await
@@ -318,14 +342,13 @@ async fn valid_acknowledgement_slot_winner_is_adopted_and_activated() {
             .await
             .expect("read drained acknowledgement outbox")
             .is_none());
-        assert!(coven_database::StoreDatabase::new(loser_db.database())
+        assert!(coven_database::StoreDatabase::new(&loser_db)
             .protocol_inert_object(loser.reference.object)
             .await
             .expect("read losing acknowledgement inert state")
             .is_none());
         for object_id in losing_object_ids {
             let exists = loser_db
-                .database()
                 .remote_object_id_exists_for_test(object_id)
                 .await
                 .expect("read losing acknowledgement candidate ownership");
@@ -340,8 +363,8 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "ack-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let first = device
         .stage_current_acknowledgement("2026-07-16T00:00:00Z")
         .await
@@ -396,8 +419,8 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "ack-test-device");
-    let device = Box::pin(initialize(&db, &storage, &signer)).await;
+    let (db, db_store_dir) = open(&path, "ack-test-device");
+    let device = Box::pin(initialize(&db, db_store_dir.clone(), &storage, &signer)).await;
     Box::pin(device.stage_current_acknowledgement("2026-07-16T00:00:00Z"))
         .await
         .expect("stage exact acknowledgement");
@@ -419,7 +442,7 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
         .into_iter()
         .find(|remote| remote.object() == &outbound.reference.object)
         .expect("acknowledgement remote object");
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .mark_remote_object_uploaded(acknowledgement_remote.into_record())
         .await
         .expect("record acknowledgement upload");
@@ -434,10 +457,15 @@ async fn activated_acknowledgement_completes_its_outbox_after_restart_without_an
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "ack-test-device");
-    let reopened_store = TestDevice::load(&reopened, storage.clone(), signer.clone())
-        .await
-        .expect("bind reopened acknowledgement Store");
+    let (reopened, reopened_store_dir) = open(&path, "ack-test-device");
+    let reopened_store = TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind reopened acknowledgement Store");
     assert_eq!(
         reopened_store.drain_acknowledgements_exact().await.unwrap(),
         1
@@ -460,8 +488,8 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "ack-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "ack-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     device
         .stage_current_acknowledgement("2026-07-16T00:00:00Z")
         .await
@@ -478,10 +506,15 @@ async fn prepared_activation_candidate_resumes_exactly_after_restart() {
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "ack-test-device");
-    let reopened_store = TestDevice::load(&reopened, storage.clone(), signer.clone())
-        .await
-        .expect("bind reopened acknowledgement Store");
+    let (reopened, reopened_store_dir) = open(&path, "ack-test-device");
+    let reopened_store = TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind reopened acknowledgement Store");
     let resumed = store_database(&reopened)
         .oldest_outbound_store_ack()
         .await
@@ -507,8 +540,8 @@ async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "ack-nonactivation-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-nonactivation-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     device
         .stage_current_acknowledgement("2026-07-16T00:00:00Z")
         .await
@@ -593,7 +626,7 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
             .reference,
         outbound.reference
     );
-    let inert = coven_database::StoreDatabase::new(db.database())
+    let inert = coven_database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -645,7 +678,7 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
         coven_database::OutboundStoreAckActivation::Nonactivating(ref candidate)
             if candidate.reference == losing.reference
     ));
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .protocol_inert_object(outbound.reference.object.clone())
         .await
         .unwrap()
@@ -653,10 +686,15 @@ async fn acknowledgement_nonactivation_resumes_after_delete_failure_and_restart(
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "ack-loser-device");
-    let reopened_device = TestDevice::load(&reopened, storage.clone(), signer.clone())
-        .await
-        .expect("bind reopened losing acknowledgement Store");
+    let (reopened, reopened_store_dir) = open(&path, "ack-loser-device");
+    let reopened_device = TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind reopened losing acknowledgement Store");
     assert_eq!(
         reopened_device
             .drain_acknowledgements_exact()
@@ -693,7 +731,6 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
 
         let head = losing.head_ref();
         let mut remote = db
-            .database()
             .remote_object_for_test(head.object.clone())
             .await
             .expect("load test head ownership");
@@ -726,8 +763,7 @@ async fn acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
             );
             remote.validate().expect("validate test head ownership");
         }
-        db.database()
-            .replace_remote_object_for_test(head.object, remote)
+        db.replace_remote_object_for_test(head.object, remote)
             .await
             .expect("install mismatched durable head proof");
 
@@ -752,8 +788,8 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "ack-alternate-head-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "ack-alternate-head-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     device
         .stage_current_acknowledgement("2026-07-16T00:00:00Z")
         .await
@@ -823,8 +859,8 @@ async fn circle_acknowledgement_publishes_activates_and_is_read_back() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "circle-ack-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "circle-ack-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let circle_id = store_database(&db)
         .install_test_active_circle("ack-circle".to_string())
         .await
@@ -865,8 +901,8 @@ async fn inactive_circle_stages_no_acknowledgement() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "inactive-circle-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "inactive-circle-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let circle_id = store_database(&db)
         .install_test_inactive_circle("inactive-circle".to_string())
         .await
@@ -904,8 +940,8 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "circle-ack-restart");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "circle-ack-restart");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let circle_id = store_database(&db)
         .install_test_active_circle("restart-circle".to_string())
         .await
@@ -936,10 +972,15 @@ async fn circle_acknowledgement_resumes_idempotently_across_restart() {
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "circle-ack-restart");
-    let reopened_device = TestDevice::load(&reopened, storage.clone(), signer.clone())
-        .await
-        .expect("bind reopened Circle acknowledgement Store");
+    let (reopened, reopened_store_dir) = open(&path, "circle-ack-restart");
+    let reopened_device = TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("bind reopened Circle acknowledgement Store");
     assert_eq!(
         reopened_device
             .drain_acknowledgements_exact()
@@ -972,8 +1013,8 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "circle-ack-collision");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "circle-ack-collision");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     store_database(&db)
         .install_test_active_circle("collision-circle".to_string())
         .await
@@ -995,7 +1036,6 @@ async fn circle_acknowledgement_slot_collision_fails_loud() {
     // Read the exact slot the staged Circle acknowledgement reserved, then occupy
     // it with different bytes before the drain uploads its object.
     let prepared = db
-        .database()
         .staged_circle_acknowledgement_object_for_test()
         .await
         .expect("read staged Circle acknowledgement object");

@@ -129,8 +129,14 @@ pub(super) struct VerifiedCircleKeyring {
 }
 
 impl VerifiedCircleKeyring {
-    fn into_keyring(self) -> EncryptionService {
+    fn key_entry(&self, fingerprint: KeyFingerprint) -> Option<(u64, [u8; 32])> {
         self.keyring
+            .keyring_entries()
+            .into_iter()
+            .find(|(generation, key)| {
+                EncryptionService::from_key_at_generation(*generation, *key).seal_key_fingerprint()
+                    == fingerprint
+            })
     }
 
     fn epoch_encryption(&self, circle_id: CircleId) -> Result<EncryptionService, CircleStateError> {
@@ -229,7 +235,10 @@ impl CircleEpochAccess {
 }
 
 impl VerifiedCircleReference {
-    pub fn retained_keyring(&self) -> Result<Option<EncryptionService>, CircleStateError> {
+    pub fn retained_key_entry(
+        &self,
+        fingerprint: KeyFingerprint,
+    ) -> Result<Option<(u64, [u8; 32])>, CircleStateError> {
         let Some(access) = self.local_access.as_ref() else {
             return Ok(None);
         };
@@ -242,7 +251,7 @@ impl VerifiedCircleReference {
             &access.leaf.value.disposition,
             &active.roster,
         )
-        .map(|keyring| Some(keyring.into_keyring()))
+        .map(|keyring| keyring.key_entry(fingerprint))
     }
 
     pub fn epoch_access(&self) -> Result<Option<CircleEpochAccess>, CircleStateError> {

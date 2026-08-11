@@ -31,9 +31,8 @@ impl StoreCircles {
     ) -> Result<(String, std::collections::BTreeSet<String>), crate::CircleError> {
         let identity_pubkey = self
             .security
-            .established_identity()
-            .map_err(|error| crate::CircleError::Identity(error.to_string()))?
-            .public_key_hex();
+            .required_identity_public_key_hex()
+            .map_err(|error| crate::CircleError::Identity(error.to_string()))?;
         let store_members = self
             .membership
             .members()

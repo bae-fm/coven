@@ -6,7 +6,7 @@
 //! serialized.
 //!
 //! Hosts open coven with `Coven::builder` and run app SQL through
-//! `CovenHandle::sql` or `CovenHandle::write`.
+//! `CovenHandle::write` or `CovenHandle::read`.
 
 pub(crate) use crate::blob_records::load_activated_registration_on;
 pub use crate::blob_records::remote_audience_to_db;
@@ -153,8 +153,7 @@ pub(crate) use test_sql::DatabaseTestSql;
 pub use test_support::synthetic_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_support::{
-    synthetic_store::SyntheticStoreFixture, DatabaseImageTest, OutboxAttempt,
-    RetainedRegistrationTamper, ScopedRoutingStateForTest,
+    DatabaseImageTest, OutboxAttempt, RetainedRegistrationTamper, ScopedRoutingStateForTest,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use test_transaction::DatabaseTestTransaction;
@@ -241,7 +240,7 @@ pub(crate) use store::{
 };
 pub use store::{
     projection_table_names, BlobTransitionRoot, BlockedWriteDiscard, CandidateCleanupObject,
-    CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimObject,
+    CircleAckPublicationInput, CreatedSnapshot, DeviceJoinJournalStore, DurableStoreReclaimObject,
     DurableStoreReclaimOperation, HostWriteBlobTransaction, HostWriteError, HostWriteOperation,
     IncomingTimestampPolicy, LocalBlobCleanup, MaterializedLocalBlob,
     MergeCandidateAbandonmentPreparation, OutboxEntry, OutboxOperation, OutboxUploadState,
@@ -249,7 +248,7 @@ pub use store::{
     ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotDatabaseImage,
+    RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotBlobFact, SnapshotDatabaseImage,
     SnapshotImageError, SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
     StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation, TableSchema,
     ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
@@ -308,12 +307,25 @@ thread_local! {
     /// caller is not. Thread-local is sound because a write closure and every
     /// statement it executes run synchronously on one thread.
     static COVEN_SQL_AUTHORITY_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static HOST_SQL_WRITE_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn reset_host_sql_write_observation() {
+    HOST_SQL_WRITE_SEEN.with(|seen| seen.set(false));
+}
+
+pub(crate) fn host_sql_write_was_observed() -> bool {
+    HOST_SQL_WRITE_SEEN.with(std::cell::Cell::get)
+}
+
+pub(crate) fn observe_host_sql_write() {
+    HOST_SQL_WRITE_SEEN.with(|seen| seen.set(true));
 }
 
 /// Run `f` with Coven's own SQL authority, so the host-SQL authorizer permits
 /// the reserved-table writes it performs. Panic-safe: the depth restores when
 /// the guard drops.
-pub fn with_coven_sql_authority<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_coven_sql_authority<R>(f: impl FnOnce() -> R) -> R {
     struct DepthGuard;
     impl Drop for DepthGuard {
         fn drop(&mut self) {
@@ -325,12 +337,21 @@ pub fn with_coven_sql_authority<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-pub fn authorize_host_sql(
+pub(crate) fn authorize_host_sql(
     context: rusqlite::hooks::AuthContext<'_>,
 ) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
 
-    if COVEN_SQL_AUTHORITY_DEPTH.with(|depth| depth.get()) > 0 {
+    let coven_owned = COVEN_SQL_AUTHORITY_DEPTH.with(|depth| depth.get()) > 0;
+    if !coven_owned
+        && matches!(
+            context.action,
+            AuthAction::Delete { .. } | AuthAction::Insert { .. } | AuthAction::Update { .. }
+        )
+    {
+        HOST_SQL_WRITE_SEEN.with(|seen| seen.set(true));
+    }
+    if coven_owned {
         return Authorization::Allow;
     }
 
@@ -418,6 +439,10 @@ impl std::fmt::Display for StagedBlobRollbackFailures {
 pub enum DbError {
     #[error("database error: {0}")]
     Message(String),
+    #[error(
+        "write callback prepared no INSERT, UPDATE, or DELETE statement; pure reads belong on read"
+    )]
+    ReadOnlyWriteTransaction,
     #[error("{0}")]
     Sqlite(#[from] rusqlite::Error),
     /// A JSON column's bytes did not read back as the value they encode, or a

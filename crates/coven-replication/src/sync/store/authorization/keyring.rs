@@ -179,7 +179,7 @@ pub(crate) async fn load_wrapped_store_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{open_test_db, test_cloud_home, TestStoreFixture};
+    use crate::sync::test_helpers::{test_cloud_home, TestStore};
     use coven_keys::keys::UserKeypair;
     use coven_protocol::wrapped_store_key::WrappedStoreKey;
     use coven_storage::CloudSyncObjectStorage as _;
@@ -189,18 +189,19 @@ mod tests {
         let owner = UserKeypair::generate();
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
-        let db = open_test_db();
-        let (store, cloud_storage) = (TestStoreFixture::create(
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+        let (store, cloud_storage) = TestStore::create_with_connection(
             &db,
+            db_store_dir.clone(),
             "wrapped-key-exact-objects",
             owner.clone(),
             test_cloud_home(),
         )
         .await
-        .expect("create exact wrapped-key Store"))
-        .into_parts();
+        .expect("create exact wrapped-key Store");
         let device = store
-            .bind_device(&db, &owner)
+            .bind_device_in(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind exact wrapped-key Store");
         let store_id = store.root().store_root_id.to_string();
@@ -255,18 +256,19 @@ mod tests {
         let owner = UserKeypair::generate();
         let recipient = UserKeypair::generate();
         let recipient_pubkey = hex::encode(recipient.public_key());
-        let db = open_test_db();
-        let (store, cloud_storage) = (TestStoreFixture::create(
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+        let (store, cloud_storage) = TestStore::create_with_connection(
             &db,
+            db_store_dir.clone(),
             "wrapped-key-relocation",
             owner.clone(),
             test_cloud_home(),
         )
         .await
-        .expect("create relocation Store"))
-        .into_parts();
+        .expect("create relocation Store");
         let device = store
-            .bind_device(&db, &owner)
+            .bind_device_in(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind relocation Store");
         let prepared = device

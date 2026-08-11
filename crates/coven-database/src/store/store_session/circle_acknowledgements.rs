@@ -17,11 +17,41 @@ use super::{StoreDatabase, StoreSession};
 /// the access authority that seals the acknowledgement, and the retained bootstrap
 /// coverage the projection was seeded from (`None` for a founder/source device).
 pub struct CircleAckPublicationInput {
-    pub circle_id: CircleId,
-    pub control: CircleControlCoord,
-    pub epoch_id: CircleEpochId,
-    pub access: coven_protocol::circle_activation::CircleEpochAccess,
-    pub seeded_from: Option<CircleBootstrapCoverageRef>,
+    circle_id: CircleId,
+    control: CircleControlCoord,
+    epoch_id: CircleEpochId,
+    access: coven_protocol::circle_activation::CircleEpochAccess,
+    seeded_from: Option<CircleBootstrapCoverageRef>,
+}
+
+impl CircleAckPublicationInput {
+    pub fn circle_id(&self) -> CircleId {
+        self.circle_id
+    }
+
+    pub fn control(&self) -> &CircleControlCoord {
+        &self.control
+    }
+
+    pub fn epoch_id(&self) -> CircleEpochId {
+        self.epoch_id
+    }
+
+    pub fn seeded_from(&self) -> Option<&CircleBootstrapCoverageRef> {
+        self.seeded_from.as_ref()
+    }
+
+    pub fn protocol_context(
+        &self,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
+        domain: coven_protocol::objects::CircleProtocolObjectDomain,
+    ) -> coven_protocol::objects::ProtocolObjectContext {
+        self.access.protocol_context(store_root_hash, domain)
+    }
+
+    pub fn key_fingerprint(&self) -> coven_keys::encryption::KeyFingerprint {
+        self.access.key_fingerprint()
+    }
 }
 
 /// The last Circle acknowledgement this device published for one Circle: its

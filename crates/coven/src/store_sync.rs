@@ -16,7 +16,6 @@ use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
 use coven_replication::sync::cycle::SyncComponents;
-use coven_replication::sync::store::blob::LocalStoreBlobAccess;
 use coven_replication::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
@@ -89,12 +88,12 @@ pub(crate) struct StoreSync {
     security: StoreSecurity,
     master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     database: StoreDatabase,
+    #[cfg(test)]
     store_dir: coven_foundation::store_dir::StoreDir,
     clock: ClockRef,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
     open_guard: Arc<StoreOpenGuard>,
     cloud_storage: StoreCloudStorage,
-    local_blob_access: LocalStoreBlobAccess,
     blob_access: crate::store_blobs::StoreBlobAccess,
     local_blob_transitions: coven_replication::blob::transition::LocalBlobTransitions,
     state: Arc<RwLock<SyncConnection>>,
@@ -162,17 +161,13 @@ impl StoreSync {
             None => coven_replication::sync::cycle::StoreInitialization::CreateStore,
         };
         self.security
-            .established_identity()?
             .initialize_sync_components(
                 self.database.clone(),
-                self.store_dir.clone(),
-                self.local_blob_access.clone(),
                 storage,
                 initialization,
                 routing_encryption,
             )
             .await
-            .map_err(SyncError::from)
     }
 
     /// Assemble the connected sync over `storage`. The loop thread is a separate
@@ -226,14 +221,8 @@ impl StoreSync {
             .map_err(Self::map_storage_setup_error)?;
         let store = Arc::new(
             self.security
-                .established_identity()?
-                .load_store(
-                    self.database.clone(),
-                    Arc::new(storage),
-                    self.store_dir.clone(),
-                )
-                .await
-                .map_err(SyncError::from)?,
+                .load_store(self.database.clone(), Arc::new(storage))
+                .await?,
         );
         *self.state.write().expect("write Store sync connection") = SyncConnection::CommandOnly {
             store: Arc::clone(&store),

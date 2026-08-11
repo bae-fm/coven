@@ -130,24 +130,17 @@ fn blob_closure_deduplicates_only_identical_exact_refs_and_merges_state() {
 
 #[tokio::test]
 async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
-    let database = crate::sync::test_helpers::open_test_db();
-    let (store, cloud_storage) = (crate::sync::test_helpers::TestStoreFixture::create(
+    let database_store_dir = crate::sync::test_helpers::test_store_dir();
+    let database = crate::sync::test_helpers::open_test_db(database_store_dir.clone());
+    let (store, cloud_storage) = crate::sync::test_helpers::TestStore::create_with_connection(
         &database,
+        database_store_dir.clone(),
         "shared-spool-test",
         coven_keys::keys::UserKeypair::generate(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
-    .expect("create exact test Store"))
-    .into_parts();
-    let device = store
-        .founder_device()
-        .await
-        .expect("bind exact blob preparation Store");
-    let writer = device
-        .authorize_writer()
-        .await
-        .expect("authorize exact blob preparation writer");
+    .expect("create exact test Store");
     let authority = store
         .founder_device_authority()
         .await
@@ -206,7 +199,10 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("read seeded exact spool");
 
-    let error = match writer.prepare_store_partition_blob(&fact, &authority).await {
+    let error = match store
+        .prepare_founder_store_partition_blob_for_test(&fact, &authority)
+        .await
+    {
         Ok(_) => panic!("invalid binding must fail after reusing the exact spool"),
         Err(error) => error,
     };
@@ -227,7 +223,10 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
         .await
         .expect("sync removed shared exact spool");
 
-    let error = match writer.prepare_store_partition_blob(&fact, &authority).await {
+    let error = match store
+        .prepare_founder_store_partition_blob_for_test(&fact, &authority)
+        .await
+    {
         Ok(_) => panic!("invalid binding must fail after creating an exact spool"),
         Err(error) => error,
     };

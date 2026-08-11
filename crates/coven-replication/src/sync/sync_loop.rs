@@ -931,7 +931,7 @@ impl SyncLoopHandle {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub fn uses_store_dir_for_test(&self, expected: &StoreDir) -> bool {
-        &self.inner.config.store_dir == expected
+        self.inner.components.uses_store_dir_for_test(expected)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

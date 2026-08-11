@@ -1,11 +1,13 @@
 use super::*;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 
 /// Prepare a founder Circle operation on a member device, then revoke that
 /// member's grant so publishing it blocks under lost authority.
 struct RevokedOperation {
-    db: SyntheticStoreFixture,
-    owner_db: SyntheticStoreFixture,
+    db: Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
+    owner_db: Database,
+    owner_db_store_dir: coven_foundation::store_dir::StoreDir,
     store: std::sync::Arc<TestStore>,
     founder: UserKeypair,
     successor: UserKeypair,
@@ -15,10 +17,12 @@ struct RevokedOperation {
 
 impl RevokedOperation {
     async fn prepare(name: &str) -> Self {
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let founder = UserKeypair::generate();
         let store = create_test_store_in_its_own_task(
             &db,
+            db_store_dir.clone(),
             name,
             &founder,
             crate::sync::test_helpers::test_cloud_home(),
@@ -30,6 +34,7 @@ impl RevokedOperation {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &founder,
                 &successor_pubkey,
                 None,
@@ -39,18 +44,21 @@ impl RevokedOperation {
             )
             .await
             .expect("invite successor member");
-        let successor_db = open_test_db();
+        let successor_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let successor_db = crate::sync::test_helpers::open_test_db(successor_db_store_dir.clone());
         store
             .activate_joined_device(
                 &db,
+                db_store_dir.clone(),
                 &successor_db,
+                successor_db_store_dir.clone(),
                 &successor,
                 "0000000001003-0000-successor",
             )
             .await
             .expect("activate successor device");
         let exact_membership = store
-            .bind_device(&successor_db, &successor)
+            .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
             .await
             .expect("bind successor Store")
             .membership_for_test()
@@ -65,14 +73,14 @@ impl RevokedOperation {
         // The member device is the one that authors and publishes; drive everything
         // through its database so its local membership view governs authority.
         let prepared = store
-            .bind_device(&successor_db, &successor)
+            .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
             .await
             .expect("bind Circle preparation Store")
             .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
             .await
             .expect("prepare operation while authorized");
         let operation_id = prepared.journal.operation_id.clone();
-        StoreDatabase::new(successor_db.database())
+        StoreDatabase::new(&successor_db)
             .insert_circle_operation(prepared.journal, prepared.prepared_objects)
             .await
             .expect("persist operation");
@@ -80,13 +88,22 @@ impl RevokedOperation {
         let custody = TestCustody::default();
         custody.set_initial_key([42; 32]);
         store
-            .remove_member(&db, &founder, &successor_pubkey, &encryption, &custody)
+            .remove_member(
+                &db,
+                db_store_dir.clone(),
+                &founder,
+                &successor_pubkey,
+                &encryption,
+                &custody,
+            )
             .await
             .expect("remove successor grant");
 
         Self {
             db: successor_db,
+            db_store_dir: successor_db_store_dir,
             owner_db: db,
+            owner_db_store_dir: db_store_dir,
             store,
             founder,
             successor,
@@ -100,20 +117,23 @@ impl RevokedOperation {
     async fn witness_membership_revocation(&self) {
         let changeset = self
             .owner_db
-            .database()
             .capture_test_changeset(&[
                 "INSERT INTO notes (id, title, body, _updated_at, created_at) \
              VALUES ('circle-revocation-witness', 'Circle revocation witness', NULL, \
                      '0000000001004-0000-founder', '2026-01-01')",
             ])
             .await;
-        StoreDatabase::new(self.owner_db.database())
+        StoreDatabase::new(&self.owner_db)
             .enqueue_store_changeset_for_test(changeset)
             .await
             .expect("enqueue the membership-revocation witness");
         let owner_store = self
             .store
-            .bind_device(&self.owner_db, &self.founder)
+            .bind_device(
+                &self.owner_db,
+                self.owner_db_store_dir.clone(),
+                &self.founder,
+            )
             .await
             .expect("load the revocation witness Store");
         let mut writer = owner_store
@@ -138,7 +158,7 @@ impl RevokedOperation {
 
         let member_store = self
             .store
-            .bind_device(&self.db, &self.successor)
+            .bind_device(&self.db, self.db_store_dir.clone(), &self.successor)
             .await
             .expect("load removed member Store");
         let pull = member_store
@@ -165,14 +185,18 @@ async fn operation_inspection_surface_reports_the_typed_block() {
     let revoked = RevokedOperation::prepare("recovery-inspection-surface").await;
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation without failing");
 
-    let operations = StoreDatabase::new(revoked.db.database())
+    let operations = StoreDatabase::new(&revoked.db)
         .get_circle_operations()
         .await
         .expect("read the operation-inspection surface");
@@ -195,29 +219,31 @@ async fn operation_inspection_surface_reports_the_typed_block() {
 
     // Retrying an operation that is not blocked is refused with the typed reason
     // the public `NotBlocked` error carries.
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(
         &db,
+        db_store_dir.clone(),
         "recovery-inspection-notblocked",
         &founder,
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
     let prepared = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Ready Circle")
         .await
         .expect("prepare a ready operation");
     let ready_id = prepared.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist the ready operation");
     let refusal = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle test Store")
         .retry_circle_operation(&ready_id)
@@ -234,13 +260,17 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
     let revoked = RevokedOperation::prepare("recovery-typed-block").await;
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume blocks the revoked operation without failing");
-    let blocked = StoreDatabase::new(revoked.db.database())
+    let blocked = StoreDatabase::new(&revoked.db)
         .circle_operation(&revoked.operation_id)
         .await
         .expect("read blocked operation")
@@ -255,7 +285,7 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
         "the block names the author's exact grant"
     );
     // Surfaced typed through the query API.
-    let operations = StoreDatabase::new(revoked.db.database())
+    let operations = StoreDatabase::new(&revoked.db)
         .get_circle_operations()
         .await
         .expect("read circle operations");
@@ -269,17 +299,19 @@ async fn a_blocked_operation_reports_typed_authority_lost() {
 
 #[tokio::test]
 async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(
         &db,
+        db_store_dir.clone(),
         "recovery-retry-republish",
         &founder,
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
     let prepared = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
@@ -291,7 +323,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     let expected_commit_object = prepared.journal.operation().commit_ref.object.clone();
     let founder_pubkey = keys::public_key_hex(&founder);
     let exact_membership = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind founder Store")
         .membership_for_test()
@@ -303,7 +335,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .collect::<Vec<_>>()
         .try_into()
         .expect("founder has one active Store grant");
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist authorized operation");
@@ -311,7 +343,7 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
     // The operation is durably blocked (its exact retained payload preserved),
     // then retried. Retry restores the phase and re-enters the publish pipeline
     // without regenerating anything.
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .block_circle_operation(
             &operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -321,19 +353,19 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
         .await
         .expect("block the authorized operation");
     store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle test Store")
         .retry_circle_operation(&operation_id)
         .await
         .expect("retry publishes the still-authorized operation");
 
-    assert!(coven_database::StoreDatabase::new(db.database())
+    assert!(coven_database::StoreDatabase::new(&db)
         .circle_operation(&operation_id)
         .await
         .expect("read retried operation")
         .is_none());
-    let (activated, activation_commit_ref) = coven_database::StoreDatabase::new(db.database())
+    let (activated, activation_commit_ref) = coven_database::StoreDatabase::new(&db)
         .circle_authoring_context(circle_id, &keys::public_key_hex(&founder))
         .await
         .expect("load activated Circle authoring state");
@@ -353,13 +385,14 @@ async fn retry_of_a_blocked_operation_republishes_its_exact_prepared_commit() {
 /// activate — the journal row stays durable.
 #[tokio::test]
 async fn discard_without_nonactivation_proof_is_refused() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, journal) =
-        persist_merge_operation(&db, "recovery-discard-refusal").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "recovery-discard-refusal").await;
     let operation_id = journal.operation_id.clone();
 
     let refusal = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle discard Store")
         .circles()
@@ -375,7 +408,7 @@ async fn discard_without_nonactivation_proof_is_refused() {
         "{refusal:?}"
     );
     assert!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read operation after refused discard")
@@ -393,7 +426,11 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
     let revoked = RevokedOperation::prepare("recovery-discard-revocation").await;
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -404,7 +441,11 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
 
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind revoked Circle discard Store")
         .circles()
@@ -413,7 +454,7 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
         .expect("the accepted membership revocation permits discard");
 
     assert!(
-        StoreDatabase::new(revoked.db.database())
+        StoreDatabase::new(&revoked.db)
             .circle_operation(&revoked.operation_id)
             .await
             .expect("read discarded operation")
@@ -428,9 +469,10 @@ async fn discard_after_membership_revocation_witness_cleans_the_operation() {
 /// published objects untouched, and clears the journal row.
 #[tokio::test]
 async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_objects() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, journal) =
-        persist_merge_operation(&db, "recovery-discard-winner").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "recovery-discard-winner").await;
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
@@ -439,7 +481,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     // Publishing the operation uploads its candidate graph, then loses the head
     // slot to the winner already occupying it.
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_operation(&operation_id)
@@ -451,7 +493,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     );
 
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle discard Store")
         .circles()
@@ -460,7 +502,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
         .expect("the verified winner permits discard");
 
     assert!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read discarded operation")
@@ -469,8 +511,7 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
     );
     assert!(!_home.contains_exact_object(&candidate_commit));
     assert!(
-        !db.database()
-            .remote_object_exists_for_test(candidate_commit.clone())
+        !db.remote_object_exists_for_test(candidate_commit.clone())
             .await
             .expect("check stored remote object"),
         "the candidate commit's remote-object row is deleted"
@@ -490,15 +531,16 @@ async fn discard_after_slot_lost_to_verified_winner_cleans_candidate_exclusive_o
 /// Resume re-runs the idempotent cleanup and clears the journal exactly once.
 #[tokio::test]
 async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, journal) =
-        persist_merge_operation(&db, "recovery-discard-crash").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "recovery-discard-crash").await;
     let operation_id = journal.operation_id.clone();
     let candidate_commit = journal.operation().commit_ref.object.clone();
 
     store.publish_competing_store_head(&journal).await;
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_operation(&operation_id)
@@ -509,7 +551,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
     // recorded the proof and moved the row into `Discarding` has committed.
     _home.fail_exact_delete_on_call(1);
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle discard Store")
         .circles()
@@ -517,7 +559,7 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
         .await
         .expect_err("the injected delete failure interrupts cleanup");
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read interrupted operation")
@@ -528,14 +570,14 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
     );
 
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("resume completes the interrupted discard");
     assert!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&operation_id)
             .await
             .expect("read resumed operation")
@@ -547,29 +589,31 @@ async fn discard_resumes_after_a_crash_at_the_cleanup_boundary() {
 
 #[tokio::test]
 async fn retry_refuses_active_operations_and_reblocks_idempotently() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(
         &db,
+        db_store_dir.clone(),
         "recovery-retry-refusal",
         &founder,
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await;
     let ready = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
         .await
         .expect("prepare an authorized operation");
     let ready_id = ready.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(ready.journal, ready.prepared_objects)
         .await
         .expect("persist the ready operation");
     let refusal = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle test Store")
         .retry_circle_operation(&ready_id)
@@ -585,7 +629,11 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     let revoked = RevokedOperation::prepare("recovery-retry-reblock").await;
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -594,7 +642,11 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
     for _ in 0..2 {
         match revoked
             .store
-            .bind_device(&revoked.db, &revoked.successor)
+            .bind_device(
+                &revoked.db,
+                revoked.db_store_dir.clone(),
+                &revoked.successor,
+            )
             .await
             .expect("bind Circle test Store")
             .retry_circle_operation(&revoked.operation_id)
@@ -604,7 +656,7 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
             other => panic!("retry of a permanently-blocked operation must re-block: {other:?}"),
         }
         assert!(matches!(
-            StoreDatabase::new(revoked.db.database())
+            StoreDatabase::new(&revoked.db)
                 .circle_operation(&revoked.operation_id)
                 .await
                 .expect("read re-blocked operation")
@@ -622,18 +674,19 @@ async fn retry_refuses_active_operations_and_reblocks_idempotently() {
 /// instead of retrying the loser forever and stranding every operation behind it.
 #[tokio::test]
 async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, first) =
-        persist_merge_operation(&db, "recovery-position-lost").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "recovery-position-lost").await;
     let second = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare the operation queued behind the loser");
     let second_id = second.journal.operation_id.clone();
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(second.journal, second.prepared_objects)
         .await
         .expect("persist the operation queued behind the loser");
@@ -641,14 +694,14 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     store.publish_competing_store_head(&first).await;
 
     store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("the resume queue drains past an operation that lost its position");
 
-    let second_after = coven_database::StoreDatabase::new(db.database())
+    let second_after = coven_database::StoreDatabase::new(&db)
         .circle_operation(&second_id)
         .await
         .expect("read the operation queued behind the loser")
@@ -663,7 +716,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
         "the queue advanced to and classified the next operation: {:?}",
         second_after.state(),
     );
-    let blocked = coven_database::StoreDatabase::new(db.database())
+    let blocked = coven_database::StoreDatabase::new(&db)
         .circle_operation(&first.operation_id)
         .await
         .expect("read the operation that lost its position")
@@ -681,7 +734,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 
     // The block is a fact reported to the initiator, so it has to be legible from
     // the surface the initiator reads.
-    let reported = coven_database::StoreDatabase::new(db.database())
+    let reported = coven_database::StoreDatabase::new(&db)
         .get_circle_operations()
         .await
         .expect("list circle operations");
@@ -701,7 +754,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
 
     assert!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .oldest_pending_circle_operation()
             .await
             .expect("read the publish queue head")
@@ -712,7 +765,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     // Retrying a permanently lost position must not re-wedge the queue: it
     // unblocks, re-observes the same winner, and re-blocks typed.
     let retried = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .retry_circle_operation(&first.operation_id)
@@ -730,7 +783,7 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
     );
     assert!(
         matches!(
-            coven_database::StoreDatabase::new(db.database())
+            coven_database::StoreDatabase::new(&db)
                 .circle_operation(&first.operation_id)
                 .await
                 .expect("read the retried operation")
@@ -752,24 +805,25 @@ async fn a_lost_position_blocks_its_operation_and_releases_the_queue_behind_it()
 /// its own completing transaction keeps every file it prepared.
 #[tokio::test]
 async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_intact() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (store, _home, signer, activating) =
-        persist_merge_operation(&db, "circle-payload-activation").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-payload-activation").await;
     let pending = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare the operation that stays pending");
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(pending.journal.clone(), pending.prepared_objects)
         .await
         .expect("journal the operation that stays pending");
     let pending = pending.journal;
 
     let device = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store");
     let prepared_steps = activating
@@ -790,7 +844,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         .expect("activate the founder Circle");
 
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
@@ -798,7 +852,7 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
         "activation discharges its own cleanup obligations"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation_payload_claims_for_test(&activating.operation_id)
             .await
             .expect("read the activated operation's payload claims"),
@@ -809,7 +863,6 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
     let mut kept_a_row = false;
     for (step, object) in &activating.operation().prepared_objects {
         let row_exists = db
-            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("read whether the activated object kept its row");
@@ -843,14 +896,18 @@ async fn activation_releases_its_payload_claims_and_keeps_a_pending_operation_in
 #[tokio::test]
 async fn discard_releases_its_payload_claims() {
     let revoked = RevokedOperation::prepare("circle-payload-discard").await;
-    let journal = coven_database::StoreDatabase::new(revoked.db.database())
+    let journal = coven_database::StoreDatabase::new(&revoked.db)
         .circle_operation(&revoked.operation_id)
         .await
         .expect("read the operation to discard")
         .expect("the operation to discard is durable");
     let device = revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind Circle test Store");
     assert!(
@@ -866,7 +923,11 @@ async fn discard_releases_its_payload_claims() {
 
     revoked
         .store
-        .bind_device(&revoked.db, &revoked.successor)
+        .bind_device(
+            &revoked.db,
+            revoked.db_store_dir.clone(),
+            &revoked.successor,
+        )
         .await
         .expect("bind revoked Circle discard Store")
         .circles()
@@ -875,7 +936,7 @@ async fn discard_releases_its_payload_claims() {
         .expect("the accepted membership revocation permits discard");
 
     assert_eq!(
-        coven_database::StoreDatabase::new(revoked.db.database())
+        coven_database::StoreDatabase::new(&revoked.db)
             .owed_payload_cleanup()
             .await
             .expect("read the payloads still owed a deletion"),
@@ -883,7 +944,7 @@ async fn discard_releases_its_payload_claims() {
         "discard discharges its own cleanup obligations"
     );
     assert_eq!(
-        coven_database::StoreDatabase::new(revoked.db.database())
+        coven_database::StoreDatabase::new(&revoked.db)
             .circle_operation_payload_claims_for_test(&revoked.operation_id)
             .await
             .expect("read the discarded operation's payload claims"),
@@ -894,7 +955,6 @@ async fn discard_releases_its_payload_claims() {
     for (step, object) in &journal.operation().prepared_objects {
         let row_exists = revoked
             .db
-            .database()
             .remote_object_exists_for_test(object.clone())
             .await
             .expect("read whether the discarded object kept its row");

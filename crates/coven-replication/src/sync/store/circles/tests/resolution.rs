@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::sync::store::Store;
-use coven_database::SyntheticStoreFixture;
+use coven_database::Database;
 use coven_protocol::circle::{CircleControlCoord, CircleInfo, CircleRole};
 
 const ROUTING_KEY: [u8; 32] = [42; 32];
@@ -17,49 +17,53 @@ fn routing() -> EncryptionService {
 /// cloud home, so a control successor authored on each and not seen by the other
 /// forms a genuine `ControlConflict` once either device pulls both.
 struct ConflictFixture {
-    db1: SyntheticStoreFixture,
+    db1: Database,
     device1: String,
-    db2: SyntheticStoreFixture,
+    db2: Database,
     store: std::sync::Arc<TestStore>,
     cloud_storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     founder: UserKeypair,
     founder_pubkey: String,
     circle_id: CircleId,
-    _dir1: tempfile::TempDir,
     dir1: coven_foundation::store_dir::StoreDir,
-    _dir2: tempfile::TempDir,
     dir2: coven_foundation::store_dir::StoreDir,
 }
 
 impl ConflictFixture {
     async fn build(label: &str) -> Self {
-        let db1 = open_test_db();
+        let db1_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db1 = crate::sync::test_helpers::open_test_db(db1_store_dir.clone());
         let (store_fixture, _home, founder, journal) =
-            persist_merge_operation_fixture(&db1, label).await;
-        let (store, cloud_storage) = (store_fixture).into_parts();
+            persist_merge_operation_fixture(&db1, db1_store_dir.clone(), label).await;
+        let (store, cloud_storage) = store_fixture;
         let circle_id = journal.circle_id();
         let device1 = db1
-            .database()
             .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
             .expect("read local Store device id")
             .expect("local Store device is active");
         store
-            .bind_device(&db1, &founder)
+            .bind_device_in(&db1, db1_store_dir.clone(), &founder)
             .await
             .expect("bind Circle test Store")
             .resume_circle_operations()
             .await
             .expect("activate founder transition");
 
-        let db2 = open_test_db();
+        let db2_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db2 = crate::sync::test_helpers::open_test_db(db2_store_dir.clone());
         store
-            .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
+            .activate_joined_device(
+                &db1,
+                db1_store_dir.clone(),
+                &db2,
+                db2_store_dir.clone(),
+                &founder,
+                "0000000001100-0000-device2",
+            )
             .await
             .expect("register the founder's second device");
-        let (_dir1, dir1) = temp_store_dir();
-        let (_dir2, dir2) = temp_store_dir();
         let founder_pubkey = keys::public_key_hex(&founder);
 
         let fixture = Self {
@@ -72,10 +76,8 @@ impl ConflictFixture {
             founder,
             founder_pubkey,
             circle_id,
-            _dir1,
-            dir1,
-            _dir2,
-            dir2,
+            dir1: db1_store_dir,
+            dir2: db2_store_dir,
         };
         // Device 2 must materialize the founder control before it can author a
         // concurrent successor of it.
@@ -85,7 +87,7 @@ impl ConflictFixture {
 
     async fn store1(&self) -> Store {
         Store::load(
-            StoreDatabase::new(self.db1.database()),
+            StoreDatabase::new(&self.db1),
             self.cloud_storage.clone(),
             self.dir1.clone(),
             self.founder.clone(),
@@ -96,7 +98,7 @@ impl ConflictFixture {
 
     async fn store2(&self) -> Store {
         Store::load(
-            StoreDatabase::new(self.db2.database()),
+            StoreDatabase::new(&self.db2),
             self.cloud_storage.clone(),
             self.dir2.clone(),
             self.founder.clone(),
@@ -128,7 +130,7 @@ impl ConflictFixture {
     }
 
     async fn conflict_branches_device1(&self) -> Vec<CircleControlCoord> {
-        StoreDatabase::new(self.db1.database())
+        StoreDatabase::new(&self.db1)
             .circle_control_conflict_branches(self.circle_id)
             .await
             .expect("read device 1 conflict branches")
@@ -136,7 +138,7 @@ impl ConflictFixture {
     }
 
     async fn circles_device1(&self) -> Vec<CircleInfo> {
-        StoreDatabase::new(self.db1.database())
+        StoreDatabase::new(&self.db1)
             .get_circles(
                 &self.founder_pubkey,
                 BTreeSet::from([self.founder_pubkey.clone()]),
@@ -146,7 +148,7 @@ impl ConflictFixture {
     }
 
     async fn circles_device2(&self) -> Vec<CircleInfo> {
-        StoreDatabase::new(self.db2.database())
+        StoreDatabase::new(&self.db2)
             .get_circles(
                 &self.founder_pubkey,
                 BTreeSet::from([self.founder_pubkey.clone()]),
@@ -188,7 +190,7 @@ impl ConflictFixture {
 
     async fn assert_resolution_activated(&self, journal: &CircleOperationJournal) {
         assert!(
-            StoreDatabase::new(self.db1.database())
+            StoreDatabase::new(&self.db1)
                 .circle_operation(&journal.operation_id)
                 .await
                 .expect("read resolution journal")
@@ -207,7 +209,7 @@ impl ConflictFixture {
     async fn journal_resolution(&self, chosen: &CircleControlCoord) -> CircleOperationJournal {
         let store = self
             .store
-            .bind_device(&self.db1, &self.founder)
+            .bind_device(&self.db1, self.dir1.clone(), &self.founder)
             .await
             .expect("authorize Circle resolution");
         let mut authority = store
@@ -228,7 +230,7 @@ impl ConflictFixture {
             .prepare_request(request)
             .await
             .expect("prepare resolution operation");
-        StoreDatabase::new(self.db1.database())
+        StoreDatabase::new(&self.db1)
             .insert_circle_operation(prepared.journal.clone(), prepared.prepared_objects)
             .await
             .expect("journal the resolution before publication");
@@ -260,7 +262,7 @@ async fn concurrent_successors_retain_and_surface_as_a_conflict() {
     assert!(rename.is_err(), "conflicted Circle refuses authoring");
 
     // Package publication refuses too: no active publication key.
-    let package = StoreDatabase::new(fixture.db1.database())
+    let package = StoreDatabase::new(&fixture.db1)
         .circle_publication_context(
             fixture.circle_id,
             fixture.conflict_branches_device1().await[0].clone(),
@@ -425,7 +427,7 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
     let (chosen, _losing) = fixture.fork().await;
     let store = fixture
         .store
-        .bind_device(&fixture.db1, &fixture.founder)
+        .bind_device(&fixture.db1, fixture.dir1.clone(), &fixture.founder)
         .await
         .expect("authorize Circle resolution");
     let mut authority = store
@@ -499,8 +501,9 @@ async fn stale_resolution_is_refused_and_a_late_branch_resurfaces_the_conflict()
 /// owner's production sync components (to add the member and close over its
 /// removal) and a registered second founder device that can author a concurrent
 /// successor.
-fn open_routing_db() -> SyntheticStoreFixture {
+fn open_routing_db(store_dir: coven_foundation::store_dir::StoreDir) -> Database {
     crate::sync::test_helpers::open_test_db_schema(
+        store_dir,
         vec![coven_protocol::synced_schema::SyncedTable::new(
             "documents",
             coven_protocol::synced_schema::RowIdentity::IndependentUuid,
@@ -523,13 +526,14 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     use crate::sync::cycle::{PreparedSyncComponents, StoreInitialization};
     use coven_protocol::membership::MemberRole;
 
-    let db1 = open_routing_db();
+    let db1_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db1 = open_routing_db(db1_store_dir.clone());
     let (store_fixture, _home, founder, journal) =
-        persist_merge_operation_fixture(&db1, "resolve-closing").await;
-    let (store, cloud_storage) = (store_fixture).into_parts();
+        persist_merge_operation_fixture(&db1, db1_store_dir.clone(), "resolve-closing").await;
+    let (store, cloud_storage) = store_fixture;
     let circle_id = journal.circle_id();
     store
-        .bind_device(&db1, &founder)
+        .bind_device_in(&db1, db1_store_dir.clone(), &founder)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -542,6 +546,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     store
         .invite_member(
             &db1,
+            db1_store_dir.clone(),
             &founder,
             &member_pubkey,
             None,
@@ -551,13 +556,21 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         )
         .await
         .expect("invite Store member");
-    let member_db = open_routing_db();
+    let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let member_db = open_routing_db(member_db_store_dir.clone());
     store
-        .activate_joined_device(&db1, &member_db, &member, "0000000001100-0000-member")
+        .activate_joined_device(
+            &db1,
+            db1_store_dir.clone(),
+            &member_db,
+            member_db_store_dir.clone(),
+            &member,
+            "0000000001100-0000-member",
+        )
         .await
         .expect("activate Store member device");
 
-    let (_store_temp, store_dir) = temp_store_dir();
+    let store_dir = db1_store_dir.clone();
     let owner_storage = coven_storage::CloudSyncConnection::new(
         _home.clone(),
         coven_storage::CloudCipher::Encrypted(routing()),
@@ -566,12 +579,8 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         founder.clone(),
     );
     let components = PreparedSyncComponents::prepare(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         store_dir.clone(),
-        crate::sync::test_owner_graph::local_blob_access(
-            StoreDatabase::new(db1.database()),
-            store_dir.clone(),
-        ),
         owner_storage,
         founder.clone(),
         StoreInitialization::OpenStore {
@@ -591,14 +600,22 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 
     // The founder's second device pulls the with-member Circle so it can author a
     // successor concurrent with the removal.
-    let db2 = open_routing_db();
+    let db2_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db2 = open_routing_db(db2_store_dir.clone());
     store
-        .activate_joined_device(&db1, &db2, &founder, "0000000001100-0000-device2")
+        .activate_joined_device(
+            &db1,
+            db1_store_dir.clone(),
+            &db2,
+            db2_store_dir.clone(),
+            &founder,
+            "0000000001100-0000-device2",
+        )
         .await
         .expect("register the founder's second device");
-    let (_dir2, dir2) = temp_store_dir();
+    let dir2 = db2_store_dir.clone();
     Store::load(
-        StoreDatabase::new(db2.database()),
+        StoreDatabase::new(&db2),
         cloud_storage.clone(),
         dir2.clone(),
         founder.clone(),
@@ -615,7 +632,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // Each founder device removes the same member from the shared predecessor
     // without seeing the other's close, producing two concurrent close controls.
     Store::load(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
@@ -627,7 +644,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .await
     .expect("device 1 authors an epoch close");
     Store::load(
-        StoreDatabase::new(db2.database()),
+        StoreDatabase::new(&db2),
         cloud_storage.clone(),
         dir2,
         founder.clone(),
@@ -640,7 +657,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .expect("device 2 authors a concurrent epoch close");
 
     Store::load(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
@@ -653,7 +670,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .pull(Some(&routing()))
     .await
     .expect("device 1 pulls the concurrent close");
-    let branches = StoreDatabase::new(db1.database())
+    let branches = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
         .expect("read conflict branches")
@@ -663,7 +680,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let mut closing = Vec::new();
     for branch in &branches {
         let activation = store
-            .bind_device(&db1, &founder)
+            .bind_device_in(&db1, db1_store_dir.clone(), &founder)
             .await
             .expect("bind branch Store")
             .verified_circle_activation_for_test(circle_id, branch.clone())
@@ -684,7 +701,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // participant responses, which bind to the closing control at create-once
     // slots.
     let error = Store::load(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
@@ -706,7 +723,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     // the Circle remains conflicted until the Owner explicitly selects the
     // reopened branch.
     Store::load(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         cloud_storage.clone(),
         store_dir.clone(),
         founder.clone(),
@@ -717,7 +734,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .cancel_circle_epoch_close(circle_id)
     .await
     .expect("cancel device 1's close while conflicted");
-    let after_cancel = StoreDatabase::new(db1.database())
+    let after_cancel = StoreDatabase::new(&db1)
         .circle_control_conflict_branches(circle_id)
         .await
         .expect("read conflict after cancellation")
@@ -726,7 +743,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let mut closing_count = 0;
     for branch in &after_cancel {
         let activation = store
-            .bind_device(&db1, &founder)
+            .bind_device_in(&db1, db1_store_dir.clone(), &founder)
             .await
             .expect("bind post-cancellation branch Store")
             .verified_circle_activation_for_test(circle_id, branch.clone())
@@ -749,7 +766,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     let reopened = reopened.expect("one branch is the cancelled close's active successor");
     assert_eq!(closing_count, 1, "the concurrent close remains retained");
     Store::load(
-        StoreDatabase::new(db1.database()),
+        StoreDatabase::new(&db1),
         cloud_storage,
         store_dir,
         founder.clone(),
@@ -760,7 +777,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
     .resolve_circle_control(circle_id, reopened)
     .await
     .expect("resolve to the reopened branch");
-    let circles = StoreDatabase::new(db1.database())
+    let circles = StoreDatabase::new(&db1)
         .get_circles(
             &keys::public_key_hex(&founder),
             BTreeSet::from([keys::public_key_hex(&founder)]),
@@ -779,7 +796,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
 #[tokio::test]
 async fn resolving_a_nonconflicted_circle_is_refused() {
     let fixture = ConflictFixture::build("resolve-nonconflicted").await;
-    let (chosen, _commit) = StoreDatabase::new(fixture.db1.database())
+    let (chosen, _commit) = StoreDatabase::new(&fixture.db1)
         .circle_authoring_context(fixture.circle_id, &fixture.founder_pubkey)
         .await
         .expect("read the active founder control");
@@ -810,6 +827,7 @@ async fn non_owner_resolution_is_refused() {
         .store
         .invite_member(
             &fixture.db1,
+            fixture.dir1.clone(),
             &fixture.founder,
             &outsider_pubkey,
             None,
@@ -819,12 +837,15 @@ async fn non_owner_resolution_is_refused() {
         )
         .await
         .expect("invite a non-owner Store member");
-    let outsider_db = open_test_db();
+    let outsider_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let outsider_db = crate::sync::test_helpers::open_test_db(outsider_db_store_dir.clone());
     fixture
         .store
         .activate_joined_device(
             &fixture.db1,
+            fixture.dir1.clone(),
             &outsider_db,
+            outsider_db_store_dir.clone(),
             &outsider,
             "0000000001600-0000-outsider",
         )
@@ -833,11 +854,10 @@ async fn non_owner_resolution_is_refused() {
 
     let (chosen, _losing) = fixture.fork().await;
 
-    let (_outsider_dir_temp, outsider_dir) = temp_store_dir();
     Store::load(
-        StoreDatabase::new(outsider_db.database()),
+        StoreDatabase::new(&outsider_db),
         fixture.cloud_storage.clone(),
-        outsider_dir.clone(),
+        outsider_db_store_dir.clone(),
         outsider.clone(),
     )
     .await
@@ -849,7 +869,7 @@ async fn non_owner_resolution_is_refused() {
     .await
     .expect("non-owner pulls the public conflict");
     assert!(
-        StoreDatabase::new(outsider_db.database())
+        StoreDatabase::new(&outsider_db)
             .circle_control_conflict_branches(fixture.circle_id)
             .await
             .expect("read non-owner conflict view")
@@ -858,9 +878,9 @@ async fn non_owner_resolution_is_refused() {
     );
 
     let error = Store::load(
-        StoreDatabase::new(outsider_db.database()),
+        StoreDatabase::new(&outsider_db),
         fixture.cloud_storage.clone(),
-        outsider_dir,
+        outsider_db_store_dir,
         outsider.clone(),
     )
     .await
@@ -884,7 +904,11 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     let journal = before_publication.journal_resolution(&chosen).await;
     before_publication
         .store
-        .bind_device(&before_publication.db1, &before_publication.founder)
+        .bind_device(
+            &before_publication.db1,
+            before_publication.dir1.clone(),
+            &before_publication.founder,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -893,7 +917,11 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     // A second resume is idempotent — the operation has already cleared.
     before_publication
         .store
-        .bind_device(&before_publication.db1, &before_publication.founder)
+        .bind_device(
+            &before_publication.db1,
+            before_publication.dir1.clone(),
+            &before_publication.founder,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -915,7 +943,7 @@ async fn resolution_resumes_idempotently_after_a_restart() {
     let journal = after_publication.journal_resolution(&chosen).await;
     // The founder control and both conflicting branches are already activated;
     // the resolution must not add its activation while it is interrupted.
-    let activations_before = StoreDatabase::new(after_publication.db1.database())
+    let activations_before = StoreDatabase::new(&after_publication.db1)
         .circle_control_activation_count_for_test(after_publication.circle_id)
         .await
         .expect("count circle activations");
@@ -926,7 +954,11 @@ async fn resolution_resumes_idempotently_after_a_restart() {
 
     let interrupted = after_publication
         .store
-        .bind_device(&after_publication.db1, &after_publication.founder)
+        .bind_device(
+            &after_publication.db1,
+            after_publication.dir1.clone(),
+            &after_publication.founder,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
@@ -937,14 +969,14 @@ async fn resolution_resumes_idempotently_after_a_restart() {
         "{interrupted}"
     );
     assert_eq!(
-        StoreDatabase::new(after_publication.db1.database())
+        StoreDatabase::new(&after_publication.db1)
             .circle_control_activation_count_for_test(after_publication.circle_id)
             .await
             .expect("count circle activations"),
         activations_before,
         "the interrupted resolution has not activated"
     );
-    let persisted = StoreDatabase::new(after_publication.db1.database())
+    let persisted = StoreDatabase::new(&after_publication.db1)
         .circle_operation(&journal.operation_id)
         .await
         .expect("read interrupted resolution")
@@ -953,7 +985,11 @@ async fn resolution_resumes_idempotently_after_a_restart() {
 
     after_publication
         .store
-        .bind_device(&after_publication.db1, &after_publication.founder)
+        .bind_device(
+            &after_publication.db1,
+            after_publication.dir1.clone(),
+            &after_publication.founder,
+        )
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()

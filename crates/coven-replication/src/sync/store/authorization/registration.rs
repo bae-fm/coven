@@ -33,43 +33,46 @@ pub enum StoreRegistrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::test_helpers::{
-        open_test_db, SyntheticStoreFixture, TestStore, TestStoreFixture,
-    };
+    use crate::sync::test_helpers::TestStore;
+    use coven_database::Database;
     use coven_protocol::store_commit::StoreBatchCommitRef;
     use coven_storage::CloudSyncObjectStorage;
 
     async fn initialized() -> (
         std::sync::Arc<TestStore>,
-        SyntheticStoreFixture,
+        Database,
+        coven_foundation::store_dir::StoreDir,
         UserKeypair,
     ) {
         let signer = UserKeypair::generate();
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let store = TestStore::create(
             &db,
+            db_store_dir.clone(),
             "registration-store-test",
             signer.clone(),
             crate::sync::test_helpers::test_cloud_home(),
         )
         .await
         .expect("create exact registration test Store");
-        (store, db, signer)
+        (store, db, db_store_dir, signer)
     }
 
     async fn recovered_author() -> (
         std::sync::Arc<TestStore>,
-        SyntheticStoreFixture,
+        Database,
+        coven_foundation::store_dir::StoreDir,
         StoreDeviceRegistrationRef,
         StoreBatchCommitRef,
     ) {
-        let (store, db, signer) = initialized().await;
+        let (store, db, db_store_dir, signer) = initialized().await;
         let loaded = store
-            .bind_device(&db, &signer)
+            .bind_device(&db, db_store_dir.clone(), &signer)
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = coven_database::StoreDatabase::new(db.database());
+        let database = coven_database::StoreDatabase::new(&db);
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -78,7 +81,7 @@ mod tests {
             .await
             .expect("recover Owner device");
         let loaded = store
-            .bind_device(&db, &signer)
+            .bind_device(&db, db_store_dir.clone(), &signer)
             .await
             .expect("reload recovered Store");
         for reference in database
@@ -92,7 +95,7 @@ mod tests {
                 .await
                 .expect("load materialized recovery commit");
             if commit.value().author_registration == registration {
-                return (store, db, registration, reference);
+                return (store, db, db_store_dir, registration, reference);
             }
         }
         panic!("recovery commit is materialized")
@@ -100,18 +103,21 @@ mod tests {
 
     #[tokio::test]
     async fn store_root_state_failures_keep_registration_error_variants() {
-        let db = open_test_db();
-        let database = coven_database::StoreDatabase::new(db.database());
-        let initialized_db = open_test_db();
-        let (_, cloud_storage) = (TestStoreFixture::create(
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+        let database = coven_database::StoreDatabase::new(&db);
+        let initialized_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let initialized_db =
+            crate::sync::test_helpers::open_test_db(initialized_db_store_dir.clone());
+        let (_, cloud_storage) = TestStore::create_with_connection(
             &initialized_db,
+            initialized_db_store_dir.clone(),
             "registration-missing-root-storage",
             UserKeypair::generate(),
             crate::sync::test_helpers::test_cloud_home(),
         )
         .await
-        .expect("create registration failure test Store"))
-        .into_parts();
+        .expect("create registration failure test Store");
 
         let result = super::RegistrationOutbox::new(database, &*cloud_storage)
             .drain()
@@ -127,10 +133,10 @@ mod tests {
 
     #[tokio::test]
     async fn exact_founder_registration_is_already_activated() {
-        let (store, db, signer) = initialized().await;
-        let database = coven_database::StoreDatabase::new(db.database());
+        let (store, db, db_store_dir, signer) = initialized().await;
+        let database = coven_database::StoreDatabase::new(&db);
         let loaded = store
-            .bind_device(&db, &signer)
+            .bind_device(&db, db_store_dir.clone(), &signer)
             .await
             .expect("load founder Store");
         loaded
@@ -147,13 +153,13 @@ mod tests {
 
     #[tokio::test]
     async fn owner_recovery_publishes_and_activates_replacement_device() {
-        let (store, db, signer) = initialized().await;
+        let (store, db, db_store_dir, signer) = initialized().await;
         let loaded = store
-            .bind_device(&db, &signer)
+            .bind_device(&db, db_store_dir.clone(), &signer)
             .await
             .expect("load recovery Store");
         let authority = store.founder_recovery_authority().await;
-        let database = coven_database::StoreDatabase::new(db.database());
+        let database = coven_database::StoreDatabase::new(&db);
         let registration = loaded
             .owner_recovery_for_test()
             .await
@@ -170,7 +176,7 @@ mod tests {
         assert_eq!(durable.device_id, registration.device_id);
         assert!(durable.is_activated());
         let loaded = store
-            .bind_device(&db, &signer)
+            .bind_device(&db, db_store_dir.clone(), &signer)
             .await
             .expect("load recovered Owner Store");
         loaded
@@ -181,14 +187,13 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_materialization_reopens_its_retained_introduced_author() {
-        let (_store, db, registration, reference) = recovered_author().await;
+        let (_store, db, _db_store_dir, registration, reference) = recovered_author().await;
         let registration = registration.clone();
-        db.database()
-            .corrupt_store_device_registration_bytes_for_test(registration)
+        db.corrupt_store_device_registration_bytes_for_test(registration)
             .await
             .expect("corrupt activated recovery registration fixture");
 
-        let frontier = coven_database::StoreDatabase::new(db.database())
+        let frontier = coven_database::StoreDatabase::new(&db)
             .materialized_frontier()
             .await
             .expect("retained recovery author does not depend on mutable registration rows");
@@ -198,35 +203,32 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_bytes() {
-        let (store, db, _registration, reference) = recovered_author().await;
-        db.database()
-            .tamper_retained_recovery_registration_for_test(
-                &reference,
-                coven_database::RetainedRegistrationTamper::CanonicalRegistration,
-            )
-            .await;
+        let (store, db, _db_store_dir, _registration, reference) = recovered_author().await;
+        db.tamper_retained_recovery_registration_for_test(
+            &reference,
+            coven_database::RetainedRegistrationTamper::CanonicalRegistration,
+        )
+        .await;
 
         let root = store.root().clone();
-        db.database()
-            .validate_retained_merge_replay_for_test(root)
+        db.validate_retained_merge_replay_for_test(root)
             .await
             .expect_err(
-                "tampered retained recovery registration bytes must fail durable history verification",
-            );
+            "tampered retained recovery registration bytes must fail durable history verification",
+        );
     }
 
     #[tokio::test]
     async fn recovery_materialization_rejects_tampered_retained_registration_authority() {
-        let (store, db, _registration, reference) = recovered_author().await;
-        db.database()
-            .tamper_retained_recovery_registration_for_test(
-                &reference,
-                coven_database::RetainedRegistrationTamper::ActivationAuthority,
-            )
-            .await;
+        let (store, db, _db_store_dir, _registration, reference) = recovered_author().await;
+        db.tamper_retained_recovery_registration_for_test(
+            &reference,
+            coven_database::RetainedRegistrationTamper::ActivationAuthority,
+        )
+        .await;
 
         let root = store.root().clone();
-        db.database()
+        db
             .validate_retained_merge_replay_for_test(root)
             .await
             .expect_err(
@@ -238,23 +240,24 @@ mod tests {
     async fn owner_recovery_retry_reuses_each_published_readiness_prefix() {
         for failed_call in [2, 3, 4] {
             let signer = UserKeypair::generate();
-            let db = open_test_db();
+            let db_store_dir = crate::sync::test_helpers::test_store_dir();
+            let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
             let home = crate::sync::test_helpers::test_cloud_home();
-            let (store, cloud_storage) = (TestStoreFixture::create(
+            let (store, cloud_storage) = TestStore::create_with_connection(
                 &db,
+                db_store_dir.clone(),
                 &format!("recovery-prefix-{failed_call}"),
                 signer.clone(),
                 home.clone(),
             )
             .await
-            .expect("create recovery prefix Store"))
-            .into_parts();
+            .expect("create recovery prefix Store");
             let loaded = store
-                .bind_device(&db, &signer)
+                .bind_device(&db, db_store_dir.clone(), &signer)
                 .await
                 .expect("load recovery Store");
             let authority = store.founder_recovery_authority().await;
-            let database = coven_database::StoreDatabase::new(db.database());
+            let database = coven_database::StoreDatabase::new(&db);
             let mut recovery = loaded
                 .owner_recovery_for_test()
                 .await

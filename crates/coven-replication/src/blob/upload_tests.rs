@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
 use coven_database::StoreDatabase;
-use coven_database::{DbError, SyntheticStoreFixture};
+use coven_database::{Database, DbError};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
@@ -254,8 +254,9 @@ impl ExactSlotStorage for InstrumentedHome {
 }
 
 struct UploadFixture {
-    db: SyntheticStoreFixture,
+    db: Database,
     database: StoreDatabase,
+    store_dir: StoreDir,
     device: crate::sync::test_helpers::TestDevice,
     storage: Arc<CloudSyncConnection>,
     home: Arc<InstrumentedHome>,
@@ -271,8 +272,10 @@ impl UploadFixture {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
         };
-        let db = SyntheticStoreFixture::open(
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = Database::open_synthetic_for_test(
             std::path::Path::new(":memory:"),
+            db_store_dir.clone(),
             test_synced_tables_with_blob(BlobDecl::new(
                 "photos",
                 Provenance::UserProvided,
@@ -295,6 +298,7 @@ impl UploadFixture {
         ));
         let device = crate::sync::test_helpers::TestDevice::create(
             &db,
+            db_store_dir.clone(),
             storage.clone(),
             "upload-store",
             owner,
@@ -302,10 +306,11 @@ impl UploadFixture {
         .await
         .expect("initialize exact local blob authority");
         home.reset_observations();
-        let database = coven_database::StoreDatabase::new(db.database());
+        let database = coven_database::StoreDatabase::new(&db);
         Self {
             db,
             database,
+            store_dir: db_store_dir,
             device,
             storage,
             home,
@@ -314,17 +319,14 @@ impl UploadFixture {
 
     async fn drain(
         &self,
-        store_dir: &StoreDir,
         clock: &dyn Clock,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<DrainOutcome, DbError> {
-        self.device
-            .drain_uploads(store_dir, clock, None, observer)
-            .await
+        self.device.drain_uploads(clock, None, observer).await
     }
 
     async fn journal(&self, blob_id: &str) -> coven_database::OutboxEntry {
-        coven_database::StoreDatabase::new(self.db.database())
+        coven_database::StoreDatabase::new(&self.db)
             .pending_blob_uploads()
             .await
             .expect("read upload journals")
@@ -342,26 +344,21 @@ impl UploadFixture {
     async fn journal_attempt(&self, blob_id: &str) -> coven_database::OutboxAttempt {
         let blob_id = blob_id.to_string();
         self.db
-            .database()
             .upload_outbox_attempt_for_test(&blob_id)
             .await
             .expect("read journal attempt")
             .expect("journal exists")
     }
 
-    async fn plant_local_rows(
-        &self,
-        store_dir: &StoreDir,
-        rows: &[(&str, &[u8])],
-    ) -> Vec<std::path::PathBuf> {
+    async fn plant_local_rows(&self, rows: &[(&str, &[u8])]) -> Vec<std::path::PathBuf> {
         self.db
-            .database()
             .insert_local_upload_rows_for_test(ROOT_ID, rows)
             .await
             .expect("plant exact Local blob rows");
         let mut paths = Vec::new();
         for (id, bytes) in rows {
-            let path = store_dir
+            let path = self
+                .store_dir
                 .db_path()
                 .parent()
                 .expect("Store directory has a parent")
@@ -369,7 +366,7 @@ impl UploadFixture {
             coven_foundation::local_file::AtomicStagedFile::write_for_test(&path, bytes)
                 .await
                 .expect("write exact upload source");
-            coven_database::StoreDatabase::new(self.db.database())
+            coven_database::StoreDatabase::new(&self.db)
                 .register_external_blob_for_test("note_photos", id, &path)
                 .await;
             paths.push(path);
@@ -379,14 +376,13 @@ impl UploadFixture {
 
     async fn plant_uploads(
         &self,
-        store_dir: &StoreDir,
         rows: &[(&str, &[u8])],
         retain_pinned: bool,
     ) -> Vec<std::path::PathBuf> {
-        let paths = self.plant_local_rows(store_dir, rows).await;
+        let paths = self.plant_local_rows(rows).await;
         crate::sync::test_owner_graph::TestOwnerGraph::new(
             self.database.clone(),
-            store_dir.clone(),
+            self.store_dir.clone(),
         )
         .make_remote("notes", ROOT_ID, retain_pinned)
         .await
@@ -394,7 +390,7 @@ impl UploadFixture {
         paths
     }
 
-    async fn seed_uploads(&self, store_dir: &StoreDir, count: usize) -> Vec<String> {
+    async fn seed_uploads(&self, count: usize) -> Vec<String> {
         let owned = (0..count)
             .map(|index| {
                 (
@@ -407,7 +403,7 @@ impl UploadFixture {
             .iter()
             .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
             .collect::<Vec<_>>();
-        self.plant_uploads(store_dir, &borrowed, false).await;
+        self.plant_uploads(&borrowed, false).await;
         owned.into_iter().map(|(id, _)| id).collect()
     }
 }
@@ -540,12 +536,8 @@ impl BlobTransitionObserver for PausingObserver {
 #[tokio::test]
 async fn empty_queue_reports_itself_rather_than_a_zero_count() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert!(matches!(outcome, DrainOutcome::QueueEmpty));
     assert_eq!(fixture.home.create_calls(), 0);
 }
@@ -553,14 +545,13 @@ async fn empty_queue_reports_itself_rather_than_a_zero_count() {
 #[tokio::test]
 async fn successful_drain_does_not_read_uploaded_body_from_provider() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("noread01", b"retained spool bytes")], false)
+        .plant_uploads(&[("noread01", b"retained spool bytes")], false)
         .await;
     let reads_before = fixture.home.exact_reads().len();
 
     let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
+        .drain(&fixed_clock(T0), None)
         .await
         .expect("publish queued blob");
 
@@ -578,14 +569,13 @@ async fn successful_drain_does_not_read_uploaded_body_from_provider() {
 #[tokio::test]
 async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("twice001", b"bytes")], false)
+        .plant_uploads(&[("twice001", b"bytes")], false)
         .await;
 
     assert_eq!(
         fixture
-            .drain(&store_dir, &fixed_clock(T0), None)
+            .drain(&fixed_clock(T0), None)
             .await
             .unwrap()
             .uploaded(),
@@ -593,10 +583,7 @@ async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
     );
     assert!(is_created(&fixture.journal("twice001").await));
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(
         outcome.uploaded(),
         0,
@@ -613,16 +600,12 @@ async fn a_second_pass_over_a_created_entry_drains_without_counting_it() {
 #[tokio::test]
 async fn provider_upload_failure_remains_typed() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("fail0001", b"provider upload")], false)
+        .plant_uploads(&[("fail0001", b"provider upload")], false)
         .await;
     fixture.home.fail_creates();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(outcome.failures().has_transport_failure());
     assert!(crate::sync::cycle::SyncCycleFailure::operation(
@@ -635,20 +618,12 @@ async fn provider_upload_failure_remains_typed() {
 #[tokio::test]
 async fn bad_item_does_not_block_good_later_item() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let paths = fixture
-        .plant_uploads(
-            &store_dir,
-            &[("bad00001", b"bad"), ("good0001", b"good")],
-            false,
-        )
+        .plant_uploads(&[("bad00001", b"bad"), ("good0001", b"good")], false)
         .await;
     tokio::fs::remove_file(&paths[0]).await.unwrap();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.uploaded(), 1);
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(matches!(
@@ -662,16 +637,12 @@ async fn bad_item_does_not_block_good_later_item() {
 #[tokio::test]
 async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("rotate01", b"bytes")], false)
+        .plant_uploads(&[("rotate01", b"bytes")], false)
         .await;
     fixture.storage.mark_rotation_committed_for_test(2).unwrap();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.uploaded(), 0);
     assert_eq!(fixture.home.create_calls(), 0);
     let (_, error, _) = fixture.journal_attempt("rotate01").await;
@@ -681,22 +652,18 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
 #[tokio::test]
 async fn failure_persists_attempt_count_and_last_error() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("retry001", b"bytes")], false)
+        .plant_uploads(&[("retry001", b"bytes")], false)
         .await;
     fixture.home.fail_creates();
 
-    fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    fixture.drain(&fixed_clock(T0), None).await.unwrap();
     let (attempt, error, _) = fixture.journal_attempt("retry001").await;
     assert_eq!(attempt, 1);
     assert!(error.unwrap().contains("induced exact create failure"));
 
     fixture
-        .drain(&store_dir, &fixed_clock("2024-06-01T00:00:31Z"), None)
+        .drain(&fixed_clock("2024-06-01T00:00:31Z"), None)
         .await
         .unwrap();
     assert_eq!(fixture.journal_attempt("retry001").await.0, 2);
@@ -706,24 +673,19 @@ async fn failure_persists_attempt_count_and_last_error() {
 #[tokio::test]
 async fn backoff_skips_item_inside_window() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("backoff1", b"bytes")], false)
+        .plant_uploads(&[("backoff1", b"bytes")], false)
         .await;
     fixture.home.fail_creates();
     let entry = fixture.journal("backoff1").await;
-    coven_database::StoreDatabase::new(fixture.db.database())
+    coven_database::StoreDatabase::new(&fixture.db)
         .record_outbox_failure(&entry, "prior", T0)
         .await
         .unwrap();
 
     let observer = RecordingObserver::new();
     let outcome = fixture
-        .drain(
-            &store_dir,
-            &fixed_clock("2024-06-01T00:00:10Z"),
-            Some(&observer),
-        )
+        .drain(&fixed_clock("2024-06-01T00:00:10Z"), Some(&observer))
         .await
         .unwrap();
     // The entry is still queued, just not due — reported as its own disposition
@@ -734,11 +696,7 @@ async fn backoff_skips_item_inside_window() {
     assert_eq!(fixture.journal_attempt("backoff1").await.0, 1);
 
     fixture
-        .drain(
-            &store_dir,
-            &fixed_clock("2024-06-01T00:00:31Z"),
-            Some(&observer),
-        )
+        .drain(&fixed_clock("2024-06-01T00:00:31Z"), Some(&observer))
         .await
         .unwrap();
     assert_eq!(fixture.home.create_calls(), 1);
@@ -748,25 +706,19 @@ async fn backoff_skips_item_inside_window() {
 #[tokio::test]
 async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(
-            &store_dir,
-            &[("healthy1", b"healthy"), ("badtime1", b"corrupt")],
-            false,
-        )
+        .plant_uploads(&[("healthy1", b"healthy"), ("badtime1", b"corrupt")], false)
         .await;
     let entry = fixture.journal("badtime1").await;
     let entry_id = entry.id;
     fixture
         .db
-        .database()
         .corrupt_upload_outbox_attempt_time_for_test(entry_id)
         .await
         .expect("corrupt last_attempt_at");
 
     let result = fixture
-        .drain(&store_dir, &fixed_clock("2024-06-01T00:00:10Z"), None)
+        .drain(&fixed_clock("2024-06-01T00:00:10Z"), None)
         .await;
     let error = match result {
         Ok(_) => panic!("a corrupt retry timestamp must fail the drain"),
@@ -796,14 +748,13 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
 #[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("observe1", b"bytes")], false)
+        .plant_uploads(&[("observe1", b"bytes")], false)
         .await;
     let observer = RecordingObserver::new();
 
     fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -819,15 +770,14 @@ async fn observer_fires_started_then_uploaded_on_success() {
 #[tokio::test]
 async fn observer_fires_started_then_failed_on_failure() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("observe2", b"bytes")], false)
+        .plant_uploads(&[("observe2", b"bytes")], false)
         .await;
     fixture.home.fail_creates();
     let observer = RecordingObserver::new();
 
     fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -839,18 +789,15 @@ async fn observer_fires_started_then_failed_on_failure() {
 #[tokio::test(start_paused = true)]
 async fn observer_receives_advancing_midfile_progress() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let bytes = vec![7; 10_000];
-    fixture
-        .plant_uploads(&store_dir, &[("progress", &bytes)], false)
-        .await;
+    fixture.plant_uploads(&[("progress", &bytes)], false).await;
     fixture
         .home
         .slow_creates(1000, std::time::Duration::from_millis(500));
     let observer = RecordingObserver::new();
 
     fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
 
@@ -870,13 +817,9 @@ async fn observer_receives_advancing_midfile_progress() {
 #[tokio::test]
 async fn enqueue_upload_on_is_transactional_with_host_writes() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let paths = fixture
-        .plant_local_rows(&store_dir, &[("transact", b"bytes")])
-        .await;
+    let paths = fixture.plant_local_rows(&[("transact", b"bytes")]).await;
     let row = fixture
         .db
-        .database()
         .row_blob_ref("note_photos", "transact")
         .await
         .unwrap();
@@ -885,11 +828,10 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
     let rollback_path = paths[0].clone();
     fixture
         .db
-        .database()
         .roll_back_blob_upload_for_test("notes", ROOT_ID, rollback_row, rollback_path, T0)
         .await
         .unwrap();
-    assert!(coven_database::StoreDatabase::new(fixture.db.database())
+    assert!(coven_database::StoreDatabase::new(&fixture.db)
         .pending_blob_uploads()
         .await
         .unwrap()
@@ -897,7 +839,6 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
 
     fixture
         .db
-        .database()
         .enqueue_blob_upload_with_retention_for_test(
             "notes",
             ROOT_ID,
@@ -909,7 +850,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
         .await
         .unwrap();
     assert_eq!(
-        coven_database::StoreDatabase::new(fixture.db.database())
+        coven_database::StoreDatabase::new(&fixture.db)
             .pending_blob_uploads()
             .await
             .unwrap()
@@ -921,15 +862,12 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
 #[tokio::test]
 async fn pinned_upload_populates_the_protected_cache_folder() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let bytes = b"PINNED-AUDIO-BYTES";
-    fixture
-        .plant_uploads(&store_dir, &[("pinaaaa1", bytes)], true)
-        .await;
+    fixture.plant_uploads(&[("pinaaaa1", bytes)], true).await;
 
     assert_eq!(
         fixture
-            .drain(&store_dir, &fixed_clock(T0), None)
+            .drain(&fixed_clock(T0), None)
             .await
             .unwrap()
             .uploaded(),
@@ -937,9 +875,13 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
     );
     let entry = fixture.journal("pinaaaa1").await;
     let locator_hash = created_stored(&entry).locator().locator_hash();
-    let pinned = store_dir.pinned_blob_path("photos", locator_hash).unwrap();
+    let pinned = fixture
+        .store_dir
+        .pinned_blob_path("photos", locator_hash)
+        .unwrap();
     assert_eq!(tokio::fs::read(pinned).await.unwrap(), bytes);
-    assert!(!store_dir
+    assert!(!fixture
+        .store_dir
         .cache_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
@@ -954,22 +896,20 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
 #[tokio::test]
 async fn unpinned_upload_populates_nothing_on_write() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     fixture
-        .plant_uploads(&store_dir, &[("unpaaaa1", b"UNPINNED")], false)
+        .plant_uploads(&[("unpaaaa1", b"UNPINNED")], false)
         .await;
 
-    fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    fixture.drain(&fixed_clock(T0), None).await.unwrap();
     let entry = fixture.journal("unpaaaa1").await;
     let locator_hash = created_stored(&entry).locator().locator_hash();
-    assert!(!store_dir
+    assert!(!fixture
+        .store_dir
         .pinned_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
-    assert!(!store_dir
+    assert!(!fixture
+        .store_dir
         .cache_blob_path("photos", locator_hash)
         .unwrap()
         .exists());
@@ -979,18 +919,16 @@ async fn unpinned_upload_populates_nothing_on_write() {
 #[tokio::test]
 async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let pinned_namespace = store_dir.storage_dir().join("pinned").join("photos");
+    let pinned_namespace = fixture
+        .store_dir
+        .storage_dir()
+        .join("pinned")
+        .join("photos");
     std::fs::create_dir_all(pinned_namespace.parent().unwrap()).unwrap();
     std::fs::write(&pinned_namespace, b"blocker").unwrap();
-    fixture
-        .plant_uploads(&store_dir, &[("pinfail1", b"PIN")], true)
-        .await;
+    fixture.plant_uploads(&[("pinfail1", b"PIN")], true).await;
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.uploaded(), 0);
     assert_eq!(outcome.failures().failures().len(), 1);
     let entry = fixture.journal("pinfail1").await;
@@ -1005,12 +943,11 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
 #[tokio::test]
 async fn limit_one_drains_every_entry_in_order() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = fixture.seed_uploads(&store_dir, 3).await;
+    let ids = fixture.seed_uploads(3).await;
     let observer = RecordingObserver::new();
 
     let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 3);
@@ -1043,14 +980,10 @@ async fn limit_one_drains_every_entry_in_order() {
 async fn concurrent_drain_overlaps_up_to_the_limit() {
     let home = Arc::new(InstrumentedHome::with_barrier(Some(2)));
     let fixture = UploadFixture::with_home(2, home.clone()).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = fixture.seed_uploads(&store_dir, 4).await;
+    let ids = fixture.seed_uploads(4).await;
     home.enable_barrier();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.uploaded(), 4);
     assert_eq!(home.max_inflight(), 2);
     assert_eq!(home.keys().len(), 4);
@@ -1062,10 +995,8 @@ async fn concurrent_drain_overlaps_up_to_the_limit() {
 #[tokio::test]
 async fn concurrent_drain_isolates_a_failed_upload() {
     let fixture = UploadFixture::new(3).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
     let paths = fixture
         .plant_uploads(
-            &store_dir,
             &[
                 ("good000a", b"aaa"),
                 ("bad0000b", b"bbb"),
@@ -1076,10 +1007,7 @@ async fn concurrent_drain_isolates_a_failed_upload() {
         .await;
     tokio::fs::remove_file(&paths[1]).await.unwrap();
 
-    let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), None)
-        .await
-        .unwrap();
+    let outcome = fixture.drain(&fixed_clock(T0), None).await.unwrap();
     assert_eq!(outcome.uploaded(), 2);
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(is_created(&fixture.journal("good000a").await));
@@ -1090,12 +1018,11 @@ async fn concurrent_drain_isolates_a_failed_upload() {
 #[tokio::test]
 async fn paused_queue_admits_nothing_under_concurrency() {
     let fixture = UploadFixture::new(3).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = fixture.seed_uploads(&store_dir, 3).await;
+    let ids = fixture.seed_uploads(3).await;
     let observer = PausingObserver::new(0);
 
     let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     // The pass reports the pause rather than a zero count, so a caller cannot
@@ -1111,12 +1038,11 @@ async fn paused_queue_admits_nothing_under_concurrency() {
 #[tokio::test]
 async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     let fixture = UploadFixture::new(1).await;
-    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-    let ids = fixture.seed_uploads(&store_dir, 2).await;
+    let ids = fixture.seed_uploads(2).await;
     let observer = PausingObserver::new(1);
 
     let outcome = fixture
-        .drain(&store_dir, &fixed_clock(T0), Some(&observer))
+        .drain(&fixed_clock(T0), Some(&observer))
         .await
         .unwrap();
     assert_eq!(outcome.uploaded(), 1);

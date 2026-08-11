@@ -2,14 +2,21 @@ use super::*;
 
 #[tokio::test]
 async fn circle_preparation_leaves_payload_installation_to_the_database() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let signer = UserKeypair::generate();
     let home = crate::sync::test_helpers::test_cloud_home();
-    let fixture =
-        create_test_store_fixture_in_its_own_task(&db, "circle-payload-owner", &signer, home).await;
-    let prepared = fixture
-        .store()
-        .bind_device(&db, &signer)
+    let fixture = create_test_store_fixture_in_its_own_task(
+        &db,
+        db_store_dir.clone(),
+        "circle-payload-owner",
+        &signer,
+        home,
+    )
+    .await;
+    let (store, _connection) = fixture;
+    let prepared = store
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-creator", "Household")
@@ -23,7 +30,7 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
 
     for hash in &hashes {
         assert!(
-            !StoreDatabase::new(db.database())
+            !StoreDatabase::new(&db)
                 .has_payload_for_test(*hash)
                 .await
                 .expect("check uninstalled prepared payload"),
@@ -32,11 +39,11 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
     }
 
     let operation_id = prepared.journal.operation_id.clone();
-    StoreDatabase::new(db.database())
+    StoreDatabase::new(&db)
         .insert_circle_operation(prepared.journal, prepared.prepared_objects)
         .await
         .expect("persist Circle operation");
-    let claims = StoreDatabase::new(db.database())
+    let claims = StoreDatabase::new(&db)
         .circle_operation_payload_claims_for_test(&operation_id)
         .await
         .expect("read Circle operation payload claims")
@@ -47,9 +54,10 @@ async fn circle_preparation_leaves_payload_installation_to_the_database() {
 
 #[tokio::test]
 async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (_store, _home, _signer, journal) =
-        persist_merge_operation(&db, "circle-operation-id-mismatch").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-operation-id-mismatch").await;
     let expected_operation_id = journal.operation_id.clone();
     let replacement_write_id =
         coven_protocol::write::WriteId::from_generated("another-circle-operation".to_string());
@@ -59,12 +67,11 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
     replacement_commit.body_mut().write_id = replacement_write_id;
     replacement.operation_mut().commit_bytes =
         serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
-    db.database()
-        .replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
+    db.replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
         .await
         .expect("install mismatched Circle operation payload");
 
-    let error = coven_database::StoreDatabase::new(db.database())
+    let error = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload operation id");
@@ -73,20 +80,20 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
 
 #[tokio::test]
 async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let (_store, _home, _signer, journal) =
-        persist_merge_operation(&db, "circle-id-mismatch").await;
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-id-mismatch").await;
     let expected_operation_id = journal.operation_id.clone();
     let replacement_circle_id = CircleId::from_bytes([7; 16]);
     let mut replacement = journal.clone();
     replacement.circle_id = replacement_circle_id;
     replacement.operation_mut().creation.circle_id = replacement_circle_id;
-    db.database()
-        .replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
+    db.replace_circle_operation_prepared_for_test(expected_operation_id, replacement)
         .await
         .expect("install mismatched Circle operation payload");
 
-    let error = coven_database::StoreDatabase::new(db.database())
+    let error = coven_database::StoreDatabase::new(&db)
         .circle_operation(&journal.operation_id)
         .await
         .expect_err("lookup authority must match the payload Circle id");
@@ -95,22 +102,24 @@ async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
 
 #[tokio::test]
 async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
-    let db = open_test_db();
-    let (store, _home, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (store, _home, signer, first) =
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-block-first").await;
     let second = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000002000-0000-creator", "Second household")
         .await
         .expect("prepare second Circle operation");
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .insert_circle_operation(second.journal.clone(), second.prepared_objects)
         .await
         .expect("persist second Circle operation");
     let second = second.journal;
 
-    coven_database::StoreDatabase::new(db.database())
+    coven_database::StoreDatabase::new(&db)
         .block_circle_operation(
             &first.operation_id,
             coven_protocol::circle::CircleOperationBlock::AuthorityLost {
@@ -122,12 +131,12 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect("block first Circle operation");
 
-    let first = coven_database::StoreDatabase::new(db.database())
+    let first = coven_database::StoreDatabase::new(&db)
         .circle_operation(&first.operation_id)
         .await
         .expect("read first Circle operation")
         .expect("first Circle operation remains durable");
-    let second = coven_database::StoreDatabase::new(db.database())
+    let second = coven_database::StoreDatabase::new(&db)
         .circle_operation(&second.operation_id)
         .await
         .expect("read second Circle operation")
@@ -141,14 +150,16 @@ async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
 
 #[tokio::test]
 async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
-    let db = open_test_db();
-    let (store, _home, signer, journal) = persist_merge_operation(&db, "circle-publish-id").await;
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (store, _home, signer, journal) =
+        persist_merge_operation(&db, db_store_dir.clone(), "circle-publish-id").await;
     let absent_operation_id = CircleOperationId::from_write_id(
         coven_protocol::write::WriteId::from_generated("absent-circle-operation".to_string()),
     );
 
     let error = store
-        .bind_device(&db, &signer)
+        .bind_device_in(&db, db_store_dir.clone(), &signer)
         .await
         .expect("bind Circle test Store")
         .publish_circle_operation(&absent_operation_id)
@@ -157,7 +168,7 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
 
     assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .circle_operation(&journal.operation_id)
             .await
             .expect("read exact Circle operation")

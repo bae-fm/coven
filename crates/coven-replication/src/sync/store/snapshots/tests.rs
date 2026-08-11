@@ -3,14 +3,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
+use coven_database::Database;
 use coven_database::StoreDatabase;
-use coven_database::SyntheticStoreFixture;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 
-fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
-    SyntheticStoreFixture::open(
+fn open(path: &Path, device_id: &str) -> (Database, coven_foundation::store_dir::StoreDir) {
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
+    let database = Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -18,11 +20,12 @@ fn open(path: &Path, device_id: &str) -> SyntheticStoreFixture {
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &crate::sync::test_helpers::test_migrations(),
     )
-    .expect("open snapshot test database")
+    .expect("open snapshot test database");
+    (database, store_dir)
 }
 
-fn store_database(database: &SyntheticStoreFixture) -> StoreDatabase {
-    StoreDatabase::new(database.database())
+fn store_database(database: &Database) -> StoreDatabase {
+    StoreDatabase::new(database)
 }
 
 fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConnection> {
@@ -36,12 +39,14 @@ fn storage(home: &InMemoryCloudHome, signer: &UserKeypair) -> Arc<CloudSyncConne
 }
 
 async fn initialize(
-    db: &SyntheticStoreFixture,
+    db: &Database,
+    db_store_dir: coven_foundation::store_dir::StoreDir,
     storage: &Arc<CloudSyncConnection>,
     signer: &UserKeypair,
 ) -> crate::sync::test_helpers::TestDevice {
     crate::sync::test_helpers::TestDevice::create(
         db,
+        db_store_dir.clone(),
         storage.clone(),
         "snapshot-exact-store",
         signer.clone(),
@@ -51,19 +56,21 @@ async fn initialize(
 }
 
 fn snapshot(bytes: &[u8]) -> CreatedSnapshot {
-    CreatedSnapshot {
-        db_image: crate::sync::test_helpers::staged_snapshot_image(bytes),
-        blobs: Vec::new(),
-    }
+    CreatedSnapshot::new(
+        crate::sync::test_helpers::staged_snapshot_image(bytes),
+        Vec::new(),
+    )
 }
 
 #[tokio::test]
 async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
     Box::pin(async {
-        let db = crate::sync::test_helpers::open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let signer = UserKeypair::generate();
         let store = crate::sync::test_helpers::TestStore::create(
             &db,
+            db_store_dir.clone(),
             "snapshot-selector-hash-domains",
             signer.clone(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -71,7 +78,7 @@ async fn selector_keeps_semantic_and_stored_snapshot_hashes_distinct() {
         .await
         .expect("create exact snapshot selector Store");
         let device = store
-            .open_into(&db)
+            .open_into(&db, db_store_dir.clone())
             .await
             .expect("open exact snapshot selector Store");
         let membership = device
@@ -140,8 +147,8 @@ async fn staged_snapshot_reuses_image_and_metadata_objects_after_restart() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(&path, "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(&path, "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     home.fail_exact_create_before_call(1);
     assert!(device
         .publish_snapshot_at(
@@ -159,11 +166,15 @@ async fn staged_snapshot_reuses_image_and_metadata_objects_after_restart() {
     drop(device);
     drop(db);
 
-    let reopened = open(&path, "snapshot-test-device");
-    let reopened_device =
-        crate::sync::test_helpers::TestDevice::load(&reopened, storage.clone(), signer.clone())
-            .await
-            .expect("reopen snapshot test Store");
+    let (reopened, reopened_store_dir) = open(&path, "snapshot-test-device");
+    let reopened_device = crate::sync::test_helpers::TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage.clone(),
+        signer.clone(),
+    )
+    .await
+    .expect("reopen snapshot test Store");
     let published = reopened_device
         .resume_snapshot_publication()
         .await
@@ -183,9 +194,9 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
-    assert!(coven_database::StoreDatabase::new(db.database())
+    let (db, db_store_dir) = open(Path::new(":memory:"), "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
+    assert!(coven_database::StoreDatabase::new(&db)
         .export_activated_device_continuation(&signer)
         .await
         .expect("export continuation before any snapshot")
@@ -205,7 +216,7 @@ async fn exact_snapshot_loader_rejects_a_tampered_continuation_reference() {
         .expect("load continued snapshot journal")
         .expect("continued snapshot journal exists");
     assert_eq!(
-        coven_database::StoreDatabase::new(db.database())
+        coven_database::StoreDatabase::new(&db)
             .export_activated_device_continuation(&signer)
             .await
             .expect("export continuation after snapshot")
@@ -260,8 +271,8 @@ async fn lost_snapshot_image_create_response_is_resolved_before_metadata_creatio
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     home.fail_exact_create_after_call(1);
 
     let published = device
@@ -289,8 +300,8 @@ async fn snapshot_image_is_durable_before_metadata_can_be_created() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     home.fail_exact_create_before_call(2);
 
     assert!(device
@@ -357,8 +368,8 @@ async fn occupied_snapshot_image_slot_blocks_metadata_and_completion() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     home.fail_exact_create_before_call(1);
     assert!(device
         .publish_snapshot_at(
@@ -401,8 +412,8 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
     let home = InMemoryCloudHome::new();
     let signer = UserKeypair::generate();
     let storage = storage(&home, &signer);
-    let db = open(Path::new(":memory:"), "snapshot-test-device");
-    let device = initialize(&db, &storage, &signer).await;
+    let (db, db_store_dir) = open(Path::new(":memory:"), "snapshot-test-device");
+    let device = initialize(&db, db_store_dir.clone(), &storage, &signer).await;
     let first = device
         .publish_snapshot_at(
             b"first image".to_vec(),
@@ -413,7 +424,6 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("publish first snapshot");
     assert_eq!(first.generation, 0);
     let image_ownership = db
-        .database()
         .remote_object_for_test(first.image.object.clone())
         .await
         .expect("load published snapshot image ownership");
@@ -463,7 +473,6 @@ async fn snapshot_predecessor_and_reserved_successor_form_one_exact_chain() {
         .expect("resume second snapshot publication")
         .expect("publish staged second snapshot");
     let published_generations = db
-        .database()
         .table_row_count_for_test(coven_database::DatabaseTestTable::named(
             "published_store_snapshot",
         ))

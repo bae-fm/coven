@@ -27,15 +27,18 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     coven_keys::keys::test_keyring::install();
     let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
-    let owner_db = open_test_db();
-    let owner_database = coven_database::StoreDatabase::from_database(owner_db.database().clone());
+    let owner_db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
+    let owner_db = open_test_db(owner_db_store_dir.clone());
+    let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
     let home = test_cloud_home();
     let create_store_db = owner_db.clone();
+    let create_store_db_store_dir = owner_db_store_dir.clone();
     let create_store_owner = owner.clone();
     let create_store_home = home.clone();
     let store = tokio::spawn(async move {
         TestStore::create(
             &create_store_db,
+            create_store_db_store_dir,
             store_id,
             create_store_owner,
             create_store_home,
@@ -52,6 +55,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let invite = store
         .invite_member(
             &owner_db,
+            owner_db_store_dir.clone(),
             &owner,
             &member_pubkey,
             None,
@@ -62,7 +66,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("invite joiner identity");
     let owner_device = store
-        .open_into(&owner_db)
+        .open_into(&owner_db, owner_db_store_dir.clone())
         .await
         .expect("load membership including joiner");
     let tables = test_synced_tables();
@@ -251,7 +255,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("retry completed join after lost response");
     assert_eq!(retry.device_id, config.device_id);
-    assert!(config.store_dir.config_path().exists());
+    assert!(layout.store_dir(store_id).config_path().exists());
     assert!(new_client()
         .resume_device_joins()
         .expect("enumerate completed joins")

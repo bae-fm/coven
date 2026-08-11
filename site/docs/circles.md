@@ -333,7 +333,7 @@ that audience, which avoids requiring a recipient to receive a package after
 their access has ended.
 
 ```rust
-handle.sql(move |sql| {
+handle.write(move |sql| {
     sql.execute(
         "UPDATE lists SET audience = ?1 WHERE id = ?2",
         coven::rusqlite::params![family.to_string(), list_id],

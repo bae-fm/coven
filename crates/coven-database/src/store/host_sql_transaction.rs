@@ -7,6 +7,7 @@ pub(crate) struct HostSqlAuthorization<'connection> {
 
 impl<'connection> HostSqlAuthorization<'connection> {
     pub(crate) fn begin(connection: &'connection rusqlite::Connection) -> Result<Self, DbError> {
+        crate::reset_host_sql_write_observation();
         connection
             .authorizer(Some(authorize_host_sql))
             .map_err(DbError::from)?;
@@ -23,6 +24,11 @@ impl<'connection> HostSqlAuthorization<'connection> {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+
+    pub(crate) fn run_observing_write<R>(self, f: impl FnOnce() -> R) -> (R, bool) {
+        let result = self.run(f);
+        (result, crate::host_sql_write_was_observed())
     }
 
     fn remove_authorizer(&mut self) {
@@ -206,6 +212,29 @@ mod tests {
             )
             .expect("query protocol state after the authorized Coven write");
         assert!(stored, "the Coven-owned write commits");
+    }
+
+    #[test]
+    fn write_observation_excludes_coven_owned_bookkeeping() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::apply_coven_schema(&conn).expect("install Coven schema");
+        let tx = conn.unchecked_transaction().expect("begin transaction");
+
+        let (result, host_write_seen) = HostSqlAuthorization::begin(&tx)
+            .expect("install authorizer")
+            .run_observing_write(|| {
+                crate::with_coven_sql_authority(|| {
+                    tx.execute(
+                        "INSERT INTO protocol_state (key, value) VALUES ('coven-owned', 'yes')",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from)
+                })
+            });
+
+        result.expect("Coven bookkeeping write");
+        assert!(!host_write_seen);
     }
 
     #[test]

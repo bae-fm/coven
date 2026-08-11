@@ -42,7 +42,7 @@ impl StoreRows {
         }
     }
 
-    pub(crate) async fn sql<F, R>(&self, sql: F) -> CovenResult<WriteReceipt<R>>
+    pub(crate) async fn write<F, R>(&self, sql: F) -> CovenResult<WriteReceipt<R>>
     where
         F: for<'context, 'connection> FnOnce(SqlContext<'context, 'connection>) -> CovenResult<R>
             + Send
@@ -61,7 +61,11 @@ impl StoreRows {
         read_rows(&self.read_database, read).await
     }
 
-    pub(crate) async fn write<F, S, R>(&self, build: F, sql: S) -> CovenResult<WriteReceipt<R>>
+    pub(crate) async fn write_with_blobs<F, S, R>(
+        &self,
+        build: F,
+        sql: S,
+    ) -> CovenResult<WriteReceipt<R>>
     where
         F: FnOnce(&mut WriteBatch) -> CovenResult<()> + Send + 'static,
         S: for<'context, 'connection> FnOnce(SqlContext<'context, 'connection>) -> CovenResult<R>

@@ -1,4 +1,4 @@
-use crate::sync::test_helpers::{open_test_db, temp_store_dir, TestStore, TestStoreFixture};
+use crate::sync::test_helpers::TestStore;
 use coven_keys::keys::UserKeypair;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::objects::ExactObjectRef;
@@ -7,32 +7,25 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::ObjectHash;
 use coven_storage::CloudSyncObjectStorage;
 
-fn store_database(db: &coven_database::SyntheticStoreFixture) -> coven_database::StoreDatabase {
-    coven_database::StoreDatabase::new(db.database())
+fn store_database(db: &coven_database::Database) -> coven_database::StoreDatabase {
+    coven_database::StoreDatabase::new(db)
 }
 
 struct HistoryPublisher<'fixture> {
-    database: &'fixture coven_database::SyntheticStoreFixture,
+    database: &'fixture coven_database::Database,
     device: &'fixture crate::sync::test_helpers::TestDevice,
-    store_dir: &'fixture coven_foundation::store_dir::StoreDir,
 }
 
 impl<'fixture> HistoryPublisher<'fixture> {
     fn new(
-        database: &'fixture coven_database::SyntheticStoreFixture,
+        database: &'fixture coven_database::Database,
         device: &'fixture crate::sync::test_helpers::TestDevice,
-        store_dir: &'fixture coven_foundation::store_dir::StoreDir,
     ) -> Self {
-        Self {
-            database,
-            device,
-            store_dir,
-        }
+        Self { database, device }
     }
 
     async fn publish_note(&self, sequence: u64) {
         self.database
-            .database()
             .execute_test_host_write(&format!(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
                  VALUES ('history-{sequence}', 'history', NULL, 1, \
@@ -41,7 +34,7 @@ impl<'fixture> HistoryPublisher<'fixture> {
             .await;
         assert!(
             self.device
-                .prepare_pending_store_write(self.store_dir)
+                .prepare_pending_store_write()
                 .await
                 .expect("prepare Merge Store write"),
             "host write produces a prepared Store commit",
@@ -58,39 +51,37 @@ impl<'fixture> HistoryPublisher<'fixture> {
 }
 
 struct PublishedHistory {
-    db: coven_database::SyntheticStoreFixture,
+    db: coven_database::Database,
     home: std::sync::Arc<coven_storage::InMemoryCloudHome>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     device: crate::sync::test_helpers::TestDevice,
     membership: MembershipChain,
-    _temp: tempfile::TempDir,
-    store_dir: coven_foundation::store_dir::StoreDir,
 }
 
 impl PublishedHistory {
     async fn publish(history_length: u64) -> Self {
         let signer = UserKeypair::generate();
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let home = crate::sync::test_helpers::test_cloud_home();
-        let (store, storage) = (TestStoreFixture::create(
+        let (store, storage) = TestStore::create_with_connection(
             &db,
+            db_store_dir.clone(),
             &format!("checkpoint-sabotage-{history_length}"),
             signer.clone(),
             home.clone(),
         )
         .await
-        .expect("create Merge Store"))
-        .into_parts();
+        .expect("create Merge Store");
         let device = store
-            .bind_device(&db, &signer)
+            .bind_device_in(&db, db_store_dir.clone(), &signer)
             .await
             .expect("load Merge Store");
         let membership = device
             .membership_for_test()
             .await
             .expect("load Merge membership");
-        let (temp, store_dir) = temp_store_dir();
-        let publisher = HistoryPublisher::new(&db, &device, &store_dir);
+        let publisher = HistoryPublisher::new(&db, &device);
         for sequence in 1..=history_length {
             publisher.publish_note(sequence).await;
         }
@@ -100,8 +91,6 @@ impl PublishedHistory {
             storage,
             device,
             membership,
-            _temp: temp,
-            store_dir,
         };
         assert_eq!(
             fixture.retained_history().await.len() as u64,
@@ -129,7 +118,6 @@ impl PublishedHistory {
             .stream_id
             .to_string();
         self.db
-            .database()
             .retained_canonical_input_for_test(stream_id, sequence)
             .await
             .expect("load retained materialization input")
@@ -156,7 +144,7 @@ impl PublishedHistory {
             .clone();
 
         self.home.clear_exact_reads();
-        HistoryPublisher::new(&self.db, &self.device, &self.store_dir)
+        HistoryPublisher::new(&self.db, &self.device)
             .publish_note(history_length + 1)
             .await;
 
@@ -171,18 +159,13 @@ impl PublishedHistory {
 
     async fn prepare_sabotaged_successor(&self) -> String {
         self.db
-            .database()
             .execute_test_host_write(
                 "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('sabotaged-successor', 'history', NULL, 1, \
                  '0000000002000-0000-history', '2026-07-21')",
             )
             .await;
-        match self
-            .device
-            .prepare_pending_store_write(&self.store_dir)
-            .await
-        {
+        match self.device.prepare_pending_store_write().await {
             Err(error) => error.to_string(),
             Ok(true) => self
                 .device
@@ -322,7 +305,7 @@ async fn retained_history_reuses_each_verified_device_head_within_a_cycle() {
 
     fixture
         .device
-        .run_cycle(&fixture.store_dir, None)
+        .run_cycle(None)
         .await
         .expect("pull retained announcement history");
 
@@ -353,7 +336,7 @@ async fn membership_head_reads_for_retained_history(history_length: u64) -> usiz
 
     fixture
         .device
-        .run_cycle(&fixture.store_dir, None)
+        .run_cycle(None)
         .await
         .expect("pull retained membership history");
 
@@ -388,7 +371,7 @@ async fn registration_reads_for_retained_history(history_length: u64) -> usize {
 
     fixture
         .device
-        .run_cycle(&fixture.store_dir, None)
+        .run_cycle(None)
         .await
         .expect("pull retained registration history");
 
@@ -423,12 +406,11 @@ async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
     let encoded = serde_json::to_string(first.commit_ref()).expect("serialize first commit ref");
     fixture
         .db
-        .database()
         .delete_device_state_snapshot_for_test(encoded)
         .await
         .expect("remove state after its checkpoint was verified");
 
-    HistoryPublisher::new(&fixture.db, &fixture.device, &fixture.store_dir)
+    HistoryPublisher::new(&fixture.db, &fixture.device)
         .publish_note(4)
         .await;
 }
@@ -448,7 +430,6 @@ async fn publish_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySa
         VerifiedAuthoritySabotage::StoreRoot => {
             fixture
                 .db
-                .database()
                 .replace_store_root_hash_for_test(None)
                 .await
                 .expect("delete verified Store root authority");
@@ -456,14 +437,13 @@ async fn publish_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySa
         VerifiedAuthoritySabotage::Registration => {
             fixture
                 .db
-                .database()
                 .corrupt_store_device_registration_bytes_for_test(registration)
                 .await
                 .expect("corrupt verified Store registration authority");
         }
     }
 
-    HistoryPublisher::new(&fixture.db, &fixture.device, &fixture.store_dir)
+    HistoryPublisher::new(&fixture.db, &fixture.device)
         .publish_note(2)
         .await;
 }
@@ -481,10 +461,15 @@ async fn open_connection_reuses_verified_registration_authority() {
 fn open_persistent_history_database(
     path: &std::path::Path,
     device_id: &str,
-) -> coven_database::SyntheticStoreFixture {
+) -> (
+    coven_database::Database,
+    coven_foundation::store_dir::StoreDir,
+) {
+    let store_dir = crate::sync::test_helpers::store_dir_for_test_database(path);
     let migrations = crate::sync::test_helpers::test_migrations();
-    coven_database::SyntheticStoreFixture::open(
+    let database = coven_database::Database::open_synthetic_for_test(
         path,
+        store_dir.clone(),
         crate::sync::test_helpers::test_synced_tables(),
         coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
         coven_protocol::blob::TransferLimits::one_at_a_time(),
@@ -492,25 +477,27 @@ fn open_persistent_history_database(
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
         &migrations,
     )
-    .expect("open persistent history database")
+    .expect("open persistent history database");
+    (database, store_dir)
 }
 
 async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySabotage) -> String {
     let directory = tempfile::tempdir().expect("create authority reopen directory");
     let path = directory.path().join("authority.sqlite");
     let signer = UserKeypair::generate();
-    let database = open_persistent_history_database(&path, "authority-reopen-device");
-    let (store, storage) = (TestStoreFixture::create(
+    let (database, database_store_dir) =
+        open_persistent_history_database(&path, "authority-reopen-device");
+    let (store, storage) = TestStore::create_with_connection(
         &database,
+        database_store_dir.clone(),
         "authority-reopen",
         signer.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
-    .expect("create authority reopen Store"))
-    .into_parts();
+    .expect("create authority reopen Store");
     let device = store
-        .bind_device(&database, &signer)
+        .bind_device_in(&database, database_store_dir.clone(), &signer)
         .await
         .expect("bind authority reopen Store");
     let store_database = store_database(&database);
@@ -525,12 +512,10 @@ async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySab
         .expect("local registration is activated");
     match sabotage {
         VerifiedAuthoritySabotage::StoreRoot => database
-            .database()
             .replace_store_root_hash_for_test(None)
             .await
             .expect("remove verified Store root"),
         VerifiedAuthoritySabotage::Registration => database
-            .database()
             .corrupt_store_device_registration_bytes_for_test(registration)
             .await
             .expect("corrupt verified Store registration"),
@@ -540,9 +525,17 @@ async fn reopen_after_verified_authority_sabotage(sabotage: VerifiedAuthoritySab
     drop(store_database);
     drop(database);
 
-    let reopened = open_persistent_history_database(&path, "authority-reopen-device");
-    match crate::sync::test_helpers::TestDevice::load(&reopened, storage, signer).await {
-        Ok(device) => coven_database::StoreDatabase::new(reopened.database())
+    let (reopened, reopened_store_dir) =
+        open_persistent_history_database(&path, "authority-reopen-device");
+    match crate::sync::test_helpers::TestDevice::load(
+        &reopened,
+        reopened_store_dir.clone(),
+        storage,
+        signer,
+    )
+    .await
+    {
+        Ok(device) => coven_database::StoreDatabase::new(&reopened)
             .validated_store_owner(device.store_root())
             .await
             .expect_err("first verification accepted altered durable Store authority")
@@ -579,7 +572,6 @@ async fn missing_frontier_retained_row_has_no_cloud_fallback() {
     let reference = reference.clone();
     fixture
         .db
-        .database()
         .delete_retained_materialization_without_foreign_keys_for_test(reference)
         .await
         .expect("remove retained frontier row");
@@ -601,12 +593,11 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
         if delete_state {
             fixture
                 .db
-                .database()
                 .delete_device_state_snapshot_for_test(encoded)
                 .await
                 .expect("delete checkpoint state");
         } else {
-            let database = coven_database::StoreDatabase::new(fixture.db.database());
+            let database = coven_database::StoreDatabase::new(&fixture.db);
             let root = database
                 .local_store_root_ref()
                 .await
@@ -640,7 +631,6 @@ async fn outbound_successor_rejects_missing_or_forged_device_state() {
                 .expect("construct another canonical device state");
             fixture
                 .db
-                .database()
                 .replace_device_state_snapshot_for_test(encoded, forged)
                 .await
                 .expect("forge canonical checkpoint state");
@@ -680,7 +670,7 @@ async fn retained_commit_evidence_rejects_an_omitted_acknowledgement() {
 }
 
 struct MemberRemovalHistory {
-    db: coven_database::SyntheticStoreFixture,
+    db: coven_database::Database,
     store: std::sync::Arc<TestStore>,
     device: crate::sync::test_helpers::TestDevice,
     removal: coven_database::OwnedVerifiedMergeMaterialization,
@@ -688,13 +678,15 @@ struct MemberRemovalHistory {
 
 impl MemberRemovalHistory {
     async fn create() -> Self {
-        let db = open_test_db();
+        let db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
         let owner = UserKeypair::generate();
         let member = UserKeypair::generate();
         let member_pubkey = crate::sync::test_helpers::pubkey_hex(&member);
         let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let store = TestStore::create(
             &db,
+            db_store_dir.clone(),
             "retained-removal-proof",
             owner.clone(),
             crate::sync::test_helpers::test_cloud_home(),
@@ -704,6 +696,7 @@ impl MemberRemovalHistory {
         store
             .invite_member(
                 &db,
+                db_store_dir.clone(),
                 &owner,
                 &member_pubkey,
                 None,
@@ -713,22 +706,45 @@ impl MemberRemovalHistory {
             )
             .await
             .expect("invite removable member");
-        let member_db = open_test_db();
+        let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
+        let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
         store
-            .activate_joined_device(&db, &member_db, &member, "2026-07-21T00:00:00Z")
+            .activate_joined_device(
+                &db,
+                db_store_dir.clone(),
+                &member_db,
+                member_db_store_dir.clone(),
+                &member,
+                "2026-07-21T00:00:00Z",
+            )
             .await
             .expect("activate removable member device");
         store
-            .promote_active_member_fixture(&db, &member_db, &owner, &member, &encryption)
+            .promote_active_member_fixture(
+                &db,
+                db_store_dir.clone(),
+                &member_db,
+                member_db_store_dir.clone(),
+                &owner,
+                &member,
+                &encryption,
+            )
             .await
             .expect("promote removable member to Owner");
         let custody = crate::sync::test_helpers::TestCustody::default();
         store
-            .remove_member(&db, &owner, &member_pubkey, &encryption, &custody)
+            .remove_member(
+                &db,
+                db_store_dir.clone(),
+                &owner,
+                &member_pubkey,
+                &encryption,
+                &custody,
+            )
             .await
             .expect("remove retained member");
         let device = store
-            .bind_device(&db, &owner)
+            .bind_device_in(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind retained-removal Store");
         let retained = device

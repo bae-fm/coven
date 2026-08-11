@@ -161,7 +161,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError<std::io:
 
 /// One unpublished file whose destination is chosen after its bytes have been
 /// written. This is the streaming counterpart to [`write_atomic`]: callers can
-/// compute a content address while implementing [`Write`], then commit the
+/// compute a content address while implementing [`std::io::Write`], then commit the
 /// completed file under that address with the owning durability policy's
 /// file-sync, rename, and directory-sync sequence.
 pub struct AtomicFileStage {

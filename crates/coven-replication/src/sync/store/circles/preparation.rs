@@ -27,16 +27,6 @@ use coven_protocol::store_commit::{
 };
 use coven_storage::CloudSyncObjectStorage;
 
-async fn snapshot_image_bytes(
-    snapshot: &coven_database::CreatedSnapshot,
-) -> Result<Vec<u8>, CircleOperationError> {
-    snapshot
-        .db_image
-        .read()
-        .await
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
-}
-
 pub(super) struct CircleCandidatePreparer<'operation, 'storage> {
     announcement_stream_id: coven_protocol::membership::AuthorStreamId,
     database: StoreDatabase,
@@ -1192,15 +1182,13 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
             let commit_base = database.local_commit_base(announcement_stream_id).await?;
             // Held until this request's candidate is durably staged, so the position
             // its order extends is still this device's next one when it lands.
-            let _authorship = commit_base.authorship;
-            let base = commit_base.predecessor;
+            let (_authorship, base, frontier) = commit_base.into_parts();
             let seq = base
                 .as_ref()
                 .map_or(1, |reference| reference.coord.sequence() + 1);
             let stream_id = announcement_stream_id;
-            let dependencies =
-                coven_protocol::store_commit::CommitFrontier::from_refs(commit_base.frontier)
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             let coord = StoreCommitCoord {
                 stream_id,
                 sequence: seq,
@@ -1330,9 +1318,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         request.circle_id,
                     )?;
                     let bootstrap_blobs = self
-                        .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
+                        .verify_snapshot_blobs(request.circle_id, request.bootstrap_blobs())
                         .await?;
-                    let image_bytes = snapshot_image_bytes(&request.bootstrap.snapshot).await?;
+                    let image_bytes = request
+                        .read_bootstrap_image()
+                        .await
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
                     let image_hash = ObjectHash::digest(&image_bytes);
                     let image_prefix =
                         coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
@@ -1352,7 +1343,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         .prepare_circle_object(&image_context, &image_prefix, ".db", image_bytes)
                         .await?;
                     let bootstrap = coven_protocol::circle::CircleBootstrapRef {
-                        coverage: request.bootstrap.coverage.clone(),
+                        coverage: request.bootstrap_coverage().clone(),
                         schema_version: db.schema_version(),
                         sync_routing_hash: db.sync_routing_hash(),
                         image: coven_protocol::store_commit::SnapshotImageRef {
@@ -1691,9 +1682,12 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         db,
                     )?;
                     let bootstrap_blobs = self
-                        .verify_snapshot_blobs(request.circle_id, &request.bootstrap.snapshot)
+                        .verify_snapshot_blobs(request.circle_id, request.bootstrap_blobs())
                         .await?;
-                    let image_bytes = snapshot_image_bytes(&request.bootstrap.snapshot).await?;
+                    let image_bytes = request
+                        .read_bootstrap_image()
+                        .await
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
                     let image_hash = ObjectHash::digest(&image_bytes);
                     let successor_encryption = EncryptionService::from(
                         MasterKeyring::from_serialized(&draft.keyring).map_err(|error| {
@@ -1731,7 +1725,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                                 )
                                 .await?;
                             let bootstrap = coven_protocol::circle::CircleBootstrapRef {
-                                coverage: request.bootstrap.coverage.clone(),
+                                coverage: request.bootstrap_coverage().clone(),
                                 schema_version: db.schema_version(),
                                 sync_routing_hash: db.sync_routing_hash(),
                                 image: coven_protocol::store_commit::SnapshotImageRef {

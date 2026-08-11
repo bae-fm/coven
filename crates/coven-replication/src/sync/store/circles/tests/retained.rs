@@ -3,10 +3,12 @@ use coven_keys::keys::MasterKeyCustody;
 
 #[tokio::test]
 async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
     let store = create_test_store_in_its_own_task(
         &db,
+        db_store_dir.clone(),
         "circle-merge-revoked-grant",
         &founder,
         crate::sync::test_helpers::test_cloud_home(),
@@ -18,6 +20,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &founder,
             &successor_pubkey,
             None,
@@ -28,18 +31,21 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .await
         .expect("invite successor member through the production membership path");
 
-    let successor_db = open_test_db();
+    let successor_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let successor_db = crate::sync::test_helpers::open_test_db(successor_db_store_dir.clone());
     store
         .activate_joined_device(
             &db,
+            db_store_dir.clone(),
             &successor_db,
+            successor_db_store_dir.clone(),
             &successor,
             "0000000001003-0000-successor",
         )
         .await
         .expect("activate successor exact device fixture");
     let journal = store
-        .bind_device(&successor_db, &successor)
+        .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001003-0000-successor", "Revoked Circle")
@@ -47,14 +53,21 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("prepare operation while successor is authorized");
     let journal_operation_id = journal.journal.operation_id.clone();
     let journal_circle_id = journal.journal.circle_id();
-    StoreDatabase::new(successor_db.database())
+    StoreDatabase::new(&successor_db)
         .insert_circle_operation(journal.journal, journal.prepared_objects)
         .await
         .expect("persist operation that will lose authorization");
     let custody = TestCustody::default();
     custody.set_initial_key([42; 32]);
     store
-        .remove_member(&db, &founder, &successor_pubkey, &encryption, &custody)
+        .remove_member(
+            &db,
+            db_store_dir.clone(),
+            &founder,
+            &successor_pubkey,
+            &encryption,
+            &custody,
+        )
         .await
         .expect("remove successor through the production membership path");
     let rotated_encryption = coven_keys::encryption::EncryptionService::from(
@@ -66,6 +79,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &founder,
             &successor_pubkey,
             None,
@@ -76,11 +90,11 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .await
         .expect("re-add successor under a new exact membership grant");
     store
-        .open_into(&successor_db)
+        .open_into(&successor_db, successor_db_store_dir.clone())
         .await
         .expect("load successor's replacement membership grant");
     let later = store
-        .bind_device(&successor_db, &successor)
+        .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001004-0000-successor", "Later Circle")
@@ -88,20 +102,20 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         .expect("prepare still-authorized operation");
     let later_operation_id = later.journal.operation_id.clone();
     let later_circle_id = later.journal.circle_id();
-    StoreDatabase::new(successor_db.database())
+    StoreDatabase::new(&successor_db)
         .insert_circle_operation(later.journal, later.prepared_objects)
         .await
         .expect("persist still-authorized operation");
 
     store
-        .bind_device(&successor_db, &successor)
+        .bind_device_in(&successor_db, successor_db_store_dir.clone(), &successor)
         .await
         .expect("bind Circle test Store")
         .resume_circle_operations()
         .await
         .expect("revoked journal is blocked without interrupting the resume loop");
 
-    let blocked = StoreDatabase::new(successor_db.database())
+    let blocked = StoreDatabase::new(&successor_db)
         .circle_operation(&journal_operation_id)
         .await
         .expect("read revoked journal")
@@ -110,13 +124,13 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         blocked.state(),
         CircleOperationState::Blocked { .. }
     ));
-    assert!(StoreDatabase::new(successor_db.database())
+    assert!(StoreDatabase::new(&successor_db)
         .circle_operation(&later_operation_id)
         .await
         .expect("read later journal")
         .is_none());
     assert_eq!(
-        StoreDatabase::new(successor_db.database())
+        StoreDatabase::new(&successor_db)
             .get_circles(
                 &successor_pubkey,
                 std::collections::BTreeSet::from([successor_pubkey.clone()]),
@@ -131,7 +145,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
         }]
     );
     assert_eq!(
-        StoreDatabase::new(successor_db.database())
+        StoreDatabase::new(&successor_db)
             .circle_control_activation_count_for_test(journal_circle_id)
             .await
             .expect("count circle activations"),
@@ -157,23 +171,25 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         replaced
     }
 
-    let db = open_test_db();
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
     let founder = UserKeypair::generate();
-    let fixture = TestStoreFixture::create(
+    let fixture = TestStore::create_with_connection(
         &db,
+        db_store_dir.clone(),
         "retained-circle-activation",
         founder.clone(),
         crate::sync::test_helpers::test_cloud_home(),
     )
     .await
     .expect("create retained Circle Store");
-    let store = fixture.store();
-    let cloud_storage = fixture.storage();
+    let (store, cloud_storage) = fixture;
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
         .invite_member(
             &db,
+            db_store_dir.clone(),
             &founder,
             &peer_pubkey,
             None,
@@ -184,7 +200,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
         .await
         .expect("invite retained Circle peer");
     let prepared = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind Circle preparation Store")
         .prepare_circle_operation("0000000001000-0000-founder", "Household")
@@ -199,12 +215,12 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     let journal = prepared.journal;
     let commit = journal.commit().expect("parse retained Circle commit");
     let commit_ref = &journal.operation().commit_ref;
-    let author = coven_database::StoreDatabase::new(db.database())
+    let author = coven_database::StoreDatabase::new(&db)
         .activated_store_device_registration(commit.author_registration.clone())
         .await
         .expect("load retained Circle commit author");
     let verified = store
-        .bind_device(&db, &founder)
+        .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
         .expect("bind retained Circle activation Store")
         .load_circle_activations(commit_ref, &commit, author.value())

@@ -2,11 +2,10 @@ use coven::{
     Config, Coven, CovenError, HomeStorage, Migration, RowIdentity, StoreDir, SyncedTable,
 };
 
-fn config(store_dir: StoreDir, storage: HomeStorage) -> Config {
+fn config(storage: HomeStorage) -> Config {
     let mut config = Config::with_defaults(
         "storage-scope".to_string(),
         "configuration-device".to_string(),
-        store_dir,
         "Storage scope configuration".to_string(),
     );
     config.cloud_home.storage = storage;
@@ -41,7 +40,7 @@ fn migrations() -> Vec<Migration> {
 fn builder_rejects_browsable_storage_with_scoped_tables() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new_ephemeral(temp.path());
-    let result = Coven::builder(config(store_dir.clone(), HomeStorage::Browsable))
+    let result = Coven::builder(store_dir.clone(), config(HomeStorage::Browsable))
         .synced_tables(tables())
         .migrations(migrations())
         .open();
@@ -65,7 +64,7 @@ fn builder_rejects_browsable_storage_with_scoped_tables() {
 fn opaque_storage_accepts_scoped_tables() {
     let temp = tempfile::tempdir().expect("store directory");
     let store_dir = StoreDir::new_ephemeral(temp.path());
-    let handle = Coven::builder(config(store_dir, HomeStorage::Opaque))
+    let handle = Coven::builder(store_dir, config(HomeStorage::Opaque))
         .synced_tables(tables())
         .migrations(migrations())
         .open()
