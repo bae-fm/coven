@@ -112,12 +112,28 @@ pub(crate) fn find_owner_dependency_leaks_with_capabilities(
     files: &[RustFile],
     extra_capability_types: &[String],
 ) -> Vec<OwnerDependencyLeak> {
+    find_owner_dependency_leaks_with_policy(files, extra_capability_types, &[])
+}
+
+pub(crate) fn find_owner_dependency_leaks_with_policy(
+    files: &[RustFile],
+    extra_capability_types: &[String],
+    allowed_capability_outputs: &[String],
+) -> Vec<OwnerDependencyLeak> {
     let methods = collect_receiver_methods(files);
     let declared_types = collect_declared_types(files);
+    let configured_capability_types = extra_capability_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let capability_types = CAPABILITY_TYPES
         .iter()
         .map(|name| (*name).to_string())
-        .chain(extra_capability_types.iter().cloned())
+        .chain(configured_capability_types.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let allowed_capability_outputs = allowed_capability_outputs
+        .iter()
+        .cloned()
         .collect::<BTreeSet<_>>();
     let internal_dependencies = INTERNAL_DEPENDENCY_TYPES
         .iter()
@@ -197,6 +213,10 @@ pub(crate) fn find_owner_dependency_leaks_with_capabilities(
         let is_composition_root = composition_root_matches(&method);
         let owner_is_service =
             service_owners.contains(&method.owner) || capability_types.contains(&method.owner);
+        let retained = retained_dependencies
+            .get(&method.owner)
+            .cloned()
+            .unwrap_or_default();
         if method.owner == "CloudSyncObjectStorage"
             && RAW_PROVIDER_OPERATIONS.contains(&method.method.as_str())
         {
@@ -208,13 +228,13 @@ pub(crate) fn find_owner_dependency_leaks_with_capabilities(
             });
         }
         if !method.returns_owner {
-            let retained = retained_dependencies
-                .get(&method.owner)
-                .cloned()
-                .unwrap_or_default();
             for output in &method.output {
                 let returns_retained_dependency = always_forbidden_returns.contains(output)
                     || (internal_dependencies.contains(output) && retained.contains(output))
+                    || (owner_is_service
+                        && !is_composition_root
+                        && configured_capability_types.contains(output)
+                        && !allowed_capability_outputs.contains(output))
                     || (owner_is_service
                         && !is_composition_root
                         && retained_service_types.contains(output)
@@ -240,6 +260,22 @@ pub(crate) fn find_owner_dependency_leaks_with_capabilities(
                     });
                 }
             }
+        }
+        for dependency in method
+            .parameters
+            .intersection(&retained)
+            .filter(|dependency| {
+                configured_capability_types.contains(*dependency)
+                    && always_forbidden_returns.contains(*dependency)
+            })
+        {
+            leaks.insert(OwnerDependencyLeak::Parameter {
+                path: method.path.clone(),
+                line: method.line,
+                owner: method.owner.clone(),
+                method: method.method.clone(),
+                dependency: dependency.clone(),
+            });
         }
         if method.mutates_owner {
             for dependency in method.parameters.intersection(&raw_database_types) {
@@ -651,9 +687,9 @@ fn receiver_method(path: &str, owner: &str, signature: &syn::Signature) -> Recei
     let parameters = signature
         .inputs
         .iter()
-        .filter_map(|input| match input {
-            syn::FnArg::Receiver(_) => None,
-            syn::FnArg::Typed(input) => direct_type_name(&input.ty),
+        .flat_map(|input| match input {
+            syn::FnArg::Receiver(_) => BTreeSet::new(),
+            syn::FnArg::Typed(input) => type_names(&input.ty),
         })
         .collect();
     ReceiverMethod {
@@ -688,14 +724,6 @@ fn transitive_field_types(
         }
     }
     fields
-}
-
-fn direct_type_name(ty: &syn::Type) -> Option<String> {
-    match ty {
-        syn::Type::Reference(reference) => direct_type_name(&reference.elem),
-        syn::Type::Path(_) => type_name(ty),
-        _ => None,
-    }
 }
 
 fn type_names(ty: &syn::Type) -> BTreeSet<String> {
@@ -818,6 +846,35 @@ mod tests {
                 if owner == "StoreAuthority"
                     && method == "required_root"
                     && dependency == "Connection"
+        ));
+    }
+
+    #[test]
+    fn owner_methods_cannot_install_retained_capabilities_through_wrappers() {
+        let file = production_file_at(
+            "bae-core/src/sync/upload_observer.rs",
+            r#"
+            struct Database;
+            struct ReleaseUploadObserver {
+                database: std::sync::OnceLock<std::sync::Arc<Database>>,
+            }
+            impl ReleaseUploadObserver {
+                fn set_database(&self, database: std::sync::Arc<Database>) {
+                    let _ = self.database.set(database);
+                }
+            }
+            "#,
+        );
+
+        let leaks =
+            find_owner_dependency_leaks_with_capabilities(&[file], &["Database".to_string()]);
+        assert_eq!(leaks.len(), 1);
+        assert!(matches!(
+            &leaks[0],
+            OwnerDependencyLeak::Parameter { owner, method, dependency, .. }
+                if owner == "ReleaseUploadObserver"
+                    && method == "set_database"
+                    && dependency == "Database"
         ));
     }
 
@@ -1133,6 +1190,75 @@ mod tests {
                 if owner == "TestOwnerGraph"
                     && method == "storage"
                     && dependency == "CloudSyncConnection"
+        ));
+    }
+
+    #[test]
+    fn owner_methods_cannot_factory_configured_capabilities_for_callers() {
+        let file = production_file_at(
+            "bae-core/src/library/manager/config.rs",
+            r#"
+            struct ConfigHandle;
+            struct KeyService;
+            struct DiscogsClient;
+            struct LibraryManager {
+                config: ConfigHandle,
+                keys: KeyService,
+            }
+            impl LibraryManager {
+                fn discogs_client(&self) -> DiscogsClient { todo!() }
+            }
+            "#,
+        );
+
+        let leaks = find_owner_dependency_leaks_with_capabilities(
+            &[file],
+            &[
+                "ConfigHandle".to_string(),
+                "DiscogsClient".to_string(),
+                "KeyService".to_string(),
+                "LibraryManager".to_string(),
+            ],
+        );
+        assert_eq!(leaks.len(), 1);
+        assert!(matches!(
+            &leaks[0],
+            OwnerDependencyLeak::Return { owner, method, dependency, .. }
+                if owner == "LibraryManager"
+                    && method == "discogs_client"
+                    && dependency == "DiscogsClient"
+        ));
+    }
+
+    #[test]
+    fn operation_output_exception_does_not_allow_retained_getters() {
+        let file = production_file_at(
+            "bae-core/src/playback/output.rs",
+            r#"
+            struct AudioStream;
+            struct AudioOutput;
+            impl AudioOutput {
+                fn create_stream(&self) -> AudioStream { todo!() }
+            }
+            struct PlaybackService {
+                stream: AudioStream,
+            }
+            impl PlaybackService {
+                fn stream(&self) -> AudioStream { todo!() }
+            }
+            "#,
+        );
+        let capabilities = &["AudioOutput".to_string(), "AudioStream".to_string()];
+        let allowed = &["AudioStream".to_string()];
+
+        let leaks = find_owner_dependency_leaks_with_policy(&[file], capabilities, allowed);
+        assert_eq!(leaks.len(), 1);
+        assert!(matches!(
+            &leaks[0],
+            OwnerDependencyLeak::Return { owner, method, dependency, .. }
+                if owner == "PlaybackService"
+                    && method == "stream"
+                    && dependency == "AudioStream"
         ));
     }
 

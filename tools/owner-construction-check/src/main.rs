@@ -10,7 +10,7 @@ mod module_dependencies;
 mod owner_dependency_boundary;
 use module_dependencies::{find_module_dependency_violations, ModuleDependencyViolation};
 use owner_dependency_boundary::{
-    find_owner_dependency_leaks, find_owner_dependency_leaks_with_capabilities, OwnerDependencyLeak,
+    find_owner_dependency_leaks, find_owner_dependency_leaks_with_policy, OwnerDependencyLeak,
 };
 
 use capability_boundaries::{
@@ -882,6 +882,7 @@ fn main() {
     let mut owner_dependency_only = false;
     let mut rust_roots = Vec::new();
     let mut extra_capability_types = Vec::new();
+    let mut allowed_capability_outputs = Vec::new();
     let mut root = None;
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -911,6 +912,11 @@ fn main() {
                 print_usage_and_exit();
             };
             extra_capability_types.push(name.to_string_lossy().into_owned());
+        } else if argument == "--allowed-capability-output" {
+            let Some(name) = arguments.next() else {
+                print_usage_and_exit();
+            };
+            allowed_capability_outputs.push(name.to_string_lossy().into_owned());
         } else if let Some((_, boundary)) = CAPABILITY_BOUNDARY_FLAGS
             .iter()
             .find(|(flag, _)| argument == *flag)
@@ -940,7 +946,12 @@ fn main() {
         } else {
             rust_roots
         };
-        match check_owner_dependency_only(&root, &rust_roots, &extra_capability_types) {
+        match check_owner_dependency_only(
+            &root,
+            &rust_roots,
+            &extra_capability_types,
+            &allowed_capability_outputs,
+        ) {
             Ok(leaks) if leaks.is_empty() => return,
             Ok(leaks) => {
                 for leak in &leaks {
@@ -957,7 +968,10 @@ fn main() {
             }
         }
     }
-    if !rust_roots.is_empty() || !extra_capability_types.is_empty() {
+    if !rust_roots.is_empty()
+        || !extra_capability_types.is_empty()
+        || !allowed_capability_outputs.is_empty()
+    {
         print_usage_and_exit();
     }
     match check(
@@ -1132,7 +1146,7 @@ fn main() {
 
 fn print_usage_and_exit() -> ! {
     eprintln!(
-        "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]\n       owner-construction-check --owner-dependency-only [--rust-root path]... [--capability-type Type]... [root]"
+        "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]\n       owner-construction-check --owner-dependency-only [--rust-root path]... [--capability-type Type]... [--allowed-capability-output Type]... [root]"
     );
     std::process::exit(2);
 }
@@ -1194,11 +1208,13 @@ fn check_owner_dependency_only(
     root: &Path,
     rust_roots: &[PathBuf],
     extra_capability_types: &[String],
+    allowed_capability_outputs: &[String],
 ) -> Result<Vec<OwnerDependencyLeak>, String> {
     let files = rust_files_in(root, rust_roots)?;
-    Ok(find_owner_dependency_leaks_with_capabilities(
+    Ok(find_owner_dependency_leaks_with_policy(
         &files,
         extra_capability_types,
+        allowed_capability_outputs,
     ))
 }
 
