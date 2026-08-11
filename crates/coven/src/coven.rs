@@ -434,3 +434,12 @@ fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResul
 #[cfg(test)]
 #[path = "coven_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod error_size_tests {
+    #[test]
+    fn coven_error_fits_below_clippys_large_result_threshold() {
+        let size = std::mem::size_of::<super::CovenError>();
+        assert!(size <= 128, "CovenError occupies {size} bytes");
+    }
+}

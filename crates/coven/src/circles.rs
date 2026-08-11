@@ -160,7 +160,7 @@ impl From<SyncError> for CircleError {
         match error {
             SyncError::NotConfigured => Self::NotConfigured,
             SyncError::LoopNotRunning => Self::LoopNotRunning,
-            SyncError::Circle(error) => error.into(),
+            SyncError::Circle(error) => (*error).into(),
             SyncError::Key(error) => Self::Identity(error.to_string()),
             other => Self::Protocol(other.to_string()),
         }

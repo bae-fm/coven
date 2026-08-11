@@ -172,12 +172,12 @@ pub enum MigrationError {
     Failed {
         version: u32,
         name: &'static str,
-        source: DbError,
+        source: Box<DbError>,
     },
     /// Reading or writing `user_version`, or the `BEGIN`/`COMMIT` around a step,
     /// failed.
     #[error("migration ledger access failed: {0}")]
-    Ledger(DbError),
+    Ledger(Box<DbError>),
 }
 
 /// Apply every pending migration on a transaction the caller already owns.
@@ -200,11 +200,11 @@ pub(crate) fn run_migrations_in_transaction(
             return Err(MigrationError::Failed {
                 version: migration.version,
                 name: migration.name,
-                source,
+                source: Box::new(source),
             });
         }
         conn.pragma_update(None, "user_version", migration.version)
-            .map_err(|error| MigrationError::Ledger(DbError::from(error)))?;
+            .map_err(|error| MigrationError::Ledger(Box::new(DbError::from(error))))?;
     }
     read_user_version(conn)
 }
@@ -259,7 +259,7 @@ pub(crate) fn ensure_schema_supported(
 fn read_user_version(conn: &Connection) -> Result<u32, MigrationError> {
     conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
         .map(|v| v as u32)
-        .map_err(|e| MigrationError::Ledger(DbError::from(e)))
+        .map_err(|e| MigrationError::Ledger(Box::new(DbError::from(e))))
 }
 
 #[cfg(test)]
@@ -300,7 +300,7 @@ mod tests {
         let version = run_migrations_in_transaction(&transaction, migrations)?;
         transaction
             .commit()
-            .map_err(|error| MigrationError::Ledger(DbError::from(error)))?;
+            .map_err(|error| MigrationError::Ledger(Box::new(DbError::from(error))))?;
         Ok(version)
     }
 

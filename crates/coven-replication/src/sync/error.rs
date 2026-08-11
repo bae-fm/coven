@@ -31,17 +31,17 @@ pub enum SyncError {
     #[error("Store protocol state: {0}")]
     Protocol(String),
     #[error("Store operation: {0}")]
-    Store(#[from] crate::sync::store::StoreError),
+    Store(Box<crate::sync::store::StoreError>),
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
     Membership(Box<crate::sync::store::MembershipOpsError>),
     #[error("circle operation: {0}")]
-    Circle(#[from] crate::sync::store::CircleOperationError),
+    Circle(Box<crate::sync::store::CircleOperationError>),
     #[error("device join: {0}")]
-    DeviceJoin(#[from] crate::sync::DeviceJoinError),
+    DeviceJoin(Box<crate::sync::DeviceJoinError>),
     #[error("device join transport: {0}")]
-    DeviceJoinTransport(#[from] crate::sync::store::DeviceJoinTransportError),
+    DeviceJoinTransport(Box<crate::sync::store::DeviceJoinTransportError>),
     #[error("invalid join request code: {0}")]
     InvalidJoinRequest(String),
     #[error("invalid Store membership operation code: {0}")]
@@ -66,8 +66,41 @@ impl From<crate::sync::store::MembershipOpsError> for SyncError {
     }
 }
 
+impl From<crate::sync::store::StoreError> for SyncError {
+    fn from(error: crate::sync::store::StoreError) -> Self {
+        Self::Store(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::CircleOperationError> for SyncError {
+    fn from(error: crate::sync::store::CircleOperationError) -> Self {
+        Self::Circle(Box::new(error))
+    }
+}
+
+impl From<crate::sync::DeviceJoinError> for SyncError {
+    fn from(error: crate::sync::DeviceJoinError) -> Self {
+        Self::DeviceJoin(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::DeviceJoinTransportError> for SyncError {
+    fn from(error: crate::sync::store::DeviceJoinTransportError) -> Self {
+        Self::DeviceJoinTransport(Box::new(error))
+    }
+}
+
 impl From<coven_database::DeviceJoinJournalError> for SyncError {
     fn from(error: coven_database::DeviceJoinJournalError) -> Self {
-        SyncError::DeviceJoin(crate::sync::DeviceJoinError::from(error))
+        crate::sync::DeviceJoinError::from(error).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sync_error_fits_below_clippys_large_result_threshold() {
+        let size = std::mem::size_of::<super::SyncError>();
+        assert!(size <= 128, "SyncError occupies {size} bytes");
     }
 }
