@@ -2750,6 +2750,7 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
+    let encryption = crate::EncryptionService::from_key([42; 32]);
     // A store id distinct from every other test's — `try_open`/
     // `open_when_lock_released` below reopen the same directory (the
     // lock is path-scoped, not store-id-scoped) but this test's own
@@ -2765,6 +2766,7 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
     )
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
+    .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
     .open()
     .expect("open handle");
     handle
@@ -2784,10 +2786,7 @@ async fn lock_is_held_until_the_sync_loop_exits_its_cycle() {
     let connect_handle = handle.clone();
     tokio::spawn(async move {
         connect_handle
-            .connect_sync_with_test_home(
-                home,
-                CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
-            )
+            .connect_sync_with_test_home(home, CloudCipher::Encrypted(encryption))
             .await
     })
     .await
@@ -2825,6 +2824,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let dir = StoreDir::new_ephemeral(tmp.path());
+    let encryption = crate::EncryptionService::from_key([42; 32]);
     // A store id distinct from every other test's — see the identical
     // note in `lock_is_held_until_the_sync_loop_exits_its_cycle`.
     let handle = Coven::builder(
@@ -2837,6 +2837,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
     )
     .synced_tables(vec![files_table()])
     .migrations(vec![files_migration()])
+    .key_custody(crate::KeyCustody::InMemory(encryption.clone().into()))
     .open()
     .expect("open handle");
     handle
@@ -2847,7 +2848,7 @@ async fn normal_shutdown_releases_the_lock_for_reopen() {
         connect_handle
             .connect_sync_with_test_home(
                 Arc::new(InMemoryCloudHome::new()),
-                CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+                CloudCipher::Encrypted(encryption),
             )
             .await
     })

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use coven_foundation::config::{Config, HomeStorage};
+use coven_foundation::config::Config;
+#[cfg(test)]
+use coven_foundation::config::HomeStorage;
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody,
@@ -139,17 +141,14 @@ impl StoreSecurity {
         self.keys.delete_host_secret(name)
     }
 
-    fn app_data_cipher(&self) -> Result<EncryptionService, SealError> {
-        let keyring = self.master_keys.unlock()?.ok_or(SealError::Locked)?;
-        Ok(EncryptionService::from(keyring))
-    }
-
     pub(crate) fn seal_app_data(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        Ok(self.app_data_cipher()?.seal_app_data(plaintext, aad))
+        let keyring = self.master_keys.unlock()?.ok_or(SealError::Locked)?;
+        Ok(EncryptionService::from(keyring).seal_app_data(plaintext, aad))
     }
 
     pub(crate) fn open_app_data(&self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SealError> {
-        self.app_data_cipher()?.open_app_data(sealed, aad)
+        let keyring = self.master_keys.unlock()?.ok_or(SealError::Locked)?;
+        EncryptionService::from(keyring).open_app_data(sealed, aad)
     }
 
     pub(crate) fn open_cloud_storage(
@@ -161,7 +160,14 @@ impl StoreSecurity {
     ) -> Result<CloudSyncConnection, coven_storage::cloud::setup::StorageSetupError> {
         let cipher = match cipher {
             Some(cipher) => cipher,
-            None => self.cloud_cipher(config.cloud_home.storage)?,
+            None if config.cloud_home.storage.is_browsable() => CloudCipher::Plaintext,
+            None => {
+                let keyring = self
+                    .master_keys
+                    .unlock()?
+                    .ok_or(coven_storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
+                CloudCipher::Encrypted(keyring.into())
+            }
         };
         let identity = self.required_identity()?;
         Ok(CloudSyncConnection::new(
@@ -174,29 +180,19 @@ impl StoreSecurity {
         .with_blob_chunking(blob_chunking))
     }
 
-    fn cloud_cipher(
-        &self,
-        storage: HomeStorage,
-    ) -> Result<CloudCipher, coven_storage::cloud::setup::StorageSetupError> {
-        if storage.is_browsable() {
-            return Ok(CloudCipher::Plaintext);
-        }
-        let keyring = self
-            .master_keys
-            .unlock()?
-            .ok_or(coven_storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
-        Ok(CloudCipher::Encrypted(keyring.into()))
-    }
-
     #[cfg(test)]
     pub(crate) fn cloud_cipher_fingerprint_for_test(
         &self,
         storage: HomeStorage,
     ) -> Result<Option<String>, coven_storage::cloud::setup::StorageSetupError> {
-        Ok(match self.cloud_cipher(storage)? {
-            CloudCipher::Encrypted(encryption) => Some(encryption.fingerprint()),
-            CloudCipher::Plaintext => None,
-        })
+        if storage.is_browsable() {
+            return Ok(None);
+        }
+        let keyring = self
+            .master_keys
+            .unlock()?
+            .ok_or(coven_storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
+        Ok(Some(EncryptionService::from(keyring).fingerprint()))
     }
 
     pub(crate) fn generate_restore_code(

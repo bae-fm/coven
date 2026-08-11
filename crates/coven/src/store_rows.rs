@@ -85,30 +85,33 @@ impl StoreRows {
     where
         R: Send + 'static,
     {
-        let routing_encryption = self.routing_encryption()?;
         let blob_staging = self.host_write_blob_staging();
+        self.execute_with_blob_staging(operation, blob_staging)
+            .await
+    }
+
+    async fn execute_with_blob_staging<R>(
+        &self,
+        operation: HostWriteOperation<R, CovenError>,
+        blob_staging: Option<Box<dyn coven_database::AudienceBlobMoveStaging>>,
+    ) -> CovenResult<WriteReceipt<R>>
+    where
+        R: Send + 'static,
+    {
+        let routing_encryption = if self.writes.requires_routing_encryption() {
+            let keyring = self
+                .master_keys
+                .unlock()
+                .map_err(coven_keys::keys::RoutingEncryptionError::from)?
+                .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+            Some(coven_keys::encryption::EncryptionService::from(keyring))
+        } else {
+            None
+        };
         self.writes
             .execute(operation, routing_encryption, blob_staging)
             .await
             .map_err(map_host_write_error)
-    }
-
-    fn routing_encryption(
-        &self,
-    ) -> Result<
-        Option<coven_keys::encryption::EncryptionService>,
-        coven_keys::keys::RoutingEncryptionError,
-    > {
-        if !self.writes.requires_routing_encryption() {
-            return Ok(None);
-        }
-        let keyring = self
-            .master_keys
-            .unlock()?
-            .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
-        Ok(Some(coven_keys::encryption::EncryptionService::from(
-            keyring,
-        )))
     }
 
     fn host_write_blob_staging(&self) -> Option<Box<dyn coven_database::AudienceBlobMoveStaging>> {
@@ -245,10 +248,8 @@ impl StoreRows {
             context.execute_batch(&sql)?;
             Ok(())
         });
-        self.writes
-            .execute(operation, self.routing_encryption()?, blob_staging)
+        self.execute_with_blob_staging(operation, blob_staging)
             .await
-            .map_err(map_host_write_error)
     }
 }
 

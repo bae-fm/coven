@@ -4,10 +4,7 @@ impl StoreSync {
     pub(crate) fn host_write_blob_staging(
         &self,
     ) -> Option<coven_replication::sync::store::HostWriteBlobStaging> {
-        Some(
-            self.connected()?
-                .host_write_blob_staging(tokio::runtime::Handle::current()),
-        )
+        Some(connected_sync!(self)?.host_write_blob_staging(tokio::runtime::Handle::current()))
     }
 
     /// The cloud object key `blob` has, or would have, under this store's home.
@@ -18,7 +15,7 @@ impl StoreSync {
     /// segment from the identity itself leaves one authority rather than two
     /// that agree.
     pub(crate) fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let scheme = match self.connected() {
+        let scheme = match connected_sync!(self) {
             Some(sync) => sync.blob_path_scheme(),
             None => BlobPathScheme::for_storage(self.config().cloud_home.storage),
         };
@@ -42,7 +39,7 @@ impl StoreSync {
         root_id: &str,
         pin: bool,
     ) -> Result<(), MakeRemoteError> {
-        self.active()
+        active_sync!(self)
             .ok_or(MakeRemoteError::SyncNotReady)?
             .make_remote(root_table, root_id, pin)
             .await?;
@@ -55,7 +52,7 @@ impl StoreSync {
         root_table: &str,
         root_id: &str,
     ) -> Result<(), MakeRemoteError> {
-        self.active()
+        active_sync!(self)
             .ok_or(MakeRemoteError::SyncNotReady)?
             .cancel_make_remote(root_table, root_id)
             .await?;
@@ -70,7 +67,7 @@ impl StoreSync {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        self.active()
+        active_sync!(self)
             .ok_or(MakeLocalError::SyncNotReady)?
             .make_local(root_table, root_id, dest, cancel)
             .await?;
@@ -81,7 +78,7 @@ impl StoreSync {
     pub(crate) async fn drain_uploads(
         &self,
     ) -> Result<coven_protocol::blob::DrainOutcome, SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()
             .await
@@ -92,7 +89,7 @@ impl StoreSync {
         &self,
         write_id: crate::WriteId,
     ) -> Result<Vec<crate::WriteId>, SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .discard_blocked_write(write_id)
             .await

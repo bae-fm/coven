@@ -148,7 +148,7 @@ impl StoreSync {
 
     #[cfg(test)]
     pub(crate) fn connected_store_id_for_test(&self) -> Option<String> {
-        Some(self.connected()?.config().store_id.clone())
+        Some(connected_sync!(self)?.config().store_id.clone())
     }
 
     #[cfg(test)]
@@ -156,13 +156,12 @@ impl StoreSync {
         &self,
         store_dir: &coven_foundation::store_dir::StoreDir,
     ) -> bool {
-        self.connected()
-            .is_some_and(|sync| sync.uses_store_dir_for_test(store_dir))
+        connected_sync!(self).is_some_and(|sync| sync.uses_store_dir_for_test(store_dir))
     }
 
     #[cfg(test)]
     pub(crate) fn connected_blob_path_scheme_for_test(&self) -> Option<BlobPathScheme> {
-        Some(self.connected()?.blob_path_scheme())
+        Some(connected_sync!(self)?.blob_path_scheme())
     }
 
     #[cfg(test)]
@@ -170,7 +169,7 @@ impl StoreSync {
         &self,
         encryption: EncryptionService,
     ) -> Result<(), SyncError> {
-        self.connected()
+        connected_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .adopt_key_rotation_for_test(encryption)
             .map(|_| ())
@@ -179,7 +178,7 @@ impl StoreSync {
 
     #[cfg(test)]
     pub(crate) fn encryption_generation_for_test(&self) -> Option<u64> {
-        self.connected()?.encryption_generation_for_test()
+        connected_sync!(self)?.encryption_generation_for_test()
     }
 
     #[cfg(test)]
@@ -188,7 +187,7 @@ impl StoreSync {
         bytes: &[u8],
         context: &[u8],
     ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), StorageError> {
-        self.connected()
+        connected_sync!(self)
             .ok_or_else(|| StorageError::Storage("sync connection is not installed".to_string()))?
             .open_sealed_blob_for_test(bytes, context)
             .map_err(StorageError::Storage)

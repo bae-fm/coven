@@ -180,61 +180,129 @@ impl CloudSyncConnection {
         self.keypair.public_key() == identity.public_key()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn connection_for_test_identity(&self, identity: UserKeypair) -> Self {
+        Self::new(
+            self.home.clone(),
+            self.cipher.read().unwrap().clone(),
+            self.blob_paths,
+            self.store_id.clone(),
+            identity,
+        )
+        .with_blob_chunking(self.blob_chunking)
+    }
+
     pub fn is_plaintext(&self) -> bool {
         self.cipher.read().unwrap().is_plaintext()
     }
 
-    fn cipher(&self) -> CloudCipher {
-        self.cipher.read().unwrap().clone()
+    fn cipher_suffix(&self) -> &'static str {
+        self.cipher.read().unwrap().suffix()
     }
 
-    /// The cipher to seal new data under — refuses while the cloud has committed
-    /// a rotation this device has not adopted, rather than sealing under the
-    /// generation the store has superseded. Every write that protects data under
-    /// the store key calls this instead of reading `self.cipher()` directly;
-    /// reads/opens are unaffected (they resolve their own generation from the
-    /// ciphertext's tag) and keep reading the cipher plainly.
-    fn cipher_for_seal(&self) -> Result<CloudCipher, StorageError> {
-        let cipher = self.cipher();
-        self.pending_rotation
-            .check(self.cipher.current_generation())?;
-        Ok(cipher)
-    }
-
-    fn store_blob_protection(
+    fn open_stored_data(
         &self,
-    ) -> Result<coven_protocol::objects::BlobSpoolProtection, StorageError> {
-        Ok(match self.cipher_for_seal()? {
-            CloudCipher::Encrypted(encryption) => {
-                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption)
-            }
-            CloudCipher::Plaintext => coven_protocol::objects::BlobSpoolProtection::Browsable,
-        })
+        stored: Vec<u8>,
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
+        self.cipher.read().unwrap().open(stored, aad_context)
     }
 
-    fn protocol_cipher_for_seal(
+    fn seal_stored_data(
+        &self,
+        plaintext: Vec<u8>,
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
+        let cipher = self.cipher.read().unwrap();
+        self.pending_rotation.check(cipher.current_generation())?;
+        Ok(cipher.seal(plaintext, aad_context))
+    }
+
+    fn seal_protocol_data(
         &self,
         context: &ProtocolObjectContext,
-    ) -> Result<CloudCipher, StorageError> {
+        plaintext: Vec<u8>,
+        aad_context: &[u8],
+    ) -> Result<Vec<u8>, StorageError> {
         match context.protection() {
-            ProtocolObjectProtection::StoreEncrypted => self.cipher_for_seal(),
-            ProtocolObjectProtection::SignedPlaintext => Ok(CloudCipher::Plaintext),
-            ProtocolObjectProtection::Circle(encryption) => {
-                Ok(CloudCipher::Encrypted(encryption.clone()))
+            ProtocolObjectProtection::StoreEncrypted => {
+                self.seal_stored_data(plaintext, aad_context)
             }
-            ProtocolObjectProtection::RecipientSealed => Ok(CloudCipher::Plaintext),
+            ProtocolObjectProtection::SignedPlaintext
+            | ProtocolObjectProtection::RecipientSealed => {
+                Ok(CloudCipher::Plaintext.seal(plaintext, aad_context))
+            }
+            ProtocolObjectProtection::Circle(encryption) => {
+                Ok(CloudCipher::Encrypted(encryption.clone()).seal(plaintext, aad_context))
+            }
         }
     }
 
-    fn protocol_cipher_for_open(&self, context: &ProtocolObjectContext) -> CloudCipher {
-        match context.protection() {
-            ProtocolObjectProtection::StoreEncrypted => self.cipher(),
+    async fn verify_and_open_protocol_data(
+        &self,
+        operation: &'static str,
+        context: &ProtocolObjectContext,
+        object: ExactObjectRef,
+        stored: Vec<u8>,
+        aad_context: Vec<u8>,
+    ) -> Result<Vec<u8>, StorageError> {
+        let cipher = match context.protection() {
+            ProtocolObjectProtection::StoreEncrypted => self.cipher.read().unwrap().clone(),
             ProtocolObjectProtection::SignedPlaintext => CloudCipher::Plaintext,
             ProtocolObjectProtection::Circle(encryption) => {
                 CloudCipher::Encrypted(encryption.clone())
             }
             ProtocolObjectProtection::RecipientSealed => CloudCipher::Plaintext,
-        }
+        };
+        run_storage_cpu(
+            operation,
+            Box::new(move || {
+                object.verify(&stored)?;
+                cipher.open(stored, &aad_context).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "protocol object {}: {error}",
+                        object.slot().logical_key()
+                    ))
+                })
+            }),
+        )
+        .await
+    }
+
+    async fn identify_and_open_protocol_data(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: ObjectSlot,
+        stored: Vec<u8>,
+        aad_context: Vec<u8>,
+    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
+        let cipher = match context.protection() {
+            ProtocolObjectProtection::StoreEncrypted => self.cipher.read().unwrap().clone(),
+            ProtocolObjectProtection::SignedPlaintext => CloudCipher::Plaintext,
+            ProtocolObjectProtection::Circle(encryption) => {
+                CloudCipher::Encrypted(encryption.clone())
+            }
+            ProtocolObjectProtection::RecipientSealed => CloudCipher::Plaintext,
+        };
+        run_storage_cpu(
+            "identify and open protocol slot",
+            Box::new(move || {
+                let object = ExactObjectRef::new(
+                    slot.clone(),
+                    stored.len() as u64,
+                    ObjectHash::digest(&stored),
+                );
+                let prepared = PreparedExactObject::new(object, stored.clone())?;
+                let opened = cipher.open(stored, &aad_context).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "protocol object {}: {error}",
+                        slot.logical_key()
+                    ))
+                })?;
+                Ok((opened, prepared))
+            }),
+        )
+        .await
     }
 
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].

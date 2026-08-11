@@ -5,7 +5,9 @@ impl StoreSync {
         &self,
     ) -> Result<Vec<coven_protocol::membership::MemberInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        match self.command_authority().await? {
+        self.ensure_command_authority().await?;
+        let authority = installed_command_authority!(self);
+        match authority {
             CommandAuthority::Connected(sync) => sync.members().await.map_err(Into::into),
             CommandAuthority::CommandOnly(store) => store.members().await.map_err(Into::into),
         }
@@ -15,7 +17,9 @@ impl StoreSync {
         &self,
     ) -> Result<Option<crate::MembershipConflictInfo>, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        match self.command_authority().await? {
+        self.ensure_command_authority().await?;
+        let authority = installed_command_authority!(self);
+        match authority {
             CommandAuthority::Connected(sync) => {
                 sync.membership_conflict().await.map_err(Into::into)
             }
@@ -29,7 +33,9 @@ impl StoreSync {
         &self,
     ) -> Result<coven_replication::sync::store::StoreRestoreMembership, SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
-        match self.command_authority().await? {
+        self.ensure_command_authority().await?;
+        let authority = installed_command_authority!(self);
+        match authority {
             CommandAuthority::Connected(sync) => {
                 sync.restore_membership().await.map_err(Into::into)
             }
@@ -45,7 +51,7 @@ impl StoreSync {
         invitee_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
     ) -> Result<coven_replication::sync::MemberInvitation, SyncError> {
-        let active = self.active().ok_or(SyncError::LoopNotRunning)?;
+        let active = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
         }
@@ -64,7 +70,7 @@ impl StoreSync {
         &self,
         public_key_hex: &str,
     ) -> Result<String, SyncError> {
-        let active = self.active().ok_or(SyncError::LoopNotRunning)?;
+        let active = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
         }
@@ -78,7 +84,7 @@ impl StoreSync {
         &self,
         choice: &crate::MembershipConflictChoice,
     ) -> Result<(), SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .resolve_membership_conflict(choice)
             .await
@@ -89,7 +95,7 @@ impl StoreSync {
         &self,
         device_id: crate::StoreDeviceId,
     ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .propose_device_exclusion(device_id)
             .await
@@ -100,7 +106,7 @@ impl StoreSync {
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_exclusion(proposal)
             .await
@@ -111,7 +117,7 @@ impl StoreSync {
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
     ) -> Result<(), SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_device_exclusion(proposal)
             .await
@@ -122,7 +128,7 @@ impl StoreSync {
         &self,
         device_id: crate::StoreDeviceId,
     ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .begin_owner_promotion(device_id)
             .await
@@ -133,7 +139,7 @@ impl StoreSync {
         &self,
         request: coven_protocol::store_commit::OwnerPromotionRequest,
     ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .accept_owner_promotion(request)
             .await
@@ -144,7 +150,7 @@ impl StoreSync {
         &self,
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
     ) -> Result<(), SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_owner_promotion(acceptance)
             .await
@@ -155,7 +161,7 @@ impl StoreSync {
         &self,
         name: &str,
     ) -> Result<crate::CircleId, crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .create_circle(name)
             .await
             .map_err(Into::into)
@@ -166,7 +172,7 @@ impl StoreSync {
         circle_id: crate::CircleId,
         name: &str,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .rename_circle(circle_id, name)
             .await
             .map_err(Into::into)
@@ -178,7 +184,7 @@ impl StoreSync {
         member_pubkey: String,
         role: crate::CircleRole,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .add_circle_member(circle_id, member_pubkey, role)
             .await
             .map_err(Into::into)
@@ -189,7 +195,7 @@ impl StoreSync {
         circle_id: crate::CircleId,
         member_pubkey: String,
     ) -> Result<crate::CircleOperationId, crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .remove_circle_member(circle_id, member_pubkey)
             .await
             .map_err(Into::into)
@@ -200,7 +206,7 @@ impl StoreSync {
         circle_id: crate::CircleId,
         chosen: crate::CircleControlCoord,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .resolve_circle_control(circle_id, chosen)
             .await
             .map_err(Into::into)
@@ -210,7 +216,7 @@ impl StoreSync {
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleOperationId, crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .cancel_circle_epoch_close(circle_id)
             .await
             .map_err(Into::into)
@@ -221,7 +227,7 @@ impl StoreSync {
         circle_id: crate::CircleId,
         device_id: crate::StoreDeviceId,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .exclude_circle_close_device(circle_id, device_id)
             .await
             .map_err(Into::into)
@@ -231,7 +237,7 @@ impl StoreSync {
         &self,
         circle_id: crate::CircleId,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .delete_circle(circle_id)
             .await
             .map_err(Into::into)
@@ -241,7 +247,7 @@ impl StoreSync {
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .retry_circle_operation(operation_id)
             .await
             .map_err(Into::into)
@@ -251,7 +257,7 @@ impl StoreSync {
         &self,
         operation_id: crate::CircleOperationId,
     ) -> Result<(), crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .discard_circle_operation(operation_id)
             .await
             .map_err(Into::into)
@@ -261,7 +267,7 @@ impl StoreSync {
         &self,
         circle_id: crate::CircleId,
     ) -> Result<crate::CircleCloseStatus, crate::CircleError> {
-        self.active_circle_operation()?
+        active_circle_sync!(self)?
             .circle_close_status(circle_id)
             .await
             .map_err(Into::into)
@@ -271,8 +277,7 @@ impl StoreSync {
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOfferBundle, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .begin_device_join_bundle(member_pubkey)
             .await?)
@@ -285,8 +290,7 @@ impl StoreSync {
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .drive_device_join(bundle, policy, access_administrator, timing)
             .await?)
@@ -297,8 +301,7 @@ impl StoreSync {
         bundle: &crate::DeviceJoinOfferBundle,
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_join_transport(bundle, timing)
             .await?)
@@ -308,8 +311,7 @@ impl StoreSync {
         &self,
         bundle: &crate::DeviceJoinOfferBundle,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .abandon_device_join_transport(bundle)
             .await?)
@@ -319,8 +321,7 @@ impl StoreSync {
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .begin_device_join(member_pubkey)
             .await?)
@@ -330,8 +331,7 @@ impl StoreSync {
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .abandon_device_join(offer)
             .await?)
@@ -342,8 +342,7 @@ impl StoreSync {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .authorize_device_provider_access(request, access_administrator)
             .await?)
@@ -353,8 +352,7 @@ impl StoreSync {
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .accept_device_registration(request)
             .await?)
@@ -364,8 +362,7 @@ impl StoreSync {
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .publish_device_provider_challenge(bootstrap)
             .await?)
@@ -375,8 +372,7 @@ impl StoreSync {
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .complete_device_provider_admission(readiness)
             .await?)
@@ -386,8 +382,7 @@ impl StoreSync {
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_device_join(completion)
             .await?)
@@ -397,8 +392,7 @@ impl StoreSync {
         &self,
         attempt: crate::DeviceJoinAttemptRef,
     ) -> Result<crate::DeviceJoinCancellation, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_join(attempt)
             .await?)
@@ -408,8 +402,7 @@ impl StoreSync {
         &self,
         cancellation: crate::DeviceJoinCancellation,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .close_device_provider_admission(cancellation)
             .await?)
@@ -420,8 +413,7 @@ impl StoreSync {
         cancellation: crate::DeviceJoinCancellation,
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::ProviderAdminJoinTerminal, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .revoke_device_provider_admission_writes(cancellation, executor)
             .await?)
@@ -432,8 +424,7 @@ impl StoreSync {
         cancellation: crate::DeviceJoinCancellation,
         executor: &dyn crate::DeviceJoinWriteRevocationExecutor,
     ) -> Result<crate::JoinerJoinTerminal, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .revoke_joining_device_writes(cancellation, executor)
             .await?)
@@ -443,8 +434,7 @@ impl StoreSync {
         &self,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(self
-            .active()
+        Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .activate_device_join_cleanup(receipt)
             .await?)
@@ -454,7 +444,7 @@ impl StoreSync {
         &self,
         activation: crate::DeviceJoinCleanupActivation,
     ) -> Result<(), SyncError> {
-        self.active()
+        active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .complete_owner_device_join_cleanup(activation)
             .await?;

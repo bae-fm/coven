@@ -3604,7 +3604,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 /// flip, its blob is not sealed, and the intent stays queued — yet the cycle
 /// completes. The first cycle after adoption flips the gate, uploads the blob,
 /// and consumes the intent. Without the gate this cycle would abort at
-/// `cipher_for_seal` before the pull.
+/// the store-key seal gate before the pull.
 #[tokio::test]
 async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let keypair = UserKeypair::generate();

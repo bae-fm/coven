@@ -138,16 +138,6 @@ impl VerifiedCircleKeyring {
                     == fingerprint
             })
     }
-
-    fn epoch_encryption(&self, circle_id: CircleId) -> Result<EncryptionService, CircleStateError> {
-        self.keyring
-            .service_for_fingerprint(self.key_fingerprint.as_bytes())
-            .map_err(|error| {
-                CircleStateError(format!(
-                    "select Circle package key for {circle_id}: {error}"
-                ))
-            })
-    }
 }
 
 impl CircleEpochAccess {
@@ -278,7 +268,14 @@ pub(super) fn epoch_access_from(
     roster: &CircleMaterializedRoster,
 ) -> Result<CircleEpochAccess, CircleStateError> {
     let verified = verified_keyring_from(circle_id, control, disposition, roster)?;
-    let encryption = verified.epoch_encryption(circle_id)?;
+    let encryption = verified
+        .keyring
+        .service_for_fingerprint(verified.key_fingerprint.as_bytes())
+        .map_err(|error| {
+            CircleStateError(format!(
+                "select Circle package key for {circle_id}: {error}"
+            ))
+        })?;
     let key_fingerprint = verified.key_fingerprint;
     Ok(CircleEpochAccess {
         circle_id,

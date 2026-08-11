@@ -9,7 +9,9 @@ mod capability_boundaries;
 mod module_dependencies;
 mod owner_dependency_boundary;
 use module_dependencies::{find_module_dependency_violations, ModuleDependencyViolation};
-use owner_dependency_boundary::{find_owner_dependency_leaks, OwnerDependencyLeak};
+use owner_dependency_boundary::{
+    find_owner_dependency_leaks, find_owner_dependency_leaks_with_capabilities, OwnerDependencyLeak,
+};
 
 use capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation, GatedCapability,
@@ -877,8 +879,12 @@ fn main() {
     let mut transient_component_bundles = false;
     let mut capability_boundaries: Vec<&'static [GatedCapability]> = Vec::new();
     let mut module_dependencies = false;
+    let mut owner_dependency_only = false;
+    let mut rust_roots = Vec::new();
+    let mut extra_capability_types = Vec::new();
     let mut root = None;
-    for argument in std::env::args_os().skip(1) {
+    let mut arguments = std::env::args_os().skip(1);
+    while let Some(argument) = arguments.next() {
         if argument == "--module-dependencies" {
             module_dependencies = true;
         } else if argument == "--database-boundary" {
@@ -893,6 +899,18 @@ fn main() {
             retained_capability_parameters = true;
         } else if argument == "--transient-component-bundles" {
             transient_component_bundles = true;
+        } else if argument == "--owner-dependency-only" {
+            owner_dependency_only = true;
+        } else if argument == "--rust-root" {
+            let Some(path) = arguments.next() else {
+                print_usage_and_exit();
+            };
+            rust_roots.push(PathBuf::from(path));
+        } else if argument == "--capability-type" {
+            let Some(name) = arguments.next() else {
+                print_usage_and_exit();
+            };
+            extra_capability_types.push(name.to_string_lossy().into_owned());
         } else if let Some((_, boundary)) = CAPABILITY_BOUNDARY_FLAGS
             .iter()
             .find(|(flag, _)| argument == *flag)
@@ -901,13 +919,47 @@ fn main() {
         } else if root.is_none() {
             root = Some(PathBuf::from(argument));
         } else {
-            eprintln!(
-                "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]"
-            );
-            std::process::exit(2);
+            print_usage_and_exit();
         }
     }
     let root = root.unwrap_or_else(|| PathBuf::from("."));
+    if owner_dependency_only {
+        if database_boundary
+            || owner_dependency_boundary
+            || retained_service_returns
+            || retained_service_construction
+            || retained_capability_parameters
+            || transient_component_bundles
+            || !capability_boundaries.is_empty()
+            || module_dependencies
+        {
+            print_usage_and_exit();
+        }
+        let rust_roots = if rust_roots.is_empty() {
+            vec![PathBuf::from(".")]
+        } else {
+            rust_roots
+        };
+        match check_owner_dependency_only(&root, &rust_roots, &extra_capability_types) {
+            Ok(leaks) if leaks.is_empty() => return,
+            Ok(leaks) => {
+                for leak in &leaks {
+                    print_owner_dependency_leak(leak);
+                }
+                eprintln!(
+                    "owners use retained dependencies internally and expose closed operations to callers"
+                );
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("owner construction check failed: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if !rust_roots.is_empty() || !extra_capability_types.is_empty() {
+        print_usage_and_exit();
+    }
     match check(
         &root,
         database_boundary,
@@ -944,66 +996,7 @@ fn main() {
                 );
             }
             for violation in &result.owner_dependency_leaks {
-                match violation {
-                    OwnerDependencyLeak::Field {
-                        path,
-                        line,
-                        owner,
-                        field,
-                    } => eprintln!(
-                        "{path}:{line}: retained-service owner {owner} exposes field {field}"
-                    ),
-                    OwnerDependencyLeak::CrateRootSessionField {
-                        path,
-                        line,
-                        session,
-                        dependency,
-                    } => eprintln!(
-                        "{path}:{line}: crate-root {session} exposes retained dependency {dependency} to every descendant module"
-                    ),
-                    OwnerDependencyLeak::Return {
-                        path,
-                        line,
-                        owner,
-                        method,
-                        dependency,
-                    } => eprintln!(
-                        "{path}:{line}: {owner}::{method} returns retained dependency {dependency}"
-                    ),
-                    OwnerDependencyLeak::Parameter {
-                        path,
-                        line,
-                        owner,
-                        method,
-                        dependency,
-                    } => eprintln!(
-                        "{path}:{line}: {owner}::{method} accepts raw dependency {dependency}"
-                    ),
-                    OwnerDependencyLeak::FreeReturn {
-                        path,
-                        line,
-                        function,
-                        dependency,
-                    } => eprintln!(
-                        "{path}:{line}: {function} returns raw dependency {dependency}"
-                    ),
-                    OwnerDependencyLeak::FreeParameter {
-                        path,
-                        line,
-                        function,
-                        dependency,
-                    } => eprintln!(
-                        "{path}:{line}: {function} accepts raw dependency {dependency}"
-                    ),
-                    OwnerDependencyLeak::RawProviderOperation {
-                        path,
-                        line,
-                        owner,
-                        method,
-                    } => eprintln!(
-                        "{path}:{line}: {owner}::{method} exposes raw provider-object access"
-                    ),
-                }
+                print_owner_dependency_leak(violation);
             }
             for violation in &result.service_returns {
                 eprintln!(
@@ -1135,6 +1128,78 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+fn print_usage_and_exit() -> ! {
+    eprintln!(
+        "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]\n       owner-construction-check --owner-dependency-only [--rust-root path]... [--capability-type Type]... [root]"
+    );
+    std::process::exit(2);
+}
+
+fn print_owner_dependency_leak(violation: &OwnerDependencyLeak) {
+    match violation {
+        OwnerDependencyLeak::Field {
+            path,
+            line,
+            owner,
+            field,
+        } => eprintln!("{path}:{line}: retained-service owner {owner} exposes field {field}"),
+        OwnerDependencyLeak::CrateRootSessionField {
+            path,
+            line,
+            session,
+            dependency,
+        } => eprintln!(
+            "{path}:{line}: crate-root {session} exposes retained dependency {dependency} to every descendant module"
+        ),
+        OwnerDependencyLeak::Return {
+            path,
+            line,
+            owner,
+            method,
+            dependency,
+        } => eprintln!(
+            "{path}:{line}: {owner}::{method} returns retained dependency {dependency}"
+        ),
+        OwnerDependencyLeak::Parameter {
+            path,
+            line,
+            owner,
+            method,
+            dependency,
+        } => eprintln!("{path}:{line}: {owner}::{method} accepts raw dependency {dependency}"),
+        OwnerDependencyLeak::FreeReturn {
+            path,
+            line,
+            function,
+            dependency,
+        } => eprintln!("{path}:{line}: {function} returns raw dependency {dependency}"),
+        OwnerDependencyLeak::FreeParameter {
+            path,
+            line,
+            function,
+            dependency,
+        } => eprintln!("{path}:{line}: {function} accepts raw dependency {dependency}"),
+        OwnerDependencyLeak::RawProviderOperation {
+            path,
+            line,
+            owner,
+            method,
+        } => eprintln!("{path}:{line}: {owner}::{method} exposes raw provider-object access"),
+    }
+}
+
+fn check_owner_dependency_only(
+    root: &Path,
+    rust_roots: &[PathBuf],
+    extra_capability_types: &[String],
+) -> Result<Vec<OwnerDependencyLeak>, String> {
+    let files = rust_files_in(root, rust_roots)?;
+    Ok(find_owner_dependency_leaks_with_capabilities(
+        &files,
+        extra_capability_types,
+    ))
 }
 
 fn check(
@@ -1456,10 +1521,16 @@ fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
 }
 
 fn rust_files(root: &Path) -> Result<Vec<RustFile>, String> {
-    let crates = root.join("crates");
+    rust_files_in(root, &[PathBuf::from("crates")])
+}
+
+fn rust_files_in(root: &Path, rust_roots: &[PathBuf]) -> Result<Vec<RustFile>, String> {
     let mut paths = Vec::new();
-    collect_rust_paths(&crates, &mut paths)?;
+    for rust_root in rust_roots {
+        collect_rust_paths(&root.join(rust_root), &mut paths)?;
+    }
     paths.sort();
+    paths.dedup();
     paths
         .into_iter()
         .map(|path| {
@@ -1487,7 +1558,12 @@ fn collect_rust_paths(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(),
         let entry = entry.map_err(|error| format!("read directory entry: {error}"))?;
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
+            if path.file_name().is_some_and(|name| {
+                matches!(
+                    name.to_str(),
+                    Some(".claude" | ".codex" | ".git" | "node_modules" | "target")
+                )
+            }) {
                 continue;
             }
             collect_rust_paths(&path, output)?;

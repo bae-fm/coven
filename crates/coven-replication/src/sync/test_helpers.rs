@@ -398,6 +398,89 @@ mod test_device {
             })
         }
 
+        pub async fn activate_joined(
+            observer: Self,
+            joining_database: coven_database::StoreDatabase,
+            joining_store_dir: StoreDir,
+            joining_identity: &UserKeypair,
+            published_at: &str,
+            storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
+        ) -> Result<Self, String> {
+            let activated_database = joining_database.clone();
+            let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+                pending_dir.path().join("pending-device-join.sqlite"),
+            )
+            .map_err(|error| error.to_string())?;
+            let offer = observer
+                .begin_device_join(&pubkey_hex(joining_identity))
+                .await
+                .map_err(|error| format!("begin device join: {error}"))?;
+            let mut pending_join = observer
+                .open_pending_device_join_for_test(&pending, joining_identity, offer)
+                .await
+                .map_err(|error| format!("open pending device join: {error}"))?;
+            let access_request = pending_join
+                .prepare_provider_access_request()
+                .await
+                .map_err(|error| format!("prepare provider access request: {error}"))?;
+            let approval = observer
+                .authorize_device_provider_access(access_request, None)
+                .await
+                .map_err(|error| format!("authorize device provider access: {error}"))?;
+            let registration_request = pending_join
+                .prepare_registration_request(approval)
+                .await
+                .map_err(|error| format!("prepare device registration request: {error}"))?;
+            let provisional = observer
+                .accept_device_registration_request(registration_request)
+                .await
+                .map_err(|error| format!("accept device registration request: {error}"))?;
+            let provider_ready = observer
+                .publish_device_provider_challenge(provisional)
+                .await
+                .map_err(|error| format!("publish device provider challenge: {error}"))?;
+            let mut joining = pending_join
+                .begin_joining_store(joining_database, &joining_store_dir)
+                .await
+                .map_err(|error| format!("begin joining Store: {error}"))?;
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let bootstrap_pull = joining
+                .pull_store_history(Some(&routing_encryption))
+                .await
+                .map_err(|error| format!("pull joining Store history: {error}"))?;
+            if !bootstrap_pull.held_positions.is_empty() {
+                return Err(format!(
+                    "device join bootstrap pull held signed positions: {:?}",
+                    bootstrap_pull.held_positions
+                ));
+            }
+            let readiness = joining
+                .bootstrap(provider_ready, published_at)
+                .await
+                .map_err(|error| format!("bootstrap joining Store: {error}"))?;
+            let completion = observer
+                .complete_device_provider_admission(readiness)
+                .await
+                .map_err(|error| format!("complete device provider admission: {error}"))?;
+            let activation = observer
+                .finalize_device_join(completion)
+                .await
+                .map_err(|error| format!("finalize device join: {error}"))?;
+            joining
+                .complete(activation)
+                .await
+                .map_err(|error| format!("complete joining Store: {error}"))?;
+            Self::load_with_database(
+                activated_database,
+                storage,
+                joining_identity.clone(),
+                joining_store_dir,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+
         pub async fn load(
             db: &Database,
             store_dir: StoreDir,
@@ -2830,33 +2913,6 @@ impl TestStore {
         Ok(finalized)
     }
 
-    fn storage_for_device(
-        &self,
-        identity: UserKeypair,
-    ) -> Result<std::sync::Arc<coven_storage::CloudSyncConnection>, String> {
-        if identity.public_key() == self.signer.public_key() {
-            return Ok(self.storage.clone());
-        }
-        let cipher = match self.storage.keyring_facts_for_test() {
-            Some(keyring) => coven_storage::CloudCipher::Encrypted(
-                coven_keys::encryption::EncryptionService::from_keyring(
-                    keyring.entries().iter().copied(),
-                )
-                .map_err(|error| error.to_string())?,
-            ),
-            None => coven_storage::CloudCipher::Plaintext,
-        };
-        Ok(std::sync::Arc::new(
-            coven_storage::CloudSyncConnection::new(
-                self.home.clone(),
-                cipher,
-                self.storage.blob_path_scheme(),
-                self.storage.store_id(),
-                identity,
-            ),
-        ))
-    }
-
     pub async fn create(
         db: &Database,
         store_dir: StoreDir,
@@ -3637,7 +3693,7 @@ impl TestStore {
     ) -> Result<TestDevice, String> {
         TestDevice::load_with_database(
             coven_database::StoreDatabase::new(db),
-            self.storage_for_device(identity.clone())?,
+            std::sync::Arc::new(self.storage.connection_for_test_identity(identity.clone())),
             identity.clone(),
             store_dir,
         )
@@ -3683,98 +3739,18 @@ impl TestStore {
         let observer = self
             .bind_device_in(observer_db, observer_store_dir, &self.signer)
             .await?;
-        self.activate_joined_device_with_observer(
+        TestDevice::activate_joined(
             observer,
-            joining_db,
+            coven_database::StoreDatabase::new(joining_db),
             joining_store_dir,
             joining_identity,
             published_at,
+            std::sync::Arc::new(
+                self.storage
+                    .connection_for_test_identity(joining_identity.clone()),
+            ),
         )
         .await
-    }
-
-    async fn activate_joined_device_with_observer(
-        &self,
-        observer: TestDevice,
-        joining_db: &Database,
-        joining_store_dir: StoreDir,
-        joining_identity: &UserKeypair,
-        published_at: &str,
-    ) -> Result<TestDevice, String> {
-        let joining_database = coven_database::StoreDatabase::new(joining_db);
-        let activated_database = joining_database.clone();
-        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
-            pending_dir.path().join("pending-device-join.sqlite"),
-        )
-        .map_err(|error| error.to_string())?;
-        let offer = observer
-            .begin_device_join(&pubkey_hex(joining_identity))
-            .await
-            .map_err(|error| format!("begin device join: {error}"))?;
-        let mut pending_join = observer
-            .open_pending_device_join_for_test(&pending, joining_identity, offer)
-            .await
-            .map_err(|error| format!("open pending device join: {error}"))?;
-        let access_request = pending_join
-            .prepare_provider_access_request()
-            .await
-            .map_err(|error| format!("prepare provider access request: {error}"))?;
-        let approval = observer
-            .authorize_device_provider_access(access_request, None)
-            .await
-            .map_err(|error| format!("authorize device provider access: {error}"))?;
-        let registration_request = pending_join
-            .prepare_registration_request(approval)
-            .await
-            .map_err(|error| format!("prepare device registration request: {error}"))?;
-        let provisional = observer
-            .accept_device_registration_request(registration_request)
-            .await
-            .map_err(|error| format!("accept device registration request: {error}"))?;
-        let provider_ready = observer
-            .publish_device_provider_challenge(provisional)
-            .await
-            .map_err(|error| format!("publish device provider challenge: {error}"))?;
-        let mut joining = pending_join
-            .begin_joining_store(joining_database, &joining_store_dir)
-            .await
-            .map_err(|error| format!("begin joining Store: {error}"))?;
-        let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-        let bootstrap_pull = joining
-            .pull_store_history(Some(&routing_encryption))
-            .await
-            .map_err(|error| format!("pull joining Store history: {error}"))?;
-        if !bootstrap_pull.held_positions.is_empty() {
-            return Err(format!(
-                "device join bootstrap pull held signed positions: {:?}",
-                bootstrap_pull.held_positions
-            ));
-        }
-        let readiness = joining
-            .bootstrap(provider_ready, published_at)
-            .await
-            .map_err(|error| format!("bootstrap joining Store: {error}"))?;
-        let completion = observer
-            .complete_device_provider_admission(readiness)
-            .await
-            .map_err(|error| format!("complete device provider admission: {error}"))?;
-        let activation = observer
-            .finalize_device_join(completion)
-            .await
-            .map_err(|error| format!("finalize device join: {error}"))?;
-        joining
-            .complete(activation)
-            .await
-            .map_err(|error| format!("complete joining Store: {error}"))?;
-        TestDevice::load_with_database(
-            activated_database,
-            self.storage_for_device(joining_identity.clone())?,
-            joining_identity.clone(),
-            joining_store_dir,
-        )
-        .await
-        .map_err(|error| error.to_string())
     }
 
     pub async fn bind_store_device(
@@ -3788,7 +3764,7 @@ impl TestStore {
         }
         TestDevice::load_with_database(
             database.clone(),
-            self.storage_for_device(identity.clone())?,
+            std::sync::Arc::new(self.storage.connection_for_test_identity(identity.clone())),
             identity.clone(),
             store_dir,
         )
@@ -3887,7 +3863,13 @@ impl TestStore {
     }
 
     pub async fn device_id(&self, name: &str) -> Result<String, String> {
-        Ok(self.ensure_producer(name).await?.device_id())
+        self.ensure_producer_registered(name).await?;
+        let producers = self.producers.lock().await;
+        Ok(producers
+            .by_name
+            .get(name)
+            .expect("registered test producer exists")
+            .device_id())
     }
 
     pub async fn latest_store_position(
@@ -3950,8 +3932,16 @@ impl TestStore {
     }
 
     pub async fn next_commit_sequence(&self, name: &str) -> Result<u64, String> {
-        self.ensure_producer(name)
-            .await?
+        self.ensure_producer_registered(name).await?;
+        let producer = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .get(name)
+                .expect("registered test producer exists")
+                .clone()
+        };
+        producer
             .latest_local_store_position()
             .await
             .map_err(|error| error.to_string())?
@@ -3968,11 +3958,11 @@ impl TestStore {
         self.founder.device_authority_for_test().await
     }
 
-    async fn ensure_producer(&self, name: &str) -> Result<TestDevice, String> {
+    async fn ensure_producer_registered(&self, name: &str) -> Result<(), String> {
         {
             let producers = self.producers.lock().await;
-            if let Some(producer) = producers.by_name.get(name) {
-                return Ok(producer.clone());
+            if producers.by_name.contains_key(name) {
+                return Ok(());
             }
         }
 
@@ -3994,12 +3984,16 @@ impl TestStore {
                         .ok_or_else(|| "test Store has no active device observer".to_string())?
                         .clone()
                 };
-                self.activate_joined_device_with_observer(
+                TestDevice::activate_joined(
                     observer,
-                    &db,
+                    coven_database::StoreDatabase::new(&db),
                     db_store_dir,
                     &self.signer,
                     "2026-07-16T00:00:00Z",
+                    std::sync::Arc::new(
+                        self.storage
+                            .connection_for_test_identity(self.signer.clone()),
+                    ),
                 )
                 .await?
             }
@@ -4012,11 +4006,7 @@ impl TestStore {
         {
             return Err(format!("test producer {name:?} was registered twice"));
         }
-        Ok(producers
-            .by_name
-            .get(name)
-            .expect("inserted test producer exists")
-            .clone())
+        Ok(())
     }
 
     pub async fn open_into(
@@ -4027,7 +4017,10 @@ impl TestStore {
         TestDevice::open_with_database(
             coven_database::StoreDatabase::new(db),
             store_dir,
-            self.storage_for_device(self.signer.clone())?,
+            std::sync::Arc::new(
+                self.storage
+                    .connection_for_test_identity(self.signer.clone()),
+            ),
             &self.root,
             &self.signer,
         )
@@ -4042,7 +4035,10 @@ impl TestStore {
         TestDevice::open_with_database(
             database.clone(),
             store_dir,
-            self.storage_for_device(self.signer.clone())?,
+            std::sync::Arc::new(
+                self.storage
+                    .connection_for_test_identity(self.signer.clone()),
+            ),
             &self.root,
             &self.signer,
         )
@@ -4381,7 +4377,15 @@ impl TestStore {
         changeset: &[u8],
         schema_version: u32,
     ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, String> {
-        let device = self.ensure_producer(name).await?;
+        self.ensure_producer_registered(name).await?;
+        let device = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .get(name)
+                .expect("registered test producer exists")
+                .clone()
+        };
         device
             .publish_changeset_for_test(sequence, changeset.to_vec(), schema_version)
             .await

@@ -638,17 +638,6 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         Ok(chain)
     }
 
-    fn commit_verifier(
-        &self,
-    ) -> &crate::sync::store::commit_verification::commit::StoreCommitVerifier<'storage> {
-        match self {
-            Self::History { history, .. } => &history.commit_verifier,
-            Self::VerifiedPrefix {
-                commit_verifier, ..
-            } => commit_verifier,
-        }
-    }
-
     async fn load_registration(
         &self,
         reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
@@ -658,7 +647,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         >,
         StoreObjectError,
     > {
-        self.commit_verifier().load_registration(reference).await
+        match self {
+            Self::History { history } => history.commit_verifier.load_registration(reference).await,
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => commit_verifier.load_registration(reference).await,
+        }
     }
 
     async fn validate_provider_admin_records(
@@ -706,7 +700,12 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         >,
         StoreObjectError,
     > {
-        self.commit_verifier().load_founder_registration().await
+        match self {
+            Self::History { history } => history.commit_verifier.load_founder_registration().await,
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => commit_verifier.load_founder_registration().await,
+        }
     }
 
     fn root(&self) -> &StoreRootRef {
@@ -727,10 +726,24 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &self,
         reference: &MembershipHeadRef,
     ) -> Result<AuthorHead, AnchoredChainError> {
-        self.commit_verifier()
-            .membership_objects()
-            .load_head(reference)
-            .await
+        let loaded = match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .membership_objects()
+                    .load_head(reference)
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .membership_objects()
+                    .load_head(reference)
+                    .await
+            }
+        };
+        loaded
             .map(|loaded| loaded.value)
             .map_err(map_membership_object_error)
     }
@@ -760,10 +773,23 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         &self,
         reference: &coven_protocol::membership::MembershipEntryRef,
     ) -> Result<coven_protocol::objects::VerifiedObject<MembershipEntry>, StoreObjectError> {
-        self.commit_verifier()
-            .membership_objects()
-            .load_entry(reference)
-            .await
+        match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .membership_objects()
+                    .load_entry(reference)
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .membership_objects()
+                    .load_entry(reference)
+                    .await
+            }
+        }
     }
 
     async fn load_membership_resolution(
@@ -773,10 +799,23 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         coven_protocol::objects::VerifiedObject<StoreMembershipConflictResolution>,
         StoreObjectError,
     > {
-        self.commit_verifier()
-            .membership_objects()
-            .load_resolution(reference)
-            .await
+        match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .membership_objects()
+                    .load_resolution(reference)
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .membership_objects()
+                    .load_resolution(reference)
+                    .await
+            }
+        }
     }
 
     async fn load_membership_head_at_slot(
@@ -787,10 +826,23 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         stream_id: coven_protocol::membership::AuthorStreamId,
         sequence: u64,
     ) -> Result<coven_protocol::objects::VerifiedObject<AuthorHead>, StoreObjectError> {
-        self.commit_verifier()
-            .membership_objects()
-            .load_head_at_slot(slot, author, grant, stream_id, sequence)
-            .await
+        match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .membership_objects()
+                    .load_head_at_slot(slot, author, grant, stream_id, sequence)
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .membership_objects()
+                    .load_head_at_slot(slot, author, grant, stream_id, sequence)
+                    .await
+            }
+        }
     }
 
     async fn validate_head_activation(

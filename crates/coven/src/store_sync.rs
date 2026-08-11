@@ -15,7 +15,6 @@ use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
-use coven_replication::sync::cycle::SyncComponents;
 use coven_replication::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
 use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
@@ -26,11 +25,6 @@ use coven_storage::{BlobPathScheme, CloudSyncConnection, CloudSyncObjectStorage}
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
 pub(crate) use coven_replication::sync::SyncError;
-
-mod blobs;
-mod commands;
-mod connection;
-mod test_access;
 
 /// Who runs sync cycles for a connected cloud.
 ///
@@ -72,7 +66,7 @@ enum SyncConnection {
 }
 
 /// Who carries out a Store command that needs no running sync loop — the two
-/// states [`StoreSync::command_authority`] can leave the connection in, and
+/// states [`StoreSync::ensure_command_authority`] can leave the connection in, and
 /// therefore the only two it can answer with. Resolving to this instead of to
 /// "the state is now good enough" is what leaves no third case to guard.
 enum CommandAuthority {
@@ -81,6 +75,64 @@ enum CommandAuthority {
     /// No cloud connection; the Store retained for commands serves it.
     CommandOnly(Arc<Store>),
 }
+
+macro_rules! connected_sync {
+    ($owner:expr) => {{
+        let connection = $owner.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, .. } => Some(std::sync::Arc::clone(sync)),
+            _ => None,
+        }
+    }};
+}
+
+macro_rules! active_sync {
+    ($owner:expr) => {{
+        let connection = $owner.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, driver, .. } => {
+                let driven = match driver {
+                    SyncDriver::Loop => sync.is_running(),
+                    #[cfg(any(test, feature = "test-utils"))]
+                    SyncDriver::Caller => true,
+                };
+                driven.then(|| std::sync::Arc::clone(sync))
+            }
+            _ => None,
+        }
+    }};
+}
+
+macro_rules! active_circle_sync {
+    ($owner:expr) => {{
+        let active = active_sync!($owner).ok_or(crate::CircleError::NotConfigured)?;
+        if active.is_running() {
+            Ok(active)
+        } else {
+            Err(crate::CircleError::LoopNotRunning)
+        }
+    }};
+}
+
+macro_rules! installed_command_authority {
+    ($owner:expr) => {{
+        let connection = $owner.state.read().expect("read Store sync connection");
+        match &*connection {
+            SyncConnection::WithCloud { sync, .. } => {
+                CommandAuthority::Connected(std::sync::Arc::clone(sync))
+            }
+            SyncConnection::CommandOnly { store } => {
+                CommandAuthority::CommandOnly(std::sync::Arc::clone(store))
+            }
+            _ => unreachable!("command authority was installed under the lifecycle lock"),
+        }
+    }};
+}
+
+mod blobs;
+mod commands;
+mod connection;
+mod test_access;
 
 #[derive(Clone)]
 pub(crate) struct StoreSync {
@@ -104,54 +156,21 @@ pub(crate) struct StoreSync {
 }
 
 impl StoreSync {
-    fn connected_encryption(
+    async fn install_storage_connection(
         &self,
-        cloud_is_plaintext: bool,
-    ) -> Result<Option<EncryptionService>, coven_keys::keys::RoutingEncryptionError> {
-        if cloud_is_plaintext {
-            return Ok(None);
-        }
-        let keyring = self
-            .master_keys
-            .unlock()?
-            .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
-        Ok(Some(EncryptionService::from(keyring)))
-    }
-
-    /// The loop handle of an installed cloud connection, whoever drives its
-    /// cycles. Enough for anything the connection already knows — its config,
-    /// path scheme, uploader — and for waking a cycle that may or may not run.
-    fn connected(&self) -> Option<Arc<SyncLoopHandle>> {
-        let connection = self.state.read().expect("read Store sync connection");
-        match &*connection {
-            SyncConnection::WithCloud { sync, .. } => Some(Arc::clone(sync)),
-            _ => None,
-        }
-    }
-
-    /// The loop handle of a connection whose cycles someone is actually
-    /// driving. Required by anything that queues work for a cycle to carry out,
-    /// which a connection with no driver would never complete.
-    fn active(&self) -> Option<Arc<SyncLoopHandle>> {
-        let connection = self.state.read().expect("read Store sync connection");
-        match &*connection {
-            SyncConnection::WithCloud { sync, driver, .. } => {
-                let driven = match driver {
-                    SyncDriver::Loop => sync.is_running(),
-                    #[cfg(any(test, feature = "test-utils"))]
-                    SyncDriver::Caller => true,
-                };
-                driven.then(|| Arc::clone(sync))
-            }
-            _ => None,
-        }
-    }
-
-    async fn initialize_components(
-        &self,
+        config: Config,
         storage: Arc<CloudSyncConnection>,
-        routing_encryption: Option<EncryptionService>,
-    ) -> Result<SyncComponents, SyncError> {
+        driver: SyncDriver,
+    ) -> Result<(), SyncError> {
+        let routing_encryption = if storage.is_plaintext() {
+            None
+        } else {
+            let keyring = self
+                .master_keys
+                .unlock()?
+                .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+            Some(EncryptionService::from(keyring))
+        };
         let initialization = match self.database.local_store_root_ref().await? {
             Some(expected_store_root) => {
                 coven_replication::sync::cycle::StoreInitialization::OpenStore {
@@ -160,32 +179,22 @@ impl StoreSync {
             }
             None => coven_replication::sync::cycle::StoreInitialization::CreateStore,
         };
-        self.security
+        let components = self
+            .security
             .initialize_sync_components(
                 self.database.clone(),
-                storage,
+                Arc::clone(&storage),
                 initialization,
-                routing_encryption,
+                routing_encryption.clone(),
             )
-            .await
-    }
-
-    /// Assemble the connected sync over `storage`. The loop thread is a separate
-    /// decision the caller makes: production starts it, a caller-driven test
-    /// connection leaves it unstarted.
-    fn build_sync(
-        &self,
-        components: SyncComponents,
-        config: Config,
-        routing_encryption: Option<EncryptionService>,
-    ) -> Arc<SyncLoopHandle> {
+            .await?;
         let blob_transitions = coven_replication::blob::transition::ConnectedBlobTransitions::new(
             self.local_blob_transitions.clone(),
             Arc::new(self.blob_access.clone()),
             routing_encryption,
             self.observer.clone(),
         );
-        Arc::new(SyncLoopHandle::new(
+        let sync = Arc::new(SyncLoopHandle::new(
             components,
             blob_transitions,
             self.master_keys.clone(),
@@ -194,7 +203,17 @@ impl StoreSync {
             self.observer.clone(),
             self.open_guard.clone(),
             self.status_tx.clone(),
-        ))
+        ));
+        if matches!(&driver, SyncDriver::Loop) {
+            if let Err(error) = sync.start() {
+                self.blob_access.clear_connection();
+                return Err(SyncError::Loop(error));
+            }
+            info!("Sync loop started");
+        }
+        let storage: Arc<dyn CloudSyncObjectStorage> = storage;
+        self.install_cloud(sync, storage, driver);
+        Ok(())
     }
 
     /// Who carries out a command that needs no running sync loop, installing
@@ -204,14 +223,15 @@ impl StoreSync {
     /// it — and because they receive the authority rather than a promise about
     /// `self.state`, there is no "installed it, then failed to find it" case
     /// for them to re-check.
-    async fn command_authority(&self) -> Result<CommandAuthority, SyncError> {
-        if let Some(sync) = self.connected() {
-            return Ok(CommandAuthority::Connected(sync));
+    async fn ensure_command_authority(&self) -> Result<(), SyncError> {
+        if connected_sync!(self).is_some() {
+            return Ok(());
         }
-        if let SyncConnection::CommandOnly { store } =
-            &*self.state.read().expect("read Store sync connection")
-        {
-            return Ok(CommandAuthority::CommandOnly(Arc::clone(store)));
+        if matches!(
+            &*self.state.read().expect("read Store sync connection"),
+            SyncConnection::CommandOnly { .. }
+        ) {
+            return Ok(());
         }
         let config = self.command_config();
         let storage = self
@@ -224,21 +244,9 @@ impl StoreSync {
                 .load_store(self.database.clone(), Arc::new(storage))
                 .await?,
         );
-        *self.state.write().expect("write Store sync connection") = SyncConnection::CommandOnly {
-            store: Arc::clone(&store),
-        };
-        Ok(CommandAuthority::CommandOnly(store))
-    }
-
-    /// A Circle write command needs the loop *thread* itself, because that
-    /// thread services the command channel a caller-driven connection has none
-    /// of.
-    fn active_circle_operation(&self) -> Result<Arc<SyncLoopHandle>, crate::CircleError> {
-        let active = self.active().ok_or(crate::CircleError::NotConfigured)?;
-        if !active.is_running() {
-            return Err(crate::CircleError::LoopNotRunning);
-        }
-        Ok(active)
+        *self.state.write().expect("write Store sync connection") =
+            SyncConnection::CommandOnly { store };
+        Ok(())
     }
 }
 

@@ -230,6 +230,13 @@ impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
 }
 
 impl CloudCipher {
+    pub(super) fn current_generation(&self) -> Option<u64> {
+        match self {
+            CloudCipher::Encrypted(encryption) => Some(encryption.current_generation()),
+            CloudCipher::Plaintext => None,
+        }
+    }
+
     /// The at-rest cipher a home's storage mode selects: an opaque home seals
     /// under its store key (`Encrypted`), a browsable home stores in the clear
     /// (`Plaintext`). The sibling of [`BlobPathScheme::for_storage`] — together

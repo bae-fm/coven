@@ -89,14 +89,14 @@ impl StoreSync {
     }
 
     pub(crate) fn trigger(&self) {
-        match self.connected() {
+        match connected_sync!(self) {
             Some(sync) => sync.trigger(),
             None => debug!("sync_now: no cloud connection; sync wake ignored"),
         }
     }
 
     pub(crate) fn is_syncing(&self) -> bool {
-        self.connected().is_some_and(|sync| sync.is_running())
+        connected_sync!(self).is_some_and(|sync| sync.is_running())
     }
 
     pub(super) fn has_cloud(&self) -> bool {
@@ -121,19 +121,8 @@ impl StoreSync {
             return Ok(());
         };
 
-        let routing_encryption = self.connected_encryption(storage.is_plaintext())?;
-        let components = self
-            .initialize_components(Arc::clone(&storage), routing_encryption.clone())
-            .await?;
-        let storage: Arc<dyn CloudSyncObjectStorage> = storage;
-        let sync = self.build_sync(components, config, routing_encryption);
-        if let Err(error) = sync.start() {
-            self.blob_access.clear_connection();
-            return Err(SyncError::Loop(error));
-        }
-        info!("Sync loop started");
-        self.install_cloud(sync, storage, SyncDriver::Loop);
-        Ok(())
+        self.install_storage_connection(config, storage, SyncDriver::Loop)
+            .await
     }
 
     pub(super) async fn replace_connection(
@@ -196,10 +185,6 @@ impl StoreSync {
         driver: SyncDriver,
     ) -> Result<(), SyncError> {
         let config = self.config();
-        let routing_encryption = match &cipher {
-            coven_storage::CloudCipher::Encrypted(encryption) => Some(encryption.clone()),
-            coven_storage::CloudCipher::Plaintext => None,
-        };
         let admitted = self
             .cloud_storage
             .admit_home(&config, home)
@@ -210,20 +195,8 @@ impl StoreSync {
                 .open(Some(cipher))
                 .map_err(Self::map_storage_setup_error)?,
         );
-        let components = self
-            .initialize_components(Arc::clone(&storage), routing_encryption.clone())
-            .await?;
-        let storage: Arc<dyn CloudSyncObjectStorage> = storage;
-        let sync = self.build_sync(components, config, routing_encryption);
-        if matches!(&driver, SyncDriver::Loop) {
-            if let Err(error) = sync.start() {
-                self.blob_access.clear_connection();
-                return Err(SyncError::Loop(error));
-            }
-            info!("Sync loop started");
-        }
-        self.install_cloud(sync, storage, driver);
-        Ok(())
+        self.install_storage_connection(config, storage, driver)
+            .await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -312,7 +285,7 @@ impl StoreSync {
     }
 
     pub(crate) fn command_config(&self) -> Config {
-        self.connected()
+        connected_sync!(self)
             .map(|sync| sync.config().clone())
             .unwrap_or_else(|| self.config())
     }
