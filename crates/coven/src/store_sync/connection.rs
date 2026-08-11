@@ -3,6 +3,7 @@ use super::*;
 impl StoreSync {
     pub(super) fn map_storage_setup_error(error: StorageSetupError) -> SyncError {
         match error {
+            StorageSetupError::CloudHome(error) => SyncError::CloudHome(error),
             StorageSetupError::Key(error) => SyncError::Key(error),
             StorageSetupError::NoEncryptionKey => SyncError::MasterKeyNotEstablished,
             error => SyncError::StorageSetup(error),
@@ -165,6 +166,14 @@ impl StoreSync {
         self.replace_connection(None).await?;
         info!("store sync connected");
         Ok(())
+    }
+
+    pub(crate) async fn probe_cloud_home(&self, config: &Config) -> Result<(), SyncError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.cloud_storage
+            .probe(config)
+            .await
+            .map_err(Self::map_storage_setup_error)
     }
 
     pub(crate) async fn connect_with_cloudkit(

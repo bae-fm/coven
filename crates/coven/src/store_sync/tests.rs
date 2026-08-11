@@ -198,8 +198,8 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         .members()
         .await
         .expect_err("malformed stored credentials must fail");
-    let SyncError::StorageSetup(StorageSetupError::CloudHome(cloud_home_error)) = &error else {
-        panic!("expected StorageSetup(CloudHome(_)), got {error:?}");
+    let SyncError::CloudHome(cloud_home_error) = &error else {
+        panic!("expected CloudHome(_), got {error:?}");
     };
     assert!(matches!(cloud_home_error, CloudHomeError::Configuration(_)));
     assert!(!cloud_home_error.is_retryable());
@@ -302,6 +302,39 @@ async fn capability_admission_refuses_before_stopping_the_active_loop() {
     ));
     assert!(sync.is_syncing());
     assert!(sync.loop_uses_connected_storage_for_test());
+}
+
+#[tokio::test]
+async fn probe_applies_exact_slot_admission_before_opening_the_provider() {
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let mut config = Config::with_defaults(
+        "probe-exact-slot-admission".to_string(),
+        "test-device".to_string(),
+        store_dir.clone(),
+        "Blob Store".to_string(),
+    );
+    config.cloud_home.provider = Some(CloudProvider::Dropbox);
+    config.cloud_home.exact_upload_verification =
+        coven_foundation::config::ExactUploadVerification::UploadChecksum;
+    let sync = store_sync(
+        Arc::new(|| panic!("the proposed config is supplied directly")),
+        StoreKeys::bind("probe-exact-slot-admission".to_string()),
+        Arc::new(NoKeyCustody),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(),
+        &store_dir,
+    );
+
+    let error = sync
+        .probe_cloud_home(&config)
+        .await
+        .expect_err("unsupported verification must be refused before provider opening");
+    assert!(matches!(
+        error,
+        SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
+            provider: CloudProvider::Dropbox,
+        })
+    ));
 }
 
 #[tokio::test]

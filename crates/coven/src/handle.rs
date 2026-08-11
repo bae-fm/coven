@@ -335,6 +335,13 @@ impl CovenHandle {
         self.sync.connect().await
     }
 
+    /// Build and probe the cloud home described by `config` without installing
+    /// it as this handle's sync connection. Hosts use this to validate proposed
+    /// provider settings before committing them to their config source.
+    pub async fn probe_cloud_home(&self, config: &crate::Config) -> Result<(), SyncError> {
+        self.sync.probe_cloud_home(config).await
+    }
+
     pub async fn connect_sync_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,

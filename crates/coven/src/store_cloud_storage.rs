@@ -44,6 +44,15 @@ impl StoreCloudStorage {
         self.admit(config, cloudkit_ops)?.open(cipher).await
     }
 
+    pub(crate) async fn probe(&self, config: &Config) -> Result<(), StorageSetupError> {
+        coven_storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
+        let home = self
+            .cloud_homes
+            .create(config, self.clock.clone(), self.cloudkit_ops.clone())
+            .await?;
+        home.probe().await.map_err(StorageSetupError::from)
+    }
+
     pub(crate) fn admit<'storage, 'config>(
         &'storage self,
         config: &'config Config,

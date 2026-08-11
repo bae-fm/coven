@@ -52,11 +52,23 @@ async fn external_host_can_revoke_missing_device_join_producers(
     Ok(())
 }
 
+async fn external_host_can_probe_a_proposed_cloud_home(
+    handle: &CovenHandle,
+    config: &coven::Config,
+) -> Result<(), coven::SyncError> {
+    handle.probe_cloud_home(config).await
+}
+
 #[test]
 fn external_host_can_name_device_join_revocation_surface() {
     fn assert_executor<T: DeviceJoinWriteRevocationExecutor>() {}
     assert_executor::<ExternalWriteRevocationExecutor>();
     let _ = external_host_can_revoke_missing_device_join_producers;
+}
+
+#[test]
+fn external_host_can_name_cloud_home_probe_surface() {
+    let _ = external_host_can_probe_a_proposed_cloud_home;
 }
 
 impl CloudKitOps for ExternalCloudKitBridge {

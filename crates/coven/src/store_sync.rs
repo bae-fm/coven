@@ -223,7 +223,7 @@ impl StoreSync {
             .cloud_storage
             .open(&config, None, None)
             .await
-            .map_err(SyncError::StorageSetup)?;
+            .map_err(Self::map_storage_setup_error)?;
         let store = Arc::new(
             self.security
                 .established_identity()?
