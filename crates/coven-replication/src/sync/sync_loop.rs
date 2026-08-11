@@ -237,6 +237,9 @@ impl SyncLoopHandle {
 
         let handle = std::thread::Builder::new()
             .name("coven-sync-loop".to_string())
+            // Host debug profiles can leave the composed sync cycle's nested
+            // async poll frames larger than Rust's default thread stack.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let _running_guard = RunningGuard {
                     running: Arc::clone(&running),
