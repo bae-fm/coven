@@ -22,6 +22,7 @@ fallible-streaming-iterator = { workspace = true }
 hex = { workspace = true }
 lz4_flex = { workspace = true }
 rusqlite = { workspace = true }
+sqlite3-parser = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

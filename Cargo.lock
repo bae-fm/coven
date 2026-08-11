@@ -981,6 +981,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sqlite3-parser",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3125,6 +3126,21 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sqlite3-parser"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbb44bfd84bfd1bde5ee215dd0b27d10c3c601a1b7cf03a91c7d6f607f2a10f7"
+dependencies = [
+ "bitflags",
+ "bumpalo",
+ "cc",
+ "fallible-iterator",
+ "indexmap",
+ "log",
+ "memchr",
 ]
 
 [[package]]

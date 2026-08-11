@@ -85,6 +85,7 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "AuthorizedWriterOperation",
     "CircleEpochAccess",
     "HostWriteBlobStaging",
+    "LiveQuery",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
@@ -2611,6 +2612,7 @@ mod tests {
                 "AuthorizedWriterOperation",
                 "CircleEpochAccess",
                 "HostWriteBlobStaging",
+                "LiveQuery",
             ]
         );
         assert!(CAPABILITY_TYPES.contains(&"CircleEpochAccess"));

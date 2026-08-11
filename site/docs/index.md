@@ -130,10 +130,33 @@ read issued after an awaited write sees that write.
 
 ```rust
 let titles: Vec<String> = handle.read(|conn| {
-    let mut stmt = conn.prepare("SELECT title FROM todos ORDER BY _updated_at")?;
-    let rows = stmt.query_map([], |row| row.get(0))?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    conn.query("SELECT title FROM todos ORDER BY _updated_at", [], |row| {
+        row.get(0)
+    }).map_err(coven::CovenError::from)
 }).await?;
+```
+
+**Read again when the result can change.** `handle.subscribe()` uses the same
+read context and retains the query. The first `next()` returns the initial
+result. While it runs, SQLite reports every table and column the statement
+reads. In a single-table query without subqueries, equality, `IN`, and range
+predicates over binary-collated `INTEGER`, `TEXT`, and `BLOB` primary keys are
+also matched against their bound values. Other SQL falls back to
+table-and-column matching, so an unsupported predicate may rerun more often but
+cannot miss a relevant committed row change. Virtual-table dependencies return
+an error because SQLite sessions do not report their row changes. Changes
+already waiting are represented by the next result.
+
+```rust
+let mut titles = handle.subscribe(|conn| {
+    conn.query("SELECT title FROM todos ORDER BY _updated_at", [], |row| {
+        row.get(0)
+    }).map_err(coven::CovenError::from)
+});
+
+loop {
+    render(titles.next().await?);
+}
 ```
 
 Everything else follows the same ownership boundary: `handle.write_with_blobs`

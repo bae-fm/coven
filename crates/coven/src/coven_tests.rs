@@ -884,7 +884,7 @@ async fn read_sees_a_committed_write() {
         .expect("insert through sql");
 
     // The read runs on the separate read-only connection; it must observe the
-    // just-committed write (WAL read-your-writes for committed data).
+    // committed write when its implicit read transaction begins.
     let id: String = handle
         .read(|conn| {
             conn.query_row(
@@ -2920,7 +2920,7 @@ async fn multiple_read_only_opens_coexist_with_a_writer() {
 }
 
 /// A read-only handle sees rows the writer committed — both before the reader
-/// opened and after (WAL cross-connection visibility on the one db file).
+/// opened and after (cross-connection visibility on the one db file).
 #[tokio::test]
 async fn read_only_open_sees_committed_writer_data() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -2947,7 +2947,7 @@ async fn read_only_open_sees_committed_writer_data() {
     );
 
     // A commit after the reader is open is visible on its next read: coven runs
-    // each read as its own transaction, so it never pins an old WAL snapshot.
+    // each read as its own transaction, so it does not retain an old snapshot.
     writer
         .write(|sql| {
             sql.execute(

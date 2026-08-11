@@ -61,6 +61,17 @@ impl StoreRows {
         read_rows(&self.read_database, read).await
     }
 
+    pub(crate) fn subscribe<F, R>(&self, query: F) -> crate::LiveQuery<R>
+    where
+        F: for<'connection> Fn(SqlReadContext<'connection>) -> CovenResult<R>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+    {
+        crate::LiveQuery::new(self.writes.clone(), self.read_database.clone(), query)
+    }
+
     pub(crate) async fn write_with_blobs<F, S, R>(
         &self,
         build: F,

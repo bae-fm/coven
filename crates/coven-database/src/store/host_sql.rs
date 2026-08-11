@@ -20,11 +20,25 @@ use coven_protocol::synced_schema::SyncedTable;
 /// ```
 pub struct SqlReadContext<'connection> {
     connection: &'connection rusqlite::Connection,
+    dependencies: Option<crate::live_query::ReadDependencyCapture>,
 }
 
 impl<'connection> SqlReadContext<'connection> {
     pub(crate) fn new(connection: &'connection rusqlite::Connection) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            dependencies: None,
+        }
+    }
+
+    pub(crate) fn tracking(
+        connection: &'connection rusqlite::Connection,
+        dependencies: crate::live_query::ReadDependencyCapture,
+    ) -> Self {
+        Self {
+            connection,
+            dependencies: Some(dependencies),
+        }
     }
 
     pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
@@ -32,7 +46,17 @@ impl<'connection> SqlReadContext<'connection> {
         P: rusqlite::Params,
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
-        self.connection.query_row(sql, params, map)
+        let mut statement = self.prepare_tracked(sql)?;
+        if let Err(error) = params.__bind_in(&mut statement) {
+            self.finish_statement(None);
+            return Err(error);
+        }
+        self.finish_statement(statement.expanded_sql());
+        let mut rows = statement.raw_query();
+        match rows.next()? {
+            Some(row) => map(row),
+            None => Err(rusqlite::Error::QueryReturnedNoRows),
+        }
     }
 
     pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
@@ -40,9 +64,38 @@ impl<'connection> SqlReadContext<'connection> {
         P: rusqlite::Params,
         F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
-        let mut statement = self.connection.prepare(sql)?;
-        let values = statement.query_map(params, map)?.collect();
-        values
+        let mut statement = self.prepare_tracked(sql)?;
+        if let Err(error) = params.__bind_in(&mut statement) {
+            self.finish_statement(None);
+            return Err(error);
+        }
+        self.finish_statement(statement.expanded_sql());
+        let mut rows = statement.raw_query();
+        let mut map = map;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next()? {
+            values.push(map(row)?);
+        }
+        Ok(values)
+    }
+
+    fn prepare_tracked(&self, sql: &str) -> rusqlite::Result<rusqlite::Statement<'connection>> {
+        if let Some(dependencies) = &self.dependencies {
+            dependencies.begin_statement();
+        }
+        match self.connection.prepare(sql) {
+            Ok(statement) => Ok(statement),
+            Err(error) => {
+                self.finish_statement(None);
+                Err(error)
+            }
+        }
+    }
+
+    fn finish_statement(&self, expanded_sql: Option<String>) {
+        if let Some(dependencies) = &self.dependencies {
+            dependencies.finish_statement(expanded_sql);
+        }
     }
 }
 

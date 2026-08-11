@@ -3,6 +3,7 @@ use crate::{authorize_host_sql, DbError};
 pub(crate) struct HostSqlAuthorization<'connection> {
     connection: &'connection rusqlite::Connection,
     authorizer_installed: bool,
+    read_tracking: bool,
 }
 
 impl<'connection> HostSqlAuthorization<'connection> {
@@ -14,6 +15,26 @@ impl<'connection> HostSqlAuthorization<'connection> {
         Ok(Self {
             connection,
             authorizer_installed: true,
+            read_tracking: false,
+        })
+    }
+
+    pub(crate) fn begin_tracking_reads(
+        connection: &'connection rusqlite::Connection,
+        dependencies: crate::live_query::ReadDependencyCapture,
+    ) -> Result<Self, DbError> {
+        crate::reset_host_sql_write_observation();
+        crate::live_query::begin_authorizer_read_capture(dependencies);
+        if let Err(error) =
+            connection.authorizer(Some(crate::live_query::authorize_tracked_host_sql))
+        {
+            crate::live_query::end_authorizer_read_capture();
+            return Err(DbError::from(error));
+        }
+        Ok(Self {
+            connection,
+            authorizer_installed: true,
+            read_tracking: true,
         })
     }
 
@@ -33,9 +54,14 @@ impl<'connection> HostSqlAuthorization<'connection> {
 
     fn remove_authorizer(&mut self) {
         self.authorizer_installed = false;
-        if let Err(error) = self.connection.authorizer(
+        let removal = self.connection.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-        ) {
+        );
+        if self.read_tracking {
+            self.read_tracking = false;
+            crate::live_query::end_authorizer_read_capture();
+        }
+        if let Err(error) = removal {
             panic!("failed to remove host SQL authorization: {error}");
         }
     }
@@ -170,6 +196,28 @@ mod tests {
             })
             .expect_err("host read API must not expose Coven bookkeeping");
         assert!(error.to_string().contains("not authorized"));
+    }
+
+    #[test]
+    fn tracked_host_reads_retain_internal_table_authorization() {
+        let conn = Connection::open_in_memory().expect("open");
+        crate::apply_coven_schema(&conn).expect("install Coven schema");
+        let dependencies = crate::live_query::ReadDependencyCapture::default();
+
+        let error = HostSqlAuthorization::begin_tracking_reads(&conn, dependencies)
+            .expect("install tracked host read authorizer")
+            .run(|| {
+                conn.query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .expect_err("tracked host reads must not expose Coven bookkeeping");
+        assert!(error.to_string().contains("not authorized"));
+
+        conn.query_row("SELECT COUNT(*) FROM protocol_state", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect("tracked authorizer is removed after the host read");
     }
 
     /// Coven's own entry points are documented to run inside the host's write

@@ -17,7 +17,7 @@
 //! It takes no store lock: it coexists with the writer that holds the exclusive
 //! `.coven-lock`, and with any number of other read-only opens (a read-only
 //! connection cannot write, so the single-writer lock does not apply to it).
-//! Cross-process reads are safe because the writer opens the db in WAL mode.
+//! SQLite's locking coordinates these read-only connections with the writer.
 
 use std::sync::Arc;
 

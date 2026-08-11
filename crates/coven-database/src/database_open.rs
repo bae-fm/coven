@@ -305,6 +305,7 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
+            true,
         ))
     }
 
@@ -376,6 +377,7 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
+            false,
         ))
     }
 }

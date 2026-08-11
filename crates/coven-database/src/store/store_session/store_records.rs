@@ -272,6 +272,28 @@ impl<'store> StoreRecords<'store> {
         Ok(authorization.run(|| read(super::SqlReadContext::new(self.conn))))
     }
 
+    pub(super) fn host_sql_read_tracked<F, R, E>(
+        self,
+        read: F,
+    ) -> Result<(Result<R, E>, crate::live_query::QueryDependencies), DbError>
+    where
+        F: for<'connection> FnOnce(super::SqlReadContext<'connection>) -> Result<R, E>,
+    {
+        let dependencies = crate::live_query::ReadDependencyCapture::default();
+        let authorization =
+            super::host_sql_transaction::HostSqlAuthorization::begin_tracking_reads(
+                self.conn,
+                dependencies.clone(),
+            )?;
+        let outcome = authorization.run(|| {
+            read(super::SqlReadContext::tracking(
+                self.conn,
+                dependencies.clone(),
+            ))
+        });
+        Ok((outcome, dependencies.dependencies(self.conn)?))
+    }
+
     pub(super) fn protocol_state(self, key: &str) -> Result<Option<String>, DbError> {
         crate::get_protocol_state_on(self.conn, key)
     }

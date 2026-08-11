@@ -122,6 +122,7 @@ mod database_runtime;
 mod database_session;
 mod external_blob_records;
 mod gate;
+mod live_query;
 mod local_state;
 mod local_store_identity;
 mod make_remote;
@@ -196,6 +197,7 @@ pub use gate::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
     CirclePartitionControl, GateError, Gates, RoutingChanges, StoreAudienceTransitions,
 };
+pub use live_query::{CommittedChanges, QueryDependencies};
 pub(crate) use local_store_identity::local_activated_registration_ref_on;
 pub use migration::supported_version;
 pub(crate) use migration::{ensure_schema_supported, run_migrations_in_transaction};
@@ -496,6 +498,11 @@ pub enum DbError {
     PayloadCleanupFailed {
         operation: Box<DbError>,
         cleanup: Box<DbError>,
+    },
+    #[error("{operation}; committed-change capture failed: {capture}")]
+    ChangeCaptureFailed {
+        operation: Box<DbError>,
+        capture: Box<DbError>,
     },
     #[error("{0}")]
     FromSql(#[from] rusqlite::types::FromSqlError),

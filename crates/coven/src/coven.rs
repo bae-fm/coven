@@ -294,7 +294,7 @@ impl CovenBuilder {
             self.clock.clone(),
             &migrations,
         )?;
-        // A second, read-only connection on the same WAL database, opened after the
+        // A second, read-only connection on the same database, opened after the
         // writer completed its migrations so the schema exists. It backs
         // [`CovenHandle::read`]: a pure read runs here on its own connection
         // thread, concurrent with the writer rather than queued behind it, and
@@ -343,7 +343,7 @@ impl CovenBuilder {
     /// policy the writer enforces. It runs no orphan-temp cleanup either (that is a
     /// write the lock-holding writer owns).
     ///
-    /// Cross-process reads are safe because the writer opens the db in WAL mode; a
+    /// SQLite's locking coordinates the read-only connection with the writer; a
     /// blob read that misses locally fetches from the cloud into the per-device
     /// cache (files written atomically), which is device scratch and touches no
     /// synced state.

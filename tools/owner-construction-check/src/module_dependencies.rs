@@ -76,6 +76,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("circles", Region::Host),
     ("coven", Region::Host),
     ("handle", Region::Host),
+    ("live_query", Region::Host),
     ("read_handle", Region::Host),
     ("store_blobs", Region::Host),
     ("store_circles", Region::Host),

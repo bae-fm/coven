@@ -137,6 +137,12 @@ impl Database {
             .subscribe_store_write_status(write_id, current)
     }
 
+    pub(crate) fn subscribe_committed_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Arc<crate::CommittedChanges>> {
+        self.connection.subscribe_committed_changes()
+    }
+
     pub(crate) async fn membership_load_permit(&self) -> crate::store::MembershipLoadPermit {
         self.connection.membership_load_permit().await
     }

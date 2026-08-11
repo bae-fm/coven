@@ -11,6 +11,9 @@
 pub(crate) mod circles;
 pub(crate) mod coven;
 mod handle;
+mod live_query;
+#[cfg(test)]
+mod live_query_tests;
 mod read_handle;
 pub(crate) mod store_blobs;
 pub(crate) mod store_circles;
@@ -139,4 +142,5 @@ pub use coven_storage::{
     S3CloudHome, UploadProgress,
 };
 pub use handle::CovenHandle;
+pub use live_query::LiveQuery;
 pub use read_handle::CovenReadHandle;

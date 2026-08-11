@@ -235,6 +235,24 @@ impl CovenHandle {
         self.rows.read(read).await
     }
 
+    /// Create a query that returns its initial value and runs again when a
+    /// committed database change can affect it.
+    ///
+    /// The query uses the same [`crate::SqlReadContext`] as [`read`](Self::read).
+    /// Coven records the tables and columns SQLite reads, and narrows supported
+    /// single-table primary-key predicates to their bound values. Other
+    /// predicates retain safe table-and-column invalidation.
+    pub fn subscribe<F, R>(&self, query: F) -> crate::LiveQuery<R>
+    where
+        F: for<'connection> Fn(crate::SqlReadContext<'connection>) -> crate::CovenResult<R>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+    {
+        self.rows.subscribe(query)
+    }
+
     pub async fn write_with_blobs<F, S, R>(
         &self,
         build: F,

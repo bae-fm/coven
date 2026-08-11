@@ -125,7 +125,7 @@ connections, so a write through them is refused by SQLite itself — a read
 cannot bypass capture because it cannot write at all.
 
 - **In the host's own process**: `handle.read(...)`. The full handle
-  opens a read-only companion connection on the same WAL database, on its own
+  opens a read-only companion connection on the same database, on its own
   thread; a pure read runs there, concurrent with the writer instead of
   queued behind it, with no session attached. Read-your-writes holds for
   committed writes: a `read` after an awaited `write` sees that
@@ -137,8 +137,8 @@ cannot bypass capture because it cannot write at all.
   reads while the app holds the full handle open. It takes no store lock
   and runs no migrations (it refuses a schema newer than its binary), and it
   exposes reads only: SQL, and blob reads that may fetch from the cloud into
-  the device cache. WAL makes the coexistence safe: many readers, one writer,
-  each read seeing the last committed state.
+  the device cache. SQLite's locking coordinates the readers with the writer,
+  and each new read transaction sees committed state.
 
 The write path polices itself: a `handle.write(...)` callback that prepares no
 `INSERT`, `UPDATE`, or `DELETE` statement is rejected as a pure read on the

@@ -16,6 +16,12 @@ impl StoreDatabase {
         Self { database }
     }
 
+    pub(super) fn subscribe_committed_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<crate::CommittedChanges>> {
+        self.database.subscribe_committed_changes()
+    }
+
     pub(super) async fn call_store<F, R>(&self, operation: F) -> Result<R, DbError>
     where
         F: for<'session> FnOnce(&mut StoreSession<'session>) -> Result<R, DbError> + Send + 'static,
@@ -43,6 +49,19 @@ impl StoreDatabase {
         E: Send + 'static,
     {
         self.call_store(move |session| session.read(read)).await
+    }
+
+    pub async fn read_tracked<F, R, E>(
+        &self,
+        read: F,
+    ) -> Result<(Result<R, E>, crate::QueryDependencies), DbError>
+    where
+        F: for<'connection> FnOnce(SqlReadContext<'connection>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.call_store(move |session| session.read_tracked(read))
+            .await
     }
 
     pub fn schema_version(&self) -> u32 {

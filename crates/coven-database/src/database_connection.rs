@@ -19,6 +19,8 @@ struct DatabaseContext {
     store_runtime: crate::store::StoreDatabaseRuntime,
     ids: coven_foundation::id_provider::IdRef,
     write_statuses: std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>,
+    committed_changes:
+        Option<tokio::sync::broadcast::Sender<Arc<crate::live_query::CommittedChanges>>>,
     #[cfg(any(test, feature = "test-utils"))]
     test_pause_points: TestPausePoints<DatabaseTestPoint>,
     #[cfg(any(test, feature = "test-utils"))]
@@ -47,7 +49,10 @@ impl DatabaseCore {
         blob_decls: Arc<BlobDecls>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: coven_protocol::blob::TransferLimits,
+        capture_committed_changes: bool,
     ) -> Self {
+        let committed_changes =
+            capture_committed_changes.then(|| tokio::sync::broadcast::channel(256).0);
         Self {
             conn,
             connection_durability,
@@ -65,12 +70,85 @@ impl DatabaseCore {
                 store_runtime: crate::store::StoreDatabaseRuntime::new(),
                 ids: Arc::new(coven_foundation::id_provider::UuidProvider),
                 write_statuses: std::sync::Mutex::new(HashMap::new()),
+                committed_changes,
                 #[cfg(any(test, feature = "test-utils"))]
                 test_pause_points: TestPausePoints::default(),
                 #[cfg(any(test, feature = "test-utils"))]
                 merge_materialization_failure: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    fn begin_change_capture(&self) -> Result<crate::live_query::ChangeCapture, DbError> {
+        let schema_version = self
+            .conn
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .map_err(DbError::from)?;
+        // SAFETY: the connection worker owns `self.conn` for longer than the
+        // returned capture, and processes no other job until it is consumed.
+        let database = unsafe { self.conn.handle() };
+        crate::live_query::ChangeCapture::begin(database, schema_version)
+    }
+
+    fn finish_change_capture(
+        &self,
+        mut capture: crate::live_query::ChangeCapture,
+    ) -> Result<crate::live_query::CommittedChanges, DbError> {
+        let bytes = capture.take_changeset()?;
+        let current_schema_version: i64 = self
+            .conn
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .map_err(DbError::from)?;
+        let mut committed = crate::live_query::decode_changeset(&self.conn, &bytes)?;
+        if current_schema_version != capture.schema_version() {
+            committed.mark_schema_changed();
+        }
+        Ok(committed)
+    }
+}
+
+fn capture_committed_changes<R>(
+    core: &mut DatabaseCore,
+    operation: impl FnOnce(&mut DatabaseCore) -> Result<R, DbError>,
+) -> Result<R, DbError> {
+    let Some(sender) = core.context.committed_changes.clone() else {
+        return operation(core);
+    };
+    if sender.receiver_count() == 0 {
+        return operation(core);
+    }
+    let capture = core.begin_change_capture()?;
+    let outcome = operation(core);
+    let captured = core.finish_change_capture(capture);
+    match (outcome, captured) {
+        (Ok(value), Ok(changes)) => {
+            publish_committed_changes(&sender, changes);
+            Ok(value)
+        }
+        (Err(operation), Ok(changes)) => {
+            publish_committed_changes(&sender, changes);
+            Err(operation)
+        }
+        (Ok(_), Err(capture)) => {
+            publish_committed_changes(&sender, crate::live_query::CommittedChanges::unknown());
+            Err(capture)
+        }
+        (Err(operation), Err(capture)) => {
+            publish_committed_changes(&sender, crate::live_query::CommittedChanges::unknown());
+            Err(DbError::ChangeCaptureFailed {
+                operation: Box::new(operation),
+                capture: Box::new(capture),
+            })
+        }
+    }
+}
+
+fn publish_committed_changes(
+    sender: &tokio::sync::broadcast::Sender<Arc<crate::live_query::CommittedChanges>>,
+    changes: crate::live_query::CommittedChanges,
+) {
+    if !changes.is_empty() {
+        let _ = sender.send(Arc::new(changes));
     }
 }
 
@@ -111,13 +189,15 @@ impl DatabaseConnection {
         R: Send + 'static,
     {
         self.on_connection_thread(move |core| {
-            let mut session = DatabaseSession::new(
-                &core.conn,
-                core.connection_durability,
-                #[cfg(any(test, feature = "test-utils"))]
-                &core.context.store_dir,
-            );
-            operation(&mut session)
+            capture_committed_changes(core, |core| {
+                let mut session = DatabaseSession::new(
+                    &core.conn,
+                    core.connection_durability,
+                    #[cfg(any(test, feature = "test-utils"))]
+                    &core.context.store_dir,
+                );
+                operation(&mut session)
+            })
         })
         .await
     }
@@ -133,35 +213,37 @@ impl DatabaseConnection {
         R: Send + 'static,
     {
         self.on_connection_thread(move |core| {
-            let outcome = {
-                let mut session = crate::store::StoreSession::new(
+            capture_committed_changes(core, |core| {
+                let outcome = {
+                    let mut session = crate::store::StoreSession::new(
+                        &core.conn,
+                        &core.context.store_dir,
+                        &mut core.verified_store_authority,
+                        &core.context.gates,
+                        &core.context.synced_tables,
+                        core.context.schema_version,
+                        core.context.sync_routing_hash,
+                        &core.context.hlc,
+                        &core.context.blob_decls,
+                        #[cfg(any(test, feature = "test-utils"))]
+                        &core.context.merge_materialization_failure,
+                    );
+                    operation(&mut session)
+                };
+                let cleanup = crate::payload_store::pay_owed_payload_deletions_on(
                     &core.conn,
                     &core.context.store_dir,
-                    &mut core.verified_store_authority,
-                    &core.context.gates,
-                    &core.context.synced_tables,
-                    core.context.schema_version,
-                    core.context.sync_routing_hash,
-                    &core.context.hlc,
-                    &core.context.blob_decls,
-                    #[cfg(any(test, feature = "test-utils"))]
-                    &core.context.merge_materialization_failure,
                 );
-                operation(&mut session)
-            };
-            let cleanup = crate::payload_store::pay_owed_payload_deletions_on(
-                &core.conn,
-                &core.context.store_dir,
-            );
-            match (outcome, cleanup) {
-                (Ok(value), Ok(())) => Ok(value),
-                (Err(operation), Ok(())) => Err(operation),
-                (Ok(_), Err(cleanup)) => Err(cleanup),
-                (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
-                    operation: Box::new(operation),
-                    cleanup: Box::new(cleanup),
-                }),
-            }
+                match (outcome, cleanup) {
+                    (Ok(value), Ok(())) => Ok(value),
+                    (Err(operation), Ok(())) => Err(operation),
+                    (Ok(_), Err(cleanup)) => Err(cleanup),
+                    (Err(operation), Err(cleanup)) => Err(DbError::PayloadCleanupFailed {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
+            })
         })
         .await
     }
@@ -289,6 +371,16 @@ impl DatabaseConnection {
             .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
         sender.send_replace(current);
         sender.subscribe()
+    }
+
+    pub(crate) fn subscribe_committed_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<Arc<crate::live_query::CommittedChanges>> {
+        self.context
+            .committed_changes
+            .as_ref()
+            .expect("only a writer exposes committed changes")
+            .subscribe()
     }
 
     pub(crate) async fn membership_load_permit(&self) -> crate::store::MembershipLoadPermit {

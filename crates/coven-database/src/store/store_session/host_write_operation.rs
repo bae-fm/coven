@@ -362,6 +362,12 @@ impl StoreRowWrites {
         self.database.has_scoped_graph()
     }
 
+    pub fn subscribe_committed_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<crate::CommittedChanges>> {
+        self.database.subscribe_committed_changes()
+    }
+
     pub async fn pending_writes(
         &self,
     ) -> Result<Vec<coven_protocol::write::PendingWrite>, DbError> {
