@@ -481,7 +481,7 @@ pub enum DbError {
     #[error("{0}")]
     Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
     #[error("{0}")]
-    RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
+    RemoteObject(#[source] Box<coven_protocol::remote_object::RemoteObjectRecordError>),
     #[error("{0}")]
     AudiencePackage(#[from] coven_protocol::audience_package::AudiencePackageError),
     #[error("{0}")]
@@ -528,13 +528,13 @@ pub enum DbError {
     #[error("{0}")]
     RowBlobRef(#[from] coven_protocol::blob::RowBlobRefError),
     #[error("{0}")]
-    WriteRetraction(#[from] coven_protocol::write::WriteRetractionError),
+    WriteRetraction(#[source] Box<coven_protocol::write::WriteRetractionError>),
     #[error("{0}")]
     RotationGate(#[from] coven_protocol::objects::RotationGateError),
     #[error("{0}")]
     Encryption(#[from] coven_keys::encryption::EncryptionError),
     #[error("{0}")]
-    SnapshotImage(#[from] crate::store::SnapshotImageError),
+    SnapshotImage(#[source] Box<crate::store::SnapshotImageError>),
     #[error("{0}")]
     PayloadStore(#[from] PayloadStoreError),
     #[error("{operation}; payload cleanup failed: {cleanup}")]
@@ -553,24 +553,24 @@ pub enum DbError {
     BlobOpeningAuthority(#[from] coven_protocol::blob::BlobOpeningAuthorityError),
     #[error("{0}")]
     OwnerPromotionJournal(
-        #[from] coven_protocol::owner_promotion_journal::OwnerPromotionJournalError,
+        #[source] Box<coven_protocol::owner_promotion_journal::OwnerPromotionJournalError>,
     ),
     #[error("{0}")]
-    CircleJournal(#[from] coven_protocol::circle_journal::CircleJournalError),
+    CircleJournal(#[source] Box<coven_protocol::circle_journal::CircleJournalError>),
     #[error("{0}")]
     SyncRoutingContract(#[from] SyncRoutingContractError),
     #[error("{0}")]
     RowIdentity(#[from] coven_protocol::synced_schema::RowIdentityError),
     #[error("{0}")]
-    PreparedCommit(#[from] coven_protocol::prepared_commit::PreparedCommitError),
+    PreparedCommit(#[source] Box<coven_protocol::prepared_commit::PreparedCommitError>),
     #[error("{0}")]
     CircleState(#[from] coven_protocol::circle_activation::CircleStateError),
     #[error("{0}")]
     DeviceExclusionJournal(
-        #[from] coven_protocol::device_exclusion_journal::StoreDeviceExclusionJournalError,
+        #[source] Box<coven_protocol::device_exclusion_journal::StoreDeviceExclusionJournalError>,
     ),
     #[error("{0}")]
-    StoreReclaimJournal(#[from] StoreReclaimJournalError),
+    StoreReclaimJournal(#[source] Box<StoreReclaimJournalError>),
     #[error("{0}")]
     CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
     /// Staging a write's audience-move blobs failed. The implementation of
@@ -641,6 +641,50 @@ impl DbError {
             context: context.into(),
             source: Box::new(source.into()),
         }
+    }
+}
+
+macro_rules! boxed_db_error_from {
+    ($source:path, $variant:ident) => {
+        impl From<$source> for DbError {
+            fn from(source: $source) -> Self {
+                Self::$variant(Box::new(source))
+            }
+        }
+    };
+}
+
+boxed_db_error_from!(
+    coven_protocol::owner_promotion_journal::OwnerPromotionJournalError,
+    OwnerPromotionJournal
+);
+boxed_db_error_from!(
+    coven_protocol::device_exclusion_journal::StoreDeviceExclusionJournalError,
+    DeviceExclusionJournal
+);
+boxed_db_error_from!(StoreReclaimJournalError, StoreReclaimJournal);
+boxed_db_error_from!(
+    coven_protocol::remote_object::RemoteObjectRecordError,
+    RemoteObject
+);
+boxed_db_error_from!(coven_protocol::write::WriteRetractionError, WriteRetraction);
+boxed_db_error_from!(crate::store::SnapshotImageError, SnapshotImage);
+boxed_db_error_from!(
+    coven_protocol::circle_journal::CircleJournalError,
+    CircleJournal
+);
+boxed_db_error_from!(
+    coven_protocol::prepared_commit::PreparedCommitError,
+    PreparedCommit
+);
+
+#[cfg(test)]
+mod db_error_tests {
+    use super::DbError;
+
+    #[test]
+    fn db_error_fits_result_without_forcing_callers_to_box_it() {
+        assert!(std::mem::size_of::<DbError>() <= 128);
     }
 }
 
