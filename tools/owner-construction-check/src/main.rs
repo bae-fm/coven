@@ -88,6 +88,7 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "CircleEpochAccess",
     "HostWriteBlobStaging",
     "LiveQuery",
+    "ReconfigurableLiveQuery",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
@@ -2129,6 +2130,8 @@ impl ConstructionVisitor<'_> {
         };
         if parent.owner == child
             || child == format!("{}Inner", parent.owner)
+            || (OPERATION_SCOPED_OWNER_TYPES.contains(&parent.owner.as_str())
+                && OPERATION_SCOPED_OWNER_TYPES.contains(&child))
             || COMPOSITION_ROOTS.iter().any(|(path, owner, method)| {
                 *path == self.path && *owner == parent.owner && *method == parent.method
             })
@@ -2664,6 +2667,7 @@ mod tests {
                 "CircleEpochAccess",
                 "HostWriteBlobStaging",
                 "LiveQuery",
+                "ReconfigurableLiveQuery",
             ]
         );
         assert!(CAPABILITY_TYPES.contains(&"CircleEpochAccess"));
@@ -2854,6 +2858,36 @@ mod tests {
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].parent, "Parent::new");
         assert_eq!(violations[0].child, "Child");
+    }
+
+    #[test]
+    fn operation_scoped_owners_can_compose_operation_scoped_owners() {
+        let source = syn::parse_file(
+            r#"
+            struct StoreDatabase;
+            struct ReconfigurableLiveQuery { database: StoreDatabase }
+            impl ReconfigurableLiveQuery {
+                fn new(database: StoreDatabase) -> Self { Self { database } }
+            }
+            struct LiveQuery { inner: ReconfigurableLiveQuery }
+            impl LiveQuery {
+                fn new(database: StoreDatabase) -> Self {
+                    Self { inner: ReconfigurableLiveQuery::new(database) }
+                }
+            }
+            "#,
+        )
+        .expect("parse fixture");
+        let files = vec![RustFile {
+            relative_path: "fixture.rs".to_string(),
+            syntax: source,
+        }];
+        let structs = collect_structs(&files);
+        let owners = infer_owners(&structs);
+        let constructors = collect_constructors(&files, &owners);
+        let free_constructors = collect_free_constructors(&files, &owners);
+
+        assert!(find_violations(&files, &owners, &constructors, &free_constructors).is_empty());
     }
 
     #[test]

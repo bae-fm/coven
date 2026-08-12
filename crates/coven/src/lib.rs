@@ -144,5 +144,8 @@ pub use coven_storage::{
     S3CloudHome, UploadProgress,
 };
 pub use handle::CovenHandle;
-pub use live_query::LiveQuery;
+pub use live_query::{
+    LiveQuery, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, ReconfigurableLiveQuery,
+    ReconfigurableLiveQueryEvent,
+};
 pub use read_handle::CovenReadHandle;

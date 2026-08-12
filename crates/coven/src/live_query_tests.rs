@@ -543,3 +543,154 @@ async fn cancellation_while_waiting_does_not_consume_the_next_change() {
         "Changed"
     );
 }
+
+#[tokio::test]
+async fn reconfigurable_query_delivers_the_latest_absolute_request() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    insert_note(&handle, NOTE_TWO, "Two").await;
+    let mut notes = handle.subscribe_reconfigurable(Vec::<String>::new(), |request, sql| {
+        let mut bodies = Vec::new();
+        for id in request {
+            bodies.push(
+                sql.query_row("SELECT body FROM notes WHERE id = ?1", [id], |row| {
+                    row.get::<_, String>(0)
+                })?,
+            );
+        }
+        Ok(bodies)
+    });
+
+    let initial = notes.next().await;
+    assert_eq!(initial.revision().get(), 0);
+    assert!(initial.request().is_empty());
+    assert_eq!(
+        initial.into_result().expect("initial query"),
+        Vec::<String>::new()
+    );
+
+    let requested = notes
+        .requests()
+        .set(vec![NOTE_ONE.to_string()])
+        .expect("subscription open");
+    let delivered = notes.next().await;
+    assert_eq!(delivered.revision(), requested);
+    assert_eq!(delivered.request(), &[NOTE_ONE.to_string()]);
+    assert_eq!(
+        delivered.into_result().expect("requested query"),
+        vec!["One"]
+    );
+
+    let requests = notes.requests();
+    requests
+        .set(vec![NOTE_ONE.to_string()])
+        .expect("same request stays open");
+    let latest = requests
+        .set(vec![NOTE_TWO.to_string()])
+        .expect("replace request");
+    let delivered = notes.next().await;
+    assert_eq!(delivered.revision(), latest);
+    assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
+    assert_eq!(delivered.into_result().expect("latest query"), vec!["Two"]);
+}
+
+#[tokio::test]
+async fn reconfigurable_query_serializes_request_changes_and_commits() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    insert_note(&handle, NOTE_TWO, "Two").await;
+    let mut notes = handle.subscribe_reconfigurable(vec![NOTE_ONE.to_string()], |request, sql| {
+        sql.query_row(
+            "SELECT body FROM notes WHERE id = ?1",
+            [&request[0]],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(CovenError::from)
+    });
+    assert_eq!(
+        notes.next().await.into_result().expect("initial query"),
+        "One"
+    );
+
+    handle
+        .write(|sql| {
+            sql.execute(
+                "UPDATE notes SET body = 'Changed' WHERE id = ?1",
+                [NOTE_ONE],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("commit matching row");
+    let revision = notes
+        .requests()
+        .set(vec![NOTE_TWO.to_string()])
+        .expect("replace request");
+
+    let delivered = notes.next().await;
+    assert_eq!(delivered.revision(), revision);
+    assert_eq!(delivered.into_result().expect("latest query"), "Two");
+}
+
+#[tokio::test]
+async fn reconfigurable_query_request_handle_reports_subscription_drop() {
+    let (_temp, handle) = open_handle();
+    let notes = handle.subscribe_reconfigurable(0usize, |limit, sql| {
+        sql.query(
+            "SELECT body FROM notes ORDER BY id LIMIT ?1",
+            [*limit as i64],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(CovenError::from)
+    });
+    let requests = notes.requests();
+    drop(notes);
+
+    assert!(requests.set(1).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_changed_during_a_query_discards_the_superseded_result() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    insert_note(&handle, NOTE_TWO, "Two").await;
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let release_first = Arc::new((Mutex::new(false), Condvar::new()));
+    let query_invocations = invocations.clone();
+    let query_started = first_started.clone();
+    let query_release = release_first.clone();
+    let mut notes =
+        handle.subscribe_reconfigurable(vec![NOTE_ONE.to_string()], move |request, sql| {
+            if query_invocations.fetch_add(1, Ordering::AcqRel) == 0 {
+                query_started.notify_one();
+                let (released, wake) = &*query_release;
+                let mut released = released.lock().expect("release mutex poisoned");
+                while !*released {
+                    released = wake.wait(released).expect("release mutex poisoned");
+                }
+            }
+            sql.query_row(
+                "SELECT body FROM notes WHERE id = ?1",
+                [&request[0]],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(CovenError::from)
+        });
+    let requests = notes.requests();
+
+    let delivery = tokio::spawn(async move { notes.next().await });
+    first_started.notified().await;
+    let revision = requests
+        .set(vec![NOTE_TWO.to_string()])
+        .expect("replace in-progress request");
+    let (released, wake) = &*release_first;
+    *released.lock().expect("release mutex poisoned") = true;
+    wake.notify_one();
+
+    let delivered = delivery.await.expect("delivery task");
+    assert_eq!(delivered.revision(), revision);
+    assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
+    assert_eq!(delivered.into_result().expect("latest result"), "Two");
+    assert_eq!(invocations.load(Ordering::Acquire), 2);
+}

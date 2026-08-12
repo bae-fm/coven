@@ -253,6 +253,27 @@ impl CovenHandle {
         self.rows.subscribe(query)
     }
 
+    /// Create a tracked query whose absolute request can be replaced while the
+    /// subscription remains active.
+    pub fn subscribe_reconfigurable<Request, F, R>(
+        &self,
+        initial_request: Request,
+        query: F,
+    ) -> crate::ReconfigurableLiveQuery<Request, R>
+    where
+        Request: Clone + PartialEq + Send + Sync + 'static,
+        F: for<'connection> Fn(
+                &Request,
+                crate::SqlReadContext<'connection>,
+            ) -> crate::CovenResult<R>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+    {
+        self.rows.subscribe_reconfigurable(initial_request, query)
+    }
+
     pub async fn write_with_blobs<F, S, R>(
         &self,
         build: F,

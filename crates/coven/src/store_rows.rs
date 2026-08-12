@@ -72,6 +72,27 @@ impl StoreRows {
         crate::LiveQuery::new(self.writes.clone(), self.read_database.clone(), query)
     }
 
+    pub(crate) fn subscribe_reconfigurable<Request, F, R>(
+        &self,
+        initial_request: Request,
+        query: F,
+    ) -> crate::ReconfigurableLiveQuery<Request, R>
+    where
+        Request: Clone + PartialEq + Send + Sync + 'static,
+        F: for<'connection> Fn(&Request, SqlReadContext<'connection>) -> CovenResult<R>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+    {
+        crate::ReconfigurableLiveQuery::new(
+            self.writes.clone(),
+            self.read_database.clone(),
+            initial_request,
+            query,
+        )
+    }
+
     pub(crate) async fn write_with_blobs<F, S, R>(
         &self,
         build: F,
