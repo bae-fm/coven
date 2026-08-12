@@ -9,6 +9,67 @@ use std::time::Duration;
 const NOTE_ONE: &str = "018f4e91-bb24-7ed6-a9be-6b8a4c248551";
 const NOTE_TWO: &str = "018f4e91-bb24-7ed6-a9be-6b8a4c248552";
 
+#[derive(Clone)]
+struct SnapshotPause {
+    first_read: Arc<tokio::sync::Notify>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl SnapshotPause {
+    fn new() -> Self {
+        Self {
+            first_read: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn pause_after_first_read(&self) {
+        self.first_read.notify_one();
+        let (released, wake) = &*self.release;
+        let mut released = released.lock().expect("snapshot release mutex poisoned");
+        while !*released {
+            released = wake
+                .wait(released)
+                .expect("snapshot release mutex poisoned");
+        }
+    }
+
+    fn release(&self) {
+        let (released, wake) = &*self.release;
+        *released.lock().expect("snapshot release mutex poisoned") = true;
+        wake.notify_one();
+    }
+}
+
+fn read_note_around_pause(
+    sql: crate::SqlReadContext<'_>,
+    pause: &SnapshotPause,
+) -> crate::CovenResult<(String, String)> {
+    let before = sql.query_row("SELECT body FROM notes WHERE id = ?1", [NOTE_ONE], |row| {
+        row.get(0)
+    })?;
+    pause.pause_after_first_read();
+    let after = sql.query_row("SELECT body FROM notes WHERE id = ?1", [NOTE_ONE], |row| {
+        row.get(0)
+    })?;
+    Ok((before, after))
+}
+
+async fn replace_note_while_snapshot_is_open(handle: &crate::CovenHandle, pause: &SnapshotPause) {
+    pause.first_read.notified().await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        handle.write(|sql| {
+            sql.execute("UPDATE notes SET body = 'After' WHERE id = ?1", [NOTE_ONE])?;
+            Ok(())
+        }),
+    )
+    .await
+    .expect("WAL writer commits while the read snapshot remains open")
+    .expect("commit replacement");
+    pause.release();
+}
+
 fn open_handle() -> (tempfile::TempDir, crate::CovenHandle) {
     coven_keys::keys::test_keyring::install();
     let temp = tempfile::tempdir().expect("create store directory");
@@ -50,6 +111,18 @@ fn open_handle() -> (tempfile::TempDir, crate::CovenHandle) {
     (temp, handle)
 }
 
+fn open_wal_handle() -> (tempfile::TempDir, crate::CovenHandle) {
+    let (temp, handle) = open_handle();
+    let database_path = StoreDir::new_ephemeral(temp.path()).db_path();
+    let journal =
+        coven_database::DatabaseImageTest::open(&database_path).expect("open journal configurator");
+    let mode: String = journal
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("enable WAL for live query concurrency tests");
+    assert_eq!(mode, "wal");
+    (temp, handle)
+}
+
 async fn assert_does_not_wake<T: Send + 'static>(query: &mut crate::LiveQuery<T>) {
     assert!(
         tokio::time::timeout(Duration::from_millis(100), query.next())
@@ -73,6 +146,119 @@ async fn insert_note(handle: &crate::CovenHandle, id: &str, body: &str) {
         })
         .await
         .expect("commit note");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_closure_sees_one_snapshot_across_statements() {
+    let (_temp, handle) = open_wal_handle();
+    insert_note(&handle, NOTE_ONE, "Before").await;
+    let pause = SnapshotPause::new();
+    let read_pause = pause.clone();
+    let reader = handle.clone();
+    let read = tokio::spawn(async move {
+        reader
+            .read(move |sql| read_note_around_pause(sql, &read_pause))
+            .await
+    });
+
+    replace_note_while_snapshot_is_open(&handle, &pause).await;
+
+    assert_eq!(
+        read.await.expect("read task").expect("read closure"),
+        ("Before".to_string(), "Before".to_string())
+    );
+    let current = handle
+        .read(|sql| {
+            sql.query_row("SELECT body FROM notes WHERE id = ?1", [NOTE_ONE], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(CovenError::from)
+        })
+        .await
+        .expect("read after snapshot closure");
+    assert_eq!(current, "After");
+}
+
+#[tokio::test]
+async fn read_transaction_ends_after_every_closure_exit() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "Readable").await;
+
+    let closure_error = handle
+        .read(|_| {
+            Err::<(), _>(CovenError::from(DbError::Message(
+                "read refused".to_string(),
+            )))
+        })
+        .await;
+    assert!(closure_error.is_err());
+
+    let database_error = handle
+        .read(|sql| {
+            sql.query_row("SELECT body FROM absent_table", [], |_| Ok(()))
+                .map_err(CovenError::from)
+        })
+        .await;
+    assert!(database_error.is_err());
+
+    let panicking_handle = handle.clone();
+    let panic = tokio::spawn(async move {
+        panicking_handle
+            .read(|_| -> crate::CovenResult<()> { panic!("read closure panic") })
+            .await
+    })
+    .await;
+    assert!(panic.is_err());
+
+    let body = handle
+        .read(|sql| {
+            sql.query_row("SELECT body FROM notes WHERE id = ?1", [NOTE_ONE], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(CovenError::from)
+        })
+        .await
+        .expect("read after closure exits");
+    assert_eq!(body, "Readable");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_live_query_sees_one_snapshot_across_statements() {
+    let (_temp, handle) = open_wal_handle();
+    insert_note(&handle, NOTE_ONE, "Before").await;
+    let pause = SnapshotPause::new();
+    let query_pause = pause.clone();
+    let mut query = handle.subscribe(move |sql| read_note_around_pause(sql, &query_pause));
+    let delivery = tokio::spawn(async move { query.next().await });
+
+    replace_note_while_snapshot_is_open(&handle, &pause).await;
+
+    assert_eq!(
+        delivery.await.expect("delivery task").expect("live query"),
+        ("Before".to_string(), "Before".to_string())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconfigurable_live_query_sees_one_snapshot_across_statements() {
+    let (_temp, handle) = open_wal_handle();
+    insert_note(&handle, NOTE_ONE, "Before").await;
+    let pause = SnapshotPause::new();
+    let query_pause = pause.clone();
+    let mut query = handle
+        .subscribe_reconfigurable((), move |(), sql| read_note_around_pause(sql, &query_pause));
+    let delivery = tokio::spawn(async move { query.next().await });
+
+    replace_note_while_snapshot_is_open(&handle, &pause).await;
+
+    assert_eq!(
+        delivery
+            .await
+            .expect("delivery task")
+            .into_result()
+            .expect("reconfigurable live query"),
+        ("Before".to_string(), "Before".to_string())
+    );
 }
 
 #[tokio::test]

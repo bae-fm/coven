@@ -199,6 +199,22 @@ mod tests {
     }
 
     #[test]
+    fn host_sql_cannot_control_the_enclosing_transaction() {
+        let conn = Connection::open_in_memory().expect("open");
+        let tx = conn.unchecked_transaction().expect("begin transaction");
+
+        for statement in ["ROLLBACK", "COMMIT", "SAVEPOINT host_savepoint"] {
+            let error = HostSqlAuthorization::begin(&tx)
+                .expect("install authorizer")
+                .run(|| tx.execute_batch(statement).map_err(DbError::from))
+                .expect_err("host SQL must not control Coven's transaction");
+            assert!(error.to_string().contains("not authorized"));
+        }
+
+        tx.rollback().expect("Coven retains transaction control");
+    }
+
+    #[test]
     fn tracked_host_reads_retain_internal_table_authorization() {
         let conn = Connection::open_in_memory().expect("open");
         crate::apply_coven_schema(&conn).expect("install Coven schema");

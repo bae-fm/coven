@@ -399,6 +399,10 @@ pub(crate) fn authorize_host_sql(
     };
     if accesses_coven_table
         || changes_coven_cleanup_guard
+        || matches!(
+            context.action,
+            AuthAction::Transaction { .. } | AuthAction::Savepoint { .. }
+        )
         || context
             .database_name
             .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))
