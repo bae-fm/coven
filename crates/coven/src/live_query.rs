@@ -30,11 +30,99 @@ struct RequestState<Request> {
     request: Request,
 }
 
+enum PendingRun {
+    Initial,
+    Triggered {
+        request_changed: bool,
+        commits: Vec<Arc<coven_database::CommittedChanges>>,
+        unknown_commit: bool,
+        previous_dependencies_matched: bool,
+    },
+}
+
+impl PendingRun {
+    fn request_changed(&mut self) {
+        match self {
+            Self::Initial => {
+                *self = Self::Triggered {
+                    request_changed: true,
+                    commits: Vec::new(),
+                    unknown_commit: false,
+                    previous_dependencies_matched: false,
+                };
+            }
+            Self::Triggered {
+                request_changed, ..
+            } => *request_changed = true,
+        }
+    }
+
+    fn committed(
+        &mut self,
+        changes: Arc<coven_database::CommittedChanges>,
+        dependencies: &QueryDependencies,
+    ) {
+        if let Self::Triggered {
+            commits,
+            previous_dependencies_matched,
+            ..
+        } = self
+        {
+            *previous_dependencies_matched |= dependencies.is_affected_by(&changes);
+            commits.push(changes);
+        }
+    }
+
+    fn lagged(&mut self) {
+        if let Self::Triggered { unknown_commit, .. } = self {
+            *unknown_commit = true;
+        }
+    }
+
+    fn cause(&self, dependencies: &QueryDependencies) -> ReconfigurableLiveQueryCause {
+        let Self::Triggered {
+            request_changed,
+            commits,
+            unknown_commit,
+            previous_dependencies_matched,
+        } = self
+        else {
+            return ReconfigurableLiveQueryCause::Initial;
+        };
+        let database_changed = *unknown_commit
+            || commits
+                .iter()
+                .any(|changes| dependencies.is_affected_by(changes))
+            || *previous_dependencies_matched;
+        match (*request_changed, database_changed) {
+            (true, true) => ReconfigurableLiveQueryCause::RequestAndDatabaseChanged,
+            (true, false) => ReconfigurableLiveQueryCause::RequestChanged,
+            (false, true) => ReconfigurableLiveQueryCause::DatabaseChanged,
+            (false, false) => {
+                unreachable!("a triggered live query must have a request or database cause")
+            }
+        }
+    }
+}
+
 /// Changes the absolute request evaluated by a reconfigurable live query.
 #[derive(Clone)]
 pub struct LiveQueryRequests<Request> {
     state: Arc<Mutex<RequestState<Request>>>,
     sender: tokio::sync::watch::Sender<RequestState<Request>>,
+}
+
+/// Why a reconfigurable live query produced an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconfigurableLiveQueryCause {
+    /// The subscription's first result.
+    Initial,
+    /// The absolute request changed.
+    RequestChanged,
+    /// A relevant database commit occurred.
+    DatabaseChanged,
+    /// The request changed and a relevant database commit occurred before the run.
+    RequestAndDatabaseChanged,
 }
 
 impl<Request> LiveQueryRequests<Request>
@@ -73,11 +161,17 @@ where
 
 /// One query result and the exact request used to produce it.
 pub struct ReconfigurableLiveQueryEvent<Request, Value> {
+    cause: ReconfigurableLiveQueryCause,
     state: RequestState<Request>,
     result: CovenResult<Value>,
 }
 
 impl<Request, Value> ReconfigurableLiveQueryEvent<Request, Value> {
+    /// Return why this event was produced.
+    pub fn cause(&self) -> ReconfigurableLiveQueryCause {
+        self.cause
+    }
+
     /// Return the revision of the request used for this result.
     pub fn revision(&self) -> LiveQueryRevision {
         self.state.revision
@@ -107,7 +201,7 @@ pub struct ReconfigurableLiveQuery<Request, Value> {
     reader: StoreDatabase,
     changes: tokio::sync::broadcast::Receiver<Arc<coven_database::CommittedChanges>>,
     dependencies: QueryDependencies,
-    pending: bool,
+    pending: Option<PendingRun>,
     query: Arc<RequestedQuery<Request, Value>>,
     request_receiver: tokio::sync::watch::Receiver<RequestState<Request>>,
     requests: LiveQueryRequests<Request>,
@@ -143,7 +237,7 @@ where
             reader,
             changes,
             dependencies: QueryDependencies::unknown(),
-            pending: true,
+            pending: Some(PendingRun::Initial),
             query: Arc::new(query),
             request_receiver,
             requests: LiveQueryRequests { state, sender },
@@ -176,6 +270,10 @@ where
                 .map_err(CovenError::from);
 
             if self.request_receiver.has_changed().unwrap_or(false) {
+                self.pending
+                    .as_mut()
+                    .expect("live query run is pending")
+                    .request_changed();
                 self.accept_latest_request();
                 self.drain_pending();
                 continue;
@@ -191,27 +289,47 @@ where
                     Err(error)
                 }
             };
-            self.pending = false;
-            return ReconfigurableLiveQueryEvent { state, result };
+            let pending = self.pending.take().expect("live query run is pending");
+            let cause = pending.cause(&self.dependencies);
+            return ReconfigurableLiveQueryEvent {
+                cause,
+                state,
+                result,
+            };
         }
     }
 
     async fn await_pending(&mut self) {
-        while !self.pending {
+        while self.pending.is_none() {
             tokio::select! {
                 changed = self.request_receiver.changed() => {
                     changed.expect("the live query retains its request sender");
                     self.accept_latest_request();
-                    self.pending = true;
+                    self.pending = Some(PendingRun::Triggered {
+                        request_changed: true,
+                        commits: Vec::new(),
+                        unknown_commit: false,
+                        previous_dependencies_matched: false,
+                    });
                 }
                 changes = self.changes.recv() => {
                     match changes {
                         Ok(changes) if self.dependencies.is_affected_by(&changes) => {
-                            self.pending = true;
+                            self.pending = Some(PendingRun::Triggered {
+                                request_changed: false,
+                                commits: vec![changes],
+                                unknown_commit: false,
+                                previous_dependencies_matched: true,
+                            });
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            self.pending = true;
+                            self.pending = Some(PendingRun::Triggered {
+                                request_changed: false,
+                                commits: Vec::new(),
+                                unknown_commit: true,
+                                previous_dependencies_matched: false,
+                            });
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             panic!("the live query retains its committed-change sender")
@@ -225,10 +343,23 @@ where
     fn drain_pending(&mut self) {
         if self.request_receiver.has_changed().unwrap_or(false) {
             self.accept_latest_request();
+            self.pending
+                .as_mut()
+                .expect("live query run is pending")
+                .request_changed();
         }
         loop {
             match self.changes.try_recv() {
-                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Ok(changes) => self
+                    .pending
+                    .as_mut()
+                    .expect("live query run is pending")
+                    .committed(changes, &self.dependencies),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => self
+                    .pending
+                    .as_mut()
+                    .expect("live query run is pending")
+                    .lagged(),
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
                     panic!("the live query retains its committed-change sender")

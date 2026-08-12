@@ -146,6 +146,6 @@ pub use coven_storage::{
 pub use handle::CovenHandle;
 pub use live_query::{
     LiveQuery, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, ReconfigurableLiveQuery,
-    ReconfigurableLiveQueryEvent,
+    ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,
 };
 pub use read_handle::CovenReadHandle;

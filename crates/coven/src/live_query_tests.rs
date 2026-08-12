@@ -1,4 +1,7 @@
-use crate::{Coven, CovenError, DbError, Migration, RowIdentity, StoreDir, SyncedTable};
+use crate::{
+    Coven, CovenError, DbError, Migration, ReconfigurableLiveQueryCause, RowIdentity, StoreDir,
+    SyncedTable,
+};
 use coven_foundation::config::Config;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -748,6 +751,7 @@ async fn reconfigurable_query_delivers_the_latest_absolute_request() {
     });
 
     let initial = notes.next().await;
+    assert_eq!(initial.cause(), ReconfigurableLiveQueryCause::Initial);
     assert_eq!(initial.revision().get(), 0);
     assert!(initial.request().is_empty());
     assert_eq!(
@@ -760,6 +764,10 @@ async fn reconfigurable_query_delivers_the_latest_absolute_request() {
         .set(vec![NOTE_ONE.to_string()])
         .expect("subscription open");
     let delivered = notes.next().await;
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::RequestChanged
+    );
     assert_eq!(delivered.revision(), requested);
     assert_eq!(delivered.request(), &[NOTE_ONE.to_string()]);
     assert_eq!(
@@ -775,6 +783,10 @@ async fn reconfigurable_query_delivers_the_latest_absolute_request() {
         .set(vec![NOTE_TWO.to_string()])
         .expect("replace request");
     let delivered = notes.next().await;
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::RequestChanged
+    );
     assert_eq!(delivered.revision(), latest);
     assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
     assert_eq!(delivered.into_result().expect("latest query"), vec!["Two"]);
@@ -814,8 +826,115 @@ async fn reconfigurable_query_serializes_request_changes_and_commits() {
         .expect("replace request");
 
     let delivered = notes.next().await;
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::RequestAndDatabaseChanged
+    );
     assert_eq!(delivered.revision(), revision);
     assert_eq!(delivered.into_result().expect("latest query"), "Two");
+}
+
+#[tokio::test]
+async fn reconfigurable_query_reports_a_relevant_commit_without_a_request_change() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    let mut note = handle.subscribe_reconfigurable(NOTE_ONE.to_string(), |id, sql| {
+        sql.query_row("SELECT body FROM notes WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(CovenError::from)
+    });
+    assert_eq!(
+        note.next().await.cause(),
+        ReconfigurableLiveQueryCause::Initial
+    );
+
+    handle
+        .write(|sql| {
+            sql.execute(
+                "UPDATE notes SET body = 'Changed' WHERE id = ?1",
+                [NOTE_ONE],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("commit matching row");
+
+    let delivered = note.next().await;
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::DatabaseChanged
+    );
+    assert_eq!(delivered.into_result().expect("changed note"), "Changed");
+}
+
+#[tokio::test]
+async fn reconfigurable_query_ignores_an_irrelevant_commit_coalesced_with_a_request() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    insert_note(&handle, NOTE_TWO, "Two").await;
+    let mut note = handle.subscribe_reconfigurable(NOTE_ONE.to_string(), |id, sql| {
+        sql.query_row("SELECT body FROM notes WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(CovenError::from)
+    });
+    assert_eq!(
+        note.next().await.cause(),
+        ReconfigurableLiveQueryCause::Initial
+    );
+
+    note.requests()
+        .set(NOTE_TWO.to_string())
+        .expect("replace request");
+    handle
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO labels (id, name) VALUES ('unrelated', 'Unrelated')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("commit unrelated row");
+
+    let delivered = note.next().await;
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::RequestChanged
+    );
+    assert_eq!(delivered.into_result().expect("requested note"), "Two");
+}
+
+#[tokio::test]
+async fn reconfigurable_query_reports_lag_as_a_database_change() {
+    let (_temp, handle) = open_handle();
+    insert_note(&handle, NOTE_ONE, "One").await;
+    let mut note = handle.subscribe_reconfigurable(NOTE_ONE.to_string(), |id, sql| {
+        sql.query_row("SELECT body FROM notes WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(CovenError::from)
+    });
+    assert_eq!(
+        note.next().await.cause(),
+        ReconfigurableLiveQueryCause::Initial
+    );
+
+    for rank in 1..=257 {
+        handle
+            .write(move |sql| {
+                sql.execute("UPDATE notes SET rank = ?1 WHERE id = ?2", (rank, NOTE_ONE))?;
+                Ok(())
+            })
+            .await
+            .expect("commit rank");
+    }
+
+    assert_eq!(
+        note.next().await.cause(),
+        ReconfigurableLiveQueryCause::DatabaseChanged
+    );
 }
 
 #[tokio::test]
@@ -875,6 +994,10 @@ async fn request_changed_during_a_query_discards_the_superseded_result() {
     wake.notify_one();
 
     let delivered = delivery.await.expect("delivery task");
+    assert_eq!(
+        delivered.cause(),
+        ReconfigurableLiveQueryCause::RequestChanged
+    );
     assert_eq!(delivered.revision(), revision);
     assert_eq!(delivered.request(), &[NOTE_TWO.to_string()]);
     assert_eq!(delivered.into_result().expect("latest result"), "Two");
