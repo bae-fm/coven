@@ -2,6 +2,7 @@
 
 use futures_util::stream::TryStreamExt;
 
+use coven_foundation::atomic_file::FileError;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::{RowBlobAuthority, RowBlobRef};
 use coven_protocol::objects::{BlobSpoolProtection, StorageError};
@@ -17,24 +18,43 @@ mod tests;
 pub use cache::{BlobCacheError, BlobStream};
 use cache::{BlobStreamSource, RemoteBlobAccess as ExactRemoteBlobAccess};
 
-/// Why materializing one exact remote blob failed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BlobDownloadFailureCause {
-    Invalid(String),
-    Local(String),
-    Metadata(String),
-    Storage(StorageError),
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PublishedBlobDropError {
+    #[error("published blob drop database state: {0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("published local blob: {0}")]
+    LocalStore(#[from] coven_foundation::store_dir::LocalBlobStoreError),
+    #[error("published pinned blob: {0}")]
+    Pinned(#[source] coven_foundation::store_dir::StoreBlobFileError),
+    #[error("published cached blob: {0}")]
+    Cache(#[from] BlobCacheError),
+    #[error("published local blob removal: {0}")]
+    Remove(#[from] coven_foundation::store_dir::LocalBlobRemovalError),
+    #[error(
+        "published blob {namespace}/{id} is missing from both the local store and its {disposition:?} destination"
+    )]
+    MissingDestination {
+        namespace: String,
+        id: String,
+        disposition: coven_protocol::blob::DeferredLocalBlobDisposition,
+    },
 }
 
-impl std::fmt::Display for BlobDownloadFailureCause {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Invalid(reason) => write!(formatter, "invalid blob: {reason}"),
-            Self::Local(reason) => write!(formatter, "local cache: {reason}"),
-            Self::Metadata(reason) => write!(formatter, "blob metadata: {reason}"),
-            Self::Storage(error) => write!(formatter, "provider: {error}"),
-        }
-    }
+/// Why materializing one exact remote blob failed.
+#[derive(Debug, thiserror::Error)]
+pub enum BlobDownloadFailureCause {
+    #[error("invalid blob path: {0}")]
+    Invalid(#[source] coven_foundation::store_dir::PathTokenError),
+    #[error("local cache file: {0}")]
+    File(#[source] FileError),
+    #[error("publish local cache file: {0}")]
+    Commit(#[source] coven_foundation::local_file::CommitNewFileError),
+    #[error("local cache: {0}")]
+    Cache(#[source] BlobCacheError),
+    #[error("occupied exact blob cache path differs from its locator")]
+    OccupiedPathMismatch,
+    #[error("provider: {0}")]
+    Storage(#[source] StorageError),
 }
 
 fn blob_opening_authority<'a>(
@@ -49,7 +69,7 @@ fn blob_opening_authority<'a>(
             }
             error @ coven_protocol::blob::BlobOpeningAuthorityError::CircleAuthorityMismatch {
                 ..
-            } => BlobCacheError::Storage(StorageError::InvalidContent(error.to_string())),
+            } => BlobCacheError::OpeningAuthority(error),
         })
 }
 
@@ -83,10 +103,10 @@ fn remote_stored_ref(
 
 async fn exact_file_facts(
     path: &std::path::Path,
-) -> Result<(Vec<u8>, u64, coven_protocol::store_commit::ObjectHash), String> {
+) -> Result<(Vec<u8>, u64, coven_protocol::store_commit::ObjectHash), FileError> {
     let bytes = tokio::fs::read(path)
         .await
-        .map_err(|error| format!("read blob file {}: {error}", path.display()))?;
+        .map_err(|source| FileError::at("read blob file", path, source))?;
     let size = bytes.len() as u64;
     let hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
     Ok((bytes, size, hash))
@@ -114,7 +134,7 @@ async fn read_exact_file(
     path: &std::path::Path,
     reference: &RowBlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let (bytes, size, hash) = exact_file_facts(path).await.map_err(BlobCacheError::Io)?;
+    let (bytes, size, hash) = exact_file_facts(path).await.map_err(BlobCacheError::File)?;
     verify_file_identity(path, reference, size, hash)?;
     Ok(bytes)
 }
@@ -123,7 +143,7 @@ async fn verify_exact_file(
     path: &std::path::Path,
     reference: &RowBlobRef,
 ) -> Result<(), BlobCacheError> {
-    let (_, size, hash) = exact_file_facts(path).await.map_err(BlobCacheError::Io)?;
+    let (_, size, hash) = exact_file_facts(path).await.map_err(BlobCacheError::File)?;
     verify_file_identity(path, reference, size, hash)
 }
 
@@ -146,7 +166,7 @@ async fn open_local_file(path: &std::path::Path) -> Result<BlobStreamSource, Blo
     coven_foundation::local_file::OpenFile::open(path)
         .await
         .map(BlobStreamSource::Local)
-        .map_err(BlobCacheError::Io)
+        .map_err(BlobCacheError::File)
 }
 
 async fn open_external_file(
@@ -245,22 +265,14 @@ impl LocalStoreBlobAccess {
     pub(crate) async fn drain_published_blob_drop_intents(
         &self,
         max_seq: u64,
-    ) -> Result<(), String> {
-        let intents = self
-            .database
-            .published_blob_drop_intents(max_seq)
-            .await
-            .map_err(|error| format!("Failed to load published blob drop intents: {error}"))?;
+    ) -> Result<(), PublishedBlobDropError> {
+        let intents = self.database.published_blob_drop_intents(max_seq).await?;
         for intent in intents {
             let deferred = &intent.drop;
-            let asset_upload_error = |error: String| {
-                crate::sync::store::StorePreparationError::AssetUpload(error).to_string()
-            };
             let local = self
                 .store_dir
                 .local_blob_path_if_present(&deferred.namespace, &deferred.id, deferred.size)
-                .await
-                .map_err(|error| asset_upload_error(error.to_string()))?;
+                .await?;
             let remove_local = match (deferred.disposition, local) {
                 (coven_protocol::blob::DeferredLocalBlobDisposition::Pin, Some(source)) => {
                     self.store_dir
@@ -272,7 +284,7 @@ impl LocalStoreBlobAccess {
                             &source,
                         )
                         .await
-                        .map_err(|error| asset_upload_error(error.to_string()))?;
+                        .map_err(PublishedBlobDropError::Pinned)?;
                     true
                 }
                 (coven_protocol::blob::DeferredLocalBlobDisposition::Cache, Some(source)) => {
@@ -284,8 +296,7 @@ impl LocalStoreBlobAccess {
                             deferred.plaintext_hash,
                             &source,
                         )
-                        .await
-                        .map_err(|error| asset_upload_error(error.to_string()))?;
+                        .await?;
                     true
                 }
                 (coven_protocol::blob::DeferredLocalBlobDisposition::Drop, _) => true,
@@ -317,12 +328,21 @@ impl LocalStoreBlobAccess {
                         }
                         coven_protocol::blob::DeferredLocalBlobDisposition::Drop => unreachable!(),
                     }
-                    .map_err(|error| asset_upload_error(error.to_string()))?;
+                    .map_err(|error| match deferred.disposition {
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Pin => {
+                            PublishedBlobDropError::Pinned(error)
+                        }
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Cache => {
+                            PublishedBlobDropError::Cache(error.into())
+                        }
+                        coven_protocol::blob::DeferredLocalBlobDisposition::Drop => unreachable!(),
+                    })?;
                     if !exact {
-                        return Err(asset_upload_error(format!(
-                            "published blob {}/{} is missing from both the local store and its {:?} destination",
-                            deferred.namespace, deferred.id, deferred.disposition,
-                        )));
+                        return Err(PublishedBlobDropError::MissingDestination {
+                            namespace: deferred.namespace.clone(),
+                            id: deferred.id.clone(),
+                            disposition: deferred.disposition,
+                        });
                     }
                     false
                 }
@@ -330,13 +350,11 @@ impl LocalStoreBlobAccess {
             if remove_local {
                 self.store_dir
                     .remove_local_blob(&deferred.namespace, &deferred.id)
-                    .await
-                    .map_err(|error| asset_upload_error(error.to_string()))?;
+                    .await?;
             }
             self.database
                 .clear_published_blob_drop_intent(&intent)
-                .await
-                .map_err(|error| format!("Failed to clear published blob drop intent: {error}"))?;
+                .await?;
         }
         Ok(())
     }
@@ -683,7 +701,7 @@ impl RemoteBlobSourceInner<'_> {
         let remote = self
             .resolved_access(authority, stored)
             .await
-            .map_err(|error| BlobDownloadFailureCause::Metadata(error.to_string()))?;
+            .map_err(BlobDownloadFailureCause::Cache)?;
         cache.verify_remote_plaintext(&remote, stored, retain).await
     }
 
@@ -745,9 +763,9 @@ impl RemoteStoreBlobAccess {
                     .store_dir
                     .stage_atomic_file(&destination)
                     .await
-                    .map_err(BlobCacheError::Io)?;
+                    .map_err(BlobCacheError::File)?;
                 let staged = remote.stage_verified_plaintext(stored, stage).await?;
-                let bytes = staged.read_bytes().await.map_err(BlobCacheError::Io)?;
+                let bytes = staged.read_bytes().await.map_err(BlobCacheError::File)?;
                 self.remote.validate(reference).await?;
                 self.local
                     .cache
@@ -837,7 +855,7 @@ impl RemoteStoreBlobAccess {
             .store_dir
             .stage_atomic_file(destination)
             .await
-            .map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
         let staged = self
             .remote
             .stage_verified_plaintext(reference.authority(), stored, stage)
@@ -861,7 +879,7 @@ impl RemoteStoreBlobAccess {
             .store_dir
             .stage_atomic_file(&destination)
             .await
-            .map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
         let staged = remote.stage_verified_plaintext(stored, stage).await?;
         verify_exact_file(staged.path(), reference).await?;
         let source = open_local_file(staged.path()).await?;
@@ -924,9 +942,10 @@ impl StoreBlobCache {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    return Err(BlobCacheError::Io(format!(
-                        "inspect cached blob {}: {error}",
-                        candidate.path().display()
+                    return Err(BlobCacheError::File(FileError::at(
+                        "inspect cached blob",
+                        candidate.path(),
+                        error,
                     )))
                 }
             }
@@ -965,7 +984,7 @@ impl StoreBlobCache {
             Err(coven_foundation::local_file::CommitNewFileError::DestinationExists(path)) => {
                 verify_exact_file(&path, reference).await
             }
-            Err(error) => Err(BlobCacheError::Io(error.to_string())),
+            Err(error) => Err(BlobCacheError::Commit(error)),
         }
     }
 
@@ -977,24 +996,24 @@ impl StoreBlobCache {
     ) -> Result<(), BlobDownloadFailureCause> {
         let locator = stored.locator();
         coven_foundation::store_dir::validate_path_token(locator.namespace())
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+            .map_err(BlobDownloadFailureCause::Invalid)?;
         coven_foundation::store_dir::validate_path_token(locator.blob_id())
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+            .map_err(BlobDownloadFailureCause::Invalid)?;
         let destination = self
             .store_dir
             .cache_blob_path(locator.namespace(), locator.locator_hash())
-            .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+            .map_err(BlobDownloadFailureCause::Invalid)?;
         let stage = self
             .store_dir
             .stage_atomic_file(&destination)
             .await
-            .map_err(BlobDownloadFailureCause::Local)?;
+            .map_err(BlobDownloadFailureCause::File)?;
         let staged = remote
             .stage_verified_plaintext(stored, stage)
             .await
             .map_err(|error| match error {
                 BlobCacheError::Storage(error) => BlobDownloadFailureCause::Storage(error),
-                other => BlobDownloadFailureCause::Local(other.to_string()),
+                other => BlobDownloadFailureCause::Cache(other),
             })?;
         if !retain {
             return Ok(());
@@ -1008,7 +1027,7 @@ impl StoreBlobCache {
                 locator.plaintext_hash(),
             )
             .await
-            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
+            .map_err(|error| BlobDownloadFailureCause::Cache(error.into()))?
         {
             return Ok(());
         }
@@ -1024,18 +1043,16 @@ impl StoreBlobCache {
                         locator.plaintext_hash(),
                     )
                     .await
-                    .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))?
+                    .map_err(|error| BlobDownloadFailureCause::Cache(error.into()))?
                 {
-                    return Err(BlobDownloadFailureCause::Local(
-                        "occupied exact blob cache path differs from its locator".to_string(),
-                    ));
+                    return Err(BlobDownloadFailureCause::OccupiedPathMismatch);
                 }
             }
-            Err(error) => return Err(BlobDownloadFailureCause::Local(error.to_string())),
+            Err(error) => return Err(BlobDownloadFailureCause::Commit(error)),
         }
         self.enforce_budget(locator.namespace(), Some(&destination))
             .await
-            .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
+            .map_err(BlobDownloadFailureCause::Cache)
     }
 
     async fn stage_exact_copy(
@@ -1048,8 +1065,11 @@ impl StoreBlobCache {
             .store_dir
             .stage_atomic_file(destination)
             .await
-            .map_err(BlobCacheError::Io)?;
-        let (staged, size, digest) = staged.copy_from(source).await.map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
+        let (staged, size, digest) = staged
+            .copy_from(source)
+            .await
+            .map_err(BlobCacheError::File)?;
         verify_file_identity(
             source,
             reference,
@@ -1074,16 +1094,17 @@ impl StoreBlobCache {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                return Err(BlobCacheError::Io(format!(
-                    "remove cached blob {}: {error}",
-                    source.display()
+                return Err(BlobCacheError::File(FileError::at(
+                    "remove cached blob",
+                    source,
+                    error,
                 )))
             }
         }
         self.store_dir
             .sync_parent_dir(source)
             .await
-            .map_err(BlobCacheError::Io)
+            .map_err(BlobCacheError::File)
     }
 
     pub(crate) async fn pin(
@@ -1138,7 +1159,7 @@ impl StoreBlobCache {
             .store_dir
             .stage_atomic_file(&pinned)
             .await
-            .map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
         let staged = remote.stage_verified_plaintext(stored, stage).await?;
         verify_exact_file(staged.path(), reference).await?;
         self.database.validate_row_blob_ref(reference).await?;
@@ -1291,12 +1312,12 @@ impl StoreBlobCache {
             .store_dir
             .stage_atomic_file(&destination)
             .await
-            .map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
         staged
             .write_bytes(bytes)
             .await
-            .map_err(BlobCacheError::Io)?;
-        staged.commit().await.map_err(BlobCacheError::Io)?;
+            .map_err(BlobCacheError::File)?;
+        staged.commit().await.map_err(BlobCacheError::File)?;
         self.enforce_budget(namespace, Some(&destination)).await
     }
 
@@ -1315,17 +1336,19 @@ impl StoreBlobCache {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
-            .map_err(|error| {
-                BlobCacheError::Io(format!(
-                    "open cached blob {} to set modification time: {error}",
-                    path.display()
+            .map_err(|source| {
+                BlobCacheError::File(FileError::at(
+                    "open cached blob to set modification time",
+                    &path,
+                    source,
                 ))
             })?;
         file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs))
-            .map_err(|error| {
-                BlobCacheError::Io(format!(
-                    "set cached blob modification time {}: {error}",
-                    path.display()
+            .map_err(|source| {
+                BlobCacheError::File(FileError::at(
+                    "set cached blob modification time",
+                    &path,
+                    source,
                 ))
             })
     }
@@ -1336,9 +1359,10 @@ impl StoreBlobCache {
         match tokio::fs::remove_dir_all(&cache_dir).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(BlobCacheError::Io(format!(
-                "remove cache directory {}: {error}",
-                cache_dir.display()
+            Err(source) => Err(BlobCacheError::File(FileError::at(
+                "remove cache directory",
+                cache_dir,
+                source,
             ))),
         }
     }

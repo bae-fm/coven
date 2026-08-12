@@ -411,7 +411,7 @@ fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {
 
     assert!(matches!(
         record.validate(),
-        Err(RemoteObjectRecordError::InvalidDomain(_))
+        Err(RemoteObjectRecordError::BlobLocator(_))
     ));
 }
 

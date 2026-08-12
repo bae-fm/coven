@@ -171,7 +171,7 @@ impl StoreRows {
         self.sync
             .discard_blocked_write(write_id.clone())
             .await
-            .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))
+            .map_err(|error| crate::CovenError::CandidateResolution(Box::new(error)))
     }
 
     pub(crate) async fn write_status(
@@ -267,8 +267,9 @@ impl StoreRows {
 fn map_host_write_error(error: HostWriteError<CovenError>) -> CovenError {
     match error {
         HostWriteError::Host(error) => error,
-        HostWriteError::Database(error) => CovenError::Database(error),
-        HostWriteError::Blob(error) => CovenError::Blob(error),
+        HostWriteError::Database(error) => CovenError::from(error),
+        HostWriteError::Blob(error) => CovenError::File(error),
+        HostWriteError::BlobDeclaration(error) => CovenError::BlobDeclaration(error),
         HostWriteError::UnsafeBlobPath(error) => CovenError::UnsafeBlobPath(error),
         HostWriteError::WriteClosurePanicked => CovenError::WriteClosurePanicked,
         HostWriteError::WriteRollbackFailed { write, rollback } => {

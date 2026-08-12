@@ -48,13 +48,12 @@ impl DeviceJoinInvite {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BootstrapError> {
-        let invite: Self = serde_json::from_slice(bytes)
-            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
+        let invite: Self =
+            serde_json::from_slice(bytes).map_err(BootstrapError::DeviceInviteJson)?;
         if invite.version != coven_protocol::store_commit::STORE_PROTOCOL_VERSION {
-            return Err(BootstrapError::InvalidCode(format!(
-                "device join invite version {} is not supported",
-                invite.version
-            )));
+            return Err(BootstrapError::UnsupportedDeviceInviteVersion(
+                invite.version,
+            ));
         }
         Ok(invite)
     }

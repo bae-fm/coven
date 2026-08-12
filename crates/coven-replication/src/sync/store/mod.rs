@@ -82,7 +82,7 @@ pub use owner_role_promotion::OwnerPromotionError;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
 
-pub(crate) use authorization::StoreInitializationError;
+pub use authorization::StoreInitializationError;
 pub use authorization::StoreRegistrationError;
 pub use authorization::{
     HistoryConstructionAuthority, Store, StoreKeyrings, StoreRestoreMembership,
@@ -90,6 +90,9 @@ pub use authorization::{
 pub use circles::CirclePackageReadError;
 pub use circles::StoreCircleCommands;
 pub use commit_publication::{AuthorizedWriterOperation, StoreWriterAuthorizationError};
+pub use founder_creation::{
+    FounderObjectDeleteError, FounderPublicationRollback, FounderRollbackError,
+};
 #[cfg(test)]
 pub(crate) use pull::HeldStoreCoordinate;
 pub(crate) use pull::{HeldStorePosition, VerifiedStoreDeviceHead};
@@ -98,4 +101,7 @@ pub use pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;
 #[doc(hidden)]
-pub use snapshots::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
+pub use snapshots::{
+    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotBlobReconcileError, SnapshotError,
+    SnapshotSpoolCleanupError,
+};

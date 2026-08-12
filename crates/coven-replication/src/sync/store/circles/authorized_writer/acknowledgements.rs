@@ -84,7 +84,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     predecessor,
                     next_slot,
                 )
-                .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreAckError::from)?;
             let prepared = self
                 .storage
                 .prepare_protocol_object(

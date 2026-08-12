@@ -10,18 +10,52 @@ pub enum CircleOperationError {
     MissingState(&'static str),
     #[error("circle protocol state is invalid: {0}")]
     InvalidState(String),
+    #[error("circle state reduction: {0}")]
+    State(#[from] coven_protocol::circle_activation::CircleStateError),
+    #[error("circle row blob reference: {0}")]
+    RowBlob(#[from] coven_protocol::blob::RowBlobRefError),
     #[error("circle construction: {0}")]
     Construction(#[from] CircleTransitionError),
+    #[error("Circle epoch-close response: {0}")]
+    EpochCloseResponse(#[source] CircleTransitionError),
+    #[error("circle protocol: {0}")]
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("circle roster: {0}")]
+    Roster(#[from] coven_protocol::circle_roster::CircleRosterError),
+    #[error("circle row routing key: {0}")]
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
+    #[error("circle snapshot image: {0}")]
+    SnapshotImage(#[from] coven_database::SnapshotImageError),
+    #[error("circle encryption: {0}")]
+    Encryption(#[from] coven_keys::encryption::EncryptionError),
+    #[error("circle key operation: {0}")]
+    Key(#[from] coven_keys::keys::KeyError),
+    #[error("circle JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("circle storage: {0}")]
+    Storage(#[from] coven_protocol::objects::StorageError),
     #[error("circle object: {0}")]
     Object(#[from] StoreObjectError),
+    #[error("circle blob download: {0}")]
+    BlobDownload(#[from] crate::sync::store::blob::BlobDownloadFailureCause),
     #[error("Store publication: {0}")]
     StoreOutbound(#[from] StoreError),
     #[error("Store device registration: {0}")]
     StoreRegistration(#[from] StoreRegistrationError),
+    #[error("circle writer authorization: {0}")]
+    WriterAuthorization(#[source] Box<crate::sync::store::StoreWriterAuthorizationError>),
+    #[error("circle sync cycle: {0}")]
+    SyncCycle(#[source] Box<crate::sync::cycle::SyncCycleFailure>),
+    #[error("circle Store pull: {0}")]
+    StorePull(#[source] Box<crate::sync::store::StorePullError>),
+    #[error("circle membership chain: {0}")]
+    AnchoredChain(#[source] Box<crate::sync::store::AnchoredChainError>),
     #[error("circles require opaque cloud storage")]
     BrowsableStorage,
     #[error("circle operation journal: {0}")]
-    Journal(String),
+    Journal(#[from] coven_protocol::circle_journal::CircleJournalError),
+    #[error("circle operation journal state: {0}")]
+    JournalState(String),
     #[error("circle operation {circle_id} is blocked: {block}")]
     Blocked {
         circle_id: CircleId,
@@ -85,14 +119,26 @@ impl From<coven_database::DbError> for CircleOperationError {
     }
 }
 
-impl From<coven_protocol::circle_journal::CircleJournalError> for CircleOperationError {
-    fn from(error: coven_protocol::circle_journal::CircleJournalError) -> Self {
-        CircleOperationError::Journal(error.to_string())
+impl From<crate::sync::store::StoreWriterAuthorizationError> for CircleOperationError {
+    fn from(error: crate::sync::store::StoreWriterAuthorizationError) -> Self {
+        Self::WriterAuthorization(Box::new(error))
     }
 }
 
-impl From<coven_protocol::circle_activation::CircleStateError> for CircleOperationError {
-    fn from(error: coven_protocol::circle_activation::CircleStateError) -> Self {
-        CircleOperationError::InvalidState(error.to_string())
+impl From<crate::sync::cycle::SyncCycleFailure> for CircleOperationError {
+    fn from(error: crate::sync::cycle::SyncCycleFailure) -> Self {
+        Self::SyncCycle(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StorePullError> for CircleOperationError {
+    fn from(error: crate::sync::store::StorePullError) -> Self {
+        Self::StorePull(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::AnchoredChainError> for CircleOperationError {
+    fn from(error: crate::sync::store::AnchoredChainError) -> Self {
+        Self::AnchoredChain(Box::new(error))
     }
 }

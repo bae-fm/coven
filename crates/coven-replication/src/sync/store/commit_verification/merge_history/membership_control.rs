@@ -172,17 +172,20 @@ impl VerifiedMergeMembershipPrefix {
         reference: &protocol_membership::MembershipHeadRef,
         head: &protocol_membership::AuthorHead,
         commit: &StoreBatchCommitRef,
-    ) -> Result<VerifiedMergePrefixHeadStatus, String> {
+    ) -> Result<VerifiedMergePrefixHeadStatus, StorePullError> {
         if !self.commits.contains(commit) {
             return Ok(VerifiedMergePrefixHeadStatus::OutsidePrefix);
         }
         let proof = self.head_activations.get(commit).ok_or_else(|| {
-            "in-prefix membership activation is absent from its verified Store control".to_string()
+            StorePullError::InvalidState(
+                "in-prefix membership activation is absent from its verified Store control"
+                    .to_string(),
+            )
         })?;
         if !proof.verifies(reference, head, commit) {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "membership head differs from its in-prefix verified Store control".to_string(),
-            );
+            ));
         }
         Ok(VerifiedMergePrefixHeadStatus::Included)
     }
@@ -190,23 +193,25 @@ impl VerifiedMergeMembershipPrefix {
     pub(crate) fn validate_complete_membership(
         &self,
         membership: &MembershipChain,
-    ) -> Result<(), String> {
+    ) -> Result<(), StorePullError> {
         if self
             .predecessor_memberships
             .iter()
             .any(|predecessor| !membership.causally_includes(predecessor))
         {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "membership state regresses below an exact Store predecessor membership"
                     .to_string(),
-            );
+            ));
         }
         if self
             .head_activations
             .values()
             .any(|proof| !membership.contains_coord(&proof.transition.body.entry.coord))
         {
-            return Err("membership state omits an accepted Store membership control".to_string());
+            return Err(StorePullError::InvalidState(
+                "membership state omits an accepted Store membership control".to_string(),
+            ));
         }
         if self.conflict_resolutions.keys().any(|reference| {
             membership
@@ -214,7 +219,9 @@ impl VerifiedMergeMembershipPrefix {
                 .binary_search(reference)
                 .is_err()
         }) {
-            return Err("membership state omits an accepted Store conflict resolution".to_string());
+            return Err(StorePullError::InvalidState(
+                "membership state omits an accepted Store conflict resolution".to_string(),
+            ));
         }
         Ok(())
     }
@@ -261,18 +268,19 @@ impl<'a> MergeHistoryVerifier<'a> {
             VerifiedCircleActivations,
             Option<VerifiedMergeConflictResolutionActivation>,
         ),
-        String,
+        StorePullError,
     > {
         let Some(store_commit::StoreControl { transition }) = commit.control() else {
-            return Err("Merge membership verifier received another Store control".to_string());
+            return Err(StorePullError::InvalidState(
+                "Merge membership verifier received another Store control".to_string(),
+            ));
         };
         let root = self.root.reference().clone();
         let state = &commit.membership_state;
         let commit_author = self
             .commit_verifier
             .load_registration(&commit.author_registration)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         if transition.body.author_registration != commit.author_registration
             || transition.body.entry.coord.author_pubkey != commit_author.value.author_pubkey
             || transition.body.resolutions != state.resolutions
@@ -283,23 +291,25 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .as_ref()
                     .map(|reference| reference.object.clone())
         {
-            return Err("Merge membership transition differs from its Store authority".to_string());
+            return Err(StorePullError::InvalidState(
+                "Merge membership transition differs from its Store authority".to_string(),
+            ));
         }
         match &transition.body.predecessor {
             Some(predecessor) if state.heads.binary_search(predecessor).is_err() => {
-                return Err(
+                return Err(StorePullError::InvalidState(
                     "Merge membership transition predecessor is absent from its signed state"
                         .to_string(),
-                );
+                ));
             }
             None if state.heads.iter().any(|head| {
                 head.coord.stream_key() == transition.body.entry.coord.stream_key()
             }) =>
             {
-                return Err(
+                return Err(StorePullError::InvalidState(
                     "first Merge membership transition has an existing signed predecessor"
                         .to_string(),
-                );
+                ));
             }
             _ => {}
         }
@@ -307,13 +317,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             .commit_verifier
             .membership_objects()
             .load_entry(&transition.body.entry)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         if opened_entry.value.coord() != transition.body.entry.coord
             || opened_entry.value.dependencies != predecessor_membership.effective_frontier()
             || opened_entry.value.resolution_dependencies != transition.body.resolutions
         {
-            return Err("Merge membership transition differs from its exact entry".to_string());
+            return Err(StorePullError::InvalidState(
+                "Merge membership transition differs from its exact entry".to_string(),
+            ));
         }
         if let protocol_membership::MembershipChange::RemoveMember {
             user_pubkey,
@@ -339,18 +350,16 @@ impl<'a> MergeHistoryVerifier<'a> {
                 || retirement_device_state.as_ref() != Some(&commit.device_state)
                 || !commit.stream_activations().is_empty()
             {
-                return Err(
+                return Err(StorePullError::InvalidState(
                     "Merge Owner-removal control differs from its exact membership entry"
                         .to_string(),
-                );
+                ));
             }
             let mut successor_membership = predecessor_membership.clone();
-            successor_membership
-                .add_entry(opened_entry.value)
-                .map_err(|error| error.to_string())?;
+            successor_membership.add_entry(opened_entry.value)?;
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
                 .map(|activations| (activations, None))
-                .map_err(|error| error.to_string());
+                .map_err(StorePullError::from);
         }
         if let protocol_membership::MembershipChange::ResolutionActivation { resolution } =
             &opened_entry.value.change
@@ -359,15 +368,16 @@ impl<'a> MergeHistoryVerifier<'a> {
             let resolution_proof = pending_resolution
                 .filter(|proof| proof.verifies(&resolution))
                 .ok_or_else(|| {
-                    "Merge conflict resolution lacks its verified Store activation".to_string()
+                    StorePullError::InvalidState(
+                        "Merge conflict resolution lacks its verified Store activation".to_string(),
+                    )
                 })?
                 .clone();
             let opened_resolution = self
                 .commit_verifier
                 .membership_objects()
                 .load_resolution(&resolution)
-                .await
-                .map_err(|error| error.to_string())?;
+                .await?;
             let acceptance = &opened_resolution.value.replacement_acceptance;
             let mut expected = vec![
                 store_commit::StreamActivation::grant_authorized(
@@ -392,18 +402,16 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .is_err()
                 || commit.stream_activations() != expected
             {
-                return Err(
+                return Err(StorePullError::InvalidState(
                     "Merge conflict-resolution control differs from its exact membership entry"
                         .to_string(),
-                );
+                ));
             }
             let mut successor_membership = predecessor_membership.clone();
-            successor_membership
-                .add_entry(opened_entry.value)
-                .map_err(|error| error.to_string())?;
+            successor_membership.add_entry(opened_entry.value)?;
             return VerifiedCircleActivations::membership_control(commit, commit_ref)
                 .map(|activations| (activations, Some(resolution_proof)))
-                .map_err(|error| error.to_string());
+                .map_err(StorePullError::from);
         }
         let protocol_membership::MembershipChange::SetMember {
             user_pubkey,
@@ -418,9 +426,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             ..
         } = &opened_entry.value.change
         else {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "Merge membership control does not activate one Owner promotion".to_string(),
-            );
+            ));
         };
         if retirement_device_state.is_some()
             || user_pubkey != &acceptance.request.member_pubkey
@@ -428,27 +436,27 @@ impl<'a> MergeHistoryVerifier<'a> {
             || replaces != &BTreeSet::from([acceptance.request.member_grant.clone()])
             || acceptance.request.promoter_registration != commit.author_registration
         {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "Merge Owner-promotion control differs from its exact membership entry".to_string(),
-            );
+            ));
         }
         self.verify_owner_promotion_acceptance_in_loaded_history(acceptance)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         let request_activation = acceptance.activation.commit();
         let request_commit = self
             .history
             .commits
             .get(request_activation)
             .ok_or_else(|| {
-                "Merge Owner-promotion request activation is absent from its verified history"
-                    .to_string()
+                StorePullError::InvalidState(
+                    "Merge Owner-promotion request activation is absent from its verified history"
+                        .to_string(),
+                )
             })?;
         let verified_membership_activations = verified_merge_membership_prefix(
             &self.history.commits,
             commit_predecessor_references(request_commit.verified.value()),
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let request_membership = self
             .load_membership_at_verified_prefix(
                 &acceptance.request.predecessor_membership.heads,
@@ -456,12 +464,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                 &verified_membership_activations,
                 None,
             )
-            .await
-            .map_err(|error| error.to_string())?;
-        let predecessor_cut = commit
-            .order
-            .predecessor_cut()
-            .map_err(|error| error.to_string())?;
+            .await?;
+        let predecessor_cut = commit.order.predecessor_cut()?;
         let predecessor_frontier = predecessor_cut.commits();
         let request_stream = request_activation.coord.stream_id;
         let activation_is_covered = predecessor_frontier
@@ -492,19 +496,19 @@ impl<'a> MergeHistoryVerifier<'a> {
             || !promoter_grant_is_active
             || !candidate_grant_is_active
         {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "Merge Owner-promotion transition does not include its accepted authority"
                     .to_string(),
-            );
+            ));
         }
         let store_commit::OwnerPromotionAnchors {
             membership,
             recovery,
         } = &acceptance.anchors;
         if membership != membership_anchor {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "Merge Owner-promotion entry carries another membership anchor".to_string(),
-            );
+            ));
         }
         let mut expected = vec![
             store_commit::StreamActivation::grant_authorized(
@@ -522,13 +526,13 @@ impl<'a> MergeHistoryVerifier<'a> {
         ];
         expected.sort();
         if commit.stream_activations() != expected {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "Merge Owner-promotion control carries different stream activations".to_string(),
-            );
+            ));
         }
         VerifiedCircleActivations::membership_control(commit, commit_ref)
             .map(|activations| (activations, None))
-            .map_err(|error| error.to_string())
+            .map_err(StorePullError::from)
     }
 
     pub(crate) async fn verified_membership_objects(
@@ -569,10 +573,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let membership = self
             .load_predecessor_membership(&activation.value().membership_state)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         if !predecessor_verifies_provider_administrator(
             &membership,
             &access.grant.administrator_grant,
@@ -751,7 +752,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     ) -> Result<MembershipChain, RegistrationLoadError> {
         self.load_membership_at_exact_heads(&state.heads, &state.resolutions)
             .await
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+            .map_err(RegistrationLoadError::from)
     }
 
     pub(crate) async fn load_predecessor_membership_at_verified_prefix(
@@ -767,7 +768,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             pending_resolution,
         )
         .await
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+        .map_err(RegistrationLoadError::from)
     }
 
     pub(crate) async fn load_exact_membership_head(
@@ -874,10 +875,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let current_membership = self
             .load_predecessor_membership(&witness_commit.value().membership_state)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         let MembershipStatus::Resolved(current) = current_membership.status() else {
             return Err(StorePullError::InvalidState(
                 "membership revocation witness state is conflicted".to_string(),
@@ -898,10 +896,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let predecessor_membership = self
             .load_predecessor_membership(&candidate_commit.membership_state)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         let MembershipStatus::Resolved(predecessor) = predecessor_membership.status() else {
             return Err(StorePullError::InvalidState(
                 "membership revocation candidate predecessor is conflicted".to_string(),

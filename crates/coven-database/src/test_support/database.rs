@@ -500,7 +500,7 @@ impl Database {
         blob_id: &str,
         cloud_path: Option<&str>,
         bytes: &[u8],
-    ) -> Result<(), DbError> {
+    ) -> Result<(), crate::HostWriteError<DbError>> {
         let root_id = root_id.to_string();
         let row_id = row_id.to_string();
         let blob_id = blob_id.to_string();
@@ -537,7 +537,7 @@ impl Database {
         row_id: &str,
         circle_id: coven_protocol::circle::CircleId,
         stamp: &str,
-    ) -> Result<coven_protocol::write::WriteId, DbError> {
+    ) -> Result<coven_protocol::write::WriteId, crate::HostWriteError<DbError>> {
         let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let audience_value = circle_id.to_string();
         let row_id = row_id.to_string();
@@ -586,7 +586,7 @@ impl Database {
         row_id: &str,
         audience: Option<coven_protocol::circle::CircleId>,
         stamp: &str,
-    ) -> Result<coven_protocol::write::WriteId, DbError> {
+    ) -> Result<coven_protocol::write::WriteId, crate::HostWriteError<DbError>> {
         let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let audience = audience.map(|circle_id| circle_id.to_string());
         let row_id = row_id.to_string();
@@ -613,7 +613,7 @@ impl Database {
         audience: Option<coven_protocol::circle::CircleId>,
         bytes: &[u8],
         stamp: &str,
-    ) -> Result<coven_protocol::write::WriteId, DbError> {
+    ) -> Result<coven_protocol::write::WriteId, crate::HostWriteError<DbError>> {
         let routing = coven_keys::encryption::EncryptionService::from_key([42; 32]);
         let document_id = document_id.to_string();
         let file_id = file_id.to_string();
@@ -710,15 +710,14 @@ impl Database {
         let locator = stored.locator().clone();
         let record =
             coven_protocol::remote_object::RemoteObjectRecord::activated_blob(stored, owner)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 .into_record();
         let object_id = record.object_id().to_string();
-        let state =
-            serde_json::to_string(&record).map_err(|error| DbError::Message(error.to_string()))?;
+        let state = serde_json::to_string(&record).map_err(DbError::from)?;
         let locator_hash = locator.locator_hash().to_string();
         let authority =
             serde_json::to_string(&coven_protocol::audience_package::PackageAudience::Store)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
         let id_for_insert = id.to_string();
         let table_for_insert = table.to_string();
         let stamp_table = table.to_string();

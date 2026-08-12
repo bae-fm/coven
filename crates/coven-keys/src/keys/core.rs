@@ -13,10 +13,86 @@ pub(crate) const SEALBYTES: usize = crypto_box::SEALBYTES;
 
 #[derive(Error, Debug)]
 pub enum KeyError {
-    #[error("Crypto error: {0}")]
-    Crypto(String),
-    #[error("Key persistence error: {0}")]
-    Persistence(String),
+    #[error("file error: {0}")]
+    File(#[from] coven_foundation::atomic_file::FileError),
+    #[error("keyring operation failed: {0}")]
+    Keyring(#[source] keyring_core::Error),
+    #[error("key custody {operation} failed: {source}")]
+    Custody {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+    #[error("{operation}: {source}")]
+    Json {
+        operation: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{subject} is not valid hexadecimal: {source}")]
+    Hex {
+        subject: &'static str,
+        #[source]
+        source: hex::FromHexError,
+    },
+    #[error("{subject} has length {actual}, expected {expected}")]
+    InvalidLength {
+        subject: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("stored signing key is invalid: {0}")]
+    SigningKey(#[source] ed25519_dalek::SignatureError),
+    #[error("key encryption failed: {0}")]
+    Encryption(#[from] crate::encryption::EncryptionError),
+    #[error("decrypted key material is not UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("base64-encoded key material is invalid: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("passphrase key derivation {operation} failed: {source}")]
+    PassphraseKdf {
+        operation: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+    #[error("passphrase envelope is version {actual}, not this build's version {expected}; update to a build that understands it")]
+    UnsupportedPassphraseEnvelopeVersion { actual: u32, expected: u32 },
+    #[error("passphrase envelope names KDF {actual:?}, but this build only supports {expected:?}")]
+    UnsupportedPassphraseKdf {
+        actual: String,
+        expected: &'static str,
+    },
+    #[error("passphrase envelope's Argon2id {parameter} ({actual}) is below the required floor ({minimum})")]
+    WeakArgon2Parameter {
+        parameter: &'static str,
+        actual: u32,
+        minimum: u32,
+    },
+    #[error("envelope decryption failed: wrong passphrase or a corrupt file")]
+    PassphraseEnvelopeDecryption,
+    #[error("sealed box decryption failed (wrong key or tampered)")]
+    SealedBoxDecryption,
+    #[error("invalid Ed25519 public key point")]
+    InvalidEd25519PublicKey,
+    #[error("weak Ed25519 public key point cannot identify a recipient")]
+    WeakEd25519PublicKey,
+    #[error("all-zero X25519 public key cannot identify a recipient")]
+    AllZeroX25519PublicKey,
+    #[error("all-zero X25519 shared secret cannot identify a recipient")]
+    AllZeroX25519SharedSecret,
+    #[error("cannot rotate the key of a plaintext cloud home")]
+    PlaintextCloudKeyRotation,
+    #[error("live keyring changed without retaining an adopted rotation")]
+    UnretainedKeyRotation,
+    #[error("keyring service is already registered as {registered:?}; cannot re-register as {requested:?}")]
+    ServiceAlreadyRegistered {
+        registered: String,
+        requested: String,
+    },
+    #[error("keyring entry {account} is present but empty (corrupt)")]
+    EmptyKeyringEntry { account: String },
+    #[error("Apple keyring entry was not constructed by the protected-data store")]
+    UnexpectedAppleKeyringEntry,
     #[error(
         "no keyring store is installed; the host must install the platform keyring store at startup (set_keyring_service) before any key operation"
     )]
@@ -175,7 +251,7 @@ impl UserKeypair {
         signing_key: &[u8; SIGN_SECRETKEYBYTES],
     ) -> Result<Self, KeyError> {
         let signing_key = ed25519_dalek::SigningKey::from_keypair_bytes(signing_key)
-            .map_err(|e| KeyError::Crypto(format!("Invalid signing key bytes: {e}")))?;
+            .map_err(KeyError::SigningKey)?;
         Ok(Self { signing_key })
     }
 
@@ -280,9 +356,7 @@ pub fn seal_box_decrypt(
 ) -> Result<Vec<u8>, KeyError> {
     crypto_box::SecretKey::from(*recipient_x25519_sk)
         .unseal(ciphertext)
-        .map_err(|_| {
-            KeyError::Crypto("Sealed box decryption failed (wrong key or tampered)".to_string())
-        })
+        .map_err(|_| KeyError::SealedBoxDecryption)
 }
 
 /// Convert an Ed25519 public key to an X25519 public key.
@@ -294,11 +368,9 @@ pub fn ed25519_to_x25519_public_key(
     ed25519_pk: &[u8; SIGN_PUBLICKEYBYTES],
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pk)
-        .map_err(|_| KeyError::Crypto("invalid Ed25519 public key point".to_string()))?;
+        .map_err(|_| KeyError::InvalidEd25519PublicKey)?;
     if vk.is_weak() {
-        return Err(KeyError::Crypto(
-            "weak Ed25519 public key point cannot identify a recipient".to_string(),
-        ));
+        return Err(KeyError::WeakEd25519PublicKey);
     }
     Ok(vk.to_montgomery().to_bytes())
 }
@@ -306,10 +378,17 @@ pub fn ed25519_to_x25519_public_key(
 pub fn ed25519_hex_to_x25519_public_key(
     ed25519_pubkey_hex: &str,
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
-    let public_key: [u8; SIGN_PUBLICKEYBYTES] = hex::decode(ed25519_pubkey_hex)
-        .map_err(|error| KeyError::Crypto(format!("invalid public-key hex: {error}")))?
-        .try_into()
-        .map_err(|_| KeyError::Crypto("public key has the wrong length".to_string()))?;
+    let public_key = hex::decode(ed25519_pubkey_hex).map_err(|source| KeyError::Hex {
+        subject: "public key",
+        source,
+    })?;
+    let actual = public_key.len();
+    let public_key: [u8; SIGN_PUBLICKEYBYTES] =
+        public_key.try_into().map_err(|_| KeyError::InvalidLength {
+            subject: "public key",
+            expected: SIGN_PUBLICKEYBYTES,
+            actual,
+        })?;
     ed25519_to_x25519_public_key(&public_key)
 }
 
@@ -321,15 +400,11 @@ pub fn x25519_shared_secret(
     peer_public: [u8; CURVE25519_PUBLICKEYBYTES],
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     if peer_public == [0; CURVE25519_PUBLICKEYBYTES] {
-        return Err(KeyError::Crypto(
-            "all-zero X25519 public key cannot identify a recipient".to_string(),
-        ));
+        return Err(KeyError::AllZeroX25519PublicKey);
     }
     let shared = x25519_dalek::x25519(local_secret, peer_public);
     if shared == [0; CURVE25519_PUBLICKEYBYTES] {
-        return Err(KeyError::Crypto(
-            "all-zero X25519 shared secret cannot identify a recipient".to_string(),
-        ));
+        return Err(KeyError::AllZeroX25519SharedSecret);
     }
     Ok(shared)
 }
@@ -508,7 +583,7 @@ mod tests {
 
         let error = ed25519_to_x25519_public_key(&bytes).expect_err("invalid point fails");
 
-        assert!(matches!(error, KeyError::Crypto(_)));
+        assert!(matches!(error, KeyError::InvalidEd25519PublicKey));
         assert!(error
             .to_string()
             .contains("invalid Ed25519 public key point"));
@@ -522,7 +597,7 @@ mod tests {
         let error = ed25519_to_x25519_public_key(&identity)
             .expect_err("a weak recipient point must not produce a shared key");
 
-        assert!(matches!(error, KeyError::Crypto(_)));
+        assert!(matches!(error, KeyError::WeakEd25519PublicKey));
     }
 
     #[test]
@@ -533,7 +608,7 @@ mod tests {
             x25519_shared_secret(local.to_x25519_secret_key(), [0; CURVE25519_PUBLICKEYBYTES])
                 .expect_err("an all-zero public key must not produce recipient identity material");
 
-        assert!(matches!(error, KeyError::Crypto(_)));
+        assert!(matches!(error, KeyError::AllZeroX25519PublicKey));
     }
 
     #[test]
@@ -545,7 +620,7 @@ mod tests {
         let error = x25519_shared_secret(local.to_x25519_secret_key(), low_order)
             .expect_err("a low-order public key must not produce recipient identity material");
 
-        assert!(matches!(error, KeyError::Crypto(_)));
+        assert!(matches!(error, KeyError::AllZeroX25519SharedSecret));
     }
 
     #[test]

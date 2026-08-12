@@ -39,9 +39,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 "snapshot test input belongs to another Store writer".to_string(),
             ));
         }
-        self.writer
-            .resign_snapshot(meta)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        self.writer.resign_snapshot(meta).map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -52,7 +50,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, StoreError> {
         self.writer
             .parse_snapshot(bytes, self.store_root().store_root_hash, reference)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

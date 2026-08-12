@@ -6,11 +6,12 @@ struct BlobDownload {
 }
 
 impl BlobDownload {
-    fn from_row(reference: coven_protocol::blob::RowBlobRef) -> Result<Self, String> {
-        let stored = reference
-            .stored()
-            .cloned()
-            .ok_or_else(|| "remote eager blob row has no exact stored reference".to_string())?;
+    fn from_row(
+        reference: coven_protocol::blob::RowBlobRef,
+    ) -> Result<Self, crate::sync::store::snapshots::SnapshotBlobReconcileError> {
+        let stored = reference.stored().cloned().ok_or(
+            crate::sync::store::snapshots::SnapshotBlobReconcileError::MissingStoredReference,
+        )?;
         Ok(Self {
             authority: reference.authority().clone(),
             stored,
@@ -76,10 +77,10 @@ impl<'storage> RestoringStore<'storage> {
             &self.root,
             continuation.registration.device_id,
         )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        .map_err(StoreRegistrationError::from)?;
         let device_signer = registration
             .device_signer(&self.identity)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         let history = self.history.restore_history();
         let latest = history
             .load_store_ack(&continuation.latest_ack, &registration)
@@ -91,14 +92,8 @@ impl<'storage> RestoringStore<'storage> {
                 &registration,
             )
             .await
-            .map_err(|error| match error {
-                crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Object(error) => {
-                    StoreRegistrationError::Object(error)
-                }
-                crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Invalid(error) => {
-                    StoreRegistrationError::Invalid(error)
-                }
-            })?
+            .map_err(crate::sync::store::StorePullError::from)
+            .map_err(StoreRegistrationError::from)?
             .into_iter()
             .rev()
             .map(|(_, value)| value)
@@ -120,44 +115,42 @@ impl<'storage> RestoringStore<'storage> {
                 latest_snapshot,
             )
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))
+            .map_err(StoreRegistrationError::from)
     }
 
     pub async fn reconcile_snapshot_blobs(
         &self,
         cancel: &watch::Receiver<bool>,
-    ) -> Result<crate::sync::store::snapshots::SnapshotBlobReconcile, coven_database::DbError> {
+    ) -> Result<
+        crate::sync::store::snapshots::SnapshotBlobReconcile,
+        crate::sync::store::snapshots::SnapshotBlobReconcileError,
+    > {
         let blobs = self
             .database
             .eager_row_blob_refs()
             .await?
             .into_iter()
             .map(BlobDownload::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(coven_database::DbError::Message)?;
+            .collect::<Result<Vec<_>, _>>()?;
 
         if blobs.is_empty() {
             return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete);
         }
 
         let total = blobs.len();
-        let mut all_ok = true;
         for blob in blobs {
             if *cancel.borrow() {
                 info!(total, "snapshot blob reconciliation cancelled");
                 return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Cancelled);
             }
-            if self.download_blob(blob).await.is_err() {
-                all_ok = false;
-            }
+            self.download_blob(blob).await.map_err(|failure| {
+                crate::sync::store::snapshots::SnapshotBlobReconcileError::Download(
+                    pull::BlobDownloadFailures::new(vec![failure]),
+                )
+            })?;
         }
-        if all_ok {
-            info!(total, "snapshot blob reconciliation complete");
-            Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete)
-        } else {
-            warn!(total, "some snapshot blob files are not local");
-            Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Incomplete)
-        }
+        info!(total, "snapshot blob reconciliation complete");
+        Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete)
     }
 
     async fn download_blob(&self, download: BlobDownload) -> Result<(), pull::BlobDownloadFailure> {

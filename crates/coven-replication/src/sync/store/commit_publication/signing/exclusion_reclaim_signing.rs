@@ -54,7 +54,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) fn sign_device_exclusion_cancellation(
@@ -74,7 +74,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) fn retain_device_exclusion_proposal(
@@ -133,7 +133,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) fn sign_device_head(
@@ -149,7 +149,7 @@ impl LocalStoreWriter {
             successor,
             &self.device_signer,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) fn sign_reclaim_receipt(
@@ -168,6 +168,6 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.device_signer,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 }

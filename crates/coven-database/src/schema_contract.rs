@@ -138,7 +138,7 @@ pub(crate) fn validate_existing_row_identities(
         table
             .row_identity()
             .validate(table.name(), &id)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
     }
     Ok(())
 }

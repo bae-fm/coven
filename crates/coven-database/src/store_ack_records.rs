@@ -53,7 +53,7 @@ pub(crate) fn verify_next_local_store_ack_on(
     if ack.successor.activation
         != registration
             .store_acknowledgement_activation(registration_ref)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .activation_id()
         || ack.successor.next_slot.logical_key()
             != format!(

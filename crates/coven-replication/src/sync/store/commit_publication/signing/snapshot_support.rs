@@ -26,13 +26,7 @@ impl LocalStoreWriter {
             old_commit.order.clone(),
             old_commit.membership_state.clone(),
             old_commit.device_state.clone(),
-            old_commit
-                .operations_membership_authority()
-                .map_err(|error| {
-                    crate::sync::store::circles::CircleOperationError::InvalidState(format!(
-                        "prepared Circle commit has no validated operations authority: {error}"
-                    ))
-                })?,
+            old_commit.operations_membership_authority()?,
             reference,
             stream_activations,
         )

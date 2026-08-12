@@ -348,14 +348,14 @@ pub fn outbox_identity(operation: &OutboxOperation) -> Result<OutboxIdentity, Db
 }
 
 pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
-    fn invalid(index: usize, message: String) -> rusqlite::Error {
+    fn invalid(
+        index: usize,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> rusqlite::Error {
         rusqlite::Error::FromSqlConversionFailure(
             index,
             rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                message,
-            )),
+            Box::new(source),
         )
     }
 
@@ -364,11 +364,11 @@ pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
         "upload" => {
             let encoded: String = row.get(2)?;
             let reference: RowBlobRef =
-                serde_json::from_str(&encoded).map_err(|error| invalid(2, error.to_string()))?;
+                serde_json::from_str(&encoded).map_err(|error| invalid(2, error))?;
             let source_path: String = row.get(4)?;
             let state_json: String = row.get(6)?;
             let state: OutboxUploadState =
-                serde_json::from_str(&state_json).map_err(|error| invalid(6, error.to_string()))?;
+                serde_json::from_str(&state_json).map_err(|error| invalid(6, error))?;
             if let OutboxUploadState::Prepared {
                 authority, stored, ..
             }
@@ -385,13 +385,15 @@ pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
                 ) {
                     return Err(invalid(
                         6,
-                        "prepared upload differs from its exact row version".to_string(),
+                        std::io::Error::other("prepared upload differs from its exact row version"),
                     ));
                 }
                 if locator.audience() != authority.remote_audience() {
                     return Err(invalid(
                         6,
-                        "upload package authority differs from its stored locator".to_string(),
+                        std::io::Error::other(
+                            "upload package authority differs from its stored locator",
+                        ),
                     ));
                 }
             }
@@ -407,13 +409,13 @@ pub fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEn
         "delete" => {
             let encoded: String = row.get(3)?;
             let stored: StoredBlobRef =
-                serde_json::from_str(&encoded).map_err(|error| invalid(3, error.to_string()))?;
+                serde_json::from_str(&encoded).map_err(|error| invalid(3, error))?;
             OutboxOperation::Delete { stored }
         }
         _ => {
             return Err(invalid(
                 1,
-                format!("invalid cloud outbox operation {tag:?}"),
+                std::io::Error::other(format!("invalid cloud outbox operation {tag:?}")),
             ))
         }
     };

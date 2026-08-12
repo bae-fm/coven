@@ -43,8 +43,7 @@ impl StoreSession<'_> {
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
         let gate_column = self.gated_root_gate_column(root_table)?;
-        crate::query_truth(self.conn, root_table, gate_column, root_id)
-            .map_err(|error| DbError::Message(error.to_string()))
+        crate::query_truth(self.conn, root_table, gate_column, root_id).map_err(DbError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -59,7 +58,7 @@ impl StoreSession<'_> {
         let gate_column = self.gated_root_gate_column(root_table)?;
         let transaction = self.conn.unchecked_transaction()?;
         let locality = crate::query_truth(&transaction, root_table, gate_column, root_id)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         if locality == Some(false) {
             let current = Database::row_blob_refs_for_root_on(
                 &transaction,
@@ -109,7 +108,7 @@ impl StoreSession<'_> {
         let resolved_root = self
             .gates
             .resolve_root_of(connection, row.table(), row.row_id())
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .ok_or_else(|| {
                 DbError::Message(format!(
                     "upload row {:?}/{:?} has no gated transition root",

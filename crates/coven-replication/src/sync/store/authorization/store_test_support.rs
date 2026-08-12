@@ -5,7 +5,7 @@ impl Store {
     pub(crate) async fn execute_unscoped_host_sql_for_test(
         &self,
         sql: String,
-    ) -> Result<(), coven_database::DbError> {
+    ) -> Result<(), coven_database::HostWriteError<coven_database::DbError>> {
         let staging = HostWriteBlobStaging::new(
             tokio::runtime::Handle::current(),
             Arc::clone(&self.storage),
@@ -35,12 +35,10 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn owner_recovery_for_test(&self) -> Result<RestoringStore<'_>, String> {
-        Ok(self
-            .authorize()
-            .await
-            .map_err(|error| error.to_string())?
-            .bind_restore_for_test())
+    pub(crate) async fn owner_recovery_for_test(
+        &self,
+    ) -> Result<RestoringStore<'_>, crate::sync::test_helpers::TestError> {
+        Ok(self.authorize().await?.bind_restore_for_test())
     }
 
     #[cfg(test)]
@@ -48,23 +46,26 @@ impl Store {
         &self,
         recipient: &str,
         value: coven_protocol::wrapped_store_key::WrappedStoreKey,
-    ) -> Result<coven_protocol::wrapped_store_key::PreparedWrappedStoreKey, String> {
-        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
+    ) -> Result<
+        coven_protocol::wrapped_store_key::PreparedWrappedStoreKey,
+        crate::sync::test_helpers::TestError,
+    > {
+        let authorization = self.authorize().await?;
         authorization
             .prepare_wrapped_key_for_test(recipient, value)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
     pub(crate) async fn membership_keyring_facts_for_test(
         &self,
-    ) -> Result<([u8; 32], usize), String> {
-        let authorization = self.authorize().await.map_err(|error| error.to_string())?;
+    ) -> Result<([u8; 32], usize), crate::sync::test_helpers::TestError> {
+        let authorization = self.authorize().await?;
         authorization
             .membership_keyring_facts_for_test()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -72,23 +73,20 @@ impl Store {
         &self,
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
-    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, String> {
+    ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, StoreError> {
         self.authorize_history()
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(StoreError::from)?
             .blob_key_fingerprint_for_test(authority, stored)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn announcement_stream_id_for_test(
         &self,
     ) -> Result<coven_protocol::membership::AuthorStreamId, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         Ok(writer.announcement_stream_id())
     }
 
@@ -98,10 +96,7 @@ impl Store {
         commit: coven_protocol::store_commit::StoreBatchCommitRef,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer.sign_device_head_for_test(commit, successor)
     }
 
@@ -110,10 +105,7 @@ impl Store {
         &self,
         meta: coven_protocol::store_commit::SnapshotMeta,
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer.resign_snapshot_meta_for_test(meta)
     }
 
@@ -123,10 +115,7 @@ impl Store {
         bytes: &[u8],
         reference: &coven_protocol::store_commit::StoreSnapshotRef,
     ) -> Result<coven_protocol::store_commit::SnapshotMeta, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer.parse_snapshot_meta_for_test(bytes, reference)
     }
 
@@ -137,10 +126,7 @@ impl Store {
         crate::sync::store::commit_publication::operation::commit_plan::StoreOperationCommitPlan,
         StoreError,
     > {
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer.prepare_plan().await
     }
 
@@ -153,10 +139,7 @@ impl Store {
         crate::sync::store::commit_verification::merge_history::MergeOutboundAuthorization,
         StoreError,
     > {
-        let authorization = self
-            .authorize()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let authorization = self.authorize().await.map_err(StoreError::from)?;
         authorization
             .authorize_retained_outbound_for_test(order, candidate_membership_heads)
             .await
@@ -166,10 +149,7 @@ impl Store {
     pub(crate) async fn owner_promotion_target_for_test(
         &self,
     ) -> Result<coven_protocol::store_commit::StoreDeviceRegistrationRef, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         Ok(writer.local_registration_ref_for_test())
     }
 
@@ -181,10 +161,7 @@ impl Store {
         candidate_object: &coven_protocol::objects::ExactObjectRef,
     ) -> Result<crate::sync::store::merge_conflict::ExcludedCandidateHeadObservation, StoreError>
     {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         let verified_commit = history
             .authenticate_commit_bytes(&candidate.commit, &candidate_commit.to_bytes())
             .await?;
@@ -199,10 +176,7 @@ impl Store {
         &self,
         write_id: coven_protocol::write::WriteId,
     ) -> Result<(), StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .cleanup_merge_candidate(write_id)
             .await
@@ -229,7 +203,7 @@ impl Store {
         self.authorize()
             .await
             .map(|authorization| authorization.membership_for_test())
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -268,7 +242,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         self.authorize_writer()
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+            .map_err(StoreError::from)?
             .prepare_conflict_resolution_plan(candidate_membership_heads)
             .await?;
         Ok(())
@@ -279,14 +253,11 @@ impl Store {
         &self,
         reference: &coven_protocol::membership::MembershipHeadRef,
     ) -> Result<coven_protocol::membership::AuthorHead, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_exact_membership_head_for_test(reference)
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -295,14 +266,11 @@ impl Store {
         heads: &[coven_protocol::membership::MembershipHeadRef],
         resolutions: &[coven_protocol::membership::StoreMembershipConflictResolutionRef],
     ) -> Result<coven_protocol::membership::MembershipChain, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_membership_at_exact_heads_for_test(heads, resolutions)
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -310,17 +278,14 @@ impl Store {
         &self,
         candidate_heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<coven_protocol::membership::MembershipChain, StoreError> {
-        let history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .project_membership_to_verified_prefix(
                 candidate_heads,
                 &crate::sync::store::commit_verification::merge_history::VerifiedMergeMembershipPrefix::default(),
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -328,10 +293,7 @@ impl Store {
         &self,
         heads: &[coven_protocol::membership::MembershipHeadRef],
     ) -> Result<(), StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .assert_deep_membership_projection_for_test(heads)
             .await;
@@ -344,10 +306,7 @@ impl Store {
         reference: &coven_protocol::store_commit::DeviceJoinAttemptRef,
         owner: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<(), StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .verify_device_join_attempt_for_test(reference, owner)
             .await
@@ -366,10 +325,7 @@ impl Store {
         ),
         StoreError,
     > {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .exact_next_announcement_slot_for_test(registration_ref, registration, previous)
             .await
@@ -380,14 +336,11 @@ impl Store {
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<coven_protocol::store_commit::VerifiedStoreBatchCommit, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_commit(reference)
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -402,10 +355,7 @@ impl Store {
         )>,
         StoreError,
     > {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_commit_ancestry_until_for_test(start, coverage)
             .await
@@ -416,10 +366,7 @@ impl Store {
         &self,
         reference: &coven_protocol::store_commit::StoreDeviceRegistrationRef,
     ) -> Result<coven_protocol::store_commit::StoreDeviceRegistration, StoreError> {
-        let history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let history = self.authorize_history().await.map_err(StoreError::from)?;
         Ok(history.load_registration(reference).await?.value)
     }
 
@@ -428,10 +375,7 @@ impl Store {
         &self,
         snapshots: &[coven_database::PublishedStoreSnapshot],
     ) -> Result<(), StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .verify_snapshots_for_acknowledgement(snapshots)
             .await?;
@@ -445,10 +389,7 @@ impl Store {
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
         reference: &coven_protocol::store_commit::CirclePackageRef,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .open_circle_package_for_test(access, commit, reference)
             .await
@@ -624,7 +565,7 @@ impl Store {
     ) -> Result<coven_protocol::store_commit::CircleAck, StoreAckError> {
         self.authorize_history()
             .await
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?
+            .map_err(StoreAckError::from)?
             .circles()
             .acknowledgements()
             .load(reference)
@@ -648,12 +589,11 @@ impl Store {
             commit_ref,
             author,
         )
-        .map_err(|error| {
-            crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-        })?;
-        let mut history = self.authorize_history().await.map_err(|error| {
-            crate::sync::store::CircleOperationError::InvalidState(error.to_string())
-        })?;
+        .map_err(crate::sync::store::CircleOperationError::from)?;
+        let mut history = self
+            .authorize_history()
+            .await
+            .map_err(crate::sync::store::CircleOperationError::from)?;
         history
             .circles()
             .activations()
@@ -672,7 +612,7 @@ impl Store {
         let mut history = self
             .authorize_history()
             .await
-            .map_err(|error| circles::CirclePackageReadError::Invalid(error.to_string()))?;
+            .map_err(circles::CirclePackageReadError::from)?;
         history
             .circles()
             .packages()
@@ -760,9 +700,10 @@ impl Store {
         coven_protocol::store_commit::StoreAck,
         crate::sync::store::acknowledgements::StoreAckError,
     > {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
         writer
             .acknowledgements()
             .stage_acknowledgement(frontier, sync_time)
@@ -773,9 +714,10 @@ impl Store {
     pub(crate) async fn drain_acknowledgements_for_test(
         &self,
     ) -> Result<u64, crate::sync::store::acknowledgements::StoreAckError> {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?;
         writer.acknowledgements().drain_acknowledgements().await
     }
 
@@ -798,11 +740,7 @@ impl Store {
     ) -> Result<(), crate::sync::store::acknowledgements::StoreAckError> {
         self.authorize_writer()
             .await
-            .map_err(|error| {
-                crate::sync::store::acknowledgements::StoreAckError::InvalidOutbound(
-                    error.to_string(),
-                )
-            })?
+            .map_err(crate::sync::store::acknowledgements::StoreAckError::from)?
             .circles()
             .stage_acknowledgements(frontier, sync_time)
             .await
@@ -818,9 +756,10 @@ impl Store {
         coven_protocol::store_commit::SnapshotMeta,
         crate::sync::store::snapshots::SnapshotError,
     > {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            crate::sync::store::snapshots::SnapshotError::PublicationState(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
         writer
             .snapshots()
             .push_store_snapshot(
@@ -841,19 +780,13 @@ impl Store {
         >,
         StoreError,
     > {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history.load_founder_registration_for_test().await
     }
 
     #[cfg(test)]
     pub(crate) async fn load_founder_registration_twice_for_test(&self) -> Result<(), StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history.load_founder_registration_twice_for_test().await
     }
 
@@ -867,10 +800,7 @@ impl Store {
         crate::sync::store::commit_verification::merge_history::PreparedMergeHistorySuccessor,
         StoreError,
     > {
-        let mut authorized = self
-            .authorize()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut authorized = self.authorize().await.map_err(StoreError::from)?;
         authorized
             .prepare_merge_history_successor_for_test(verified_commit, recovery_author, evidence)
             .await
@@ -883,10 +813,7 @@ impl Store {
         attempt_activation: &coven_protocol::store_commit::StoreBatchCommitRef,
         membership_state: &coven_protocol::circle_control::StoreMembershipStateRef,
     ) -> Result<coven_database::DeviceJoinBootstrapPlan, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .prepare_device_join_bootstrap_for_test(coverage, attempt_activation, membership_state)
             .await
@@ -897,10 +824,7 @@ impl Store {
         &self,
         reference: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<Option<coven_protocol::objects::VerifiedObject<Vec<u8>>>, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history.load_store_package_for_test(reference).await
     }
 
@@ -910,10 +834,7 @@ impl Store {
         reference: &coven_protocol::store_commit::StoreAckRef,
         registration: &coven_protocol::store_commit::StoreDeviceRegistration,
     ) -> Result<coven_protocol::store_commit::StoreAck, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_store_ack_for_test(reference, registration)
             .await
@@ -926,10 +847,7 @@ impl Store {
         registration: &coven_protocol::store_commit::StoreDeviceRegistration,
         commit: &coven_protocol::store_commit::StoreBatchCommitRef,
     ) -> Result<coven_protocol::store_commit::StoreDeviceHead, StoreError> {
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         history
             .load_head_for_test(reference, registration, commit)
             .await

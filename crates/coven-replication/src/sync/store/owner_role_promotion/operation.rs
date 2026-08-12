@@ -165,12 +165,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let (successor, state) = next.into_predecessor()?;
         self.database
             .advance_owner_promotion_journal(transition)
-            .await
-            .map_err(|error| {
-                OwnerPromotionError::Protocol(format!(
-                    "advance exact Owner-promotion journal: {error}"
-                ))
-            })?;
+            .await?;
         Ok((successor, state))
     }
 
@@ -211,7 +206,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .owner_promotion_history()
             .find_request_activation(&request)
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let root = self.root.clone();
         let membership_stream = self.writer.grant_authorized_stream_id(
             &request.intended_owner_grant,
@@ -259,12 +254,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 verified_activation.activation().clone(),
                 anchors,
             )
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         self.writer
             .owner_promotion_history()
             .verify_acceptance_from_request(&acceptance, verified_activation)
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let journal = OwnerPromotionJournal {
             promotion_id: request.promotion_id,
             target: request.member_registration.clone(),
@@ -378,7 +373,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .owner_promotion_history()
             .load_registration(&member_registration)
             .await
-            .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let plan = operation.writer.prepare_plan().await?;
         let member_grant = operation.exact_member_grant(&member.value.author_pubkey)?;
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
@@ -394,7 +389,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         let (seq, previous_hash) = operation
             .membership
             .next_stream_position(&author_pubkey, &owner_grant, author_stream)
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let finalization = OwnerPromotionFinalizationPoint {
             author_stream,
             seq,
@@ -477,7 +472,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 .verify_acceptance(&acceptance),
         )
         .await
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        .map_err(OwnerPromotionError::from)?;
         if !self
             .writer
             .is_local_registration(&acceptance.request.promoter_registration)
@@ -527,7 +522,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         self.writer
             .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let plan = self.writer.prepare_plan().await?;
         let OwnerPromotionAnchors {
             membership: membership_anchor,
@@ -567,10 +562,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 },
             )
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         self.writer
             .attach_merge_membership_proof(&mut candidate, &publication, None)
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         Ok(OwnerPromotionJournal {
             promotion_id: journal.promotion_id,
             target: journal.target.clone(),
@@ -634,10 +629,10 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .writer
             .open_keyring_or_for_membership(&membership, encryption)
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let recipient = &acceptance.request.member_pubkey;
-        let recipient_key = keys::ed25519_hex_to_x25519_public_key(recipient)
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        let recipient_key =
+            keys::ed25519_hex_to_x25519_public_key(recipient).map_err(OwnerPromotionError::from)?;
         let wrapped_key = operation
             .writer
             .seal_local_keyring(
@@ -648,7 +643,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 &recipient_key,
                 &authorized,
             )
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let wrapped_key = operation
             .writer
             .prepare_wrapped_key(recipient, wrapped_key)
@@ -658,7 +653,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .owner_promotion_history()
             .load_registration(&acceptance.request.member_registration)
             .await
-            .map_err(|error| OwnerPromotionError::Storage(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let entry = operation
             .writer
             .sign_finalize_owner_promotion(
@@ -669,12 +664,12 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 wrapped_key.reference.clone(),
                 db.stamp(),
             )
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let transition = operation
             .writer
             .prepare_membership_transition(&membership, entry)
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let next = OwnerPromotionJournal {
             promotion_id: journal.promotion_id,
             target: journal.target.clone(),
@@ -708,7 +703,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .writer
             .publish_membership_authority(&transition, std::slice::from_ref(&wrapped_key))
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         if candidate_commit.control()
             != Some(&coven_protocol::store_commit::StoreControl {
                 transition: transition.transition.clone(),
@@ -733,7 +728,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             .owner_promotion_history()
             .load_membership(&predecessor.heads, &predecessor.resolutions)
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(OwnerPromotionError::Protocol(
@@ -746,7 +741,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             candidate_commit.device_state.recovery().to_vec(),
             resolved.state_hash,
         )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        .map_err(OwnerPromotionError::from)?;
         if exact_predecessor != candidate_commit.membership_state {
             return Err(OwnerPromotionError::Protocol(
                 "Owner promotion candidate membership differs from its exact predecessor"
@@ -756,7 +751,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
         membership
             .add_entry(transition.entry.clone())
             .and_then(|()| membership.activate_head_ref(publication.head_ref.clone()))
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
             return Err(OwnerPromotionError::Protocol(
@@ -798,7 +793,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                     grant_id,
                     promotion_acceptance.anchors.recovery(),
                 )
-                .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?,
+                .map_err(OwnerPromotionError::from)?,
             },
         });
         let membership = StoreMembershipStateRef::from_parts(
@@ -807,7 +802,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
             recovery,
             resolved.state_hash,
         )
-        .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+        .map_err(OwnerPromotionError::from)?;
         if membership
             .heads
             .binary_search(&publication.head_ref)
@@ -848,12 +843,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 })?;
             database
                 .mark_remote_object_uploaded(remote.into_record())
-                .await
-                .map_err(|error| {
-                    OwnerPromotionError::Protocol(format!(
-                        "record published Owner-promotion membership authority: {error}"
-                    ))
-                })?;
+                .await?;
         }
         let outcome = operation
             .writer
@@ -870,7 +860,7 @@ impl<'operation, 'storage> AuthorizedOwnerPromotion<'operation, 'storage> {
                 },
             )
             .await
-            .map_err(|error| OwnerPromotionError::Protocol(error.to_string()))?;
+            .map_err(OwnerPromotionError::from)?;
         match outcome {
             StoreOperationPublicationOutcome::Activated(commit) => {
                 if commit != candidate_ref {

@@ -64,7 +64,7 @@ pub(crate) async fn ok_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, Cloud
     resp.bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| CloudHomeError::Transport(format!("{ctx}: {e}")))
+        .map_err(|e| CloudHomeError::transport(ctx.to_string(), e))
 }
 
 /// Read a successful response's body and parse it as JSON. `ctx` names what is
@@ -76,8 +76,8 @@ pub(crate) async fn ok_json<T: DeserializeOwned>(
     let body = resp
         .text()
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("{ctx}: read body: {e}")))?;
-    serde_json::from_str(&body).map_err(|e| CloudHomeError::Transport(format!("{ctx}: parse: {e}")))
+        .map_err(|e| CloudHomeError::transport(format!("{ctx}: read body"), e))?;
+    serde_json::from_str(&body).map_err(|e| CloudHomeError::transport(format!("{ctx}: parse"), e))
 }
 
 /// Parse an error-response body as JSON and pull a provider-specific reason out of

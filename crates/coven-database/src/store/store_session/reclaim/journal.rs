@@ -53,10 +53,10 @@ impl DurableStoreReclaimObject {
             } => {
                 evidence_ref
                     .verify(evidence)
-                    .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+                    .map_err(StoreReclaimJournalError::from)?;
                 authorization_ref
                     .verify_identity(authorization)
-                    .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+                    .map_err(StoreReclaimJournalError::from)?;
                 if evidence_prepared.reference() != &evidence_ref.object
                     || authorization_prepared.reference() != &authorization_ref.object
                     || authorization_ref.evidence != *evidence_ref
@@ -76,7 +76,7 @@ impl DurableStoreReclaimObject {
             } => {
                 receipt_ref
                     .verify_identity(receipt)
-                    .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+                    .map_err(StoreReclaimJournalError::from)?;
                 if receipt_prepared.reference() != &receipt_ref.object {
                     return Err(StoreReclaimJournalError::Invalid(
                         "reclaim receipt differs from its prepared exact object".to_string(),
@@ -401,7 +401,7 @@ impl DurableStoreReclaimOperation {
                 candidate
                     .reference
                     .verify_commit(&candidate.commit)
-                    .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+                    .map_err(StoreReclaimJournalError::from)?;
                 if !object.commit_names_object(candidate) {
                     return Err(StoreReclaimJournalError::Invalid(
                         "reclaim journal candidate names another operation".to_string(),
@@ -439,7 +439,7 @@ impl DurableStoreReclaimOperation {
                 candidate
                     .reference
                     .verify_commit(&candidate.commit)
-                    .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+                    .map_err(StoreReclaimJournalError::from)?;
                 if object.authorization_ref() != authorization
                     || !matches!(&**object, DurableStoreReclaimObject::Receipt { .. })
                     || !object.commit_names_object(candidate)
@@ -499,12 +499,12 @@ fn validate_replacement(
     candidate
         .reference
         .verify_commit(&candidate.commit)
-        .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+        .map_err(StoreReclaimJournalError::from)?;
     losing
         .candidate
         .reference
         .verify_commit(&losing.candidate.commit)
-        .map_err(|error| StoreReclaimJournalError::Invalid(error.to_string()))?;
+        .map_err(StoreReclaimJournalError::from)?;
     coven_protocol::remote_object::CandidateNonactivation::validate_durable_shape(
         &losing.candidate.reference,
         &losing.candidate.commit,
@@ -531,4 +531,6 @@ pub enum StoreReclaimJournalError {
     Outbound(#[from] coven_protocol::prepared_commit::PreparedCommitError),
     #[error(transparent)]
     Storage(#[from] coven_protocol::objects::StorageError),
+    #[error(transparent)]
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
 }

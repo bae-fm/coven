@@ -48,7 +48,7 @@ use coven_foundation::changeset::RowChange;
 use coven_protocol::audience_package::{AudiencePackage, PackageAudience};
 use coven_protocol::blob::locator::RemoteAudience;
 use coven_protocol::circle_activation::{VerifiedCircleActivations, VerifiedStreamActivations};
-use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
+use coven_protocol::membership::LocalStoreMembership;
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::remote_object::{remote_object_id, RemoteObjectRecord, RetainedReplayOwner};
 use coven_protocol::store_commit::{
@@ -63,7 +63,7 @@ use coven_protocol::write::{PublishedPosition, WriteId, WriteResolution, WriteSt
 pub(crate) use commit_records::derive_materialized_store_device_state_on;
 
 pub(crate) struct AppliedMergeMaterialization {
-    pub outcome: ApplyOutcome,
+    pub outcome: crate::MaterializationOutcome,
     pub max_updated_at: Option<coven_protocol::hlc::Timestamp>,
     pub write_status_notifications: Vec<(
         coven_protocol::write::WriteId,
@@ -87,16 +87,13 @@ pub(crate) enum MergeSubsetOutcome {
 }
 
 impl MergeSubsetOutcome {
-    fn extend_winning_rows(
-        self,
-        winning_rows: &mut Vec<crate::WinningRow>,
-    ) -> Result<(), Vec<String>> {
+    fn append_winning_rows(self, winning_rows: &mut Vec<crate::WinningRow>) -> Option<Vec<String>> {
         match self {
             Self::Applied(rows) => {
                 winning_rows.extend(rows);
-                Ok(())
+                None
             }
-            Self::ConstraintConflict(tables) => Err(tables),
+            Self::ConstraintConflict(tables) => Some(tables),
         }
     }
 }

@@ -22,7 +22,7 @@ impl StoreSync {
         let uploader = self
             .security
             .identity_public_key()
-            .map_err(|error| StorageError::Storage(format!("read this store's identity: {error}")))?
+            .map_err(StorageError::Key)?
             .map(hex::encode);
         CloudSyncConnection::blob_key(
             scheme,
@@ -77,12 +77,12 @@ impl StoreSync {
 
     pub(crate) async fn drain_uploads(
         &self,
-    ) -> Result<coven_protocol::blob::DrainOutcome, SyncError> {
+    ) -> Result<coven_replication::blob::DrainOutcome, SyncError> {
         active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
             .drain_uploads()
             .await
-            .map_err(SyncError::BlobUpload)
+            .map_err(|error| SyncError::BlobUpload(Box::new(error)))
     }
 
     pub(crate) async fn discard_blocked_write(

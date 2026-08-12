@@ -30,7 +30,7 @@ pub(crate) fn record_activated_store_device_registrations_on(
         signed
             .registration
             .verify_registration(registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         if registration.store_root.store_root_hash != commit.store_root_hash {
             return Err(DbError::Message(format!(
                 "Store registration {} belongs to a different Store",

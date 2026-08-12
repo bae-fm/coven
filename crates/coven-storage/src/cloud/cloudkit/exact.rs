@@ -29,7 +29,7 @@ pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, Cloud
     let text = std::str::from_utf8(bytes.strip_prefix(EXACT_MANIFEST_MAGIC).ok_or_else(|| {
         CloudHomeError::Transport("CloudKit exact object has an invalid manifest".to_string())
     })?)
-    .map_err(|error| CloudHomeError::Transport(format!("CloudKit exact manifest: {error}")))?;
+    .map_err(|error| CloudHomeError::transport("CloudKit exact manifest".to_string(), error))?;
     let mut lines = text.lines();
     let part_count = lines
         .next()
@@ -38,7 +38,7 @@ pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, Cloud
         })?
         .parse::<usize>()
         .map_err(|error| {
-            CloudHomeError::Transport(format!("CloudKit exact manifest part count: {error}"))
+            CloudHomeError::transport("CloudKit exact manifest part count".to_string(), error)
         })?;
     let total_len = lines
         .next()
@@ -47,7 +47,7 @@ pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, Cloud
         })?
         .parse::<usize>()
         .map_err(|error| {
-            CloudHomeError::Transport(format!("CloudKit exact manifest length: {error}"))
+            CloudHomeError::transport("CloudKit exact manifest length".to_string(), error)
         })?;
     let stored_hash = lines
         .next()
@@ -56,7 +56,7 @@ pub(crate) fn decode_exact_manifest(bytes: &[u8]) -> Result<ExactManifest, Cloud
         })?
         .parse()
         .map_err(|error| {
-            CloudHomeError::Transport(format!("CloudKit exact manifest stored hash: {error}"))
+            CloudHomeError::transport("CloudKit exact manifest stored hash".to_string(), error)
         })?;
     if lines.next().is_some() || part_count != total_len.div_ceil(CHUNK_SIZE) {
         return Err(CloudHomeError::Transport(

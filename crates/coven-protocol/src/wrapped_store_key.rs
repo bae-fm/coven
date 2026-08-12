@@ -272,8 +272,7 @@ impl PreparedWrappedStoreKey {
                 "prepared wrapped Store key carries a different exact reference".to_string(),
             ));
         }
-        let value: WrappedStoreKey = serde_json::from_slice(self.object.stored_bytes())
-            .map_err(|error| StorageError::Parse(format!("parse wrapped Store key: {error}")))?;
+        let value: WrappedStoreKey = serde_json::from_slice(self.object.stored_bytes())?;
         self.reference
             .validate_value(&value, self.object.stored_bytes())?;
         Ok(value)

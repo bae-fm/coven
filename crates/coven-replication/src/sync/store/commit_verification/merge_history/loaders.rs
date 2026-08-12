@@ -344,18 +344,12 @@ impl<'a> MergeHistoryVerifier<'a> {
         let accepted =
             VerifiedMergePredecessorHistory::new(&self.history.commits, accepted_frontier);
         let loaded = self.load_commit_join_evidence(commit, author).await;
-        let loaded = loaded.map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-        })?;
+        let loaded = loaded.map_err(StorePullError::from)?;
         let join_evidence = accepted.verify_commit_join_evidence(commit, loaded)?;
         let registrations = self
             .load_commit_registrations(commit, author, Some(membership), &join_evidence, accepted)
             .await;
-        registrations.map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-        })
+        registrations.map_err(StorePullError::from)
     }
 
     async fn load_commit_registrations(
@@ -513,12 +507,12 @@ impl<'a> MergeHistoryVerifier<'a> {
                 activated.registration.clone(),
                 registration,
             )
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            .map_err(RegistrationLoadError::from)?;
             let registration = ActivatedStoreDeviceRegistration::verified(registration, authority)
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                .map_err(RegistrationLoadError::from)?;
             registration
                 .verify_reference(activated)
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                .map_err(RegistrationLoadError::from)?;
             registrations.push(registration);
         }
         Ok(registrations)

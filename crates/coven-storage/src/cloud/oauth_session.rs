@@ -172,7 +172,7 @@ impl OAuthSession {
         self.key_service
             .set_cloud_home_oauth_tokens(&new_tokens)
             .map_err(|e| {
-                CloudHomeError::Transport(format!("persist refreshed OAuth tokens: {e}"))
+                CloudHomeError::transport("persist refreshed OAuth tokens".to_string(), e)
             })?;
 
         let access_token = new_tokens.access_token.clone();
@@ -200,7 +200,7 @@ impl OAuthSession {
         })
         .send()
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("request failed: {e}")))?;
+        .map_err(|e| CloudHomeError::transport("request failed".to_string(), e))?;
 
         if resp.status() == StatusCode::UNAUTHORIZED {
             let new_token = self.refresh().await?;
@@ -210,7 +210,7 @@ impl OAuthSession {
             })
             .send()
             .await
-            .map_err(|e| CloudHomeError::Transport(format!("retry request failed: {e}")))
+            .map_err(|e| CloudHomeError::transport("retry request failed".to_string(), e))
         } else {
             Ok(resp)
         }

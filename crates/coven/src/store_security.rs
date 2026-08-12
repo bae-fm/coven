@@ -74,13 +74,11 @@ impl StoreSecurity {
     pub(crate) async fn export_activated_device_continuation(
         &self,
         database: &coven_database::StoreDatabase,
-    ) -> Result<coven_protocol::recovery::ActivatedContinuation, coven_database::DbError> {
-        let identity = self
-            .required_identity()
-            .map_err(|error| coven_database::DbError::Message(error.to_string()))?;
-        database
+    ) -> Result<coven_protocol::recovery::ActivatedContinuation, crate::store_sync::SyncError> {
+        let identity = self.required_identity()?;
+        Ok(database
             .export_activated_device_continuation(&identity)
-            .await
+            .await?)
     }
 
     pub(crate) fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
@@ -207,21 +205,16 @@ impl StoreSecurity {
         use coven_storage::cloud::CloudHomeJoinInfo;
 
         let cloud_provider = config.cloud_home.provider.as_ref().ok_or_else(|| {
-            coven_storage::cloud::setup::SetupError(
+            coven_storage::cloud::setup::SetupError::Configuration(
                 "No cloud provider configured. Set up sync first.".to_string(),
             )
         })?;
         let encryption_key = if config.cloud_home.storage.is_opaque() {
             Some(
                 self.master_keys
-                    .unlock()
-                    .map_err(|error| {
-                        coven_storage::cloud::setup::SetupError(format!(
-                            "Failed to read master key: {error}"
-                        ))
-                    })?
+                    .unlock()?
                     .ok_or_else(|| {
-                        coven_storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError::Configuration(
                             "No encryption key found".to_string(),
                         )
                     })?
@@ -233,38 +226,30 @@ impl StoreSecurity {
 
         let provider = match cloud_provider {
             coven_foundation::config::CloudProvider::S3 => {
-                let credentials = self
-                    .keys
-                    .get_cloud_home_credentials()
-                    .map_err(|error| {
-                        coven_storage::cloud::setup::SetupError(format!(
-                            "Failed to read cloud credentials: {error}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        coven_storage::cloud::setup::SetupError(
-                            "No S3 credentials found in keyring".to_string(),
-                        )
-                    })?;
+                let credentials = self.keys.get_cloud_home_credentials()?.ok_or_else(|| {
+                    coven_storage::cloud::setup::SetupError::Configuration(
+                        "No S3 credentials found in keyring".to_string(),
+                    )
+                })?;
                 let (access_key, secret_key) = match credentials {
                     CloudHomeCredentials::S3 {
                         access_key,
                         secret_key,
                     } => (access_key, secret_key),
                     _ => {
-                        return Err(coven_storage::cloud::setup::SetupError(
+                        return Err(coven_storage::cloud::setup::SetupError::Configuration(
                             "Expected S3 credentials but found different type".to_string(),
                         ))
                     }
                 };
                 CloudHomeJoinInfo::S3 {
                     bucket: config.cloud_home.s3_bucket.clone().ok_or_else(|| {
-                        coven_storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError::Configuration(
                             "S3 bucket not configured".to_string(),
                         )
                     })?,
                     region: config.cloud_home.s3_region.clone().ok_or_else(|| {
-                        coven_storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError::Configuration(
                             "S3 region not configured".to_string(),
                         )
                     })?,
@@ -278,7 +263,7 @@ impl StoreSecurity {
                 if config.cloud_home.cloudkit_owner_name.is_some()
                     || config.cloud_home.cloudkit_zone_name.is_some()
                 {
-                    return Err(coven_storage::cloud::setup::SetupError(
+                    return Err(coven_storage::cloud::setup::SetupError::Configuration(
                         "This store was joined through a CloudKit share; only the store's owner can create a restore code.".to_string(),
                     ));
                 }
@@ -291,7 +276,7 @@ impl StoreSecurity {
                         .google_drive_folder_id
                         .clone()
                         .ok_or_else(|| {
-                            coven_storage::cloud::setup::SetupError(
+                            coven_storage::cloud::setup::SetupError::Configuration(
                                 "Google Drive folder ID not configured".to_string(),
                             )
                         })?,
@@ -301,7 +286,7 @@ impl StoreSecurity {
                 CloudHomeJoinInfo::Dropbox {
                     folder_path: config.cloud_home.dropbox_folder_path.clone().ok_or_else(
                         || {
-                            coven_storage::cloud::setup::SetupError(
+                            coven_storage::cloud::setup::SetupError::Configuration(
                                 "Dropbox folder path not configured".to_string(),
                             )
                         },
@@ -310,7 +295,7 @@ impl StoreSecurity {
             }
             coven_foundation::config::CloudProvider::OneDrive => CloudHomeJoinInfo::OneDrive {
                 drive_id: config.cloud_home.onedrive_drive_id.clone().ok_or_else(|| {
-                    coven_storage::cloud::setup::SetupError(
+                    coven_storage::cloud::setup::SetupError::Configuration(
                         "OneDrive drive ID not configured".to_string(),
                     )
                 })?,
@@ -319,7 +304,7 @@ impl StoreSecurity {
                     .onedrive_folder_id
                     .clone()
                     .ok_or_else(|| {
-                        coven_storage::cloud::setup::SetupError(
+                        coven_storage::cloud::setup::SetupError::Configuration(
                             "OneDrive folder ID not configured".to_string(),
                         )
                     })?,

@@ -51,7 +51,7 @@ pub(crate) async fn fetch_google(tokens: &OAuthTokens) -> Result<String, CloudHo
         .bearer_auth(&tokens.access_token)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("fetch Google account email: {e}")))?;
+        .map_err(|e| CloudHomeError::transport("fetch Google account email".to_string(), e))?;
     let resp = ensure_ok(resp, "fetch Google account email", NotFound::Status).await?;
     let info: GoogleUserInfo = ok_json(resp, "parse Google userinfo").await?;
     Ok(info.email)
@@ -65,7 +65,7 @@ pub(crate) async fn fetch_dropbox(tokens: &OAuthTokens) -> Result<String, CloudH
         .json(&serde_json::Value::Null)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("fetch Dropbox account email: {e}")))?;
+        .map_err(|e| CloudHomeError::transport("fetch Dropbox account email".to_string(), e))?;
     let resp = ensure_ok(resp, "fetch Dropbox account email", NotFound::Status).await?;
     let account: DropboxAccount = ok_json(resp, "parse Dropbox account").await?;
     Ok(account.email)
@@ -77,7 +77,7 @@ pub(crate) async fn fetch_onedrive(tokens: &OAuthTokens) -> Result<String, Cloud
         .bearer_auth(&tokens.access_token)
         .send()
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("fetch OneDrive account email: {e}")))?;
+        .map_err(|e| CloudHomeError::transport("fetch OneDrive account email".to_string(), e))?;
     let resp = ensure_ok(resp, "fetch OneDrive account email", NotFound::Status).await?;
     let user: GraphUser = ok_json(resp, "parse OneDrive /me").await?;
     graph_email(user)

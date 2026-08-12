@@ -187,7 +187,7 @@ impl<'operation, 'storage> VerifiedPrefixMembershipActivation<'operation, 'stora
             .await?;
         prefix
             .validate_complete_membership(&projected)
-            .map_err(AnchoredChainError::LoadFailed)?;
+            .map_err(AnchoredChainError::from)?;
         Ok(projected)
     }
 }
@@ -495,7 +495,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                             &value.resolver_pubkey,
                         ))
                         .await
-                        .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                        .map_err(AnchoredChainError::from)?;
                     }
                 }
                 resolutions.insert(reference.clone(), value);
@@ -577,7 +577,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 .collect::<Result<Vec<_>, _>>()?;
             chain
                 .apply_resolutions(root.store_root_hash, &introduced_resolutions)
-                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                .map_err(AnchoredChainError::from)?;
             graph.add_exact_suffix(&mut chain)?;
             graph.validate_stream_anchors(&root, &chain)?;
             if chain.head_refs() != exact_heads || chain.resolution_refs() != exact_resolutions {
@@ -597,7 +597,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             &crate::sync::store::commit_verification::merge_history::VerifiedMergeConflictResolutionActivation,
         >,
     ) -> Result<MembershipChain, AnchoredChainError> {
-        validate_membership_floor(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
+        validate_membership_floor(exact_heads).map_err(AnchoredChainError::InvalidFloor)?;
         if !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1]) {
             return Err(AnchoredChainError::LoadFailed(
                 "membership resolution cut is not canonical".to_string(),
@@ -687,7 +687,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
             }
             capability
                 .verify(&self.verified_root().descriptor.provider, provider)
-                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                .map_err(AnchoredChainError::from)?;
         }
         Ok(())
     }
@@ -884,7 +884,7 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 MembershipActivationAuthority::History { history, .. } => {
                     Box::pin(history.verify_membership_head_activation(reference, head, commit))
                         .await
-                        .map_err(AnchoredChainError::LoadFailed)
+                        .map_err(AnchoredChainError::from)
                 }
             },
             (true, coven_protocol::membership::MembershipHeadActivation::Direct) => {

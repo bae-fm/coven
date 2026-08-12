@@ -342,8 +342,8 @@ impl<'a> StoreCommitVerifier<'a> {
             &semantic_prefix,
             &object,
             Box::new(move || {
-                let unverified: StoreDeviceRegistration = serde_json::from_slice(&verify_bytes)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                let unverified: StoreDeviceRegistration =
+                    serde_json::from_slice(&verify_bytes).map_err(StoreProtocolError::from)?;
                 let reference =
                     StoreDeviceRegistrationRef::from_registration(&unverified, verify_object);
                 let value = verify_opened_registration(

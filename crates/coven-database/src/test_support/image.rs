@@ -238,8 +238,7 @@ impl DatabaseImageTest {
                 "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
                 rusqlite::params![
                     object_id,
-                    serde_json::to_string(remote)
-                        .map_err(|error| DbError::Message(error.to_string()))?
+                    serde_json::to_string(remote).map_err(DbError::from)?
                 ],
             )
             .map_err(DbError::from)?;
@@ -265,7 +264,7 @@ impl DatabaseImageTest {
                     serde_json::to_string(
                         &coven_protocol::audience_package::PackageAudience::Store
                     )
-                    .map_err(|error| DbError::Message(error.to_string()))?,
+                    .map_err(DbError::from)?,
                     object_id,
                 ],
             )

@@ -4,7 +4,7 @@
 //! pulls and applies them through a real [`coven_database::Database`], exercising
 //! the real `pull_changes` + blob plumbing.
 
-use coven_protocol::membership::HeldStorePositionReason;
+use crate::sync::store::pull::HeldStorePositionReason;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -265,7 +265,7 @@ trait TestStoreStorage: Sync {
         db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
-    ) -> Result<crate::sync::store::Store, String>;
+    ) -> Result<crate::sync::store::Store, crate::sync::test_helpers::TestError>;
 
     async fn sync_for_test(
         &self,
@@ -275,16 +275,16 @@ trait TestStoreStorage: Sync {
         message: &str,
         keypair: &UserKeypair,
         store_dir: &coven_foundation::store_dir::StoreDir,
-    ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, String> {
+    ) -> Result<
+        Option<coven_protocol::store_commit::StoreBatchCommitRef>,
+        crate::sync::test_helpers::TestError,
+    > {
         assert!(
             message.is_empty(),
             "Store commits carry no arbitrary message"
         );
         let store = self.store_for_test_publish(db, store_dir, keypair).await?;
-        let before = store
-            .latest_local_store_position()
-            .await
-            .map_err(|error| error.to_string())?;
+        let before = store.latest_local_store_position().await?;
         assert_eq!(
             before
                 .as_ref()
@@ -293,27 +293,17 @@ trait TestStoreStorage: Sync {
         );
         coven_database::StoreDatabase::new(db)
             .enqueue_store_changeset_for_test(outgoing)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut writer = store
-            .authorize_writer()
-            .await
-            .map_err(|error| error.to_string())?;
-        let prepared = writer
-            .prepare_pending_store_write()
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
+        let mut writer = store.authorize_writer().await?;
+        let prepared = writer.prepare_pending_store_write().await?;
         if !prepared {
             return Ok(None);
         }
-        writer
-            .drain_store_writes()
-            .await
-            .map_err(|error| error.to_string())?;
+        writer.drain_store_writes().await?;
         writer
             .latest_local_store_position()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(Into::into)
     }
 
     /// Push one captured changeset through Store write preparation and publish
@@ -341,12 +331,11 @@ impl TestStoreStorage for TestStore {
         db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
-    ) -> Result<crate::sync::store::Store, String> {
-        self.bind_device_in(db, store_dir.clone(), keypair)
-            .await
-            .map_err(|error| error.to_string())?;
+    ) -> Result<crate::sync::store::Store, crate::sync::test_helpers::TestError> {
+        self.bind_device_in(db, store_dir.clone(), keypair).await?;
         self.open_store_with_identity(db, store_dir.clone(), keypair)
             .await
+            .map_err(Into::into)
     }
 }
 
@@ -357,11 +346,10 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
         db: &coven_database::Database,
         store_dir: &coven_foundation::store_dir::StoreDir,
         keypair: &UserKeypair,
-    ) -> Result<crate::sync::store::Store, String> {
+    ) -> Result<crate::sync::store::Store, crate::sync::test_helpers::TestError> {
         if coven_database::StoreDatabase::new(db)
             .local_store_root_ref()
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
             .is_none()
         {
             crate::sync::store::Store::create(
@@ -371,8 +359,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
                 self.store_id(),
                 keypair,
             )
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         }
         crate::sync::store::Store::load(
             coven_database::StoreDatabase::new(db),
@@ -381,7 +368,7 @@ impl TestStoreStorage for std::sync::Arc<CloudSyncConnection> {
             keypair.clone(),
         )
         .await
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
     }
 }
 
@@ -516,7 +503,9 @@ impl PullTestStoreOps for TestStore {
         let device = self
             .open_into(db, store_dir.clone())
             .await
-            .map_err(crate::sync::cycle::SyncCycleFailure::from)?;
+            .map_err(|error| {
+                crate::sync::cycle::SyncCycleFailure::operation("open Store", error)
+            })?;
         let routing_encryption = EncryptionService::from_key([42; 32]);
         device
             .authorize_writer()
@@ -748,8 +737,12 @@ fn missing_exact_membership_authority_positions(
         .filter(|held| {
             matches!(
                 &held.reason,
-                HeldStorePositionReason::InvalidObject(detail)
-                    if detail.contains("Merge history commit lacks exact membership authority")
+                HeldStorePositionReason::InvalidObjectPull(error)
+                    if matches!(
+                        error.as_ref(),
+                        crate::sync::store::StorePullError::InvalidState(detail)
+                            if detail == "Merge history commit lacks exact membership authority"
+                    )
             )
         })
         .collect()
@@ -2384,8 +2377,8 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     ));
     assert!(matches!(
         &result.held_positions[0].reason,
-        HeldStorePositionReason::ObjectUnreadable { key, detail }
-            if key == "exact Store object" && detail.contains("object not found")
+        HeldStorePositionReason::ObjectUnreadableStorage { key, source }
+            if key == "exact Store object" && source.to_string().contains("object not found")
     ));
     // The position holds at the gap: dev1 never advances over the unapplied seq.
     assert_eq!(updated.get(&stream_id).copied().unwrap_or(0), 0);
@@ -2420,7 +2413,7 @@ async fn pull_holds_a_non_canonical_uuid_row_identity() {
     assert_eq!(result.held_positions.len(), 1);
     assert!(matches!(
         &result.held_positions[0].reason,
-        HeldStorePositionReason::InvalidRowIdentity { table, .. } if table == "uuid_notes"
+        HeldStorePositionReason::InvalidRowIdentity(error) if error.table() == "uuid_notes"
     ));
     assert!(
         !db2.test_row_exists("SELECT 1 FROM uuid_notes WHERE id = 'NOT-A-CANONICAL-UUID'")
@@ -3201,11 +3194,11 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
                     seq: 1,
                     package_hash,
                 },
-                reason: HeldStorePositionReason::ObjectUnreadable { key, detail },
+                reason: HeldStorePositionReason::ObjectUnreadableStorage { key, source },
             } if device_id == &expected_stream_id
                 && *package_hash == expected_package_hash
                 && key == "exact Store object"
-                && detail.contains("does not match stored size/hash")
+                && source.to_string().contains("does not match stored size/hash")
         ),
         "unexpected held position: {:#?}",
         result.held_positions[0]
@@ -3617,8 +3610,8 @@ async fn malformed_store_package_isolates_to_one_device() {
             && commit == &bad_reference
     ));
     assert!(matches!(
-        result.held_positions[0].reason,
-        HeldStorePositionReason::InvalidChangeset(_)
+        &result.held_positions[0].reason,
+        HeldStorePositionReason::InvalidStorePackage(_)
     ));
 }
 
@@ -4275,7 +4268,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
     };
 
     assert!(
-        err.contains("audio/audio1") && err.contains("absent"),
+        err.to_string().contains("audio/audio1") && err.to_string().contains("absent"),
         "the error must name the absent remote blob: {err}",
     );
     assert!(
@@ -4395,7 +4388,8 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         .await;
     let err = result.expect_err("missing blob blocks Store publication");
     assert!(
-        err.contains("outbound blob photos/p1ab is absent from storage"),
+        err.to_string()
+            .contains("outbound blob photos/p1ab is absent from storage"),
         "an absent blob must abort Store publication, got {err:?}",
     );
     let pending = coven_database::StoreDatabase::new(&db1)
@@ -6022,11 +6016,11 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
             &result.held_positions[0],
             HeldStorePosition {
                 coordinate: HeldStoreCoordinate::Commit { device_id, commit },
-                reason: HeldStorePositionReason::ObjectUnreadable { key, detail },
+                reason: HeldStorePositionReason::ObjectUnreadableProtocol { key, source },
             } if device_id == &expected_stream_id
                 && commit == &commit_ref
                 && key == commit_ref.object.slot().logical_key()
-                && detail.contains("missing field `signature`")
+                && source.to_string().contains("missing field `signature`")
         ),
         "unexpected held position: {:#?}",
         result.held_positions[0]
@@ -7578,8 +7572,8 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     // The failed read leaves authorization undecided and the position unchanged.
     assert!(result.held_positions.iter().any(|held| matches!(
         &held.reason,
-        HeldStorePositionReason::InvalidObject(detail)
-            if detail.contains("forced exact membership read failure")
+        HeldStorePositionReason::InvalidObjectPull(error)
+            if error.to_string().contains("forced exact membership read failure")
     )));
     assert!(
         !db2.test_row_exists("SELECT 1 FROM notes WHERE id = 'n1'")
@@ -7816,19 +7810,16 @@ mod blob_path_traversal {
                 .expect_err("a traversal blob id cannot enter the upload journal");
         assert!(matches!(
             error,
-            crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }
+            crate::blob::transition::MakeRemoteError::SourcePath { ref blob_id, .. }
                 if blob_id == "x/../../../PWNED"
         ));
     }
 
-    /// A blob id too short to form the `{ab}/{cd}` partition prefix (the
-    /// dash-stripped id is under four chars, or splits a multi-byte char) cannot
-    /// index the prefix's byte slice, so the path builder refuses it. End to end
-    /// it is bad data: the row does not apply and the position holds. (The slice
-    /// itself is proven non-panicking by the `hashed_path` unit tests in
-    /// `store_dir`.)
+    /// A short blob id does not panic while make_remote verifies its local source.
+    /// Partitioned remote-path rejection belongs to the connected storage scheme;
+    /// this local transition reports the absent source as the typed file failure.
     #[tokio::test]
-    async fn unindexable_id_is_refused_not_panicked() {
+    async fn short_id_missing_source_is_typed_not_panicked() {
         let db1_store_dir = crate::sync::test_helpers::test_store_dir();
         let db1 =
             crate::sync::test_helpers::open_test_db_with_blob(db1_store_dir.clone(), photo_decl());
@@ -7837,8 +7828,6 @@ mod blob_path_traversal {
         db1.capture_test_changeset(&[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                  VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-            // `id = "a"` dash-strips to "a", too short for the `&hex[..2]`
-            // prefix slice, so the path builder refuses it.
             &format!(
                 "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
                      VALUES ('a', 'n1', 'cover', 1, '{}', '0000000001000-0000-dev1', '2026-01-01')",
@@ -7851,10 +7840,10 @@ mod blob_path_traversal {
             crate::sync::test_owner_graph::TestOwnerGraph::new(store_database(&db1), store_dir)
                 .make_remote("notes", "n1", false)
                 .await
-                .expect_err("an unindexable blob id cannot enter the upload journal");
+                .expect_err("a missing short-id source cannot enter the upload journal");
         assert!(matches!(
             error,
-            crate::blob::transition::MakeRemoteError::Source { ref blob_id, .. }
+            crate::blob::transition::MakeRemoteError::SourceFile { ref blob_id, .. }
                 if blob_id == "a"
         ));
     }

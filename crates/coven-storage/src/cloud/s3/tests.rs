@@ -27,7 +27,11 @@ impl coven_foundation::local_file::PlaintextChunkReader for FailingBodyReader {
             return Ok(vec![7; MULTIPART_PART_SIZE]);
         }
         Err(crate::local_file::PlaintextChunkError::Local(
-            "injected body failure".to_string(),
+            coven_foundation::atomic_file::FileError::at(
+                "read injected body",
+                "injected-body",
+                std::io::Error::other("injected body failure"),
+            ),
         ))
     }
 }
@@ -1013,8 +1017,8 @@ async fn provider_binding_rejects_a_custom_endpoint_with_a_base_path() {
 
 #[test]
 fn sts_transport_failure_remains_retryable_transport() {
-    let error = sts_request_error("offline");
-    assert!(matches!(error, CloudHomeError::Transport(_)));
+    let error = sts_request_error(std::io::Error::other("offline"));
+    assert!(matches!(error, CloudHomeError::TransportSource { .. }));
     assert!(error.is_retryable());
 }
 

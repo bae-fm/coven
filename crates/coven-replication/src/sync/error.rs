@@ -27,9 +27,7 @@ pub enum SyncError {
     #[error("key error: {0}")]
     Key(#[from] KeyError),
     #[error("sync initialization error: {0}")]
-    Init(#[from] InitSyncError),
-    #[error("Store protocol state: {0}")]
-    Protocol(String),
+    Init(Box<InitSyncError>),
     #[error("Store operation: {0}")]
     Store(Box<crate::sync::store::StoreError>),
     #[error("{0}")]
@@ -43,19 +41,19 @@ pub enum SyncError {
     #[error("device join transport: {0}")]
     DeviceJoinTransport(Box<crate::sync::store::DeviceJoinTransportError>),
     #[error("invalid join request code: {0}")]
-    InvalidJoinRequest(String),
+    InvalidJoinRequest(#[source] coven_foundation::code_envelope::EnvelopeError),
     #[error("invalid Store membership operation code: {0}")]
-    InvalidMembershipOperationCode(String),
+    InvalidMembershipOperationCode(#[source] coven_foundation::code_envelope::EnvelopeError),
     #[error("Store device exclusion: {0}")]
-    DeviceExclusion(String),
+    DeviceExclusion(Box<crate::sync::store::StoreDeviceExclusionError>),
     #[error("Store Owner promotion: {0}")]
-    OwnerPromotion(String),
+    OwnerPromotion(Box<crate::sync::store::OwnerPromotionError>),
     #[error("{0}")]
-    Database(#[from] DbError),
+    Database(Box<DbError>),
     #[error("row routing key: {0}")]
     RoutingEncryption(#[from] coven_keys::keys::RoutingEncryptionError),
     #[error("blob upload drain failed: {0}")]
-    BlobUpload(DbError),
+    BlobUpload(Box<crate::sync::store::StoreError>),
     #[error("sync loop error: {0}")]
     Loop(SyncLoopError),
 }
@@ -63,6 +61,12 @@ pub enum SyncError {
 impl From<crate::sync::store::MembershipOpsError> for SyncError {
     fn from(error: crate::sync::store::MembershipOpsError) -> Self {
         Self::Membership(Box::new(error))
+    }
+}
+
+impl From<InitSyncError> for SyncError {
+    fn from(error: InitSyncError) -> Self {
+        Self::Init(Box::new(error))
     }
 }
 
@@ -87,6 +91,24 @@ impl From<crate::sync::DeviceJoinError> for SyncError {
 impl From<crate::sync::store::DeviceJoinTransportError> for SyncError {
     fn from(error: crate::sync::store::DeviceJoinTransportError) -> Self {
         Self::DeviceJoinTransport(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreDeviceExclusionError> for SyncError {
+    fn from(error: crate::sync::store::StoreDeviceExclusionError) -> Self {
+        Self::DeviceExclusion(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::OwnerPromotionError> for SyncError {
+    fn from(error: crate::sync::store::OwnerPromotionError) -> Self {
+        Self::OwnerPromotion(Box::new(error))
+    }
+}
+
+impl From<DbError> for SyncError {
+    fn from(error: DbError) -> Self {
+        Self::Database(Box::new(error))
     }
 }
 

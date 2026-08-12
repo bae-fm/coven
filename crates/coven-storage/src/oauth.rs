@@ -178,7 +178,7 @@ impl OAuthClients {
         } = AuthorizeRequest::from_entropy(&config, &redirect_uri, entropy)?;
 
         // Channel to receive the authorization code from the callback handler
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, OAuthCallbackError>>();
         let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
         let tx_for_handler = tx.clone();
@@ -227,7 +227,7 @@ impl OAuthClients {
 
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", config.redirect_port))
             .await
-            .map_err(|e| OAuthError::Server(format!("failed to bind port: {e}")))?;
+            .map_err(OAuthError::ServerBind)?;
 
         // Spawn the server. The guard aborts the task on drop so future
         // cancellation (parent .await dropped) tears the listener down too.
@@ -243,7 +243,7 @@ impl OAuthClients {
         }));
 
         // Open the browser
-        open::that(&auth_url).map_err(|e| OAuthError::BrowserOpen(format!("{e}")))?;
+        open::that(&auth_url).map_err(OAuthError::BrowserOpen)?;
 
         info!("Opened browser for OAuth authorization, waiting for callback");
 
@@ -252,11 +252,11 @@ impl OAuthClients {
         let result = tokio::select! {
             result = rx => {
                 result
-                    .map_err(|_| OAuthError::Server("callback channel closed".to_string()))
+                    .map_err(OAuthError::CallbackChannel)
                     .and_then(|r| r.map_err(OAuthError::Denied))
             }
             _ = cancel.wait_for(|&v| v) => {
-                Err(OAuthError::Denied("cancelled".to_string()))
+                Err(OAuthError::Denied(OAuthCallbackError::Cancelled))
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
                 Err(OAuthError::Timeout)
@@ -346,9 +346,7 @@ impl OAuthClients {
                 clock,
             )
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Google Drive authorization failed: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::authorization("Google Drive", source))?;
         let folder_name = format!("your-app - {store_name}");
         let search_query = crate::cloud::folder_search_query(&folder_name);
         let search_resp = crate::cloud::supports_all_drives(
@@ -362,26 +360,22 @@ impl OAuthClients {
         ])
         .send()
         .await
-        .map_err(|error| {
-            crate::cloud::SetupError(format!(
-                "Failed to search for existing Google Drive folder: {error}"
-            ))
+        .map_err(|source| {
+            crate::cloud::SetupError::http("search for existing Google Drive folder", source)
         })?;
         if !search_resp.status().is_success() {
             let status = search_resp.status();
-            let body = search_resp.text().await.map_err(|error| {
-                crate::cloud::SetupError(format!(
-                    "Failed to read Google Drive folder search error (HTTP {status}): {error}"
-                ))
+            let body = search_resp.text().await.map_err(|source| {
+                crate::cloud::SetupError::http("read Google Drive folder search error", source)
             })?;
-            return Err(crate::cloud::SetupError(format!(
-                "Failed to search for existing Google Drive folder (HTTP {status}): {body}"
-            )));
+            return Err(crate::cloud::SetupError::provider_response(
+                "search for existing Google Drive folder",
+                status,
+                body,
+            ));
         }
-        let search_json: serde_json::Value = search_resp.json().await.map_err(|error| {
-            crate::cloud::SetupError(format!(
-                "Failed to parse Google Drive search response: {error}"
-            ))
+        let search_json: serde_json::Value = search_resp.json().await.map_err(|source| {
+            crate::cloud::SetupError::http("parse Google Drive search response", source)
         })?;
         let existing_folder_id = search_json["files"][0]["id"].as_str().map(str::to_string);
         let folder_id = if let Some(id) = existing_folder_id {
@@ -399,29 +393,30 @@ impl OAuthClients {
             .json(&create_body)
             .send()
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to create Google Drive folder: {error}"))
+            .map_err(|source| {
+                crate::cloud::SetupError::http("create Google Drive folder", source)
             })?;
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.map_err(|error| {
-                    crate::cloud::SetupError(format!(
-                        "Failed to read Google Drive folder creation error (HTTP {status}): {error}"
-                    ))
+                let body = response.text().await.map_err(|source| {
+                    crate::cloud::SetupError::http(
+                        "read Google Drive folder creation error",
+                        source,
+                    )
                 })?;
-                return Err(crate::cloud::SetupError(format!(
-                    "Failed to create Google Drive folder (HTTP {status}): {body}"
-                )));
+                return Err(crate::cloud::SetupError::provider_response(
+                    "create Google Drive folder",
+                    status,
+                    body,
+                ));
             }
-            let folder: serde_json::Value = response.json().await.map_err(|error| {
-                crate::cloud::SetupError(format!(
-                    "Failed to parse Google Drive folder response: {error}"
-                ))
+            let folder: serde_json::Value = response.json().await.map_err(|source| {
+                crate::cloud::SetupError::http("parse Google Drive folder response", source)
             })?;
             folder["id"]
                 .as_str()
                 .ok_or_else(|| {
-                    crate::cloud::SetupError(
+                    crate::cloud::SetupError::Configuration(
                         "Google Drive folder response missing 'id'".to_string(),
                     )
                 })?
@@ -429,9 +424,7 @@ impl OAuthClients {
         };
         key_service
             .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
+            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized Google Drive; folder ready");
         Ok(folder_id)
     }
@@ -453,9 +446,7 @@ impl OAuthClients {
                 clock,
             )
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Dropbox authorization failed: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::authorization("Dropbox", source))?;
         let folder_path = format!("/Apps/your-app/{store_name}");
         let response = self
             .client
@@ -467,27 +458,23 @@ impl OAuthClients {
             }))
             .send()
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to create Dropbox folder: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::http("create Dropbox folder", source))?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.map_err(|error| {
-                crate::cloud::SetupError(format!(
-                    "Failed to read Dropbox folder creation error (HTTP {status}): {error}"
-                ))
+            let body = response.text().await.map_err(|source| {
+                crate::cloud::SetupError::http("read Dropbox folder creation error", source)
             })?;
             if !(status == reqwest::StatusCode::CONFLICT && body.contains("conflict")) {
-                return Err(crate::cloud::SetupError(format!(
-                    "Failed to create Dropbox folder (HTTP {status}): {body}"
-                )));
+                return Err(crate::cloud::SetupError::provider_response(
+                    "create Dropbox folder",
+                    status,
+                    body,
+                ));
             }
         }
         key_service
             .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
+            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized Dropbox; folder ready");
         Ok(folder_path)
     }
@@ -508,36 +495,35 @@ impl OAuthClients {
                 clock,
             )
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("OneDrive authorization failed: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::authorization("OneDrive", source))?;
         let drive_response = self
             .client
             .get("https://graph.microsoft.com/v1.0/me/drive")
             .bearer_auth(&tokens.access_token)
             .send()
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to get OneDrive info: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::http("get OneDrive info", source))?;
         if !drive_response.status().is_success() {
             let status = drive_response.status();
-            let body = drive_response.text().await.map_err(|error| {
-                crate::cloud::SetupError(format!(
-                    "Failed to read OneDrive info error (HTTP {status}): {error}"
-                ))
+            let body = drive_response.text().await.map_err(|source| {
+                crate::cloud::SetupError::http("read OneDrive info error", source)
             })?;
-            return Err(crate::cloud::SetupError(format!(
-                "Failed to get OneDrive info (HTTP {status}): {body}"
-            )));
+            return Err(crate::cloud::SetupError::provider_response(
+                "get OneDrive info",
+                status,
+                body,
+            ));
         }
-        let drive: serde_json::Value = drive_response.json().await.map_err(|error| {
-            crate::cloud::SetupError(format!("Failed to parse OneDrive response: {error}"))
-        })?;
+        let drive: serde_json::Value = drive_response
+            .json()
+            .await
+            .map_err(|source| crate::cloud::SetupError::http("parse OneDrive response", source))?;
         let drive_id = drive["id"]
             .as_str()
             .ok_or_else(|| {
-                crate::cloud::SetupError("OneDrive response missing 'id' field".to_string())
+                crate::cloud::SetupError::Configuration(
+                    "OneDrive response missing 'id' field".to_string(),
+                )
             })?
             .to_string();
         let folder_response = self
@@ -553,34 +539,32 @@ impl OAuthClients {
             }))
             .send()
             .await
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to create OneDrive folder: {error}"))
-            })?;
+            .map_err(|source| crate::cloud::SetupError::http("create OneDrive folder", source))?;
         if !folder_response.status().is_success() {
             let status = folder_response.status();
-            let body = folder_response.text().await.map_err(|error| {
-                crate::cloud::SetupError(format!(
-                    "Failed to read OneDrive folder creation error (HTTP {status}): {error}"
-                ))
+            let body = folder_response.text().await.map_err(|source| {
+                crate::cloud::SetupError::http("read OneDrive folder creation error", source)
             })?;
-            return Err(crate::cloud::SetupError(format!(
-                "Failed to create OneDrive folder (HTTP {status}): {body}"
-            )));
+            return Err(crate::cloud::SetupError::provider_response(
+                "create OneDrive folder",
+                status,
+                body,
+            ));
         }
-        let folder: serde_json::Value = folder_response.json().await.map_err(|error| {
-            crate::cloud::SetupError(format!("Failed to parse OneDrive folder response: {error}"))
+        let folder: serde_json::Value = folder_response.json().await.map_err(|source| {
+            crate::cloud::SetupError::http("parse OneDrive folder response", source)
         })?;
         let folder_id = folder["id"]
             .as_str()
             .ok_or_else(|| {
-                crate::cloud::SetupError("OneDrive folder response missing 'id' field".to_string())
+                crate::cloud::SetupError::Configuration(
+                    "OneDrive folder response missing 'id' field".to_string(),
+                )
             })?
             .to_string();
         key_service
             .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(|error| {
-                crate::cloud::SetupError(format!("Failed to save OAuth token: {error}"))
-            })?;
+            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized OneDrive; folder ready");
         Ok((drive_id, folder_id))
     }
@@ -593,18 +577,39 @@ pub use coven_keys::keys::OAuthTokens;
 pub enum OAuthError {
     #[cfg(feature = "oauth-providers")]
     #[error("failed to open browser: {0}")]
-    BrowserOpen(String),
+    BrowserOpen(#[source] std::io::Error),
     #[cfg(feature = "oauth-providers")]
-    #[error("callback server error: {0}")]
-    Server(String),
+    #[error("callback server could not bind: {0}")]
+    ServerBind(#[source] std::io::Error),
+    #[cfg(feature = "oauth-providers")]
+    #[error("callback channel closed: {0}")]
+    CallbackChannel(#[source] tokio::sync::oneshot::error::RecvError),
+    #[cfg(feature = "oauth-providers")]
+    #[error("OAuth request parameters could not be encoded: {0}")]
+    EncodeParameters(#[source] serde_urlencoded::ser::Error),
+    #[error("token request failed while {operation}: {source}")]
+    TokenRequest {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("parse token response (HTTP {status}): {source}")]
+    TokenResponseJson {
+        status: reqwest::StatusCode,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("token exchange error: {0}")]
     TokenExchange(String),
     #[cfg(feature = "oauth-providers")]
     #[error("account email fetch error: {0}")]
-    AccountFetch(String),
+    AccountFetch(#[source] crate::cloud::CloudHomeError),
+    #[cfg(feature = "oauth-providers")]
+    #[error("provider {0:?} does not use OAuth")]
+    UnsupportedProvider(coven_foundation::config::CloudProvider),
     #[cfg(feature = "oauth-providers")]
     #[error("authorization denied: {0}")]
-    Denied(String),
+    Denied(#[source] OAuthCallbackError),
     #[cfg(feature = "oauth-providers")]
     #[error("timeout waiting for authorization callback")]
     Timeout,
@@ -616,6 +621,21 @@ pub enum OAuthError {
     #[cfg(feature = "oauth-providers")]
     #[error(transparent)]
     ClientCreds(#[from] OAuthClientCredsError),
+}
+
+#[cfg(feature = "oauth-providers")]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OAuthCallbackError {
+    #[error("provider denied authorization: {0}")]
+    ProviderDenied(String),
+    #[error("authorization callback did not contain a code")]
+    MissingCode,
+    #[error("authorization callback state did not match the request")]
+    StateMismatch,
+    #[error("authorization callback omitted its state")]
+    MissingState,
+    #[error("authorization was cancelled")]
+    Cancelled,
 }
 
 /// Guards the localhost OAuth-callback server task.
@@ -727,17 +747,22 @@ async fn post_token_request(
         .form(&params)
         .send()
         .await
-        .map_err(|e| OAuthError::TokenExchange(format!("request failed: {e}")))?;
+        .map_err(|source| OAuthError::TokenRequest {
+            operation: "send token request",
+            source,
+        })?;
 
     let status = resp.status();
     let body = resp
         .text()
         .await
-        .map_err(|e| OAuthError::TokenExchange(format!("read body: {e}")))?;
+        .map_err(|source| OAuthError::TokenRequest {
+            operation: "read token response body",
+            source,
+        })?;
 
-    let token_resp: TokenResponse = serde_json::from_str(&body).map_err(|e| {
-        OAuthError::TokenExchange(format!("parse token response (HTTP {status}): {e}"))
-    })?;
+    let token_resp: TokenResponse = serde_json::from_str(&body)
+        .map_err(|source| OAuthError::TokenResponseJson { status, source })?;
 
     token_resp.into_tokens(status, clock)
 }
@@ -794,8 +819,7 @@ impl AuthorizeRequest {
         let auth_url = format!(
             "{}?{}",
             config.auth_url,
-            serde_urlencoded::to_string(&auth_params)
-                .map_err(|error| OAuthError::Server(format!("failed to encode params: {error}")))?
+            serde_urlencoded::to_string(&auth_params).map_err(OAuthError::EncodeParameters)?
         );
 
         Ok(Self {
@@ -811,7 +835,9 @@ impl AuthorizeRequest {
 }
 
 #[cfg(feature = "oauth-providers")]
-fn callback_code(params: &std::collections::HashMap<String, String>) -> Result<String, String> {
+fn callback_code(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<String, OAuthCallbackError> {
     if let Some(error) = params.get("error") {
         let desc = match params.get("error_description") {
             Some(desc) => desc.clone(),
@@ -820,20 +846,23 @@ fn callback_code(params: &std::collections::HashMap<String, String>) -> Result<S
                 error.clone()
             }
         };
-        Err(desc)
+        Err(OAuthCallbackError::ProviderDenied(desc))
     } else if let Some(code) = params.get("code") {
         Ok(code.clone())
     } else {
-        Err("no code in callback".to_string())
+        Err(OAuthCallbackError::MissingCode)
     }
 }
 
 #[cfg(feature = "oauth-providers")]
-fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> Result<(), String> {
+fn verify_callback_state(
+    callback_state: Option<&str>,
+    expected_state: &str,
+) -> Result<(), OAuthCallbackError> {
     match callback_state {
         Some(state) if state == expected_state => Ok(()),
-        Some(_) => Err("state mismatch in callback".to_string()),
-        None => Err("missing state in callback".to_string()),
+        Some(_) => Err(OAuthCallbackError::StateMismatch),
+        None => Err(OAuthCallbackError::MissingState),
     }
 }
 

@@ -310,7 +310,7 @@ pub(crate) fn load_activated_registration_on(
         .map_err(|error| DbError::context("activated Store registration", error))?;
     reference
         .verify_registration(&registration)
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
     Ok(registration)
 }
 

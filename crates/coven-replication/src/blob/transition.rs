@@ -70,11 +70,19 @@ pub enum MakeRemoteError {
     NothingToMakeRemote(String, String),
     #[error("blob {0:?} is not a user-provided (external) file, so it cannot be made Remote")]
     NotExternal(String),
-    #[error("external source for blob {blob_id:?} at {path}: {detail}")]
-    Source {
+    #[error("external source path for blob {blob_id:?} at {path}: {source}")]
+    SourcePath {
         blob_id: String,
         path: String,
-        detail: String,
+        #[source]
+        source: coven_foundation::store_dir::PathTokenError,
+    },
+    #[error("external source for blob {blob_id:?} at {path}: {source}")]
+    SourceFile {
+        blob_id: String,
+        path: String,
+        #[source]
+        source: ExactPlaintextFileError,
     },
     #[error("database error: {0}")]
     Db(#[from] DbError),
@@ -97,18 +105,42 @@ pub enum MakeLocalError {
     MissingDest(String),
     #[error("destination path for user-provided blob {blob_id:?} is not valid UTF-8: {path}")]
     NonUtf8Dest { blob_id: String, path: String },
-    #[error("read blob {0:?} to materialize: {1}")]
-    Read(String, String),
-    #[error("write materialized blob {blob_id:?} to {path}: {detail}")]
-    Write {
+    #[error("remote row for blob {0:?} has no exact stored reference")]
+    MissingStoredReference(String),
+    #[error("read blob {blob_id:?} to materialize: {source}")]
+    Read {
+        blob_id: String,
+        #[source]
+        source: crate::sync::BlobCacheError,
+    },
+    #[error("materialized blob path for {blob_id:?} at {path}: {source}")]
+    WritePath {
         blob_id: String,
         path: String,
-        detail: String,
+        #[source]
+        source: coven_foundation::store_dir::PathTokenError,
+    },
+    #[error("write materialized blob {blob_id:?} to {path}: {source}")]
+    WriteFile {
+        blob_id: String,
+        path: String,
+        #[source]
+        source: ExactPlaintextFileError,
+    },
+    #[error("publish materialized blob {blob_id:?} to {path}: {source}")]
+    CommitFile {
+        blob_id: String,
+        path: String,
+        #[source]
+        source: coven_foundation::local_file::CommitNewFileError,
     },
     #[error("make_local cancelled before the commit; the release stays Remote")]
     Cancelled,
-    #[error("could not roll back materialized file at {path}: {detail}")]
-    Cleanup { path: String, detail: String },
+    #[error("{operation}; materialized-file rollback failed: {failures}")]
+    Cleanup {
+        operation: Box<MakeLocalError>,
+        failures: MaterializedFileCleanupFailures,
+    },
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -117,6 +149,61 @@ struct ExactPlaintextFile {
     path: PathBuf,
     expected_size: u64,
     expected_hash: coven_protocol::store_commit::ObjectHash,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExactPlaintextFileError {
+    #[error("{operation} {}: {source}", path.display())]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("blob path has no parent: {}", path.display())]
+    NoParent { path: PathBuf },
+    #[error("file size overflow: {}", path.display())]
+    SizeOverflow { path: PathBuf },
+    #[error("plaintext facts {actual_size}/{actual_hash} differ from expected facts {expected_size}/{expected_hash}")]
+    FactsMismatch {
+        actual_size: u64,
+        actual_hash: coven_protocol::store_commit::ObjectHash,
+        expected_size: u64,
+        expected_hash: coven_protocol::store_commit::ObjectHash,
+    },
+    #[error("destination {} has {actual} bytes, expected {expected}", path.display())]
+    SizeMismatch {
+        path: PathBuf,
+        actual: u64,
+        expected: u64,
+    },
+}
+
+#[derive(Debug)]
+pub struct MaterializedFileCleanupFailure {
+    path: PathBuf,
+    source: ExactPlaintextFileError,
+}
+
+#[derive(Debug)]
+pub struct MaterializedFileCleanupFailures(Vec<MaterializedFileCleanupFailure>);
+
+impl std::fmt::Display for MaterializedFileCleanupFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{}: {}", failure.path.display(), failure.source)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MaterializedFileCleanupFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.first().map(|failure| &failure.source as _)
+    }
 }
 
 impl ExactPlaintextFile {
@@ -136,69 +223,95 @@ impl ExactPlaintextFile {
         &self.path
     }
 
-    async fn verify(&self) -> Result<(), String> {
+    async fn verify(&self) -> Result<(), ExactPlaintextFileError> {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncReadExt;
 
-        let mut file = tokio::fs::File::open(&self.path)
-            .await
-            .map_err(|error| format!("open {}: {error}", self.path.display()))?;
+        let mut file = tokio::fs::File::open(&self.path).await.map_err(|source| {
+            ExactPlaintextFileError::Io {
+                operation: "open",
+                path: self.path.clone(),
+                source,
+            }
+        })?;
         let mut size = 0_u64;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0_u8; 1 << 20];
         loop {
-            let read = file
-                .read(&mut buffer)
-                .await
-                .map_err(|error| format!("read {}: {error}", self.path.display()))?;
+            let read =
+                file.read(&mut buffer)
+                    .await
+                    .map_err(|source| ExactPlaintextFileError::Io {
+                        operation: "read",
+                        path: self.path.clone(),
+                        source,
+                    })?;
             if read == 0 {
                 break;
             }
-            size = size
-                .checked_add(read as u64)
-                .ok_or_else(|| format!("file size overflow: {}", self.path.display()))?;
+            size = size.checked_add(read as u64).ok_or_else(|| {
+                ExactPlaintextFileError::SizeOverflow {
+                    path: self.path.clone(),
+                }
+            })?;
             hasher.update(&buffer[..read]);
         }
         let hash = coven_protocol::store_commit::ObjectHash::from_digest(hasher.finalize().into());
         if size != self.expected_size || hash != self.expected_hash {
-            return Err(format!(
-                "plaintext facts {size}/{hash} differ from expected facts {}/{}",
-                self.expected_size, self.expected_hash
-            ));
+            return Err(ExactPlaintextFileError::FactsMismatch {
+                actual_size: size,
+                actual_hash: hash,
+                expected_size: self.expected_size,
+                expected_hash: self.expected_hash,
+            });
         }
         Ok(())
     }
 
-    async fn ensure_parent(&self) -> Result<(), String> {
+    async fn ensure_parent(&self) -> Result<(), ExactPlaintextFileError> {
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| format!("blob path has no parent: {}", self.path.display()))?;
+            .ok_or_else(|| ExactPlaintextFileError::NoParent {
+                path: self.path.clone(),
+            })?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|error| format!("create blob parent {}: {error}", parent.display()))
+            .map_err(|source| ExactPlaintextFileError::Io {
+                operation: "create parent",
+                path: parent.to_path_buf(),
+                source,
+            })
     }
 
-    async fn verify_installed_size(&self) -> Result<(), String> {
+    async fn verify_installed_size(&self) -> Result<(), ExactPlaintextFileError> {
         let length = tokio::fs::metadata(&self.path)
             .await
-            .map_err(|error| format!("stat {}: {error}", self.path.display()))?
+            .map_err(|source| ExactPlaintextFileError::Io {
+                operation: "stat",
+                path: self.path.clone(),
+                source,
+            })?
             .len();
         if length != self.expected_size {
-            return Err(format!(
-                "destination {} has {length} bytes, expected {}",
-                self.path.display(),
-                self.expected_size
-            ));
+            return Err(ExactPlaintextFileError::SizeMismatch {
+                path: self.path.clone(),
+                actual: length,
+                expected: self.expected_size,
+            });
         }
         Ok(())
     }
 
-    async fn remove(&self) -> Result<(), String> {
+    async fn remove(&self) -> Result<(), ExactPlaintextFileError> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("remove {}: {error}", self.path.display())),
+            Err(source) => Err(ExactPlaintextFileError::Io {
+                operation: "remove",
+                path: self.path.clone(),
+                source,
+            }),
         }
     }
 }
@@ -281,10 +394,10 @@ impl LocalBlobTransitions {
                 Provenance::HostProvided => self
                     .store_dir
                     .local_blob_path(&blob.namespace, &blob.id)
-                    .map_err(|error| MakeRemoteError::Source {
+                    .map_err(|source| MakeRemoteError::SourcePath {
                         blob_id: blob.id.clone(),
                         path: format!("local/{}/{}", blob.namespace, blob.id),
-                        detail: error.to_string(),
+                        source,
                     })?,
             };
             let source = ExactPlaintextFile::new(
@@ -295,10 +408,10 @@ impl LocalBlobTransitions {
             source
                 .verify()
                 .await
-                .map_err(|detail| MakeRemoteError::Source {
+                .map_err(|source| MakeRemoteError::SourceFile {
                     blob_id: blob.id.clone(),
                     path: source_path.display().to_string(),
-                    detail,
+                    source,
                 })?;
             uploads.push((reference, source_path));
         }
@@ -530,12 +643,10 @@ impl ConnectedBlobTransitions {
                 return Err(MakeLocalError::Cancelled);
             }
             let blob = reference.blob();
-            let stored = reference.stored().cloned().ok_or_else(|| {
-                MakeLocalError::Read(
-                    blob.id.clone(),
-                    "remote row has no exact stored blob reference".to_string(),
-                )
-            })?;
+            let stored = reference
+                .stored()
+                .cloned()
+                .ok_or_else(|| MakeLocalError::MissingStoredReference(blob.id.clone()))?;
 
             // Where the blob's bytes go is its provenance's Local home: a user-provided
             // blob to the user's chosen `dest` path (registered as an external ref); a
@@ -553,34 +664,36 @@ impl ConnectedBlobTransitions {
                         reference.plaintext_size(),
                         reference.plaintext_hash(),
                     );
-                    destination
-                        .ensure_parent()
-                        .await
-                        .map_err(|detail| MakeLocalError::Write {
+                    destination.ensure_parent().await.map_err(|source| {
+                        MakeLocalError::WriteFile {
                             blob_id: blob.id.clone(),
                             path: dest_path.display().to_string(),
-                            detail,
-                        })?;
+                            source,
+                        }
+                    })?;
                     let staged = self
                         .blob_access
                         .stage_verified_local_copy(reference, &dest_path)
                         .await
-                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                        .map_err(|source| MakeLocalError::Read {
+                            blob_id: blob.id.clone(),
+                            source,
+                        })?;
                     staged
                         .commit_new()
                         .await
-                        .map_err(|detail| MakeLocalError::Write {
+                        .map_err(|source| MakeLocalError::CommitFile {
                             blob_id: blob.id.clone(),
                             path: dest_path.display().to_string(),
-                            detail: detail.to_string(),
+                            source,
                         })?;
                     destination
                         .verify_installed_size()
                         .await
-                        .map_err(|detail| MakeLocalError::Write {
+                        .map_err(|source| MakeLocalError::WriteFile {
                             blob_id: blob.id.clone(),
                             path: dest_path.display().to_string(),
-                            detail,
+                            source,
                         })?;
                     materialization.record_created_file(destination);
                     coven_database::MaterializedLocalBlob {
@@ -594,10 +707,10 @@ impl ConnectedBlobTransitions {
                         .local
                         .store_dir
                         .local_blob_path(&blob.namespace, &blob.id)
-                        .map_err(|e| MakeLocalError::Write {
+                        .map_err(|source| MakeLocalError::WritePath {
                             blob_id: blob.id.clone(),
                             path: format!("local/{}/{}", blob.namespace, blob.id),
-                            detail: e.to_string(),
+                            source,
                         })?;
                     let destination = ExactPlaintextFile::new(
                         store_path.clone(),
@@ -608,26 +721,28 @@ impl ConnectedBlobTransitions {
                         .blob_access
                         .stage_verified_local_copy(reference, &store_path)
                         .await
-                        .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                        .map_err(|source| MakeLocalError::Read {
+                            blob_id: blob.id.clone(),
+                            source,
+                        })?;
                     match staged.commit_new().await {
                         Ok(()) => materialization.record_created_file(destination),
                         Err(
                             coven_foundation::local_file::CommitNewFileError::DestinationExists(_),
                         ) => {
-                            destination
-                                .verify()
-                                .await
-                                .map_err(|detail| MakeLocalError::Write {
+                            destination.verify().await.map_err(|source| {
+                                MakeLocalError::WriteFile {
                                     blob_id: blob.id.clone(),
                                     path: store_path.display().to_string(),
-                                    detail,
-                                })?;
+                                    source,
+                                }
+                            })?;
                         }
                         Err(error) => {
-                            return Err(MakeLocalError::Write {
+                            return Err(MakeLocalError::CommitFile {
                                 blob_id: blob.id.clone(),
                                 path: store_path.display().to_string(),
-                                detail: error.to_string(),
+                                source: error,
                             });
                         }
                     }
@@ -638,10 +753,10 @@ impl ConnectedBlobTransitions {
                     )
                     .verify_installed_size()
                     .await
-                    .map_err(|detail| MakeLocalError::Write {
+                    .map_err(|source| MakeLocalError::WriteFile {
                         blob_id: blob.id.clone(),
                         path: store_path.display().to_string(),
-                        detail,
+                        source,
                     })?;
                     coven_database::MaterializedLocalBlob {
                         remote: reference.clone(),
@@ -740,15 +855,23 @@ impl<'operation> MakeLocalMaterialization<'operation> {
     }
 
     async fn abort(self, cause: MakeLocalError) -> MakeLocalError {
+        let mut failures = Vec::new();
         for file in self.created_files {
-            if let Err(detail) = file.remove().await {
-                return MakeLocalError::Cleanup {
-                    path: file.path().display().to_string(),
-                    detail,
-                };
+            if let Err(source) = file.remove().await {
+                failures.push(MaterializedFileCleanupFailure {
+                    path: file.path().to_path_buf(),
+                    source,
+                });
             }
         }
-        cause
+        if failures.is_empty() {
+            cause
+        } else {
+            MakeLocalError::Cleanup {
+                operation: Box::new(cause),
+                failures: MaterializedFileCleanupFailures(failures),
+            }
+        }
     }
 
     async fn commit(self) -> Result<(), MakeLocalError> {

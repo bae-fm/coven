@@ -86,7 +86,10 @@ impl StoreDatabase {
         .await
     }
 
-    pub async fn insert_fixture_position_for_test(&self, note_id: &str) -> Result<(), DbError> {
+    pub async fn insert_fixture_position_for_test(
+        &self,
+        note_id: &str,
+    ) -> Result<(), crate::HostWriteError<DbError>> {
         let note_id = note_id.to_string();
         self.run_host_store_write_for_test(None, None, move |transaction| {
             transaction
@@ -112,7 +115,7 @@ impl StoreDatabase {
             ) -> Result<R, DbError>
             + Send
             + 'static,
-    ) -> Result<coven_protocol::write::WriteReceipt<R>, DbError>
+    ) -> Result<coven_protocol::write::WriteReceipt<R>, crate::HostWriteError<DbError>>
     where
         R: Send + 'static,
     {
@@ -123,7 +126,6 @@ impl StoreDatabase {
                 blob_staging,
             )
             .await
-            .map_err(test_host_write_error)
     }
 
     pub async fn cleanup_intent_count_for_test(
@@ -353,12 +355,5 @@ impl StoreDatabase {
                 session.import_prepared_write(&destination_write_id, transfer)
             })
             .await
-    }
-}
-
-fn test_host_write_error(error: crate::HostWriteError<DbError>) -> DbError {
-    match error {
-        crate::HostWriteError::Host(error) | crate::HostWriteError::Database(error) => error,
-        error => DbError::Message(format!("test host write failed: {error:?}")),
     }
 }

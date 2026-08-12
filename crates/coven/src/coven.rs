@@ -24,19 +24,25 @@ pub type CovenResult<T> = Result<T, CovenError>;
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
     #[error("database error: {0}")]
-    Database(#[from] DbError),
+    Database(#[source] Box<DbError>),
     #[error("migration error: {0}")]
     Migration(MigrationError),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("blob error: {0}")]
-    Blob(String),
+    #[error("file error: {0}")]
+    File(#[from] coven_foundation::atomic_file::FileError),
+    #[error("local blob {} has {actual_size} bytes, expected {expected_size}", path.display())]
+    LocalBlobSizeMismatch {
+        path: PathBuf,
+        expected_size: u64,
+        actual_size: u64,
+    },
     #[error("unsafe blob path: {0}")]
     UnsafeBlobPath(#[from] PathTokenError),
     #[error("row routing key: {0}")]
     RoutingEncryption(#[from] coven_keys::keys::RoutingEncryptionError),
-    #[error("malformed local path: {0}")]
-    MalformedPath(String),
+    #[error("store database path has no parent: {}", path.display())]
+    StorePathHasNoParent { path: PathBuf },
     #[error("the write SQL closure panicked")]
     WriteClosurePanicked,
     #[error(
@@ -56,7 +62,9 @@ pub enum CovenError {
     #[error("migrations must be set before opening a coven store")]
     MissingMigrations,
     #[error("candidate resolution failed: {0}")]
-    CandidateResolution(String),
+    CandidateResolution(Box<coven_replication::sync::SyncError>),
+    #[error("blob declaration failed: {0}")]
+    BlobDeclaration(#[from] coven_database::BlobDeclError),
     #[error("blob_tombstone_grace must be a positive duration")]
     InvalidBlobTombstoneGrace,
     #[error("browsable cloud storage cannot be used with scoped table {table:?}")]
@@ -71,13 +79,22 @@ pub enum CovenError {
     AlreadyOpen { store_dir: PathBuf },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[cfg(test)]
+    #[error("test failure: {0}")]
+    TestFailure(&'static str),
+}
+
+impl From<DbError> for CovenError {
+    fn from(error: DbError) -> Self {
+        Self::Database(Box::new(error))
+    }
 }
 
 impl From<OpenError> for CovenError {
     fn from(value: OpenError) -> Self {
         match value {
             OpenError::Migration(e) => CovenError::Migration(e),
-            OpenError::Db(e) => CovenError::Database(e),
+            OpenError::Db(e) => CovenError::from(e),
         }
     }
 }
@@ -86,7 +103,16 @@ impl From<LocalBlobStoreError> for CovenError {
     fn from(value: LocalBlobStoreError) -> Self {
         match value {
             LocalBlobStoreError::Path(error) => CovenError::UnsafeBlobPath(error),
-            LocalBlobStoreError::Io(error) => CovenError::Blob(error),
+            LocalBlobStoreError::File(error) => CovenError::File(error),
+            LocalBlobStoreError::SizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            } => CovenError::LocalBlobSizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            },
         }
     }
 }
@@ -165,10 +191,12 @@ impl From<coven_foundation::store_dir::StoreOpenGuardError> for CovenError {
             coven_foundation::store_dir::StoreOpenGuardError::AlreadyOpen { store_dir } => {
                 CovenError::AlreadyOpen { store_dir }
             }
-            coven_foundation::store_dir::StoreOpenGuardError::MalformedPath(message) => {
-                CovenError::MalformedPath(message)
+            coven_foundation::store_dir::StoreOpenGuardError::NoParent { path } => {
+                CovenError::StorePathHasNoParent { path }
             }
-            coven_foundation::store_dir::StoreOpenGuardError::Io(error) => CovenError::Io(error),
+            coven_foundation::store_dir::StoreOpenGuardError::File(error) => {
+                CovenError::File(error)
+            }
         }
     }
 }

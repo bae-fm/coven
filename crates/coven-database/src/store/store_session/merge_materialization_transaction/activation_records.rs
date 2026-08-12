@@ -110,8 +110,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         "serialize activated Circle acknowledgement ref",
                         error
                     ))?,
-                    serde_json::to_string(commit_ref).map_err(|error| DbError::Message(
-                        format!("serialize Circle acknowledgement activating commit: {error}")
+                    serde_json::to_string(commit_ref).map_err(|error| DbError::context(
+                        "serialize Circle acknowledgement activating commit",
+                        error
                     ))?,
                 ],
             )
@@ -277,13 +278,13 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 commit.candidate_family(),
                 activation,
             )
-            .map_err(DbError::Message)?;
+            .map_err(DbError::from)?;
             let current_state = crate::store::circle_operations::circle_current_state_on(
                 conn,
                 activation.circle_id,
             )?;
             let current_state = match current_state {
-                Some(current) => current.advance(next_state).map_err(DbError::Message)?,
+                Some(current) => current.advance(next_state).map_err(DbError::from)?,
                 None if activation.control.value.is_founder() => next_state,
                 None => {
                     return Err(DbError::Message(format!(

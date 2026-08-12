@@ -161,9 +161,7 @@ fn validate_circle_ack_state(
     circle_id: CircleId,
 ) -> Result<(), StoreProtocolError> {
     validate_commit_frontier(store_cut)?;
-    control
-        .validate()
-        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    control.validate()?;
     if let Some(seeded_from) = seeded_from {
         if seeded_from.circle_id != circle_id {
             return Err(StoreProtocolError::Malformed(

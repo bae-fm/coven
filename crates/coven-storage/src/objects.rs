@@ -20,10 +20,11 @@ where
 {
     coven_foundation::blocking::run(verify)
         .await
-        .map_err(|error| {
-            StoreObjectError::Storage(StorageError::Storage(format!(
-                "Store object verification task failed: {error}"
-            )))
+        .map_err(|source| {
+            StoreObjectError::Storage(StorageError::Blocking {
+                operation: "verify Store object",
+                source,
+            })
         })?
         .map_err(|source| StoreObjectError::InvalidObject {
             semantic_prefix: semantic_prefix.to_string(),

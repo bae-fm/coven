@@ -210,7 +210,7 @@ impl<'session> StoreSession<'session> {
             reference,
         )?;
         ReferencedStoreDeviceRegistration::verified(reference.clone(), registration)
-            .map_err(|error| DbError::Message(error.to_string()))
+            .map_err(DbError::from)
     }
 
     pub(super) fn local_store_authority(

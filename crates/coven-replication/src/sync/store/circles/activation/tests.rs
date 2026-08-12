@@ -531,7 +531,7 @@ async fn current_state_reducer_retains_each_concurrent_control_branch() {
         .clone()
         .advance(first.clone())
         .expect_err("a control cannot advance itself");
-    assert!(first_current.contains("duplicate branch"));
+    assert!(first_current.to_string().contains("duplicate branch"));
 
     let conflict = first
         .clone()

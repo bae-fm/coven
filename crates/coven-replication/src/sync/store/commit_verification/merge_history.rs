@@ -162,10 +162,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let chain = self
             .load_acknowledgement_proof_chain(reference, value, registration)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         Ok(store_commit::RetainedVerifiedActivatedAck {
             chain,
             activating_commit: activating_commit.clone(),
@@ -207,10 +204,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             Some(membership),
         ))
         .await
-        .map_err(|error| match error {
-            RegistrationLoadError::Object(error) => StorePullError::Object(error),
-            RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-        })
+        .map_err(StorePullError::from)
     }
 
     pub(crate) async fn derive_local_post_device_state(
@@ -326,10 +320,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             let verified_commit = match self.load_ref(&cursor).await {
                 Ok(commit) => commit,
                 Err(error) => {
-                    return MaterializedCheck::Held(HeldStorePositionReason::ObjectUnreadable {
-                        key: "exact Store commit".to_string(),
-                        detail: error.to_string(),
-                    });
+                    return MaterializedCheck::Held(
+                        HeldStorePositionReason::ObjectUnreadablePull {
+                            key: "exact Store commit".to_string(),
+                            source: error.into(),
+                        },
+                    );
                 }
             };
             let Some(predecessor) = verified_commit.value().order.predecessor() else {
@@ -355,7 +351,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let predecessor_cut = commit
             .order
             .predecessor_cut()
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+            .map_err(RegistrationLoadError::from)?;
         if ack.registration != commit.author_registration
             || ack.store_cut != predecessor_cut
             || ack.device_state != commit.device_state
@@ -376,7 +372,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     &snapshot.snapshot,
                 )
                 .await
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                .map_err(RegistrationLoadError::from)?;
             if !ack.store_cut.frontier().covers(&metadata.coverage) {
                 return Err(RegistrationLoadError::Invalid(
                     "Store acknowledgement does not cover its exact snapshot".to_string(),
@@ -470,25 +466,25 @@ impl<'a> MergeHistoryVerifier<'a> {
         reference: &protocol_membership::MembershipHeadRef,
         head: &protocol_membership::AuthorHead,
         activation: &StoreBatchCommitRef,
-    ) -> Result<bool, String> {
-        let verified = self
-            .load_ref(activation)
-            .await
-            .map_err(|error| error.to_string())?;
+    ) -> Result<bool, StorePullError> {
+        let verified = self.load_ref(activation).await?;
         let commit = verified.value();
         let author = verified.author();
         let transition = commit
             .control()
             .map(|control| &control.transition)
             .ok_or_else(|| {
-                "membership head activation commit has no Merge membership transition".to_string()
+                StorePullError::InvalidState(
+                    "membership head activation commit has no Merge membership transition"
+                        .to_string(),
+                )
             })?;
         if !transition.matches_head(head, reference)
             || transition.body.author_registration != commit.author_registration
         {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "membership head differs from its exact activating Store transition".to_string(),
-            );
+            ));
         }
         let activation_observation = self
             .exact_next_announcement_slot(&commit.author_registration, author, Some(&verified))
@@ -500,16 +496,14 @@ impl<'a> MergeHistoryVerifier<'a> {
             | Err(StoreError::Object(coven_protocol::objects::StoreObjectError::Storage(
                 StorageError::NotFound(_),
             ))) => return Ok(false),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(StorePullError::Store(Box::new(error))),
         }
-        self.verify_refs([activation.clone()])
-            .await
-            .map_err(|error| error.to_string())?;
+        self.verify_refs([activation.clone()]).await?;
         if !self.verifies_membership_head_activation(reference, head, activation) {
-            return Err(
+            return Err(StorePullError::InvalidState(
                 "membership head activation differs from its verified Merge membership control"
                     .to_string(),
-            );
+            ));
         }
         Ok(true)
     }
@@ -596,9 +590,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await
                 .map_err(StorePullError::MembershipChain)?,
         };
-        verified_membership_activations
-            .validate_complete_membership(&membership)
-            .map_err(StorePullError::InvalidState)?;
+        verified_membership_activations.validate_complete_membership(&membership)?;
         verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
         self.remember_verified_membership(verified_membership_activations, membership.clone());
         Ok(VerifiedMergeHistoryAuthority {

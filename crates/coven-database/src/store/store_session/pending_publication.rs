@@ -218,7 +218,7 @@ impl StoreSession<'_> {
                     coven_protocol::audience_package::PackageAudience::Store => {
                         graph_commit
                             .verify_store_package(package.semantic_bytes())
-                            .map_err(|error| DbError::Message(error.to_string()))?;
+                            .map_err(DbError::from)?;
                         &graph_commit
                             .store_package()
                             .as_ref()
@@ -230,7 +230,7 @@ impl StoreSession<'_> {
                     } => {
                         graph_commit
                             .verify_circle_package(*circle_id, package.semantic_bytes())
-                            .map_err(|error| DbError::Message(error.to_string()))?;
+                            .map_err(DbError::from)?;
                         &graph_commit
                             .circle_packages()
                             .iter()
@@ -305,9 +305,7 @@ impl StoreDatabase {
                     {
                         let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
                             .await
-                            .map_err(|error| {
-                                DbError::Message(format!("prepared blob spool: {error}"))
-                            })?;
+                            .map_err(|error| DbError::context("prepared blob spool", error))?;
                         blob.blob()
                             .object()
                             .verify_stored_facts(

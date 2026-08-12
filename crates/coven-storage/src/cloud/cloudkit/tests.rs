@@ -595,7 +595,11 @@ impl coven_foundation::local_file::PlaintextChunkReader for FailingBodyReader {
             return Ok(vec![7; CHUNK_SIZE]);
         }
         Err(crate::local_file::PlaintextChunkError::Local(
-            "injected body failure".to_string(),
+            coven_foundation::atomic_file::FileError::at(
+                "read injected body",
+                "injected-body",
+                std::io::Error::other("injected body failure"),
+            ),
         ))
     }
 }

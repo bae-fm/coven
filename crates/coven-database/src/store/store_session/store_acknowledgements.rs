@@ -107,7 +107,7 @@ impl StoreSession<'_> {
             verify_next_local_store_ack_on(&tx, &authority, &winner_bytes, &winner_prepared)?;
         let expected_records = candidate
             .acknowledgement_remote_objects(&outbound.ack)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         for expected_record in &expected_records {
             let object_id = expected_record.object_id();
             let stored = load_remote_object_on(&tx, object_id)?;
@@ -143,9 +143,9 @@ impl StoreSession<'_> {
                  SET ack_ref = ?2, ack_bytes = ?3, prepared_object = ?4, activation = ?5
                  WHERE singleton = 1 AND ack_ref = ?1",
                 rusqlite::params![
-                    serde_json::to_string(expected).map_err(|error| DbError::Message(format!(
-                        "serialize losing Store acknowledgement ref: {error}"
-                    )))?,
+                    serde_json::to_string(expected).map_err(|error| {
+                        DbError::context("serialize losing Store acknowledgement ref", error)
+                    })?,
                     winner_ref,
                     winner_bytes,
                     winner_prepared,

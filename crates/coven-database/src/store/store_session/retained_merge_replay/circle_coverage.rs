@@ -236,7 +236,7 @@ impl StoreDatabase {
                         coverage.bootstrap,
                         image_bytes,
                     )
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    .map_err(DbError::from)?;
                 Ok((coverage.activation_commit, image))
             })
             .collect()

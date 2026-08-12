@@ -28,8 +28,9 @@ impl StoreSession<'_> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let image_facts =
             crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
-                .map_err(|error| {
-                    SnapshotImageError::Projection(format!("spool Store snapshot image: {error}"))
+                .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
+                    operation: "spool Store snapshot image".to_string(),
+                    source,
                 });
         let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
@@ -105,7 +106,7 @@ impl StoreSession<'_> {
         if meta.successor.activation
             != registration
                 .store_snapshot_activation(registration_ref)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 .activation_id()
             || meta.successor.next_slot.logical_key()
                 != format!(
@@ -133,19 +134,19 @@ impl StoreSession<'_> {
              (singleton, snapshot_ref, meta_prepared, image_ref, meta_bytes, blobs) \
              VALUES (1, ?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
-                serde_json::to_string(&reference).map_err(|error| DbError::Message(format!(
-                    "serialize exact Store snapshot ref: {error}"
-                )))?,
-                serde_json::to_string(&meta_prepared).map_err(|error| DbError::Message(
-                    format!("serialize prepared Store snapshot metadata: {error}")
-                ))?,
-                serde_json::to_string(&meta.image).map_err(|error| DbError::Message(format!(
-                    "serialize exact Store snapshot image ref: {error}"
-                )))?,
+                serde_json::to_string(&reference).map_err(|error| {
+                    DbError::context("serialize exact Store snapshot ref", error)
+                })?,
+                serde_json::to_string(&meta_prepared).map_err(|error| {
+                    DbError::context("serialize prepared Store snapshot metadata", error)
+                })?,
+                serde_json::to_string(&meta.image).map_err(|error| {
+                    DbError::context("serialize exact Store snapshot image ref", error)
+                })?,
                 meta.to_bytes(),
-                serde_json::to_string(&blobs).map_err(|error| DbError::Message(format!(
-                    "serialize prepared Store snapshot blobs: {error}"
-                )))?,
+                serde_json::to_string(&blobs).map_err(|error| {
+                    DbError::context("serialize prepared Store snapshot blobs", error)
+                })?,
             ],
         )
         .map_err(DbError::from)?;
@@ -210,9 +211,9 @@ impl StoreSession<'_> {
              (generation, snapshot_ref, successor_slot, meta_bytes) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 accepted_generation,
-                serde_json::to_string(&accepted).map_err(|error| DbError::Message(format!(
-                    "serialize published Store snapshot ref: {error}"
-                )))?,
+                serde_json::to_string(&accepted).map_err(|error| {
+                    DbError::context("serialize published Store snapshot ref", error)
+                })?,
                 serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
                     |error| DbError::context("serialize Store snapshot successor slot", error)
                 )?,

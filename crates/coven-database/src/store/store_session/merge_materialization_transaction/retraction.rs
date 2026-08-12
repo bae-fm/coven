@@ -51,12 +51,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 retained.commit_ref().object.clone(),
                 retained.commit().to_bytes(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?,
+            .map_err(DbError::from)?,
             activation_head: coven_protocol::objects::PreparedExactObject::new(
                 retained.activation_head_object().clone(),
                 retained.activation_head().to_bytes(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?,
+            .map_err(DbError::from)?,
         };
         let canonical_cleanup = serde_json::to_vec(&input)
             .map_err(|error| DbError::context("serialize Merge retraction cleanup", error))?;
@@ -119,11 +119,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         let conn = self.store.transaction;
         let provided = retractions
             .iter()
-            .map(|retraction| {
-                retraction
-                    .candidate_reference()
-                    .map_err(|error| DbError::Message(error.to_string()))
-            })
+            .map(|retraction| retraction.candidate_reference().map_err(DbError::from))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let retained = self.store.retained_replay_inputs(retained_replay)?;
         let mut required = BTreeSet::new();
@@ -149,7 +145,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 required.insert(
                     retraction
                         .candidate_reference()
-                        .map_err(|error| DbError::Message(error.to_string()))?,
+                        .map_err(DbError::from)?,
                 );
             }
         }
@@ -172,13 +168,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         require_exact_merge_retraction_closure(&direct_dependencies, required, &provided)?;
         let mut notifications = Vec::new();
         for verified in retractions {
-            let (nonactivation, head_nonactivation) =
-                verified
-                    .into_terminal_head_nonactivation()
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-            let candidate = nonactivation
-                .reference()
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            let (nonactivation, head_nonactivation) = verified
+                .into_terminal_head_nonactivation()
+                .map_err(DbError::from)?;
+            let candidate = nonactivation.reference().map_err(DbError::from)?;
             self.store.validate_terminal_nonactivation_authority(
                 retained_replay,
                 root,
@@ -400,7 +393,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     original,
                     nonactivation.clone(),
                 )
-                .map_err(DbError::Message)?;
+                .map_err(DbError::from)?;
                 let status = WriteStatus::Resolved(WriteResolution::Retracted { witness });
                 conn.execute(
                     "DELETE FROM store_write_blob_leases WHERE write_id = ?1",

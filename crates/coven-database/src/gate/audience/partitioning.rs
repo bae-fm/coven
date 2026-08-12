@@ -283,10 +283,10 @@ pub(crate) fn row_audience_move(
             };
             let source_value = row.old_value(audience_col.index).unwrap_or(None);
             let parse = |value: Option<&str>| {
-                Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
+                Audience::from_column(value).map_err(|source| GateError::InvalidAudienceEncoding {
                     table: row.table.clone(),
                     value: value.map(str::to_string),
-                    reason: error.to_string(),
+                    source,
                 })
             };
             (parse(source_value)?, parse(destination_value)?)
@@ -365,13 +365,13 @@ pub(crate) fn change_audience(
     match gates.tables.get(&row.table) {
         Some(TableGate::ScopedRoot { audience_col }) => {
             match recorded_column(row, audience_col.index) {
-                Some(value) => {
-                    Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
+                Some(value) => Audience::from_column(value).map_err(|source| {
+                    GateError::InvalidAudienceEncoding {
                         table: row.table.clone(),
                         value: value.map(str::to_string),
-                        reason: error.to_string(),
-                    })
-                }
+                        source,
+                    }
+                }),
                 None => live_row(),
             }
         }

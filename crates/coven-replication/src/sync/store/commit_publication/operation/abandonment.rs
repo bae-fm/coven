@@ -46,7 +46,7 @@ impl AuthorizedWriterOperation<'_> {
                     },
                 }],
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let stream_id = coord.stream_id;
         let sequence = coord.sequence;
         let commit_context = ProtocolObjectContext::signed_plaintext(
@@ -79,7 +79,7 @@ impl AuthorizedWriterOperation<'_> {
                 coord,
                 commit_prepared.reference().clone(),
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let commit_ref = commit.reference().clone();
         let head = self.writer.sign_device_head(
             root.store_root_hash,

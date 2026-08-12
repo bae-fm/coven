@@ -198,10 +198,7 @@ impl ClosedRemoteObject {
             payloads.insert(hash, canonical_semantic_bytes.to_vec());
         }
         if let Some(hash) = record.stored_payload() {
-            record
-                .object()
-                .verify(stored_bytes)
-                .map_err(|error| RemoteObjectRecordError::StoredBytes(error.to_string()))?;
+            record.object().verify(stored_bytes)?;
             payloads.insert(hash, stored_bytes.to_vec());
         }
         Self::with_payloads(record, payloads)
@@ -333,7 +330,17 @@ pub use super::store_commit::StoreBatchCommitDeletionTarget;
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteObjectRecordError {
     #[error("prepared stored bytes do not match their exact reference: {0}")]
-    StoredBytes(String),
+    Storage(#[from] crate::objects::StorageError),
+    #[error("remote object JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("remote object Store protocol: {0}")]
+    StoreProtocol(#[from] crate::store_commit::StoreProtocolError),
+    #[error("remote object audience package: {0}")]
+    AudiencePackage(#[from] crate::audience_package::AudiencePackageError),
+    #[error("remote object Circle transition: {0}")]
+    CircleTransition(#[from] crate::circle_control::CircleTransitionError),
+    #[error("remote object blob locator: {0}")]
+    BlobLocator(#[from] crate::blob::locator::BlobLocatorError),
     #[error("remote object payload placement contradicts its domain")]
     PayloadPlacement,
     #[error("prepared stored reference differs from the closed identity reference")]
@@ -367,6 +374,8 @@ pub enum RemoteObjectRecordError {
     EmptyNonactivation,
     #[error("candidate nonactivation proof is invalid: {0}")]
     InvalidProof(String),
+    #[error("candidate nonactivation proof has invalid Store protocol: {0}")]
+    InvalidProofProtocol(#[source] crate::store_commit::StoreProtocolError),
     #[error("candidate does not own this remote object")]
     CandidateOwnerMismatch,
     #[error("remote object does not retain this candidate's nonactivation proof")]

@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use super::circles::CirclePackageReadError;
 use super::*;
 use crate::sync::store::commit_verification::commit::VerifiedMergeMembershipClosure;
-use crate::sync::store::commit_verification::merge_history::registration::*;
 use crate::sync::store::commit_verification::merge_history::*;
 
 mod authorized;
@@ -125,7 +124,7 @@ pub(crate) struct StorePullExecution {
 pub(crate) use crate::sync::store::commit_verification::commit::{
     CommitCoverageError, LoadedDeviceJoinAttemptEvidence,
 };
-pub(crate) use coven_protocol::membership::{HeldStorePositionReason, LocalStoreMembership};
+pub(crate) use coven_protocol::membership::LocalStoreMembership;
 pub(crate) use device_lifecycle_state::*;
 pub(crate) use discovery::*;
 pub(crate) use join_activation::*;
@@ -134,8 +133,8 @@ pub(crate) use materialization::*;
 pub(crate) use membership_control::*;
 pub use model::LoadedCirclePackage;
 pub(crate) use model::{
-    commit_stream_id, Candidate, HeldStoreCoordinate, HeldStorePosition, StorePullMembershipError,
-    VerifiedStoreDeviceHead,
+    commit_stream_id, ApplyOutcome, Candidate, HeldStoreCoordinate, HeldStorePosition,
+    HeldStorePositionReason, StorePullMembershipError, VerifiedStoreDeviceHead,
 };
 pub use model::{StorePullError, StorePullResult};
 pub(crate) use snapshot_evidence::*;

@@ -378,6 +378,31 @@ pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AuthorStreamId([u8; 32]);
 
+#[derive(Debug, thiserror::Error)]
+pub enum AuthorStreamIdParseError {
+    #[error("author stream id must be exactly 64 lowercase hexadecimal characters: {value:?}")]
+    InvalidFormat { value: String },
+    #[error("decode author stream id: {0}")]
+    Hex(#[source] hex::FromHexError),
+    #[error("author stream id has the wrong byte length")]
+    WrongLength,
+}
+
+impl PartialEq for AuthorStreamIdParseError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InvalidFormat { value: left }, Self::InvalidFormat { value: right }) => {
+                left == right
+            }
+            (Self::Hex(left), Self::Hex(right)) => left.to_string() == right.to_string(),
+            (Self::WrongLength, Self::WrongLength) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for AuthorStreamIdParseError {}
+
 impl AuthorStreamId {
     pub fn from_digest(digest: ObjectHash) -> Self {
         Self(*digest.as_bytes())
@@ -396,7 +421,7 @@ impl fmt::Display for AuthorStreamId {
 }
 
 impl FromStr for AuthorStreamId {
-    type Err = String;
+    type Err = AuthorStreamIdParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         if value.len() != 64
@@ -404,14 +429,14 @@ impl FromStr for AuthorStreamId {
                 .bytes()
                 .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
         {
-            return Err(format!(
-                "author stream id must be exactly 64 lowercase hexadecimal characters: {value:?}"
-            ));
+            return Err(AuthorStreamIdParseError::InvalidFormat {
+                value: value.to_string(),
+            });
         }
         let bytes = hex::decode(value)
-            .map_err(|error| format!("decode author stream id: {error}"))?
+            .map_err(AuthorStreamIdParseError::Hex)?
             .try_into()
-            .map_err(|_| "author stream id has the wrong byte length".to_string())?;
+            .map_err(|_| AuthorStreamIdParseError::WrongLength)?;
         Ok(Self(bytes))
     }
 }

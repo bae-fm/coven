@@ -85,6 +85,30 @@ pub enum LocalRotation {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RotationGateError {
+    #[error("rotation candidate names generation zero")]
+    CandidateGenerationZero,
+    #[error("a committed local rotation already owns the gate")]
+    CommittedLocalOwnsGate,
+    #[error("another rotation candidate already owns the gate")]
+    DifferentCandidateOwnsGate,
+    #[error("rotation commit does not own the pending candidate gate")]
+    CommitDoesNotOwnCandidate,
+    #[error("committed rotation names generation zero")]
+    CommittedGenerationZero,
+    #[error("rotation loss does not own the pending candidate gate")]
+    LossDoesNotOwnCandidate,
+    #[error("rotation candidate replacement lost its exact owner")]
+    ReplacementLostOwner,
+    #[error("rotation adoption cannot close while a candidate is pending")]
+    CandidatePendingDuringAdoption,
+    #[error("rotation adoption does not own the committed gate")]
+    AdoptionDoesNotOwnCommitted,
+    #[error("adopted rotation names generation zero")]
+    AdoptedGenerationZero,
+}
+
 impl LocalRotation {
     /// Reported through the replication layer's `PendingRotation::pending_generation`,
     /// which exists for status reporting in tests and for hosts built with
@@ -181,20 +205,18 @@ impl RotationGate {
         gate: Option<Self>,
         generation: u64,
         mutation: crate::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RotationGateError> {
         let Some(generation) = NonZeroU64::new(generation) else {
-            return Err("rotation candidate names generation zero".to_string());
+            return Err(RotationGateError::CandidateGenerationZero);
         };
         let candidate = LocalRotation::Candidate {
             generation,
             mutation,
         };
         match gate.as_ref().and_then(Self::local) {
-            Some(LocalRotation::Committed { .. }) => {
-                Err("a committed local rotation already owns the gate".to_string())
-            }
+            Some(LocalRotation::Committed { .. }) => Err(RotationGateError::CommittedLocalOwnsGate),
             Some(existing) if existing != candidate => {
-                Err("another rotation candidate already owns the gate".to_string())
+                Err(RotationGateError::DifferentCandidateOwnsGate)
             }
             _ => Ok(Self::with_local(
                 candidate,
@@ -208,10 +230,9 @@ impl RotationGate {
         gate: Option<Self>,
         generation: u64,
         mutation: crate::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
-        let refusal = "rotation commit does not own the pending candidate gate";
+    ) -> Result<Self, RotationGateError> {
         let Some(generation) = NonZeroU64::new(generation) else {
-            return Err(refusal.to_string());
+            return Err(RotationGateError::CommitDoesNotOwnCandidate);
         };
         let committed = LocalRotation::Committed {
             generation,
@@ -227,7 +248,7 @@ impl RotationGate {
             })
             && local != Some(committed)
         {
-            return Err(refusal.to_string());
+            return Err(RotationGateError::CommitDoesNotOwnCandidate);
         }
         Ok(Self::with_local(
             committed,
@@ -237,9 +258,12 @@ impl RotationGate {
 
     /// Record that the store committed `generation`. Forward-only: an older
     /// generation never displaces a newer one already recorded.
-    pub fn merge_peer_commit(gate: Option<Self>, generation: u64) -> Result<Self, String> {
+    pub fn merge_peer_commit(
+        gate: Option<Self>,
+        generation: u64,
+    ) -> Result<Self, RotationGateError> {
         let Some(generation) = NonZeroU64::new(generation) else {
-            return Err("committed rotation names generation zero".to_string());
+            return Err(RotationGateError::CommittedGenerationZero);
         };
         let peer_generation = gate
             .as_ref()
@@ -260,13 +284,13 @@ impl RotationGate {
         self,
         generation: u64,
         mutation: crate::store_commit::ObjectHash,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, RotationGateError> {
         let lost = NonZeroU64::new(generation).map(|generation| LocalRotation::Candidate {
             generation,
             mutation,
         });
         if lost.is_none() || self.local() != lost {
-            return Err("rotation loss does not own the pending candidate gate".to_string());
+            return Err(RotationGateError::LossDoesNotOwnCandidate);
         }
         Ok(Self::from_parts(None, self.peer()))
     }
@@ -276,10 +300,9 @@ impl RotationGate {
         generation: u64,
         previous: crate::store_commit::ObjectHash,
         replacement: crate::store_commit::ObjectHash,
-    ) -> Result<Self, String> {
-        let refusal = "rotation candidate replacement lost its exact owner";
+    ) -> Result<Self, RotationGateError> {
         let Some(generation) = NonZeroU64::new(generation) else {
-            return Err(refusal.to_string());
+            return Err(RotationGateError::ReplacementLostOwner);
         };
         if self.local()
             != Some(LocalRotation::Candidate {
@@ -287,7 +310,7 @@ impl RotationGate {
                 mutation: previous,
             })
         {
-            return Err(refusal.to_string());
+            return Err(RotationGateError::ReplacementLostOwner);
         }
         Ok(Self::with_local(
             LocalRotation::Candidate {
@@ -302,18 +325,16 @@ impl RotationGate {
         self,
         generation: u64,
         mutation: crate::store_commit::ObjectHash,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, RotationGateError> {
         match self.local() {
             Some(LocalRotation::Candidate { .. }) => {
-                return Err(
-                    "rotation adoption cannot close while a candidate is pending".to_string(),
-                )
+                return Err(RotationGateError::CandidatePendingDuringAdoption)
             }
             Some(LocalRotation::Committed {
                 generation: committed,
                 mutation: committed_mutation,
             }) if committed.get() == generation && committed_mutation == mutation => {}
-            _ => return Err("rotation adoption does not own the committed gate".to_string()),
+            _ => return Err(RotationGateError::AdoptionDoesNotOwnCommitted),
         }
         // Adopting the local rotation adopts every peer generation it covers; a
         // newer peer generation is a separate fact and stays.
@@ -323,9 +344,12 @@ impl RotationGate {
         ))
     }
 
-    pub fn complete_peer_adoption(self, adopted_generation: u64) -> Result<Option<Self>, String> {
+    pub fn complete_peer_adoption(
+        self,
+        adopted_generation: u64,
+    ) -> Result<Option<Self>, RotationGateError> {
         if adopted_generation == 0 {
-            return Err("adopted rotation names generation zero".to_string());
+            return Err(RotationGateError::AdoptedGenerationZero);
         }
         Ok(Self::from_parts(
             self.local(),

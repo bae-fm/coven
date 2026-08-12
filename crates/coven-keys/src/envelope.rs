@@ -104,11 +104,13 @@ impl PassphraseVault {
     }
 
     fn read_envelope(&self) -> Result<Option<Envelope>, KeyError> {
-        match self.file.read_optional().map_err(KeyError::Persistence)? {
+        match self.file.read_optional().map_err(KeyError::File)? {
             Some(bytes) => {
-                let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|e| {
-                    KeyError::Persistence(format!("passphrase envelope is malformed: {e}"))
-                })?;
+                let envelope: Envelope =
+                    serde_json::from_slice(&bytes).map_err(|source| KeyError::Json {
+                        operation: "parse passphrase envelope",
+                        source,
+                    })?;
                 validate_envelope_header(&envelope)?;
                 Ok(Some(envelope))
             }
@@ -191,14 +193,16 @@ impl PassphraseVault {
             nonce_b64: base64_encode(&nonce),
             ciphertext_b64: base64_encode(&ciphertext),
         };
-        let bytes = serde_json::to_vec(&envelope)
-            .map_err(|e| KeyError::Persistence(format!("serialize passphrase envelope: {e}")))?;
-        self.file.replace(&bytes).map_err(KeyError::Persistence)
+        let bytes = serde_json::to_vec(&envelope).map_err(|source| KeyError::Json {
+            operation: "serialize passphrase envelope",
+            source,
+        })?;
+        self.file.replace(&bytes).map_err(KeyError::File)
     }
 
     /// Remove the stored envelope. `Ok` when nothing was stored.
     pub(crate) fn forget(&self) -> Result<(), KeyError> {
-        self.file.remove().map_err(KeyError::Persistence)
+        self.file.remove().map_err(KeyError::File)
     }
 
     #[cfg(test)]
@@ -215,17 +219,16 @@ impl PassphraseVault {
 /// this module must not act on blindly.
 fn validate_envelope_header(envelope: &Envelope) -> Result<(), KeyError> {
     if envelope.v != ENVELOPE_VERSION {
-        return Err(KeyError::Persistence(format!(
-            "passphrase envelope is v{}, not this build's v{ENVELOPE_VERSION}; \
-             update to a build that understands it",
-            envelope.v
-        )));
+        return Err(KeyError::UnsupportedPassphraseEnvelopeVersion {
+            actual: envelope.v,
+            expected: ENVELOPE_VERSION,
+        });
     }
     if envelope.kdf.algo != ARGON2ID_ALGO {
-        return Err(KeyError::Persistence(format!(
-            "passphrase envelope names KDF {:?}, but this module only wraps with {ARGON2ID_ALGO:?}",
-            envelope.kdf.algo
-        )));
+        return Err(KeyError::UnsupportedPassphraseKdf {
+            actual: envelope.kdf.algo.clone(),
+            expected: ARGON2ID_ALGO,
+        });
     }
     Ok(())
 }
@@ -244,22 +247,25 @@ fn validate_envelope_header(envelope: &Envelope) -> Result<(), KeyError> {
 /// constants call for unlocks unchanged.
 fn validate_params_floor(m_cost: u32, t_cost: u32, p_cost: u32) -> Result<(), KeyError> {
     if m_cost < ARGON2_M_COST_KIB {
-        return Err(KeyError::Crypto(format!(
-            "passphrase envelope's Argon2id m_cost ({m_cost} KiB) is below this module's floor \
-             ({ARGON2_M_COST_KIB} KiB); refusing to derive a wrapping key at reduced memory cost"
-        )));
+        return Err(KeyError::WeakArgon2Parameter {
+            parameter: "m_cost in KiB",
+            actual: m_cost,
+            minimum: ARGON2_M_COST_KIB,
+        });
     }
     if t_cost < ARGON2_T_COST {
-        return Err(KeyError::Crypto(format!(
-            "passphrase envelope's Argon2id t_cost ({t_cost}) is below this module's floor \
-             ({ARGON2_T_COST}); refusing to derive a wrapping key at a reduced iteration count"
-        )));
+        return Err(KeyError::WeakArgon2Parameter {
+            parameter: "t_cost",
+            actual: t_cost,
+            minimum: ARGON2_T_COST,
+        });
     }
     if p_cost < ARGON2_P_COST {
-        return Err(KeyError::Crypto(format!(
-            "passphrase envelope's Argon2id p_cost ({p_cost}) is below this module's floor \
-             ({ARGON2_P_COST}); refusing to derive a wrapping key at reduced parallelism"
-        )));
+        return Err(KeyError::WeakArgon2Parameter {
+            parameter: "p_cost",
+            actual: p_cost,
+            minimum: ARGON2_P_COST,
+        });
     }
     Ok(())
 }
@@ -271,13 +277,21 @@ fn derive_wrapping_key(
     t_cost: u32,
     p_cost: u32,
 ) -> Result<[u8; ARGON2_OUTPUT_LEN], KeyError> {
-    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| KeyError::Crypto(format!("invalid argon2id params: {e}")))?;
+    let params =
+        argon2::Params::new(m_cost, t_cost, p_cost, Some(ARGON2_OUTPUT_LEN)).map_err(|source| {
+            KeyError::PassphraseKdf {
+                operation: "parameter validation",
+                source: Box::new(source),
+            }
+        })?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = [0u8; ARGON2_OUTPUT_LEN];
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut out)
-        .map_err(|e| KeyError::Crypto(format!("argon2id derivation failed: {e}")))?;
+        .map_err(|source| KeyError::PassphraseKdf {
+            operation: "derivation",
+            source: Box::new(source),
+        })?;
     Ok(out)
 }
 
@@ -297,19 +311,17 @@ fn open(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, KeyError> {
     if nonce.len() != NONCE_LEN {
-        return Err(KeyError::Crypto(format!(
-            "envelope nonce is {} bytes, expected {NONCE_LEN}: a corrupt file, not a wrong \
-             passphrase",
-            nonce.len()
-        )));
+        return Err(KeyError::InvalidLength {
+            subject: "passphrase envelope nonce",
+            expected: NONCE_LEN,
+            actual: nonce.len(),
+        });
     }
     let cipher = XChaCha20Poly1305::new(GenericArray::from_slice(wrapping_key));
     let nonce = GenericArray::from_slice(nonce);
-    cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        KeyError::Crypto(
-            "envelope decryption failed: wrong passphrase or a corrupt file".to_string(),
-        )
-    })
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| KeyError::PassphraseEnvelopeDecryption)
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -321,7 +333,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, KeyError> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(s)
-        .map_err(|e| KeyError::Persistence(format!("passphrase envelope base64: {e}")))
+        .map_err(KeyError::Base64)
 }
 
 #[cfg(test)]
@@ -377,7 +389,10 @@ mod tests {
         let error = reader
             .unlock()
             .expect_err("wrong passphrase must not unlock");
-        assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}");
+        assert!(
+            matches!(error, KeyError::PassphraseEnvelopeDecryption),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -482,7 +497,7 @@ mod tests {
             .unlock()
             .expect_err("weak Argon2id params must be refused");
         assert!(
-            matches!(unlock_error, KeyError::Crypto(_)),
+            matches!(unlock_error, KeyError::WeakArgon2Parameter { .. }),
             "got {unlock_error:?}"
         );
 
@@ -490,7 +505,7 @@ mod tests {
             .persist(b"the real secret")
             .expect_err("persist must refuse to re-wrap under weak params rather than establish");
         assert!(
-            matches!(persist_error, KeyError::Crypto(_)),
+            matches!(persist_error, KeyError::WeakArgon2Parameter { .. }),
             "got {persist_error:?}"
         );
 
@@ -553,7 +568,10 @@ mod tests {
         let error = vault
             .unlock()
             .expect_err("a corrupt nonce length must be an error, not a panic");
-        assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}");
+        assert!(
+            matches!(error, KeyError::InvalidLength { .. }),
+            "got {error:?}"
+        );
     }
 
     /// An envelope naming any version other than this build's is refused —
@@ -571,7 +589,10 @@ mod tests {
         let error = vault
             .unlock()
             .expect_err("an older envelope version must be refused");
-        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+        assert!(
+            matches!(error, KeyError::UnsupportedPassphraseEnvelopeVersion { .. }),
+            "got {error:?}"
+        );
 
         let mut newer = established;
         newer.v = ENVELOPE_VERSION + 1;
@@ -579,7 +600,10 @@ mod tests {
         let error = vault
             .unlock()
             .expect_err("a newer envelope version must be refused");
-        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+        assert!(
+            matches!(error, KeyError::UnsupportedPassphraseEnvelopeVersion { .. }),
+            "got {error:?}"
+        );
     }
 
     /// An envelope naming a KDF other than Argon2id is refused — the `algo`
@@ -596,6 +620,9 @@ mod tests {
         let error = vault
             .unlock()
             .expect_err("an unrecognized KDF algo must be refused");
-        assert!(matches!(error, KeyError::Persistence(_)), "got {error:?}");
+        assert!(
+            matches!(error, KeyError::UnsupportedPassphraseKdf { .. }),
+            "got {error:?}"
+        );
     }
 }

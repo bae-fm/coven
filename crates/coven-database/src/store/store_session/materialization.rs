@@ -69,13 +69,13 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let materialized_frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             crate::store::materialized_commit_index::materialized_frontier_on(tx, None)?,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         let candidate_predecessors = materialization
             .verified_commit
             .value()
             .order
             .predecessor_cut()
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .frontier();
         let requires_canonical_replay = !candidate_predecessors.covers(&materialized_frontier);
         let merge_transaction = MergeMaterializationTransaction::from_store(self.store);
@@ -90,10 +90,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             None,
             materialization,
         )?;
-        if matches!(
-            applied.outcome,
-            coven_protocol::membership::ApplyOutcome::Applied(_)
-        ) {
+        if matches!(applied.outcome, crate::MaterializationOutcome::Applied(_)) {
             let retained = applied.retained.take().ok_or_else(|| {
                 DbError::Message(
                     "applied Merge materialization omitted its verified retained input".to_string(),
@@ -114,11 +111,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             }
             let retracted = retractions
                 .iter()
-                .map(|retraction| {
-                    retraction
-                        .candidate_reference()
-                        .map_err(|error| DbError::Message(error.to_string()))
-                })
+                .map(|retraction| retraction.candidate_reference().map_err(DbError::from))
                 .collect::<Result<BTreeSet<_>, _>>()?;
             if !retractions.is_empty() {
                 applied.write_status_notifications =
@@ -207,23 +200,21 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 }
                 merge_transaction.replace_store_device_exclusion_freezes_from_replay(&root)?;
                 let old_projection =
-                    crate::walk_old_changeset(&projection_changeset).map_err(DbError::Message)?;
+                    crate::walk_old_changeset(&projection_changeset).map_err(DbError::Changeset)?;
                 let new_projection =
-                    crate::walk_changeset(&projection_changeset).map_err(DbError::Message)?;
+                    crate::walk_changeset(&projection_changeset).map_err(DbError::Changeset)?;
                 for intent in crate::local_blob_cleanup_intents::intents_from_changes(
                     blob_decls,
                     &old_projection,
                     &new_projection,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 {
                     super::local_blob_cleanup::record_obsolete_copy_intents_on(
                         tx, blob_decls, &intent,
                     )?;
                 }
-                if let coven_protocol::membership::ApplyOutcome::Applied(rows) =
-                    &mut applied.outcome
-                {
+                if let crate::MaterializationOutcome::Applied(rows) = &mut applied.outcome {
                     rows.extend(new_projection);
                 }
             }
@@ -321,7 +312,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         )?;
         let circle_activations =
             VerifiedCircleActivations::none(verified_commit.value(), verified_commit.reference())
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
         let materialization = VerifiedMergeMaterialization::verify(
             &root,
             &verified_commit,
@@ -446,7 +437,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 &prepared.registrations,
             )?;
             let circle_activations = VerifiedCircleActivations::none(commit, &prepared.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let activation = &prepared.activation;
             let materialization = VerifiedMergeMaterialization::verify(
                 &root,
@@ -532,10 +523,7 @@ impl StoreSession<'_> {
                 routing_key,
                 receiver_wall_ms,
             )?;
-            if matches!(
-                applied.outcome,
-                coven_protocol::membership::ApplyOutcome::Applied(_)
-            ) {
+            if matches!(applied.outcome, crate::MaterializationOutcome::Applied(_)) {
                 Ok(StoreTransactionOutcome::Commit(applied))
             } else {
                 Ok(StoreTransactionOutcome::Rollback(applied))
@@ -646,7 +634,7 @@ impl StoreDatabase {
         local_store_membership: coven_protocol::membership::LocalStoreMembership,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
+    ) -> Result<crate::MaterializationOutcome, DbError> {
         let applied = self
             .call_store(move |session| {
                 session.apply_received_merge_materialization(

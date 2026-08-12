@@ -1,7 +1,7 @@
 use super::*;
 
 pub fn store_reclaim_journal_error(error: StoreReclaimJournalError) -> DbError {
-    DbError::Message(error.to_string())
+    DbError::from(error)
 }
 
 pub fn parse_store_reclaim_operation(

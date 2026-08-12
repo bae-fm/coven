@@ -71,7 +71,7 @@ impl VerifiedCircleImage {
         image_bytes: Vec<u8>,
     ) -> Result<Self, CircleStateError> {
         if reference.image.image_hash != ObjectHash::digest(&image_bytes) {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "stored Circle image differs from its exact image hash".to_string(),
             ));
         }
@@ -91,7 +91,7 @@ impl VerifiedCircleImage {
             || !self.reference.verify_for_access(access)
             || self.reference.image.image_hash != ObjectHash::digest(&self.image_bytes)
         {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "verified Circle bootstrap differs from its signed access leaf".to_string(),
             ));
         }
@@ -168,21 +168,23 @@ impl CircleEpochAccess {
         roster: &CircleMaterializedRoster,
     ) -> Result<Self, CircleStateError> {
         if !roster.verify() {
-            return Err(CircleStateError(format!(
+            return Err(CircleStateError::Invariant(format!(
                 "Circle {circle_id} historical package roster is invalid"
             )));
         }
-        let keyring = MasterKeyring::from_serialized(serialized_keyring).map_err(|error| {
-            CircleStateError(format!(
-                "parse Circle {circle_id} historical package keyring: {error}"
-            ))
+        let keyring = MasterKeyring::from_serialized(serialized_keyring).map_err(|source| {
+            CircleStateError::Encryption {
+                operation: "parse historical package keyring",
+                circle_id,
+                source,
+            }
         })?;
         let encryption = EncryptionService::from(keyring)
             .service_for_fingerprint(key_fingerprint.as_bytes())
-            .map_err(|error| {
-                CircleStateError(format!(
-                    "select Circle {circle_id} historical package key: {error}"
-                ))
+            .map_err(|source| CircleStateError::Encryption {
+                operation: "select historical package key",
+                circle_id,
+                source,
             })?;
         Ok(Self {
             circle_id,
@@ -198,19 +200,19 @@ impl CircleEpochAccess {
         author: &StoreDeviceRegistration,
     ) -> Result<(), CircleStateError> {
         if reference.circle_id != self.circle_id {
-            return Err(CircleStateError(format!(
+            return Err(CircleStateError::Invariant(format!(
                 "Circle package names {}, but access belongs to {}",
                 reference.circle_id, self.circle_id
             )));
         }
         if !self.writers.contains(&author.author_pubkey) {
-            return Err(CircleStateError(format!(
+            return Err(CircleStateError::Invariant(format!(
                 "Circle package author is not a member of {} at its exact control",
                 reference.circle_id
             )));
         }
         if self.key_fingerprint != reference.key_fingerprint {
-            return Err(CircleStateError(format!(
+            return Err(CircleStateError::Invariant(format!(
                 "Circle package key for {} differs from its activated control",
                 reference.circle_id
             )));
@@ -271,10 +273,10 @@ pub(super) fn epoch_access_from(
     let encryption = verified
         .keyring
         .service_for_fingerprint(verified.key_fingerprint.as_bytes())
-        .map_err(|error| {
-            CircleStateError(format!(
-                "select Circle package key for {circle_id}: {error}"
-            ))
+        .map_err(|source| CircleStateError::Encryption {
+            operation: "select package key",
+            circle_id,
+            source,
         })?;
     let key_fingerprint = verified.key_fingerprint;
     Ok(CircleEpochAccess {
@@ -295,7 +297,7 @@ pub(super) fn verified_keyring_from(
         || !roster.verify()
         || roster.state_hash() != control.roster_state_ref().state_hash
     {
-        return Err(CircleStateError(format!(
+        return Err(CircleStateError::Invariant(format!(
             "Circle {circle_id} package roster differs from its activated control"
         )));
     }
@@ -305,27 +307,28 @@ pub(super) fn verified_keyring_from(
         ..
     } = disposition
     else {
-        return Err(CircleStateError(format!(
+        return Err(CircleStateError::Invariant(format!(
             "active Circle access for {circle_id} has an inactive leaf"
         )));
     };
     if *key_fingerprint != control.key_fingerprint() {
-        return Err(CircleStateError(format!(
+        return Err(CircleStateError::Invariant(format!(
             "Circle package key for {circle_id} differs from its activated control"
         )));
     }
-    let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
-        CircleStateError(format!(
-            "parse Circle package keyring for {circle_id}: {error}"
-        ))
-    })?;
+    let keyring =
+        MasterKeyring::from_serialized(keyring).map_err(|source| CircleStateError::Encryption {
+            operation: "parse package keyring",
+            circle_id,
+            source,
+        })?;
     let keyring = EncryptionService::from(keyring);
     keyring
         .service_for_fingerprint(key_fingerprint.as_bytes())
-        .map_err(|error| {
-            CircleStateError(format!(
-                "select Circle package key for {circle_id}: {error}"
-            ))
+        .map_err(|source| CircleStateError::Encryption {
+            operation: "select package key",
+            circle_id,
+            source,
         })?;
     Ok(VerifiedCircleKeyring {
         keyring,

@@ -795,10 +795,7 @@ impl StoreDatabase {
         let losing_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store reclaim operation has no losing candidate".to_string())
         })?;
-        if nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != losing_candidate.reference
+        if nonactivation.candidate_reference().map_err(DbError::from)? != losing_candidate.reference
         {
             return Err(DbError::Message(
                 "verified nonactivation names another Store reclaim candidate".to_string(),

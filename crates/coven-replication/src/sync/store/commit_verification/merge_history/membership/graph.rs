@@ -106,12 +106,12 @@ impl LoadedExactMembershipGraph {
                 .expect("selected membership resolution suffix entry remains pending");
             chain
                 .add_entry_at(coord, entry)
-                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                .map_err(AnchoredChainError::from)?;
         }
         for (reference, _) in &self.heads {
             chain
                 .activate_head_ref(reference.clone())
-                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+                .map_err(AnchoredChainError::from)?;
         }
         Ok(())
     }
@@ -238,7 +238,7 @@ fn membership_projection_activation_status(
                     MembershipProjectionStatus::OutsidePrefix
                 }
             })
-            .map_err(AnchoredChainError::LoadFailed),
+            .map_err(AnchoredChainError::from),
         (true, coven_protocol::membership::MembershipHeadActivation::Direct) => {
             Err(AnchoredChainError::LoadFailed(
                 "membership authority change has no exact Store activation".to_string(),
@@ -407,7 +407,7 @@ pub(super) fn project_membership_cut_to_store_prefix(
         }
     }
     projected.sort_by_key(|reference| reference.coord.stream_key());
-    validate_membership_floor(&projected).map_err(AnchoredChainError::LoadFailed)?;
+    validate_membership_floor(&projected).map_err(AnchoredChainError::InvalidFloor)?;
     let resolutions = projected
         .iter()
         .map(|reference| {
@@ -440,7 +440,7 @@ pub(super) fn exact_membership_chain_from_graph(
         graph.heads.clone(),
         provider_admin,
     )
-    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+    .map_err(AnchoredChainError::from)?;
     graph.validate_stream_anchors(root, &chain)?;
     Ok(chain)
 }

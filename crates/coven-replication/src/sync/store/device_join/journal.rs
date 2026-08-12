@@ -357,7 +357,3 @@ impl DeviceJoinJournalDatabase {
 pub(super) fn database_error(error: coven_database::DbError) -> DeviceJoinError {
     DeviceJoinError::Database(error)
 }
-
-pub(super) fn provider_error(error: impl std::fmt::Display) -> DeviceJoinError {
-    DeviceJoinError::Provider(error.to_string())
-}

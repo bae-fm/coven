@@ -60,28 +60,115 @@ impl FileSync {
         }
     }
 
-    pub(crate) async fn sync_parent(&self, path: &Path) -> Result<(), String> {
+    pub(crate) async fn sync_parent(&self, path: &Path) -> Result<(), FileError> {
         let parent = parent_of(path)?;
         self.requested();
         match self {
             Self::Enabled => flush_directory(parent)
                 .await
-                .map_err(|error| format!("fsync parent directory {}: {error}", parent.display())),
+                .map_err(|source| FileError::at("fsync parent directory", parent, source)),
             Self::Disabled => Ok(()),
             #[cfg(any(test, feature = "test-utils"))]
             Self::ObservedDisabled(_) => Ok(()),
         }
     }
 
-    pub(crate) fn sync_parent_blocking(&self, path: &Path) -> Result<(), String> {
+    pub(crate) fn sync_parent_blocking(&self, path: &Path) -> Result<(), FileError> {
         let parent = parent_of(path)?;
         self.requested();
         match self {
             Self::Enabled => flush_directory_blocking(parent)
-                .map_err(|error| format!("fsync parent directory {}: {error}", parent.display())),
+                .map_err(|source| FileError::at("fsync parent directory", parent, source)),
             Self::Disabled => Ok(()),
             #[cfg(any(test, feature = "test-utils"))]
             Self::ObservedDisabled(_) => Ok(()),
+        }
+    }
+}
+
+/// A local filesystem operation that failed without erasing its I/O cause.
+#[derive(Debug, thiserror::Error)]
+pub enum FileError {
+    #[error("{operation} {}: {source}", path.display())]
+    Path {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{subject} is not a file: {}", path.display())]
+    NotFile {
+        subject: &'static str,
+        path: PathBuf,
+    },
+    #[error("{operation} {} -> {}: {source}", from.display(), to.display())]
+    BetweenPaths {
+        operation: &'static str,
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("path has no parent directory: {}", path.display())]
+    NoParent { path: PathBuf },
+    #[error("atomic stage in {} cannot commit to {}", stage_parent.display(), destination.display())]
+    InvalidAtomicDestination {
+        stage_parent: PathBuf,
+        destination: PathBuf,
+    },
+    #[error("{subject} size overflow: {}", path.display())]
+    SizeOverflow {
+        subject: &'static str,
+        path: PathBuf,
+    },
+    #[error("local file range is too large: {len} bytes")]
+    RangeTooLarge { len: u64 },
+    #[error("file modification time for {} predates the Unix epoch: {source}", path.display())]
+    ModifiedBeforeUnixEpoch {
+        path: PathBuf,
+        #[source]
+        source: std::time::SystemTimeError,
+    },
+    #[error("atomic write {}: {source}", path.display())]
+    AtomicWrite {
+        path: PathBuf,
+        #[source]
+        source: WriteError<std::io::Error>,
+    },
+    #[error("{operation}; rollback failed: {rollback}")]
+    RollbackFailed {
+        operation: Box<FileError>,
+        rollback: Box<FileError>,
+    },
+}
+
+impl FileError {
+    pub fn at(operation: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Path {
+            operation,
+            path: path.into(),
+            source,
+        }
+    }
+
+    pub fn between(
+        operation: &'static str,
+        from: impl Into<PathBuf>,
+        to: impl Into<PathBuf>,
+        source: std::io::Error,
+    ) -> Self {
+        Self::BetweenPaths {
+            operation,
+            from: from.into(),
+            to: to.into(),
+            source,
+        }
+    }
+
+    pub fn rollback(operation: FileError, rollback: FileError) -> Self {
+        Self::RollbackFailed {
+            operation: Box::new(operation),
+            rollback: Box::new(rollback),
         }
     }
 }
@@ -130,6 +217,14 @@ impl<E: std::fmt::Display> std::fmt::Display for WriteError<E> {
         match self {
             Self::BeforeCommit(error) => write!(f, "{error}"),
             Self::AfterCommit(error) => write!(f, "{error} (after the write committed)"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for WriteError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeCommit(error) | Self::AfterCommit(error) => Some(error),
         }
     }
 }
@@ -190,26 +285,32 @@ impl AtomicFileStage {
         })
     }
 
-    pub fn commit(self, destination: &Path) -> Result<(), WriteError<std::io::Error>> {
+    pub fn commit(self, destination: &Path) -> Result<(), WriteError<FileError>> {
         if destination.parent() != Some(self.parent.as_path()) {
-            return Err(WriteError::BeforeCommit(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "atomic stage in {} cannot commit to {}",
-                    self.parent.display(),
-                    destination.display()
-                ),
-            )));
+            return Err(WriteError::BeforeCommit(
+                FileError::InvalidAtomicDestination {
+                    stage_parent: self.parent,
+                    destination: destination.to_path_buf(),
+                },
+            ));
         }
+        let staged_path = self.temp.path().to_path_buf();
         self.file_sync
             .sync_file_blocking(self.temp.as_file())
-            .map_err(WriteError::BeforeCommit)?;
-        self.temp
-            .persist(destination)
-            .map_err(|error| WriteError::BeforeCommit(error.error))?;
+            .map_err(|source| {
+                WriteError::BeforeCommit(FileError::at("sync staged file", &staged_path, source))
+            })?;
+        self.temp.persist(destination).map_err(|error| {
+            WriteError::BeforeCommit(FileError::between(
+                "persist atomic stage",
+                &staged_path,
+                destination,
+                error.error,
+            ))
+        })?;
         self.file_sync
             .sync_parent_blocking(destination)
-            .map_err(|error| WriteError::AfterCommit(std::io::Error::other(error)))
+            .map_err(WriteError::AfterCommit)
     }
 }
 
@@ -233,27 +334,29 @@ impl AtomicFile {
         Self { path }
     }
 
-    pub fn read_optional(&self) -> Result<Option<Vec<u8>>, String> {
+    pub fn read_optional(&self) -> Result<Option<Vec<u8>>, FileError> {
         match std::fs::read(&self.path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("read {}: {error}", self.path.display())),
+            Err(source) => Err(FileError::at("read file", &self.path, source)),
         }
     }
 
-    pub fn replace(&self, bytes: &[u8]) -> Result<(), String> {
+    pub fn replace(&self, bytes: &[u8]) -> Result<(), FileError> {
         let parent = parent_of(&self.path)?;
         std::fs::create_dir_all(parent)
-            .map_err(|error| format!("create parent directory {}: {error}", parent.display()))?;
-        write_atomic(&self.path, bytes)
-            .map_err(|error| format!("atomic write {}: {error}", self.path.display()))
+            .map_err(|source| FileError::at("create parent directory", parent, source))?;
+        write_atomic(&self.path, bytes).map_err(|source| FileError::AtomicWrite {
+            path: self.path.clone(),
+            source,
+        })
     }
 
-    pub fn remove(&self) -> Result<(), String> {
+    pub fn remove(&self) -> Result<(), FileError> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("remove {}: {error}", self.path.display())),
+            Err(source) => Err(FileError::at("remove file", &self.path, source)),
         }
     }
 
@@ -264,25 +367,26 @@ impl AtomicFile {
 }
 
 /// The directory holding the entry that a rename onto `path` creates.
-fn parent_of(path: &Path) -> Result<&Path, String> {
-    path.parent()
-        .ok_or_else(|| format!("path has no parent directory: {}", path.display()))
+fn parent_of(path: &Path) -> Result<&Path, FileError> {
+    path.parent().ok_or_else(|| FileError::NoParent {
+        path: path.to_path_buf(),
+    })
 }
 
 /// Flush the directory entry a rename onto `path` just wrote, so the installed
 /// file survives a crash. Every durable rename in the crate ends here.
-pub async fn sync_parent_dir(path: &Path) -> Result<(), String> {
+pub async fn sync_parent_dir(path: &Path) -> Result<(), FileError> {
     let parent = parent_of(path)?;
     flush_directory(parent)
         .await
-        .map_err(|error| format!("fsync parent directory {}: {error}", parent.display()))
+        .map_err(|source| FileError::at("fsync parent directory", parent, source))
 }
 
 /// [`sync_parent_dir`] for callers that are not on the async runtime.
-pub fn sync_parent_dir_blocking(path: &Path) -> Result<(), String> {
+pub fn sync_parent_dir_blocking(path: &Path) -> Result<(), FileError> {
     let parent = parent_of(path)?;
     flush_directory_blocking(parent)
-        .map_err(|error| format!("fsync parent directory {}: {error}", parent.display()))
+        .map_err(|source| FileError::at("fsync parent directory", parent, source))
 }
 
 #[cfg(unix)]
@@ -395,7 +499,10 @@ mod tests {
             .await
             .expect_err("root has no parent");
 
-        assert!(error.contains("no parent directory"), "{error}");
+        assert!(matches!(
+            error,
+            FileError::NoParent { path } if path == Path::new("/")
+        ));
     }
 
     #[test]

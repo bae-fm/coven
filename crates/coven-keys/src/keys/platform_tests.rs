@@ -38,7 +38,7 @@ fn missing_entitlement_os_status_maps_to_a_typed_actionable_error() {
 
 /// The match is scoped to exactly -34018, not "any `PlatformFailure`" —
 /// another OSStatus wrapped the same way must still fall through to the
-/// generic, stringly-typed `Persistence` error rather than being
+/// source-preserving keyring error rather than being
 /// mis-reported as a missing entitlement.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[test]
@@ -49,7 +49,7 @@ fn a_different_platform_failure_os_status_is_not_reported_as_missing_entitlement
 
     let mapped = map_keyring_error(raw);
 
-    assert!(matches!(mapped, KeyError::Persistence(_)), "got {mapped:?}");
+    assert!(matches!(mapped, KeyError::Keyring(_)), "got {mapped:?}");
 }
 
 #[test]

@@ -89,7 +89,7 @@ impl ReplayProjection {
             coven_protocol::store_commit::CommitFrontier,
         >,
         materialization: crate::PreparedMergeMaterialization,
-    ) -> Result<coven_protocol::membership::ApplyOutcome, DbError> {
+    ) -> Result<crate::MaterializationOutcome, DbError> {
         let transaction = self
             .connection
             .unchecked_transaction()
@@ -109,11 +109,11 @@ impl ReplayProjection {
             materialization,
         )?;
         match applied.outcome {
-            outcome @ coven_protocol::membership::ApplyOutcome::Applied(_) => {
+            outcome @ crate::MaterializationOutcome::Applied(_) => {
                 transaction.commit().map_err(DbError::from)?;
                 Ok(outcome)
             }
-            outcome @ coven_protocol::membership::ApplyOutcome::Held(_) => {
+            outcome @ crate::MaterializationOutcome::Held(_) => {
                 transaction.rollback().map_err(DbError::from)?;
                 Ok(outcome)
             }
@@ -182,7 +182,7 @@ impl ReplayProjection {
                 None,
             )?,
         )
-        .map_err(|error| DbError::Message(error.to_string()))
+        .map_err(DbError::from)
     }
 
     pub(super) fn capture_snapshot(

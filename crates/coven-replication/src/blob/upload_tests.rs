@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use crate::blob::DrainOutcome;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
+use coven_database::Database;
 use coven_database::StoreDatabase;
-use coven_database::{Database, DbError};
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
-use coven_protocol::blob::DrainOutcome;
 use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
@@ -321,7 +321,7 @@ impl UploadFixture {
         &self,
         clock: &dyn Clock,
         observer: Option<&dyn BlobTransitionObserver>,
-    ) -> Result<DrainOutcome, DbError> {
+    ) -> Result<DrainOutcome, crate::sync::test_helpers::TestError> {
         self.device.drain_uploads(clock, None, observer).await
     }
 
@@ -628,7 +628,7 @@ async fn bad_item_does_not_block_good_later_item() {
     assert_eq!(outcome.failures().failures().len(), 1);
     assert!(matches!(
         outcome.failures().failures()[0].cause,
-        coven_protocol::blob::UploadFailureCause::Storage(_)
+        crate::blob::UploadFailureCause::Storage(_)
     ));
     assert_eq!(fixture.journal_attempt("bad00001").await.0, 1);
     assert!(is_created(&fixture.journal("good0001").await));

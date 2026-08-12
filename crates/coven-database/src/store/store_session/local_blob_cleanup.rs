@@ -16,7 +16,7 @@ pub(crate) fn record_obsolete_copy_intents_on(
         LocalBlobCleanupIdentity::Local => {
             let local_referenced = decls
                 .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             if !local_referenced {
                 record_durable_intent(conn, intent)?;
             }
@@ -73,14 +73,14 @@ pub(crate) fn record_obsolete_copy_intents_on(
                         exact.blob_id(),
                         locator_hash,
                     )
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    .map_err(DbError::from)?;
                 if !referenced {
                     record_durable_intent(conn, &exact)?;
                 }
             }
             let local_referenced = decls
                 .local_copy_is_referenced(conn, intent.namespace(), intent.blob_id())
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             if !local_referenced {
                 record_durable_intent(
                     conn,
@@ -144,7 +144,7 @@ pub(crate) fn local_blob_cleanup_intents_on(
                     rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                        Box::new(error),
                     )
                 })?,
                 row.get::<_, bool>(3)?,

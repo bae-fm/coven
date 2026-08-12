@@ -36,6 +36,30 @@ struct StagedFounderStoreCreation<'operation> {
     rollback_allowed: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("delete founder object {}: {source}", object.slot().logical_key())]
+pub struct FounderObjectDeleteError {
+    object: coven_protocol::objects::ExactObjectRef,
+    #[source]
+    source: coven_protocol::objects::StorageError,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FounderRollbackError {
+    #[error("founder object rollback failed: {0:?}")]
+    ObjectDeletes(Vec<FounderObjectDeleteError>),
+    #[error("reset founder publication database state: {0}")]
+    Database(#[from] coven_database::DbError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}; Store founder rollback failed: {rollback}")]
+pub struct FounderPublicationRollback {
+    #[source]
+    operation: StoreProtocolRootError,
+    rollback: FounderRollbackError,
+}
+
 fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority {
     match attempt {
         StoreCreationAttempt::Initialized(authority) => authority,
@@ -118,14 +142,14 @@ impl<'operation> FounderStoreCreation<'operation> {
         let signer = self.identity;
         let binding = coven_storage::CloudSyncObjectStorage::provider_binding(storage)
             .await
-            .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Provider)?;
         let probes =
             StoreCreationProbeIds::new(coven_protocol::provider::ProviderProbeId::from_bytes(
                 coven_keys::encryption::generate_random_key(),
             ));
         let access =
             coven_protocol::provider::ProviderAccessLocator::for_current_administrator(&binding)
-                .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Provider)?;
         let initialized = StoreCreationAttempt::Initialized(StoreCreationAuthority {
             creation_id: StoreCreationId::from_random_bytes(
                 coven_keys::encryption::generate_random_key(),
@@ -147,7 +171,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let mut attempt = db
             .begin_store_creation_attempt(initialized)
             .await
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Database)?;
         let authority = creation_authority(&attempt);
         if authority.binding != binding
             || authority.founder_pubkey != coven_keys::keys::public_key_hex(signer)
@@ -155,7 +179,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             || authority.schema_version != db.schema_version()
             || authority.sync_routing_hash != db.sync_routing_hash()
         {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "durable Store creation authority differs from this creation request".to_string(),
             ));
         }
@@ -178,7 +202,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             });
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::RootReserved(root) = &attempt {
@@ -200,7 +224,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 });
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::FounderRegistrationReserved(founder) = &attempt {
@@ -222,7 +246,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             let next = StoreCreationAttempt::MembershipReserved(membership);
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::MembershipReserved(membership) = &attempt {
@@ -246,7 +270,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             });
             db.advance_store_creation_attempt(attempt, next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             return Ok(match next {
                 StoreCreationAttempt::DescriptorReserved(reservation) => reservation,
                 _ => unreachable!("constructed descriptor reservation variant"),
@@ -269,7 +293,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 .store_commits
                 .descriptor),
             StoreCreationAttempt::FounderGraphReserved(reservation) => Ok(reservation.descriptor),
-            _ => Err(StoreProtocolRootError::Database(
+            _ => Err(StoreProtocolRootError::Invariant(
                 "Store creation attempt did not reach descriptor reservation".to_string(),
             )),
         }
@@ -285,12 +309,12 @@ impl<'operation> FounderStoreCreation<'operation> {
         let mut attempt = db
             .load_store_creation_attempt()
             .await
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
+            .map_err(StoreProtocolRootError::Database)?
             .ok_or_else(|| {
-                StoreProtocolRootError::Database("Store creation attempt is absent".to_string())
+                StoreProtocolRootError::Invariant("Store creation attempt is absent".to_string())
             })?;
         if creation_authority(&attempt) != &descriptor.membership.founder.root.authority {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "founder graph reservation belongs to another descriptor".to_string(),
             ));
         }
@@ -306,7 +330,7 @@ impl<'operation> FounderStoreCreation<'operation> {
 
         if let StoreCreationAttempt::DescriptorReserved(current) = &attempt {
             if current != descriptor {
-                return Err(StoreProtocolRootError::Database(
+                return Err(StoreProtocolRootError::Invariant(
                     "founder graph reservation belongs to another descriptor".to_string(),
                 ));
             }
@@ -330,7 +354,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 });
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::FounderStoreCommitsReserved(current) = &attempt {
@@ -351,7 +375,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             );
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::FounderAcknowledgementsReserved(current) = &attempt {
@@ -374,7 +398,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 });
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::FounderSnapshotsReserved(current) = &attempt {
@@ -387,7 +411,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             });
             db.advance_store_creation_attempt(attempt.clone(), next.clone())
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             attempt = next;
         }
         if let StoreCreationAttempt::FounderNextAckReserved(current) = &attempt {
@@ -435,12 +459,12 @@ impl<'operation> FounderStoreCreation<'operation> {
             let next = StoreCreationAttempt::FounderGraphReserved(reservation.clone());
             db.advance_store_creation_attempt(attempt, next)
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
             return Ok(reservation);
         }
         match attempt {
             StoreCreationAttempt::FounderGraphReserved(reservation) => Ok(reservation),
-            _ => Err(StoreProtocolRootError::Database(
+            _ => Err(StoreProtocolRootError::Invariant(
                 "Store creation attempt regressed before founder graph reservation".to_string(),
             )),
         }
@@ -458,7 +482,7 @@ impl<'operation> FounderStoreCreation<'operation> {
         let exact_slots = storage
             .probe_exact_slots(db, authority.probes.exact_slots(), &authority.binding)
             .await
-            .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
+            .map_err(StoreProtocolRootError::ProviderProbe)?;
         let provider_admin = coven_protocol::provider::FounderProviderAdminGrant {
             grant_id: authority.provider_admin_grant.clone(),
             provider: authority.binding.device.clone(),
@@ -485,7 +509,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             founder_recovery,
         };
         let root_value = StoreProtocolRoot::signed(descriptor, signer)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Protocol)?;
         let root_id = root_value.descriptor.store_root_id();
         let root_hash = root_value.object_hash();
         let root_prefix = coven_protocol::store_commit::store_protocol_root_logical_key();
@@ -522,13 +546,13 @@ impl<'operation> FounderStoreCreation<'operation> {
             graph_reservation.snapshots.clone(),
             signer,
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         let registration_prepared = prepare_registration_object(
             storage,
             &registration_value,
             root_value.descriptor.founder_registration.clone(),
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(|error| StoreProtocolRootError::Registration(Box::new(error)))?;
         let registration_bytes = registration_value.to_bytes();
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration_value,
@@ -536,11 +560,11 @@ impl<'operation> FounderStoreCreation<'operation> {
         );
         let device_signer = registration_value
             .device_signer(signer)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Protocol)?;
         let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
             &registration_value.acknowledgements
         else {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "founder registration has no acknowledgement anchor".to_string(),
             ));
         };
@@ -557,18 +581,18 @@ impl<'operation> FounderStoreCreation<'operation> {
             root_value.descriptor.founder_grant.clone(),
             &root_value.descriptor.founder_recovery,
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         let device_state = StoreDeviceStateRef::from_resolved(
             CommitFrontier(frontier.0.clone()),
             &resolved_devices,
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         let exclusions = StoreAckExclusionState {
             proposal_freezes: Vec::new(),
         };
         let acknowledgement_activation = registration_value
             .store_acknowledgement_activation(&registration_ref)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
+            .map_err(StoreProtocolRootError::Protocol)?
             .activation_id();
         let initial_ack_value = StoreAck::signed(
             root_hash,
@@ -586,7 +610,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             },
             &device_signer,
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         let initial_ack_bytes = initial_ack_value.to_bytes();
         let initial_ack_prepared = storage
             .prepare_protocol_object(
@@ -705,7 +729,7 @@ impl<'operation> FounderStoreCreation<'operation> {
     async fn rollback_founder_publication(
         &self,
         graph: &coven_database::DurableFounderGraph,
-    ) -> Result<(), String> {
+    ) -> Result<(), FounderRollbackError> {
         let mut objects = vec![
             graph.membership.head.prepared.reference().clone(),
             graph.membership.entry.prepared.reference().clone(),
@@ -719,43 +743,33 @@ impl<'operation> FounderStoreCreation<'operation> {
         for object in objects {
             match self.storage.delete_protocol_object(&object).await {
                 Ok(()) | Err(coven_protocol::objects::StorageError::SlotCollision(_)) => {}
-                Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
+                Err(source) => failures.push(FounderObjectDeleteError { object, source }),
             }
         }
         if !failures.is_empty() {
-            return Err(failures.join("; "));
+            return Err(FounderRollbackError::ObjectDeletes(failures));
         }
         self.database
             .reset_store_founder_graph_publication(graph)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(FounderRollbackError::Database)
     }
 
     async fn stage(
         self,
     ) -> Result<StagedFounderStoreCreation<'operation>, StoreInitializationError> {
-        let existing = self
-            .database
-            .local_store_founder_graph()
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        let existing = self.database.local_store_founder_graph().await?;
         let resumed = existing.is_some();
         let graph = match existing {
             Some(graph) => graph,
             None => {
-                let graph = Box::pin(self.prepare_founder_graph())
-                    .await
-                    .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
-                self.database
-                    .stage_store_founder_graph(graph)
-                    .await
-                    .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+                let graph = Box::pin(self.prepare_founder_graph()).await?;
+                self.database.stage_store_founder_graph(graph).await?;
                 self.database
                     .local_store_founder_graph()
-                    .await
-                    .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
+                    .await?
                     .ok_or_else(|| {
-                        StoreInitializationError::ProtocolRoot(
+                        StoreInitializationError::FounderState(
                             "staged Store founder graph is absent".to_string(),
                         )
                     })?
@@ -786,10 +800,9 @@ impl<'operation> FounderStoreCreation<'operation> {
     ) -> Result<Box<coven_database::DurableFounderGraph>, StoreInitializationError> {
         self.database
             .local_store_founder_graph()
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
+            .await?
             .ok_or_else(|| {
-                StoreInitializationError::ProtocolRoot(
+                StoreInitializationError::FounderState(
                     "rolled-back Store founder graph is absent".to_string(),
                 )
             })
@@ -810,7 +823,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             object: graph.root.prepared.reference().clone(),
         };
         if graph.initial_ack.value.last_sync != founder_timestamp {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "durable Store founder timestamp differs from this creation request".to_string(),
             ));
         }
@@ -819,9 +832,9 @@ impl<'operation> FounderStoreCreation<'operation> {
             &root,
             database.sync_routing_hash(),
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         if protocol_root.descriptor.founder_pubkey != coven_keys::keys::public_key_hex(identity) {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "durable Store founder differs from the creation signer".to_string(),
             ));
         }
@@ -857,7 +870,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                 object: graph.root.prepared.reference().clone(),
             },
         )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(StoreProtocolRootError::Protocol)?;
         let authority = HistoryConstructionAuthority::founder();
         let commit_verifier = StoreCommitVerifier::from_verified_root(
             authority,
@@ -876,7 +889,7 @@ impl<'operation> FounderStoreCreation<'operation> {
             .logical_key()
             .strip_suffix(".json")
             .ok_or_else(|| {
-                StoreProtocolRootError::Database(
+                StoreProtocolRootError::Invariant(
                     "founder registration slot has no .json suffix".to_string(),
                 )
             })?;
@@ -914,7 +927,7 @@ impl<'operation> FounderStoreCreation<'operation> {
                     graph.initial_ack.clone(),
                 )
                 .await
-                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+                .map_err(StoreProtocolRootError::Database)?;
         }
         let membership = &graph.membership;
         let entry_coord = membership.entry.value.coord();
@@ -963,14 +976,14 @@ impl<'operation> FounderStoreCreation<'operation> {
                 },
             )
             .await
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Database)?;
         let history_verifier = MergeHistoryVerifier::from_commit_verifier(
             authority,
             verified_root.clone(),
             commit_verifier,
         )
         .await
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+        .map_err(|error| StoreProtocolRootError::History(Box::new(error)))?;
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             database.clone(),
             storage_access,
@@ -992,18 +1005,13 @@ impl<'operation> FounderStoreCreation<'operation> {
         &self,
         history: AuthorizedStoreHistory<'_>,
     ) -> Result<InitializedStore, StoreInitializationError> {
-        let durable_root = self
-            .database
-            .local_store_root_ref()
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?
-            .ok_or_else(|| {
-                StoreInitializationError::ProtocolRoot(
-                    "published Store founder graph has no durable exact root".to_string(),
-                )
-            })?;
+        let durable_root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+            StoreInitializationError::FounderState(
+                "published Store founder graph has no durable exact root".to_string(),
+            )
+        })?;
         if history.root() != &durable_root {
-            return Err(StoreInitializationError::ProtocolRoot(
+            return Err(StoreInitializationError::FounderState(
                 "published Store founder history differs from its durable exact root".to_string(),
             ));
         }
@@ -1013,13 +1021,7 @@ impl<'operation> FounderStoreCreation<'operation> {
 
 impl StagedFounderStoreCreation<'_> {
     async fn reset_partial_publication(&mut self) -> Result<(), StoreInitializationError> {
-        Box::pin(self.creation.rollback_founder_publication(&self.graph))
-            .await
-            .map_err(|rollback| {
-                StoreInitializationError::ProtocolRoot(format!(
-                    "Store founder rollback before publication: {rollback}"
-                ))
-            })?;
+        Box::pin(self.creation.rollback_founder_publication(&self.graph)).await?;
         self.graph = self.creation.reload_founder_graph().await?;
         Ok(())
     }
@@ -1030,21 +1032,19 @@ impl StagedFounderStoreCreation<'_> {
             Err(operation) if self.rollback_allowed => {
                 match Box::pin(self.creation.rollback_founder_publication(&self.graph)).await {
                     Ok(()) => {
-                        return Err(StoreInitializationError::ProtocolRoot(
-                            operation.to_string(),
-                        ));
+                        return Err(StoreInitializationError::ProtocolRoot(operation));
                     }
                     Err(rollback) => {
-                        return Err(StoreInitializationError::ProtocolRoot(format!(
-                            "{operation}; Store founder rollback failed: {rollback}"
-                        )));
+                        return Err(FounderPublicationRollback {
+                            operation,
+                            rollback,
+                        }
+                        .into());
                     }
                 }
             }
             Err(operation) => {
-                return Err(StoreInitializationError::ProtocolRoot(
-                    operation.to_string(),
-                ));
+                return Err(StoreInitializationError::ProtocolRoot(operation));
             }
         };
         self.creation.finish_published(history).await

@@ -66,11 +66,9 @@ impl VerifiedMergeWinner {
     > {
         let commit = candidate
             .verify_nonactivation_candidate(self.store_root_hash, author)
-            .map_err(|error| {
-                coven_protocol::remote_object::RemoteObjectRecordError::InvalidProof(
-                    error.to_string(),
-                )
-            })?;
+            .map_err(
+                coven_protocol::remote_object::RemoteObjectRecordError::InvalidProofProtocol,
+            )?;
         let reference = commit.reference().clone();
         if self.expected.store_root_hash != self.store_root_hash
             || commit.store_root_hash != self.store_root_hash
@@ -120,7 +118,7 @@ impl VerifiedMergeWinner {
             }
             nonactivations.push(
                 self.verified_nonactivation(target, author)
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                    .map_err(StoreError::from)?,
             );
         }
         Ok(nonactivations)

@@ -33,7 +33,7 @@ impl<'store> StoreCircleCommands<'store> {
         self.store
             .authorize_writer()
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+            .map_err(CircleOperationError::from)
     }
 
     /// The read-only settlement status of a Circle's in-flight epoch close: for
@@ -170,7 +170,7 @@ impl<'store> StoreCircleCommands<'store> {
             .store
             .authorize()
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         authorized.discard_circle_operation(operation_id).await
     }
 

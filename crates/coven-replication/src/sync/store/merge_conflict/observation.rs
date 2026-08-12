@@ -21,9 +21,7 @@ impl MergeConflictHistory<'_, '_> {
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let unverified: coven_protocol::store_commit::StoreDeviceHead =
-            serde_json::from_slice(&winner_bytes).map_err(|error| {
-                StoreError::InvalidOutbound(format!("parse competing Merge head: {error}"))
-            })?;
+            serde_json::from_slice(&winner_bytes)?;
         if unverified.author_registration != expected.author_registration
             || unverified.commit.coord != expected.commit.coord
             || unverified.successor.activation != expected.successor.activation
@@ -51,7 +49,7 @@ impl MergeConflictHistory<'_, '_> {
             registration.value(),
             &expected.commit,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
         let winner_commit = self.history.load_ref(&unverified.commit).await?;
         if winner_commit.author() != registration.value() {
             return Err(StoreError::InvalidOutbound(
@@ -63,10 +61,7 @@ impl MergeConflictHistory<'_, '_> {
             store_root_hash,
             registration.value(),
             &unverified.commit,
-        )
-        .map_err(|error| {
-            StoreError::InvalidOutbound(format!("verify occupied Merge head: {error}"))
-        })?;
+        )?;
         Ok(abandonment::VerifiedMergeWinner::from_verified_parts(
             store_root_hash,
             slot.clone(),

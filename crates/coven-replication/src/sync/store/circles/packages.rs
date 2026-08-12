@@ -9,9 +9,44 @@ use coven_protocol::store_commit::{
 };
 use coven_storage::run_blocking_object_verification;
 
+#[derive(Debug, thiserror::Error)]
 pub enum CirclePackageReadError {
-    Database(DbError),
+    #[error("Circle package database: {0}")]
+    Database(#[from] DbError),
+    #[error("Circle package is invalid: {0}")]
     Invalid(String),
+    #[error("Circle package state: {0}")]
+    CircleState(#[from] coven_protocol::circle_activation::CircleStateError),
+    #[error("Circle package storage: {0}")]
+    Storage(#[from] coven_protocol::objects::StorageError),
+    #[error("Circle package object: {0}")]
+    StoreObject(#[from] coven_protocol::objects::StoreObjectError),
+    #[error("Circle package sync cycle: {0}")]
+    SyncCycle(#[source] Box<crate::sync::cycle::SyncCycleFailure>),
+    #[error("Circle package operation: {0}")]
+    CircleOperation(#[source] Box<crate::sync::store::circles::CircleOperationError>),
+    #[error("Circle package pull: {0}")]
+    Pull(#[source] Box<crate::sync::store::StorePullError>),
+    #[error("Circle package roster: {0}")]
+    Roster(#[from] coven_protocol::circle_roster::CircleRosterError),
+}
+
+impl From<crate::sync::cycle::SyncCycleFailure> for CirclePackageReadError {
+    fn from(error: crate::sync::cycle::SyncCycleFailure) -> Self {
+        Self::SyncCycle(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::circles::CircleOperationError> for CirclePackageReadError {
+    fn from(error: crate::sync::store::circles::CircleOperationError) -> Self {
+        Self::CircleOperation(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StorePullError> for CirclePackageReadError {
+    fn from(error: crate::sync::store::StorePullError) -> Self {
+        Self::Pull(Box::new(error))
+    }
 }
 
 pub(crate) struct OpenedCirclePackage {
@@ -50,7 +85,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
     ) -> Result<OpenedCirclePackage, CirclePackageReadError> {
         access
             .authorize_package(reference, author)
-            .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+            .map_err(CirclePackageReadError::from)?;
         let commit = verified.value();
         if !commit
             .circle_packages()
@@ -76,7 +111,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             .storage
             .read_protocol_object(&context, &reference.package.object, &semantic_prefix)
             .await
-            .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+            .map_err(CirclePackageReadError::from)?;
         let verify_bytes = bytes.clone();
         let expected_commit = commit.clone();
         let expected_circle_id = reference.circle_id;
@@ -89,7 +124,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             }),
         )
         .await
-        .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
+        .map_err(CirclePackageReadError::from)?;
         Ok(OpenedCirclePackage {
             object: VerifiedObject {
                 value,
@@ -179,7 +214,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
             let exact_access = if let Some(activation) = same_commit {
                 activation
                     .epoch_access()
-                    .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?
+                    .map_err(CirclePackageReadError::from)?
             } else {
                 self.database
                     .circle_epoch_access(
@@ -226,16 +261,7 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                         reference.circle_id
                     )));
                 };
-                let historical_commit = self
-                    .history
-                    .load_ref(&historical_commit_ref)
-                    .await
-                    .map_err(|error| {
-                        CirclePackageReadError::Invalid(format!(
-                            "load Circle {} historical package control: {error}",
-                            reference.circle_id
-                        ))
-                    })?;
+                let historical_commit = self.history.load_ref(&historical_commit_ref).await?;
                 let roster_chain = super::activation::CircleActivationVerifier::new(
                     self.database,
                     self.storage,
@@ -248,20 +274,15 @@ impl<'operation, 'storage> CirclePackageReader<'operation, 'storage> {
                     &keyring,
                 )
                 .await
-                .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?;
-                let roster = roster_chain.try_resolved().map_err(|error| {
-                    CirclePackageReadError::Invalid(format!(
-                        "resolve Circle {} historical package roster: {error}",
-                        reference.circle_id
-                    ))
-                })?;
+                .map_err(CirclePackageReadError::from)?;
+                let roster = roster_chain.try_resolved()?;
                 coven_protocol::circle_activation::CircleEpochAccess::from_historical(
                     reference.circle_id,
                     reference.key_fingerprint,
                     &keyring,
                     &roster,
                 )
-                .map_err(|error| CirclePackageReadError::Invalid(error.to_string()))?
+                .map_err(CirclePackageReadError::from)?
             };
             let package = self
                 .open_package(&access, verified, reference, author)

@@ -140,10 +140,11 @@ impl TestOwnerGraph {
     pub async fn drain_published_blob_drop_intents(
         &self,
         through_sequence: u64,
-    ) -> Result<(), String> {
-        self.local_access
+    ) -> Result<(), crate::sync::test_helpers::TestError> {
+        Ok(self
+            .local_access
             .drain_published_blob_drop_intents(through_sequence)
-            .await
+            .await?)
     }
 
     pub async fn make_remote(
@@ -272,13 +273,12 @@ impl TestOwnerGraph {
         &self,
         storage: impl Into<std::sync::Arc<coven_storage::CloudSyncConnection>>,
         identity: coven_keys::keys::UserKeypair,
-    ) -> Result<crate::sync::cycle::SyncCycleResult, String> {
-        let expected_store_root = self
-            .database
-            .local_store_root_ref()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
+    ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::test_helpers::TestError> {
+        let expected_store_root = self.database.local_store_root_ref().await?.ok_or_else(|| {
+            crate::sync::test_helpers::TestError::invariant(
+                "cycle fixture database has no exact Store root",
+            )
+        })?;
         let components = Box::pin(crate::sync::cycle::PreparedSyncComponents::prepare(
             self.database.clone(),
             self.store_dir.clone(),
@@ -289,15 +289,11 @@ impl TestOwnerGraph {
             },
             None,
         ))
-        .await
-        .map_err(|error| error.to_string())?;
-        let components = Box::pin(components.initialize())
-            .await
-            .map_err(|error| error.to_string())?;
-        components
+        .await?;
+        let components = Box::pin(components.initialize()).await?;
+        Ok(components
             .run_cycle(&coven_foundation::clock::SystemClock, None, None)
-            .await
-            .map_err(|error| error.to_string())
+            .await?)
     }
 }
 

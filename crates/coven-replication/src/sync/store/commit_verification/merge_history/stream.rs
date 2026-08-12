@@ -8,9 +8,9 @@ fn held_protocol_error(error: StoreProtocolError) -> HeldStorePositionReason {
         | StoreProtocolError::StoreRootMismatch { .. }
         | StoreProtocolError::StoreMismatch { .. }
         | StoreProtocolError::FounderMismatch { .. } => {
-            HeldStorePositionReason::WrongSlot(error.to_string())
+            HeldStorePositionReason::WrongSlotProtocol(error.into())
         }
-        error => HeldStorePositionReason::InvalidObject(error.to_string()),
+        error => HeldStorePositionReason::InvalidObjectProtocol(error.into()),
     }
 }
 
@@ -93,7 +93,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                             seq: sequence,
                             head_hash: ObjectHash::digest(&bytes),
                         },
-                        reason: HeldStorePositionReason::InvalidObject(error.to_string()),
+                        reason: HeldStorePositionReason::InvalidObjectJson(error.into()),
                     }));
                     break;
                 }
@@ -164,7 +164,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Err(error) => {
                     let reason = match error {
                         StorePullError::Object(error) => held_object_error(error),
-                        error => HeldStorePositionReason::InvalidObject(error.to_string()),
+                        error => HeldStorePositionReason::InvalidObjectPull(error.into()),
                     };
                     block = Some(MergeStreamBlock::Authenticated(HeldStorePosition::commit(
                         &unverified.commit,
@@ -309,7 +309,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         &readiness.initial_ack,
                         &initial_ack,
                     )
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                    .map_err(RegistrationLoadError::from)?;
                 Ok(StoreDeviceRegistrationActivation::Join {
                     attempt_id: *attempt_id,
                     outcome: outcome.clone(),
@@ -499,9 +499,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                     .await
                     .map_err(StorePullError::MembershipChain)?,
             };
-            verified_membership_prefix
-                .validate_complete_membership(&membership)
-                .map_err(StorePullError::InvalidState)?;
+            verified_membership_prefix.validate_complete_membership(&membership)?;
             verify_merge_membership_state_ref(
                 &commit.membership_state,
                 &membership,
@@ -544,17 +542,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Some(&membership),
             ))
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
             let acknowledgement = self
                 .validate_commit_acknowledgement(&commit, &author)
                 .await
-                .map_err(|error| match error {
-                    RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                    RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-                })?;
+                .map_err(StorePullError::from)?;
             let membership_control =
                 if let Some(store_commit::StoreControl { transition }) = commit.control() {
                     let (activations, conflict_resolution) =
@@ -565,8 +557,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                             &predecessor_state,
                             pending_resolution.as_ref(),
                         ))
-                        .await
-                        .map_err(StorePullError::InvalidState)?;
+                        .await?;
                     Some(VerifiedMergeMembershipControl {
                         activations,
                         head_activation: VerifiedMergeMembershipHeadActivation {

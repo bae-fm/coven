@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 mod abandonment;
 mod blob_lifecycle;
+pub(crate) use blob_lifecycle::TombstoneGcError;
 mod blob_preparation;
 mod blob_upload;
 pub(crate) mod commit_plan;
@@ -182,7 +183,7 @@ impl MergeConflictResolutionCommitPlan {
             self.device_state.recovery().to_vec(),
             resolved.state_hash,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
         let common = commit_plan::StoreOperationPlanCommon::new(
             self.authorship,
             self.writer,
@@ -213,7 +214,7 @@ pub enum StoreWriterAuthorizationError {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum AuthorizationRefreshError {
+pub(crate) enum AuthorizationRefreshError {
     #[error("select this device's wrapped-key authority: {0}")]
     Membership(#[source] coven_protocol::membership::MembershipError),
     #[error("read this device's wrapped key: {0}")]

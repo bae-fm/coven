@@ -84,11 +84,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             coord,
             commit_prepared.reference().clone(),
         )
-        .map_err(|error| {
-            CircleOperationError::InvalidState(format!(
-                "build replacement Circle commit reference: {error}"
-            ))
-        })?;
+        .map_err(CircleOperationError::from)?;
         let old_head = journal.operation().policy.head.clone();
         let history_evidence = journal.operation().policy.history_evidence.clone();
         let head = self
@@ -98,11 +94,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 commit_ref.clone(),
                 old_head.successor.clone(),
             )
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "sign replacement Circle Store head: {error}"
-                ))
-            })?;
+            .map_err(CircleOperationError::from)?;
         let head_slot = journal
             .operation()
             .prepared_objects
@@ -132,7 +124,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             self.database
                 .install_payload_for_test(object.stored_bytes().to_vec())
                 .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
         }
         let operation = journal.operation_mut();
         operation.commit_bytes = commit.to_bytes();

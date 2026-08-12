@@ -125,9 +125,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .history
             .load_registration(&publication.head.body.author_registration)
             .await
-            .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
-            })?
+            .map_err(crate::sync::store::membership::InviteError::from)?
             .value;
         if !publication.head.verify(&author) {
             return Err(
@@ -185,7 +183,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .store_dir
             .stage_atomic_file(destination)
             .await
-            .map_err(crate::sync::BlobCacheError::Io)?;
+            .map_err(crate::sync::BlobCacheError::File)?;
         self.history
             .stage_verified_blob_plaintext(authority, stored, stage)
             .await
@@ -280,11 +278,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(execution.result)
     }
 
-    pub(crate) fn require_current_owner(&self, author_pubkey: &str) -> Result<(), String> {
+    pub(crate) fn require_current_owner(
+        &self,
+        author_pubkey: &str,
+    ) -> Result<(), coven_protocol::membership::MembershipError> {
         if self.membership.is_owner_now(author_pubkey) {
             Ok(())
         } else {
-            Err(format!("author {author_pubkey} is not a current owner"))
+            Err(
+                coven_protocol::membership::MembershipError::SignerIsNotOwner(
+                    author_pubkey.to_string(),
+                ),
+            )
         }
     }
 

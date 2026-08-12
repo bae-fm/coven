@@ -58,8 +58,12 @@ pub enum RowIdentityError {
     MissingPrimaryKey { table: String, side: &'static str },
     #[error("synced table {table:?} changeset has a non-TEXT {side} primary-key value")]
     NonTextPrimaryKey { table: String, side: &'static str },
-    #[error("synced table {table:?} changeset primary key is not UTF-8: {reason}")]
-    NonUtf8PrimaryKey { table: String, reason: String },
+    #[error("synced table {table:?} changeset primary key is not UTF-8: {source}")]
+    NonUtf8PrimaryKey {
+        table: String,
+        #[source]
+        source: std::str::Utf8Error,
+    },
 }
 
 impl RowIdentityError {

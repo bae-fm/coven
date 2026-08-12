@@ -35,7 +35,9 @@ pub enum MembershipOpsError {
     #[error("Store protocol object error: {0}")]
     StoreObject(#[from] coven_protocol::objects::StoreObjectError),
     #[error("membership database state error: {0}")]
-    Database(String),
+    Database(#[from] coven_database::DbError),
+    #[error("Store access failed: {0}")]
+    Store(#[from] crate::sync::store::StoreError),
     #[error("{0}")]
     Chain(#[from] AnchoredChainError),
     #[error("{0}")]
@@ -82,11 +84,29 @@ pub enum AnchoredChainError {
     },
     #[error("membership chain failed to load/validate: {0}")]
     LoadFailed(String),
+    #[error("membership object: {0}")]
+    Object(#[from] StoreObjectError),
+    #[error("membership database: {0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("membership protocol: {0}")]
+    Membership(#[from] coven_protocol::membership::MembershipError),
+    #[error("membership provider probe: {0}")]
+    ProviderProbe(#[from] coven_protocol::provider::ProviderProbeError),
+    #[error("membership floor failed validation: {0}")]
+    InvalidFloor(#[from] coven_protocol::membership::MembershipFloorError),
+    #[error("membership Store pull: {0}")]
+    StorePull(#[source] Box<crate::sync::store::StorePullError>),
     #[error("chain founder {founder:?} is not the pinned owner {owner}")]
     FounderMismatch {
         founder: Option<String>,
         owner: String,
     },
+}
+
+impl From<crate::sync::store::StorePullError> for AnchoredChainError {
+    fn from(error: crate::sync::store::StorePullError) -> Self {
+        Self::StorePull(Box::new(error))
+    }
 }
 
 impl AnchoredChainError {
@@ -99,7 +119,7 @@ impl AnchoredChainError {
                     source,
                 }
             }
-            error => Self::LoadFailed(error.to_string()),
+            error => Self::Object(error),
         }
     }
 }

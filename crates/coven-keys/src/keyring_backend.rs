@@ -16,24 +16,21 @@ pub(crate) fn install_platform_store() -> Result<(), KeyError> {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn install_bundled_store() -> Result<(), KeyError> {
-    let store = apple_native_keyring_store::protected::Store::new()
-        .map_err(|e| KeyError::Persistence(format!("build apple keyring store: {e}")))?;
+    let store = apple_native_keyring_store::protected::Store::new().map_err(KeyError::Keyring)?;
     keyring_core::set_default_store(store);
     Ok(())
 }
 
 #[cfg(target_os = "android")]
 fn install_bundled_store() -> Result<(), KeyError> {
-    let store = android_native_keyring_store::Store::new()
-        .map_err(|e| KeyError::Persistence(format!("build android keyring store: {e}")))?;
+    let store = android_native_keyring_store::Store::new().map_err(KeyError::Keyring)?;
     keyring_core::set_default_store(store);
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn install_bundled_store() -> Result<(), KeyError> {
-    let store = windows_native_keyring_store::Store::new()
-        .map_err(|e| KeyError::Persistence(format!("build windows keyring store: {e}")))?;
+    let store = windows_native_keyring_store::Store::new().map_err(KeyError::Keyring)?;
     keyring_core::set_default_store(store);
     Ok(())
 }

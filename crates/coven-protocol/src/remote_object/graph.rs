@@ -21,9 +21,7 @@ impl CandidateObjectGraph {
     pub fn from_commit(
         commit: &crate::store_commit::StoreBatchCommit,
     ) -> Result<Self, RemoteObjectRecordError> {
-        let manifest = commit
-            .verified_candidate_objects()
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        let manifest = commit.verified_candidate_objects()?;
         let mut objects = Vec::new();
         for candidate in &manifest.objects {
             match candidate {
@@ -112,9 +110,7 @@ impl CandidateObjectGraph {
         owner: &StoreBatchCommitRef,
         materials: Vec<CandidateObjectMaterial>,
     ) -> Result<Vec<ClosedRemoteObject>, RemoteObjectRecordError> {
-        owner
-            .verify_commit(commit)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        owner.verify_commit(commit)?;
         if self.family != commit.candidate_family() {
             return Err(RemoteObjectRecordError::DomainMismatch);
         }

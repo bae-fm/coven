@@ -127,7 +127,12 @@ impl coven_protocol::provider::DeviceJoinChallengePublicationJournal for StoreDa
     > {
         self.prepare_device_join_challenge_publication(challenge.clone())
             .await
-            .map_err(|error| coven_protocol::objects::StorageError::Storage(error.to_string()))
+            .map_err(|error| {
+                coven_protocol::objects::StorageError::backend(
+                    "prepare device join challenge publication",
+                    error,
+                )
+            })
     }
 
     async fn claim_published(
@@ -137,6 +142,11 @@ impl coven_protocol::provider::DeviceJoinChallengePublicationJournal for StoreDa
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.publish_device_join_challenge(authorization.clone(), challenge.clone())
             .await
-            .map_err(|error| coven_protocol::objects::StorageError::Storage(error.to_string()))
+            .map_err(|error| {
+                coven_protocol::objects::StorageError::backend(
+                    "publish device join challenge",
+                    error,
+                )
+            })
     }
 }

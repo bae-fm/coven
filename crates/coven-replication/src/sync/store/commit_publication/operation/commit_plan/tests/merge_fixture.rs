@@ -249,8 +249,7 @@ impl PreparedWriteFixture {
     pub(super) async fn publish_prepared_remote_objects(&self) -> Result<(), StoreError> {
         self.device
             .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+            .await?
             .publish_prepared_remote_objects(&self.write_id)
             .await
     }

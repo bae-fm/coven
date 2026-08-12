@@ -928,14 +928,11 @@ fn build_expected_coven_schema_manifest(
     live_coven_schema_manifest(&conn)
 }
 
-static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, String>> =
-    std::sync::LazyLock::new(|| {
-        build_expected_coven_schema_manifest(false).map_err(|error| error.to_string())
-    });
-static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, String>> =
-    std::sync::LazyLock::new(|| {
-        build_expected_coven_schema_manifest(true).map_err(|error| error.to_string())
-    });
+static EXPECTED_COVEN_SCHEMA: std::sync::LazyLock<Result<CovenSchemaManifest, rusqlite::Error>> =
+    std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(false));
+static EXPECTED_ROUTED_COVEN_SCHEMA: std::sync::LazyLock<
+    Result<CovenSchemaManifest, rusqlite::Error>,
+> = std::sync::LazyLock::new(|| build_expected_coven_schema_manifest(true));
 
 pub fn expected_coven_schema_manifest(
     include_routing: bool,
@@ -945,11 +942,7 @@ pub fn expected_coven_schema_manifest(
     } else {
         &*EXPECTED_COVEN_SCHEMA
     };
-    expected.as_ref().map_err(|error| {
-        DbError::Message(format!(
-            "failed to construct the expected Coven schema manifest: {error}"
-        ))
-    })
+    expected.as_ref().map_err(DbError::ExpectedSchema)
 }
 
 /// Creates Coven's bookkeeping tables after the fresh host schema has passed

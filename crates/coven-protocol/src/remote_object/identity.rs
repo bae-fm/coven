@@ -39,13 +39,10 @@ pub(super) fn validate_access_pairs(
             .get(&envelope_ref.object)
             .ok_or(RemoteObjectRecordError::CandidateObjectMissing)?;
         let leaf: crate::circle_control::CircleAccessLeaf =
-            serde_json::from_slice(&leaf_material.canonical_semantic_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            serde_json::from_slice(&leaf_material.canonical_semantic_bytes)?;
         let envelope: crate::circle_control::AccessEnvelope =
-            serde_json::from_slice(&envelope_material.canonical_semantic_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-        let leaf_bytes = serde_json::to_vec(&leaf)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            serde_json::from_slice(&envelope_material.canonical_semantic_bytes)?;
+        let leaf_bytes = serde_json::to_vec(&leaf)?;
         if envelope.value_hash != ObjectHash::digest(&leaf_bytes) {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
@@ -237,8 +234,7 @@ pub(super) fn validate_package_reference(
     canonical_semantic_bytes: &[u8],
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
-    let package = crate::audience_package::AudiencePackage::parse(canonical_semantic_bytes)
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+    let package = crate::audience_package::AudiencePackage::parse(canonical_semantic_bytes)?;
     let size = u64::try_from(canonical_semantic_bytes.len())
         .map_err(|_| RemoteObjectRecordError::DomainMismatch)?;
     if reference.object != *object
@@ -276,10 +272,8 @@ pub(super) fn validate_circle_access_leaf_identity(
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
     let leaf: crate::circle_control::CircleAccessLeaf =
-        serde_json::from_slice(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-    let parsed_bytes = serde_json::to_vec(&leaf)
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        serde_json::from_slice(canonical_semantic_bytes)?;
+    let parsed_bytes = serde_json::to_vec(&leaf)?;
     if parsed_bytes != canonical_semantic_bytes
         || !leaf.verify_signature()
         || leaf.candidate_family != family
@@ -304,10 +298,8 @@ pub(super) fn validate_circle_access_envelope_identity(
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
     let envelope: crate::circle_control::AccessEnvelope =
-        serde_json::from_slice(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-    let parsed_bytes = serde_json::to_vec(&envelope)
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        serde_json::from_slice(canonical_semantic_bytes)?;
+    let parsed_bytes = serde_json::to_vec(&envelope)?;
     if parsed_bytes != canonical_semantic_bytes
         || envelope.verify_by(&envelope.owner_pubkey).is_err()
         || envelope.candidate_family != family
@@ -331,10 +323,8 @@ pub(super) fn validate_circle_epoch_close_intent_identity(
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
     let intent: crate::circle_control::CircleEpochCloseIntent =
-        serde_json::from_slice(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-    let parsed_bytes = serde_json::to_vec(&intent)
-        .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+        serde_json::from_slice(canonical_semantic_bytes)?;
+    let parsed_bytes = serde_json::to_vec(&intent)?;
     let expected = format!(
         "{}.json",
         crate::circle_control::circle_epoch_close_intent_semantic_prefix(
@@ -363,8 +353,7 @@ pub(super) fn validate_circle_epoch_close_outcome_identity(
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
     let crate::circle_control::CircleEpochCloseSlotValue::Outcome(outcome) =
-        crate::circle_control::CircleEpochCloseSlotValue::parse(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?
+        crate::circle_control::CircleEpochCloseSlotValue::parse(canonical_semantic_bytes)?
     else {
         return Err(RemoteObjectRecordError::StoredReferenceMismatch);
     };
@@ -394,8 +383,7 @@ pub(super) fn validate_circle_epoch_close_cancellation_identity(
     object: &ExactObjectRef,
 ) -> Result<(), RemoteObjectRecordError> {
     let crate::circle_control::CircleEpochCloseSlotValue::Cancellation(cancellation) =
-        crate::circle_control::CircleEpochCloseSlotValue::parse(canonical_semantic_bytes)
-            .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?
+        crate::circle_control::CircleEpochCloseSlotValue::parse(canonical_semantic_bytes)?
     else {
         return Err(RemoteObjectRecordError::StoredReferenceMismatch);
     };
@@ -426,11 +414,8 @@ pub(super) fn validate_retained_authority_identity(
     match &identity.domain {
         RetainedAuthorityObjectDomain::Commit { reference } => {
             let commit: crate::store_commit::StoreBatchCommit =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .verify_commit(&commit)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify_commit(&commit)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
@@ -440,8 +425,7 @@ pub(super) fn validate_retained_authority_identity(
             head_commit,
         } => {
             let head: crate::store_commit::StoreDeviceHead =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if head.head_hash() != reference.head_hash
                 || reference.object != identity.object
                 || head.commit != *head_commit
@@ -451,8 +435,7 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::Acknowledgement { reference } => {
             let acknowledgement: crate::store_commit::StoreAck =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if acknowledgement.registration != reference.registration
                 || acknowledgement.sequence != reference.sequence
                 || acknowledgement.ack_hash() != reference.ack_hash
@@ -463,8 +446,7 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::CircleAcknowledgement { reference } => {
             let acknowledgement: crate::store_commit::CircleAck =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if acknowledgement.registration != reference.registration
                 || acknowledgement.circle_id != reference.circle_id
                 || acknowledgement.sequence != reference.sequence
@@ -476,19 +458,15 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::MergeMembershipWrappedStoreKey { reference } => {
             let wrapped: crate::wrapped_store_key::WrappedStoreKey =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .validate_value(&wrapped, canonical_semantic_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.validate_value(&wrapped, canonical_semantic_bytes)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
         RetainedAuthorityObjectDomain::StoreMembershipResolution { reference } => {
             let resolution: crate::membership::StoreMembershipConflictResolution =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             let expected_key = format!(
                 "{}.json",
                 crate::store_commit::membership_resolution_semantic_prefix(
@@ -508,16 +486,14 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::MergeMembershipEntry { reference } => {
             let entry: crate::membership::MembershipEntry =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if entry.coord() != reference.coord || reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
         RetainedAuthorityObjectDomain::MergeMembershipHead { reference } => {
             let head: crate::membership::AuthorHead =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if head.entry_coord() != reference.coord
                 || head.head_hash() != reference.head_hash
                 || reference.object != identity.object
@@ -527,19 +503,15 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference } => {
             let proposal: crate::store_commit::StoreDeviceExclusionProposal =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .verify_proposal(&proposal)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify_proposal(&proposal)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
         RetainedAuthorityObjectDomain::DeviceExclusionOutcome { reference } => {
             let outcome: crate::store_commit::StoreDeviceExclusionOutcome =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
             if outcome.proposal() != reference.proposal()
                 || outcome.outcome_hash() != reference.outcome_hash()
                 || reference.object() != &identity.object
@@ -549,33 +521,24 @@ pub(super) fn validate_retained_authority_identity(
         }
         RetainedAuthorityObjectDomain::ReclaimEvidence { reference } => {
             let value: crate::reclaim::ReclaimEvidence =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .verify(&value)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify(&value)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
         RetainedAuthorityObjectDomain::ReclaimAuthorization { reference } => {
             let value: crate::reclaim::ReclaimAuthorization =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .verify_identity(&value)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify_identity(&value)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
         RetainedAuthorityObjectDomain::ReclaimReceipt { reference } => {
             let value: crate::reclaim::ReclaimReceipt =
-                serde_json::from_slice(canonical_semantic_bytes)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
-            reference
-                .verify_identity(&value)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                serde_json::from_slice(canonical_semantic_bytes)?;
+            reference.verify_identity(&value)?;
             if reference.object != identity.object {
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }

@@ -31,7 +31,8 @@ async fn read_on_write_path_is_rejected_after_payload_spooling() {
         .await;
     assert!(matches!(
         result,
-        Err(CovenError::Database(DbError::ReadOnlyWriteTransaction))
+        Err(CovenError::Database(error))
+            if matches!(error.as_ref(), DbError::ReadOnlyWriteTransaction)
     ));
 }
 

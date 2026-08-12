@@ -103,10 +103,7 @@ impl RetainedVerifiedActivatedAck {
             {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
-            reference
-                .object
-                .verify(&value.to_bytes())
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            reference.object.verify(&value.to_bytes())?;
             StoreAck::parse_at(&value.to_bytes(), root, reference, registration.value())?;
             predecessor = Some(reference);
         }
@@ -201,19 +198,11 @@ impl RetainedMergeCommitEvidence {
             proof
                 .entry
                 .object
-                .verify(
-                    &serde_json::to_vec(&proof.entry_value)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
-                )
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                .verify(&serde_json::to_vec(&proof.entry_value)?)?;
             proof
                 .head
                 .object
-                .verify(
-                    &serde_json::to_vec(&proof.head_value)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
-                )
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                .verify(&serde_json::to_vec(&proof.head_value)?)?;
             match (
                 &proof.entry_value.change,
                 &proof.resolution,
@@ -228,14 +217,7 @@ impl RetainedMergeCommitEvidence {
                     && value.resolution_ref(reference.object.clone()) == *reference
                     && value.verify_signature() =>
                 {
-                    reference
-                        .object
-                        .verify(
-                            &serde_json::to_vec(value).map_err(|error| {
-                                StoreProtocolError::Malformed(error.to_string())
-                            })?,
-                        )
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    reference.object.verify(&serde_json::to_vec(value)?)?;
                 }
                 (crate::membership::MembershipChange::ResolutionActivation { .. }, _, _)
                 | (_, Some(_), _)
@@ -321,8 +303,7 @@ impl RetainedVerifiedMergeHistorySummary {
             registration
                 .reference()
                 .object
-                .verify(&registration.value().to_bytes())
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                .verify(&registration.value().to_bytes())?;
             StoreDeviceRegistration::parse_at(
                 &registration.value().to_bytes(),
                 &registration.value().store_root,
@@ -384,11 +365,7 @@ impl RetainedVerifiedMergeHistorySummary {
             proof
                 .entry
                 .object
-                .verify(
-                    &serde_json::to_vec(&proof.entry_value)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
-                )
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                .verify(&serde_json::to_vec(&proof.entry_value)?)?;
             let head_author = self
                 .registrations
                 .get(&proof.head_value.body.author_registration.device_id)
@@ -406,11 +383,7 @@ impl RetainedVerifiedMergeHistorySummary {
             proof
                 .head
                 .object
-                .verify(
-                    &serde_json::to_vec(&proof.head_value)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?,
-                )
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                .verify(&serde_json::to_vec(&proof.head_value)?)?;
             match (
                 &proof.entry_value.change,
                 &proof.resolution,
@@ -425,14 +398,7 @@ impl RetainedVerifiedMergeHistorySummary {
                     && value.resolution_ref(reference.object.clone()) == *reference
                     && value.verify_signature() =>
                 {
-                    reference
-                        .object
-                        .verify(
-                            &serde_json::to_vec(value).map_err(|error| {
-                                StoreProtocolError::Malformed(error.to_string())
-                            })?,
-                        )
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    reference.object.verify(&serde_json::to_vec(value)?)?;
                 }
                 (crate::membership::MembershipChange::ResolutionActivation { .. }, _, _)
                 | (_, Some(_), _)
@@ -494,8 +460,7 @@ impl RetainedVerifiedMergeHistorySummary {
         announcement
             .reference
             .object
-            .verify(&announcement.value.to_bytes())
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            .verify(&announcement.value.to_bytes())?;
         StoreDeviceHead::parse_at(
             &announcement.value.to_bytes(),
             self.store_root_hash,

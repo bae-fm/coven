@@ -258,10 +258,12 @@ async fn resumable_create_rejects_a_non_utf8_location_header() {
         .await
         .expect_err("non-UTF-8 Location must fail");
 
-    assert!(
-        error.to_string().contains("invalid Location header"),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        CloudHomeError::TransportSource { operation, source }
+            if operation == "read append resumable create Location header for protocol/copy"
+                && source.is::<reqwest::header::ToStrError>()
+    ));
     shutdown.send(()).expect("shut down test endpoint");
 }
 
@@ -282,7 +284,11 @@ impl coven_foundation::local_file::PlaintextChunkReader for FailingMultipartBody
             return Ok(vec![7; GDRIVE_CHUNK_SIZE]);
         }
         Err(crate::local_file::PlaintextChunkError::Local(
-            "injected Drive body failure".to_string(),
+            coven_foundation::atomic_file::FileError::at(
+                "read injected Drive body",
+                "injected-drive-body",
+                std::io::Error::other("injected Drive body failure"),
+            ),
         ))
     }
 }

@@ -160,7 +160,7 @@ impl LocalStoreWriter {
         storage: &dyn coven_storage::CloudSyncObjectStorage,
         store_id: &str,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, crate::blob::delete::TombstoneDrainError> {
         crate::blob::delete::TombstoneDrain::new(database, storage, store_id, &self.identity, clock)
             .drain()
             .await
@@ -282,9 +282,9 @@ impl LocalStoreWriter {
                 let device_registrations = activation
                     .into_iter()
                     .map(|activation| {
-                        activation.activated_reference().map_err(|error| {
-                            crate::sync::store::StoreError::InvalidOutbound(error.to_string())
-                        })
+                        activation
+                            .activated_reference()
+                            .map_err(crate::sync::store::StoreError::from)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 sign_ops(
@@ -392,7 +392,7 @@ impl LocalStoreWriter {
                 )
             }
         }
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(crate::sync::store::StoreError::from)?;
         Ok((commit, registration_activation))
     }
 }

@@ -152,8 +152,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema(
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
-    let changeset = ValidatedChangeset::new(bytes, schema)
-        .map_err(|error| DbError::Message(error.to_string()))?;
+    let changeset = ValidatedChangeset::new(bytes, schema).map_err(DbError::from)?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let result = MergeMaterializationTransaction::from_store(
         crate::store::store_session::StoreTransaction::new(&tx, store_dir),
@@ -473,7 +472,7 @@ fn incoming_update(
         return Ok(None);
     };
 
-    let pk = update_pk_key(item, table).map_err(DbError::Message)?;
+    let pk = update_pk_key(item, table)?;
 
     let mut changed_columns = Vec::new();
     for index in 0..op.number_of_columns() as usize {
@@ -641,27 +640,33 @@ fn changeset_value(
     }
 }
 
-fn update_pk_key(item: &ChangesetItem, table: &str) -> Result<String, String> {
+fn update_pk_key(item: &ChangesetItem, table: &str) -> Result<String, DbError> {
     match item.old_value(0) {
         Ok(value) => text_id_from_value_ref(table, value),
-        Err(rusqlite::Error::InvalidColumnIndex(_)) => Err(format!(
+        Err(rusqlite::Error::InvalidColumnIndex(_)) => Err(DbError::Message(format!(
             "UPDATE changeset for {table} has no old-side primary key"
-        )),
-        Err(error) => Err(format!(
-            "UPDATE changeset for {table} primary key read failed: {error}"
+        ))),
+        Err(error) => Err(DbError::context(
+            format!("UPDATE changeset for {table} primary key read failed"),
+            error,
         )),
     }
 }
 
-fn text_id_from_value_ref(table: &str, value: ValueRef<'_>) -> Result<String, String> {
+fn text_id_from_value_ref(table: &str, value: ValueRef<'_>) -> Result<String, DbError> {
     let ValueRef::Text(bytes) = value else {
-        return Err(format!(
+        return Err(DbError::Message(format!(
             "UPDATE changeset for {table} primary key is not TEXT"
-        ));
+        )));
     };
     std::str::from_utf8(bytes)
         .map(str::to_owned)
-        .map_err(|error| format!("UPDATE changeset for {table} primary key is not UTF-8: {error}"))
+        .map_err(|error| {
+            DbError::context(
+                format!("UPDATE changeset for {table} primary key is not UTF-8"),
+                error,
+            )
+        })
 }
 
 fn timestamp_from_value(value: &Value) -> Option<Timestamp> {

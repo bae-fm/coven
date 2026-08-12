@@ -34,7 +34,7 @@ impl LocalStoreDevice {
         }
         let registration =
             StoreDeviceRegistration::parse_at(&durable.registration_bytes, root, durable.device_id)
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration,
             durable.prepared.reference().clone(),
@@ -68,7 +68,7 @@ impl LocalStoreDevice {
                 registration_ref,
                 registration,
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+            .map_err(StoreError::from)?,
             activation,
         })
     }
@@ -274,7 +274,7 @@ impl<'storage> AuthorizedStore<'storage> {
             .registration
             .value()
             .device_signer(identity)
-            .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(crate::sync::store::StoreError::from)?;
         Ok(history.authorize_writer(
             membership,
             identity,

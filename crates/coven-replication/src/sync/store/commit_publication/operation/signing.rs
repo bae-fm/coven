@@ -60,7 +60,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let wrapped = self
             .writer
             .seal_keyring(store_id, recipient, recipient_key, keyring)
-            .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?;
+            .map_err(InviteError::Encryption)?;
         self.prepare_wrapped_key(recipient, wrapped)
             .await
             .map_err(InviteError::from)
@@ -116,7 +116,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         publication: &PreparedMembershipPublication,
     ) -> Result<(), InviteError> {
         self.attach_merge_membership_proof(candidate, publication, None)
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+            .map_err(InviteError::from)
     }
 
     pub(super) async fn set_membership_access(

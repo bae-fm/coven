@@ -141,15 +141,15 @@ pub(crate) fn validate_snapshot_routing_state(
     for (routing_id, circle_id, stamp) in mirror_rows {
         routing_id
             .parse::<coven_protocol::circle::RowRoutingId>()
-            .map_err(|error| {
-                GateError::InvalidMaterializedRouting(format!(
-                    "Store audience mirror has invalid routing id {routing_id:?}: {error}"
-                ))
+            .map_err(|source| GateError::InvalidMaterializedRoutingId {
+                context: format!("Store audience mirror has invalid routing id {routing_id:?}"),
+                source,
             })?;
-        let audience = Audience::from_column(circle_id.as_deref()).map_err(|error| {
-            GateError::InvalidMaterializedRouting(format!(
-                "Store audience mirror has invalid audience for {routing_id}: {error}"
-            ))
+        let audience = Audience::from_column(circle_id.as_deref()).map_err(|source| {
+            GateError::InvalidMaterializedAudience {
+                context: format!("Store audience mirror has invalid audience for {routing_id}"),
+                source,
+            }
         })?;
         if audience == Audience::Local {
             return Err(GateError::InvalidMaterializedRouting(format!(
@@ -166,10 +166,11 @@ pub(crate) fn validate_snapshot_routing_state(
             ))
         })?;
         for row_id in all_row_ids(conn, &table)? {
-            identity.validate(&table, &row_id).map_err(|error| {
-                GateError::InvalidMaterializedRouting(format!(
-                    "row identity {table}.{row_id} is invalid: {error}"
-                ))
+            identity.validate(&table, &row_id).map_err(|source| {
+                GateError::InvalidMaterializedRowIdentity {
+                    context: format!("row identity {table}.{row_id} is invalid"),
+                    source,
+                }
             })?;
             let (routing_id, route_stamp) = query_row_optional(
                 conn,
@@ -328,11 +329,11 @@ pub(crate) fn prune_ineligible_scoped_rows(
         })?;
         for (row_id, local_audience) in roots {
             let parsed_audience =
-                Audience::from_column(local_audience.as_deref()).map_err(|error| {
-                    GateError::InvalidAudience {
+                Audience::from_column(local_audience.as_deref()).map_err(|source| {
+                    GateError::InvalidAudienceEncoding {
                         table: table.clone(),
                         value: local_audience.clone(),
-                        reason: error.to_string(),
+                        source,
                     }
                 })?;
             if parsed_audience == Audience::Local {
@@ -350,11 +351,11 @@ pub(crate) fn prune_ineligible_scoped_rows(
             )?;
             let mirror_audience = match mirror.as_ref() {
                 None => None,
-                Some(value) => Some(Audience::from_column(value.as_deref()).map_err(|error| {
-                    GateError::InvalidAudience {
+                Some(value) => Some(Audience::from_column(value.as_deref()).map_err(|source| {
+                    GateError::InvalidAudienceEncoding {
                         table: "_coven_audience".to_string(),
                         value: value.clone(),
-                        reason: error.to_string(),
+                        source,
                     }
                 })?),
             };

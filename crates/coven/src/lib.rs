@@ -79,8 +79,7 @@ pub use coven_keys::keys::{
 };
 pub use coven_protocol::blob::{
     content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    DrainOutcome, Provenance, RowBlobAuthority, RowBlobRef, UploadFailure, UploadFailureCause,
-    UploadFailures,
+    Provenance, RowBlobAuthority, RowBlobRef,
 };
 pub use coven_protocol::hlc::Timestamp;
 pub use coven_protocol::objects::{
@@ -104,6 +103,9 @@ pub use coven_protocol::{
 pub use coven_protocol::{
     AwsPrincipal, CloudKitEnvironment, GoogleDriveCorpus, ProviderDeviceBinding,
     ProviderPrincipalId, ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
+};
+pub use coven_replication::blob::{
+    DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
 };
 pub use coven_replication::blob::{MakeLocalError, MakeRemoteError};
 pub use coven_replication::sync::{

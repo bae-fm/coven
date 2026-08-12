@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreProtocolError {
     #[error("object hash must be exactly 64 lowercase hexadecimal characters: {0:?}")]
     InvalidObjectHash(String),
@@ -8,6 +8,16 @@ pub enum StoreProtocolError {
     UnsupportedVersion(u32),
     #[error("malformed Store protocol object: {0}")]
     Malformed(String),
+    #[error("Store protocol JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Store protocol object storage shape: {0}")]
+    Storage(#[from] crate::objects::StorageError),
+    #[error("Store protocol Circle control coordinate: {0}")]
+    CircleControlCoord(#[from] crate::circle_control::CircleControlCoordError),
+    #[error("Store provider probe: {0}")]
+    ProviderProbe(#[source] Box<crate::provider::ProviderProbeError>),
+    #[error("invalid author stream id: {0}")]
+    AuthorStreamId(#[from] crate::causal_grants::AuthorStreamIdParseError),
     #[error("Store protocol signature is invalid")]
     InvalidSignature,
     #[error("Owner promotion evidence does not match its exact Store authority")]
@@ -637,5 +647,11 @@ pub(super) fn validate_operation_membership_authority(
 impl From<coven_foundation::object_hash::InvalidObjectHash> for StoreProtocolError {
     fn from(error: coven_foundation::object_hash::InvalidObjectHash) -> Self {
         StoreProtocolError::InvalidObjectHash(error.0)
+    }
+}
+
+impl From<crate::provider::ProviderProbeError> for StoreProtocolError {
+    fn from(error: crate::provider::ProviderProbeError) -> Self {
+        Self::ProviderProbe(Box::new(error))
     }
 }

@@ -43,9 +43,7 @@ impl ResumableSession {
             .body(part)
             .send()
             .await
-            .map_err(|error| {
-                CloudHomeError::Transport(format!("upload chunk {}: {error}", self.key))
-            })
+            .map_err(|error| CloudHomeError::transport(format!("upload chunk {}", self.key), error))
     }
 
     async fn cancel(&self) -> Result<(), CloudHomeError> {
@@ -55,10 +53,10 @@ impl ResumableSession {
             .send()
             .await
             .map_err(|error| {
-                CloudHomeError::Transport(format!(
-                    "cancel upload session {} at {}: {error}",
-                    self.key, self.url
-                ))
+                CloudHomeError::transport(
+                    format!("cancel upload session {} at {}", self.key, self.url),
+                    error,
+                )
             })?;
         let status = response.status();
         if (self.cancellation_succeeded)(status) {
@@ -194,9 +192,7 @@ impl Drop for RangePutUploader {
                     .enable_all()
                     .build()
                     .map_err(|error| {
-                        CloudHomeError::Transport(format!(
-                            "build resumable cancellation runtime: {error}"
-                        ))
+                        CloudHomeError::transport("build resumable cancellation runtime", error)
                     })?;
                 runtime.block_on(session.cancel())
             }) {

@@ -447,8 +447,7 @@ impl VerifiedStoreAuthority {
             DbError::Message("local Store device has no activated registration".to_string())
         })?;
         let registration = self.activated_registration_on(records, &root, &reference)?;
-        ReferencedStoreDeviceRegistration::verified(reference, registration)
-            .map_err(|error| DbError::Message(error.to_string()))
+        ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(DbError::from)
     }
 
     pub(super) fn local_merge_stream_id_on(

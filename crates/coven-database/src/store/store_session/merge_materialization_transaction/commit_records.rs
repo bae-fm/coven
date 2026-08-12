@@ -50,7 +50,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
     if let Some((registration, recovery)) = &recovery_author {
         device_state = device_state
             .activate_registration(registration.clone(), Some(recovery.clone()))
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
     }
     let active_author = device_state
         .devices
@@ -69,7 +69,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
     }
     device_state = device_operations
         .apply_to(device_state, &commit.device_state)
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
     for activation in commit.device_registrations() {
         if recovery_author
             .as_ref()
@@ -79,7 +79,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
         }
         device_state = device_state
             .activate_registration(activation.registration.clone(), None)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
     }
     let mut owner_recoveries = commit.stream_activations().iter().filter_map(|activation| {
         let coven_protocol::store_commit::StreamActivation::GrantAuthorized {
@@ -111,7 +111,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
                     grant_id,
                     anchor,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?,
+                .map_err(DbError::from)?,
             ))
         }
         None => None,
@@ -119,7 +119,7 @@ pub(crate) fn derive_materialized_store_device_state_on(
     if let Some((grant_id, activation)) = owner_recovery {
         device_state = device_state
             .activate_owner_recovery(grant_id, activation)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
     }
     Ok(device_state)
 }
@@ -461,10 +461,10 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<OwnedVerifiedMergeMaterialization, DbError> {
         let commit = verified_commit.value();
         let commit_ref = verified_commit.reference();
-        let device_operations = VerifiedStoreDeviceOperations::without_exclusions(commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let circle_activations = VerifiedCircleActivations::none(commit, commit_ref)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let device_operations =
+            VerifiedStoreDeviceOperations::without_exclusions(commit).map_err(DbError::from)?;
+        let circle_activations =
+            VerifiedCircleActivations::none(commit, commit_ref).map_err(DbError::from)?;
         let materialization = VerifiedMergeMaterialization::verify(
             root,
             verified_commit,

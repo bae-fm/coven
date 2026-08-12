@@ -739,7 +739,10 @@ async fn a_roster_resolution_seals_and_opens_only_under_its_own_domain() {
             .await
             .expect_err("sealed roster bytes must not open under another kind");
         assert!(
-            matches!(error, coven_protocol::objects::StorageError::Decryption(_)),
+            matches!(
+                error,
+                coven_protocol::objects::StorageError::Decryption { .. }
+            ),
             "moving roster bytes across kinds must fail the sealing context: {error}",
         );
     }

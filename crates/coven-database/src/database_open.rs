@@ -117,9 +117,7 @@ pub(crate) fn load_coven_metadata(conn: &Connection) -> Result<SyncRoutingContra
                 "Store database is missing required sync_routing_contract metadata".to_string(),
             )
         })?;
-    let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes()).map_err(|error| {
-        DbError::Message(format!("Store sync-routing contract is invalid: {error}"))
-    })?;
+    let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes())?;
     let stored_hash =
         get_protocol_state_on(conn, SYNC_ROUTING_HASH_STATE_KEY)?.ok_or_else(|| {
             DbError::Message(
@@ -226,7 +224,7 @@ impl DatabaseCore {
                 // leave either its DDL or `user_version` advance committed.
                 validate_host_synced_tables(&tx, &synced_tables)?;
                 let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    .map_err(DbError::from)?;
                 if let Some(pinned) = &pinned_routing_contract {
                     validate_sync_routing_contract(pinned, &resolved)?;
                     validate_initialized_coven_schema(&tx, resolved.has_scoped_graph())?;
@@ -234,10 +232,9 @@ impl DatabaseCore {
                     initialize_coven_metadata_on(&tx, &resolved, resolved.has_scoped_graph())?;
                 }
                 pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
-                let gates = Gates::from_tables(&tx, &synced_tables)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                let gates = Gates::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
+                let blob_decls =
+                    BlobDecls::from_tables(&tx, &synced_tables).map_err(DbError::from)?;
                 if let CovenMetadataOpen::VerifiedSnapshot(install) = &metadata_open {
                     if resolved.has_scoped_graph() {
                         let routing_key = install.routing_key.as_ref().ok_or_else(|| {
@@ -252,7 +249,7 @@ impl DatabaseCore {
                             routing_key,
                             &coven_protocol::circle::Audience::Store,
                         )
-                        .map_err(|error| DbError::Message(error.to_string()))?;
+                        .map_err(DbError::from)?;
                     }
                     crate::store::install_verified_snapshot_bootstrap_on(
                         &tx,
@@ -290,7 +287,7 @@ impl DatabaseCore {
         let blob_decls = Arc::new(blob_decls);
         blob_decls
             .install_cleanup_guards(&conn)
-            .map_err(|e| DbError::Message(e.to_string()))?;
+            .map_err(DbError::from)?;
         gate::attach_empty_clone(&conn, &gates)
             .map_err(|error| DbError::context("install host transaction gate", error))?;
         Ok(DatabaseCore::new(
@@ -347,8 +344,8 @@ impl DatabaseCore {
         let pinned_routing_contract = load_coven_metadata(&conn)?;
         validate_initialized_coven_schema(&conn, pinned_routing_contract.has_scoped_graph())?;
         validate_host_device_id_on(&conn, hlc.device_id())?;
-        let sync_routing_contract = SyncRoutingContract::from_connection(&conn, &synced_tables)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let sync_routing_contract =
+            SyncRoutingContract::from_connection(&conn, &synced_tables).map_err(DbError::from)?;
         validate_sync_routing_contract(&pinned_routing_contract, &sync_routing_contract)?;
         let sync_routing_hash = sync_routing_contract.hash();
         validate_durable_coven_state(&conn)?;
@@ -357,14 +354,9 @@ impl DatabaseCore {
 
         // No register-clock seeding: a reader never mints an `_updated_at`, so it has
         // no stamp to keep ahead of on-disk values.
-        let gates = Arc::new(
-            Gates::from_tables(&conn, &synced_tables)
-                .map_err(|e| DbError::Message(e.to_string()))?,
-        );
-        let blob_decls = Arc::new(
-            BlobDecls::from_tables(&conn, &synced_tables)
-                .map_err(|e| DbError::Message(e.to_string()))?,
-        );
+        let gates = Arc::new(Gates::from_tables(&conn, &synced_tables).map_err(DbError::from)?);
+        let blob_decls =
+            Arc::new(BlobDecls::from_tables(&conn, &synced_tables).map_err(DbError::from)?);
         Ok(DatabaseCore::new(
             store_dir,
             conn,

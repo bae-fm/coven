@@ -162,9 +162,7 @@ impl StoreSession<'_> {
                 false,
                 &bootstrap_blobs,
             )?;
-        journal
-            .begin_discard()
-            .map_err(|error| crate::DbError::Message(error.to_string()))?;
+        journal.begin_discard().map_err(crate::DbError::from)?;
         super::circle_controls::update_circle_operation_phase_on(&tx, &journal)?;
         tx.commit().map_err(crate::DbError::from)
     }
@@ -208,9 +206,7 @@ impl StoreSession<'_> {
         let candidate = store_transaction
             .circle_operation_candidate(self.verified_store_authority, journal.operation())?
             .candidate;
-        let reference = durable
-            .reference()
-            .map_err(|error| crate::DbError::Message(error.to_string()))?;
+        let reference = durable.reference().map_err(crate::DbError::from)?;
         if reference != candidate.reference {
             return Err(crate::DbError::Message(
                 "fresh excluded-author head evidence names another candidate".to_string(),
@@ -234,7 +230,7 @@ impl StoreSession<'_> {
             let inert = load_protocol_inert_object_on(&tx, object_id)?;
             if inert
                 .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| crate::DbError::Message(error.to_string()))?
+                .map_err(crate::DbError::from)?
                 != Some(durable.proof())
             {
                 return Err(crate::DbError::Message(
@@ -438,7 +434,7 @@ impl StoreDatabase {
         }
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
-            .map_err(|error| crate::DbError::Message(error.to_string()))?;
+            .map_err(crate::DbError::from)?;
         let operation_id = operation_id.as_str().to_string();
         self.call_store(move |session| {
             session.reconcile_circle_operation_terminal_head(

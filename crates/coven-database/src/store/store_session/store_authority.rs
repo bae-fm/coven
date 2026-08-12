@@ -72,7 +72,7 @@ impl StoreSession<'_> {
             protocol_root.descriptor.founder_grant.clone(),
             &protocol_root.descriptor.founder_recovery,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         let stored_genesis: ResolvedStoreDeviceState = serde_json::from_str(
             &required_protocol_state_on(self.conn, STORE_DEVICE_GENESIS_STATE_KEY)?,
         )
@@ -363,7 +363,7 @@ impl StoreSession<'_> {
             graph.root.value.descriptor.founder_grant.clone(),
             &graph.root.value.descriptor.founder_recovery,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         let device_genesis_json = serde_json::to_string(&device_genesis)
             .map_err(|error| DbError::context("serialize Store device genesis state", error))?;
         let device_id = registration.device_id.to_string();

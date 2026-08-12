@@ -34,33 +34,15 @@ pub(super) struct CircleHeadPosition<'a> {
 impl CircleHeadValue {
     pub(super) fn parse(kind: CircleHeadKind, bytes: &[u8]) -> Result<Self, CircleOperationError> {
         match kind {
-            CircleHeadKind::Control => {
-                serde_json::from_slice(bytes)
-                    .map(Self::Control)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse predecessor Circle control head: {error}"
-                        ))
-                    })
-            }
-            CircleHeadKind::Roster => {
-                serde_json::from_slice(bytes)
-                    .map(Self::Roster)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse predecessor Circle roster head: {error}"
-                        ))
-                    })
-            }
-            CircleHeadKind::Metadata => {
-                serde_json::from_slice(bytes)
-                    .map(Self::Metadata)
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse predecessor Circle metadata head: {error}"
-                        ))
-                    })
-            }
+            CircleHeadKind::Control => serde_json::from_slice(bytes)
+                .map(Self::Control)
+                .map_err(CircleOperationError::Json),
+            CircleHeadKind::Roster => serde_json::from_slice(bytes)
+                .map(Self::Roster)
+                .map_err(CircleOperationError::Json),
+            CircleHeadKind::Metadata => serde_json::from_slice(bytes)
+                .map(Self::Metadata)
+                .map_err(CircleOperationError::Json),
         }
     }
 
@@ -237,12 +219,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(&context, &reference.object, &prefix)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse covered Circle control head: {error}"
-                    ))
-                })?;
+            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)?;
             let CircleControlCoord {
                 stream_id,
                 author_owner_grant,
@@ -311,7 +288,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .database
                 .registered_stream_activation(claimed_activation_id)
                 .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                .map_err(CircleOperationError::from)?
                 .ok_or_else(|| {
                     CircleOperationError::InvalidState(format!(
                         "Circle author stream {stream_id} has no verified activation"
@@ -365,14 +342,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     }),
                 )
                 .await
-                .map_err(|error| match error {
-                    crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Object(error) => {
-                        CircleOperationError::Object(error)
-                    }
-                    crate::sync::store::commit_verification::merge_history::registration::RegistrationLoadError::Invalid(error) => {
-                        CircleOperationError::InvalidState(error)
-                    }
-                })?
+                .map_err(crate::sync::store::StorePullError::from)
+                .map_err(CircleOperationError::from)?
                 .is_some();
             if !reached {
                 return Err(CircleOperationError::InvalidState(

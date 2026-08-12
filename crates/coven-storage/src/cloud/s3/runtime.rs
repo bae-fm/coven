@@ -24,7 +24,7 @@ impl S3Runtime {
             .enable_all()
             .build()
             .map_err(|error| {
-                CloudHomeError::Transport(format!("build coven S3 runtime: {error}"))
+                CloudHomeError::transport("build coven S3 runtime".to_string(), error)
             })?;
         Ok(Self {
             inner: std::sync::Arc::new(S3RuntimeInner {
@@ -56,7 +56,7 @@ impl S3Runtime {
         future: impl std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,
     ) -> Result<T, CloudHomeError> {
         self.run_with(future, |error| {
-            CloudHomeError::Transport(format!("S3 task aborted: {error}"))
+            CloudHomeError::transport("S3 task aborted".to_string(), error)
         })
         .await
     }
@@ -66,9 +66,7 @@ impl S3Runtime {
         future: impl std::future::Future<Output = Result<T, CloudFileReadError>> + Send + 'static,
     ) -> Result<T, CloudFileReadError> {
         self.run_with(future, |error| {
-            CloudFileReadError::Source(CloudHomeError::Transport(format!(
-                "S3 task aborted: {error}"
-            )))
+            CloudFileReadError::Source(CloudHomeError::transport("run S3 file-read task", error))
         })
         .await
     }

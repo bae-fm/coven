@@ -48,8 +48,33 @@ pub enum PayloadStoreError {
         actual: ObjectHash,
         path: PathBuf,
     },
-    #[error("payload spool {}: {error}", path.display())]
-    File { path: PathBuf, error: String },
+    #[error("{operation} payload spool {}: {source}", path.display())]
+    FileIo {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("commit payload spool {}: {source}", path.display())]
+    AtomicFile {
+        path: PathBuf,
+        #[source]
+        source: coven_foundation::atomic_file::WriteError<coven_foundation::atomic_file::FileError>,
+    },
+    #[error("payload spool filesystem: {0}")]
+    LocalFile(#[from] coven_foundation::atomic_file::FileError),
+    #[error("payload {hash} database operation: {source}")]
+    Database {
+        hash: ObjectHash,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("payload {hash} size does not fit SQLite: {source}")]
+    SizeConversion {
+        hash: ObjectHash,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
     #[error("payload {hash} has invalid storage metadata: {error}")]
     Storage { hash: ObjectHash, error: String },
     #[error("inline payload {expected} contains bytes hashing to {actual}")]
@@ -57,8 +82,18 @@ pub enum PayloadStoreError {
         expected: ObjectHash,
         actual: ObjectHash,
     },
-    #[error("payload {hash} has invalid compressed bytes: {error}")]
-    Compression { hash: ObjectHash, error: String },
+    #[error("payload {hash} compression I/O failed: {source}")]
+    CompressionIo {
+        hash: ObjectHash,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("payload {hash} compression framing failed: {source}")]
+    CompressionFrame {
+        hash: ObjectHash,
+        #[source]
+        source: lz4_flex::frame::Error,
+    },
 }
 
 const INLINE_PAYLOAD_LIMIT: usize = 64 * 1024;
@@ -247,7 +282,9 @@ impl<'store> PayloadStore<'store> {
             Err(
                 PayloadStoreError::Missing { .. }
                 | PayloadStoreError::Storage { .. }
-                | PayloadStoreError::Compression { .. },
+                | PayloadStoreError::FileIo { .. }
+                | PayloadStoreError::CompressionIo { .. }
+                | PayloadStoreError::CompressionFrame { .. },
             ) if !inline => return Ok(ExistingPayloadState::RepairableFile),
             Err(error) => return Err(error),
         };
@@ -286,10 +323,7 @@ impl<'store> PayloadStore<'store> {
                 },
             )
             .optional()
-            .map_err(|error| PayloadStoreError::Storage {
-                hash,
-                error: error.to_string(),
-            })?;
+            .map_err(|source| PayloadStoreError::Database { hash, source })?;
         match row {
             None => Ok(None),
             Some((storage, payload_size, Some(compressed), compressed_size))
@@ -331,16 +365,10 @@ impl<'store> PayloadStore<'store> {
         payload_size: u64,
         compressed: &[u8],
     ) -> Result<(), PayloadStoreError> {
-        let payload_size =
-            i64::try_from(payload_size).map_err(|error| PayloadStoreError::Storage {
-                hash,
-                error: error.to_string(),
-            })?;
-        let compressed_size =
-            i64::try_from(compressed.len()).map_err(|error| PayloadStoreError::Storage {
-                hash,
-                error: error.to_string(),
-            })?;
+        let payload_size = i64::try_from(payload_size)
+            .map_err(|source| PayloadStoreError::SizeConversion { hash, source })?;
+        let compressed_size = i64::try_from(compressed.len())
+            .map_err(|source| PayloadStoreError::SizeConversion { hash, source })?;
         match self.stored(hash)? {
             None => self
                 .conn
@@ -351,10 +379,7 @@ impl<'store> PayloadStore<'store> {
                     rusqlite::params![hash.to_string(), payload_size, compressed, compressed_size],
                 )
                 .map(|_| ())
-                .map_err(|error| PayloadStoreError::Storage {
-                    hash,
-                    error: error.to_string(),
-                }),
+                .map_err(|source| PayloadStoreError::Database { hash, source }),
             Some(StoredPayload::Inline {
                 compressed: stored,
                 payload_size: stored_payload_size,
@@ -376,16 +401,10 @@ impl<'store> PayloadStore<'store> {
         payload_size: u64,
         compressed_size: u64,
     ) -> Result<(), PayloadStoreError> {
-        let payload_size =
-            i64::try_from(payload_size).map_err(|error| PayloadStoreError::Storage {
-                hash,
-                error: error.to_string(),
-            })?;
-        let compressed_size =
-            i64::try_from(compressed_size).map_err(|error| PayloadStoreError::Storage {
-                hash,
-                error: error.to_string(),
-            })?;
+        let payload_size = i64::try_from(payload_size)
+            .map_err(|source| PayloadStoreError::SizeConversion { hash, source })?;
+        let compressed_size = i64::try_from(compressed_size)
+            .map_err(|source| PayloadStoreError::SizeConversion { hash, source })?;
         match self.stored(hash)? {
             None => self
                 .conn
@@ -396,9 +415,9 @@ impl<'store> PayloadStore<'store> {
                     rusqlite::params![hash.to_string(), payload_size, compressed_size],
                 )
                 .map(|_| ())
-                .map_err(|error| PayloadStoreError::Storage {
+                .map_err(|source| PayloadStoreError::Database {
                     hash,
-                    error: error.to_string(),
+                    source,
                 }),
             Some(StoredPayload::File {
                 payload_size: stored_payload_size,
@@ -411,9 +430,9 @@ impl<'store> PayloadStore<'store> {
                      WHERE payload_hash = ?1 AND storage = 'file'",
                     rusqlite::params![hash.to_string(), compressed_size],
                 )
-                .map_err(|error| PayloadStoreError::Storage {
+                .map_err(|source| PayloadStoreError::Database {
                     hash,
-                    error: error.to_string(),
+                    source,
                 })?;
                 if updated != 1 {
                     return Err(PayloadStoreError::Storage {
@@ -486,10 +505,7 @@ impl<'store> PayloadWriter<'store> {
         let compressed = self
             .encoder
             .finish()
-            .map_err(|error| PayloadStoreError::Compression {
-                hash,
-                error: error.to_string(),
-            })?;
+            .map_err(|source| PayloadStoreError::CompressionFrame { hash, source })?;
         match (existing_file, compressed.target) {
             (true, PayloadWriterTarget::Inline(bytes)) => {
                 self.payloads
@@ -505,10 +521,7 @@ impl<'store> PayloadWriter<'store> {
                     .record_file(hash, self.size, compressed.size)?;
                 staged
                     .commit(&path)
-                    .map_err(|error| PayloadStoreError::File {
-                        path,
-                        error: error.to_string(),
-                    })?;
+                    .map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
             }
         }
         Ok((hash, self.size))
@@ -554,7 +567,11 @@ impl std::io::Write for CompressedPayloadTarget<'_> {
                     .map_err(|error| {
                         std::io::Error::new(
                             error.kind(),
-                            format!("create payload stage {}: {error}", directory.display()),
+                            coven_foundation::atomic_file::FileError::at(
+                                "create payload stage",
+                                &directory,
+                                error,
+                            ),
                         )
                     })?;
                 staged.write_all(buffer)?;
@@ -583,16 +600,10 @@ fn compress_payload(hash: ObjectHash, bytes: &[u8]) -> Result<Vec<u8>, PayloadSt
     let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
     encoder
         .write_all(bytes)
-        .map_err(|error| PayloadStoreError::Compression {
-            hash,
-            error: error.to_string(),
-        })?;
+        .map_err(|source| PayloadStoreError::CompressionIo { hash, source })?;
     encoder
         .finish()
-        .map_err(|error| PayloadStoreError::Compression {
-            hash,
-            error: error.to_string(),
-        })
+        .map_err(|source| PayloadStoreError::CompressionFrame { hash, source })
 }
 
 fn decompress_payload(
@@ -604,10 +615,7 @@ fn decompress_payload(
     lz4_flex::frame::FrameDecoder::new(compressed)
         .take(payload_size.saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|error| PayloadStoreError::Compression {
-            hash,
-            error: error.to_string(),
-        })?;
+        .map_err(|source| PayloadStoreError::CompressionIo { hash, source })?;
     Ok(bytes)
 }
 
@@ -688,10 +696,11 @@ fn write_payload_file_bytes_blocking(
         Ok(installed) if installed == bytes => return Ok(()),
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(PayloadStoreError::File {
+        Err(source) => {
+            return Err(PayloadStoreError::FileIo {
+                operation: "read",
                 path,
-                error: error.to_string(),
+                source,
             });
         }
     }
@@ -700,22 +709,21 @@ fn write_payload_file_bytes_blocking(
     let mut staged =
         store_dir
             .create_payload_spool_stage()
-            .map_err(|error| PayloadStoreError::File {
+            .map_err(|source| PayloadStoreError::FileIo {
+                operation: "create stage in",
                 path: directory.clone(),
-                error: error.to_string(),
+                source,
             })?;
     staged
         .write_all(bytes)
-        .map_err(|error| PayloadStoreError::File {
+        .map_err(|source| PayloadStoreError::FileIo {
+            operation: "write stage in",
             path: directory,
-            error: error.to_string(),
+            source,
         })?;
     staged
         .commit(&path)
-        .map_err(|error| PayloadStoreError::File {
-            path,
-            error: error.to_string(),
-        })?;
+        .map_err(|source| PayloadStoreError::AtomicFile { path, source })?;
     Ok(())
 }
 
@@ -727,14 +735,16 @@ pub(crate) fn write_payload_file_blocking(
     store_dir: &StoreDir,
     source: &Path,
 ) -> Result<(ObjectHash, u64), PayloadStoreError> {
-    let mut input = std::fs::File::open(source).map_err(|error| PayloadStoreError::File {
+    let mut input = std::fs::File::open(source).map_err(|error| PayloadStoreError::FileIo {
+        operation: "open",
         path: source.to_path_buf(),
-        error: error.to_string(),
+        source: error,
     })?;
     let mut writer = PayloadStore::new(conn, store_dir).writer();
-    std::io::copy(&mut input, &mut writer).map_err(|error| PayloadStoreError::File {
+    std::io::copy(&mut input, &mut writer).map_err(|error| PayloadStoreError::FileIo {
+        operation: "copy",
         path: source.to_path_buf(),
-        error: error.to_string(),
+        source: error,
     })?;
     writer.commit()
 }
@@ -768,9 +778,10 @@ fn read_error(hash: ObjectHash, path: PathBuf, error: std::io::Error) -> Payload
     if error.kind() == std::io::ErrorKind::NotFound {
         return PayloadStoreError::Missing { hash, path };
     }
-    PayloadStoreError::File {
+    PayloadStoreError::FileIo {
+        operation: "read",
         path,
-        error: error.to_string(),
+        source: error,
     }
 }
 
@@ -788,9 +799,10 @@ fn delete_payload_file_blocking(
             debug!(payload = %hash, "payload spool file is already absent");
             Ok(())
         }
-        Err(error) => Err(PayloadStoreError::File {
+        Err(error) => Err(PayloadStoreError::FileIo {
+            operation: "remove",
             path,
-            error: error.to_string(),
+            source: error,
         }),
     }
 }
@@ -798,10 +810,7 @@ fn delete_payload_file_blocking(
 fn sync_parent(store_dir: &StoreDir, path: &Path) -> Result<(), PayloadStoreError> {
     store_dir
         .sync_parent_dir_blocking(path)
-        .map_err(|error| PayloadStoreError::File {
-            path: path.to_path_buf(),
-            error,
-        })
+        .map_err(PayloadStoreError::LocalFile)
 }
 
 /// Claim `payloads` for `owner_key`, replacing whatever that owner claimed

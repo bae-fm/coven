@@ -98,7 +98,7 @@ pub(crate) fn reopen_remote_object_on(
     let mut payloads = std::collections::BTreeMap::new();
     for hash in remote.payload_claims() {
         let bytes = crate::payload_store::read_payload_blocking(conn, store_dir, hash)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         payloads.insert(hash, bytes);
     }
     coven_protocol::remote_object::ClosedRemoteObject::with_payloads(remote, payloads)
@@ -352,9 +352,7 @@ pub(crate) fn record_reclaimed_store_package_on(
                         "Circle snapshot reclaim closure has no verified Store root".to_string(),
                     )
                 })?;
-                let owner = target
-                    .snapshot_owner(root_hash)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                let owner = target.snapshot_owner(root_hash).map_err(DbError::from)?;
                 remote.validate_reclaimable_snapshot_image(&target.image, &owner)
             }
             coven_protocol::reclaim::ReclaimTarget::AudienceBlob(target) => {
@@ -428,7 +426,7 @@ fn install_record_payloads_on(
 ) -> Result<(), DbError> {
     for (hash, bytes) in closed.payload_bytes() {
         let written = crate::payload_store::write_payload_blocking(conn, store_dir, bytes)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         if written != *hash {
             return Err(DbError::Message(format!(
                 "remote object payload stored under {written}, named as {hash}"

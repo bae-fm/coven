@@ -97,7 +97,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             Some(reference) => Some(
                 self.load_commit(reference)
                     .await
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                    .map_err(StoreError::from)?,
             ),
             None => None,
         };
@@ -121,10 +121,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let mut ancestry = Vec::new();
         let mut cursor = start;
         while !coverage.0.values().any(|covered| covered == &cursor) {
-            let commit = self
-                .load_commit(&cursor)
-                .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let commit = self.load_commit(&cursor).await.map_err(StoreError::from)?;
             let predecessor = commit.order.predecessor().cloned().ok_or_else(|| {
                 StoreError::InvalidOutbound(
                     "commit ancestry ended before snapshot coverage".to_string(),
@@ -151,14 +148,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let opened = reader
             .open_package(access, commit, reference, commit.author())
             .await
-            .map_err(|error| match error {
-                crate::sync::store::circles::packages::CirclePackageReadError::Database(error) => {
-                    StoreError::Database(error)
-                }
-                crate::sync::store::circles::packages::CirclePackageReadError::Invalid(error) => {
-                    StoreError::InvalidOutbound(error)
-                }
-            })?;
+            .map_err(StoreError::from)?;
         Ok(opened.object.value)
     }
 

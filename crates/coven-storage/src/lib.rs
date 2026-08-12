@@ -47,10 +47,8 @@ pub async fn fetch_account_email(
         CloudProvider::Dropbox => cloud::account_email::fetch_dropbox(tokens).await,
         CloudProvider::OneDrive => cloud::account_email::fetch_onedrive(tokens).await,
         other => {
-            return Err(crate::oauth::OAuthError::AccountFetch(format!(
-                "{other:?} does not use OAuth; account email is only fetched for OAuth providers"
-            )));
+            return Err(crate::oauth::OAuthError::UnsupportedProvider(other));
         }
     };
-    result.map_err(|error| crate::oauth::OAuthError::AccountFetch(error.to_string()))
+    result.map_err(crate::oauth::OAuthError::AccountFetch)
 }

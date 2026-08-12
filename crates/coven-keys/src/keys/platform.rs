@@ -77,9 +77,10 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
             .map(|service| service.name.as_str())
             .expect("a keyring service is registered when set() fails");
         if registered != name {
-            return Err(KeyError::Persistence(format!(
-                "keyring service is already registered as {registered:?}; cannot re-register as {name:?}"
-            )));
+            return Err(KeyError::ServiceAlreadyRegistered {
+                registered: registered.to_string(),
+                requested: name,
+            });
         }
     }
     Ok(())
@@ -106,7 +107,7 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     }
     match e {
         keyring_core::Error::NoDefaultStore => KeyError::StoreNotInstalled,
-        other => KeyError::Persistence(other.to_string()),
+        other => KeyError::Keyring(other),
     }
 }
 
@@ -301,9 +302,7 @@ impl KeyringService {
         let account = slot.account();
         let entry = self.entry(&account)?;
         match entry.get_password() {
-            Ok(password) if password.is_empty() => Err(KeyError::Persistence(format!(
-                "keyring entry {account} is present but empty (corrupt)"
-            ))),
+            Ok(password) if password.is_empty() => Err(KeyError::EmptyKeyringEntry { account }),
             Ok(password) => Ok(Some(password)),
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(error) => Err(map_keyring_error(error)),
@@ -349,11 +348,7 @@ pub fn apple_keyring_entry_facts_for_test(
     let credential = entry
         .as_any()
         .downcast_ref::<apple_native_keyring_store::protected::Cred>()
-        .ok_or_else(|| {
-            KeyError::Persistence(
-                "Apple keyring entry was not constructed by the protected-data store".to_string(),
-            )
-        })?;
+        .ok_or(KeyError::UnexpectedAppleKeyringEntry)?;
     Ok(AppleKeyringEntryFacts {
         access_policy: credential.access_policy.clone(),
         cloud_synchronize: credential.cloud_synchronize,
@@ -412,10 +407,19 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
         .ok_or_else(|| KeyError::NoPendingIdentity {
             request_public_key_hex: request_public_key_hex.clone(),
         })?;
-    let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&sk_hex)
-        .map_err(|e| KeyError::Crypto(format!("invalid pending identity hex: {e}")))?
-        .try_into()
-        .map_err(|_| KeyError::Crypto("pending identity wrong length".to_string()))?;
+    let signing_key = hex::decode(&sk_hex).map_err(|source| KeyError::Hex {
+        subject: "pending identity",
+        source,
+    })?;
+    let actual = signing_key.len();
+    let signing_key: [u8; SIGN_SECRETKEYBYTES] =
+        signing_key
+            .try_into()
+            .map_err(|_| KeyError::InvalidLength {
+                subject: "pending identity",
+                expected: SIGN_SECRETKEYBYTES,
+                actual,
+            })?;
     UserKeypair::from_signing_key_bytes(&signing_key)
 }
 
@@ -488,15 +492,20 @@ impl StoreKeys {
             .read(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))?
         {
             None => Ok(None),
-            Some(j) => serde_json::from_str(&j).map(Some).map_err(|e| {
-                KeyError::Crypto(format!("malformed cloud home credentials JSON: {e}"))
-            }),
+            Some(j) => serde_json::from_str(&j)
+                .map(Some)
+                .map_err(|source| KeyError::Json {
+                    operation: "parse cloud home credentials JSON",
+                    source,
+                }),
         }
     }
 
     pub fn set_cloud_home_credentials(&self, creds: &CloudHomeCredentials) -> Result<(), KeyError> {
-        let json = serde_json::to_string(creds)
-            .map_err(|e| KeyError::Crypto(format!("serialize credentials: {e}")))?;
+        let json = serde_json::to_string(creds).map_err(|source| KeyError::Json {
+            operation: "serialize cloud home credentials",
+            source,
+        })?;
         self.keyring.service()?.write(
             &KeyringSlot::CloudHomeCredentials(self.store_id.clone()),
             &json,
@@ -601,10 +610,19 @@ impl DeviceIdentityCustody for StoreKeys {
         let Some(signing_key_hex) = self.keyring.service()?.read(&slot)? else {
             return Ok(None);
         };
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = hex::decode(&signing_key_hex)
-            .map_err(|error| KeyError::Crypto(format!("Invalid signing key hex: {error}")))?
-            .try_into()
-            .map_err(|_| KeyError::Crypto("Signing key wrong length".to_string()))?;
+        let signing_key = hex::decode(&signing_key_hex).map_err(|source| KeyError::Hex {
+            subject: "signing key",
+            source,
+        })?;
+        let actual = signing_key.len();
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
+            signing_key
+                .try_into()
+                .map_err(|_| KeyError::InvalidLength {
+                    subject: "signing key",
+                    expected: SIGN_SECRETKEYBYTES,
+                    actual,
+                })?;
         Ok(Some(UserKeypair::from_signing_key_bytes(&signing_key)?))
     }
 

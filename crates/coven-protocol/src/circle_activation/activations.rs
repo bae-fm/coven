@@ -210,8 +210,9 @@ impl VerifiedCircleActivations {
                 .collect(),
             bootstraps: self.bootstraps.clone(),
         };
-        serde_json::to_vec(&retained).map_err(|error| {
-            CircleStateError(format!("serialize retained Circle activations: {error}"))
+        serde_json::to_vec(&retained).map_err(|source| CircleStateError::Json {
+            operation: "serialize retained Circle activations",
+            source,
         })
     }
 
@@ -223,23 +224,23 @@ impl VerifiedCircleActivations {
         let commit = verified.value();
         let commit_ref = verified.reference();
         let retained: RetainedCircleActivations =
-            serde_json::from_slice(bytes).map_err(|error| {
-                CircleStateError(format!("parse retained Circle activations: {error}"))
+            serde_json::from_slice(bytes).map_err(|source| CircleStateError::Json {
+                operation: "parse retained Circle activations",
+                source,
             })?;
-        let canonical = serde_json::to_vec(&retained).map_err(|error| {
-            CircleStateError(format!(
-                "serialize parsed retained Circle activations: {error}"
-            ))
+        let canonical = serde_json::to_vec(&retained).map_err(|source| CircleStateError::Json {
+            operation: "serialize parsed retained Circle activations",
+            source,
         })?;
         if canonical != bytes {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle activation bytes are not canonical".to_string(),
             ));
         }
         if retained.activating_commit != *commit_ref
             || retained.circles.len() != commit.circle_controls().len()
         {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle activations differ from their exact Store commit".to_string(),
             ));
         }
@@ -271,13 +272,13 @@ impl VerifiedCircleActivations {
                 )
                 .is_some()
             {
-                return Err(CircleStateError(
+                return Err(CircleStateError::Invariant(
                     "retained Circle activations repeat a bootstrap recipient".to_string(),
                 ));
             }
         }
         if retained.bootstraps.len() != expected_bootstraps.len() {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle bootstrap set is incomplete".to_string(),
             ));
         }
@@ -285,12 +286,12 @@ impl VerifiedCircleActivations {
             let (access, reference) = expected_bootstraps
                 .remove(&(bootstrap.circle_id, bootstrap.control.clone()))
                 .ok_or_else(|| {
-                    CircleStateError(
+                    CircleStateError::Invariant(
                         "retained Circle bootstrap has no signed access leaf".to_string(),
                     )
                 })?;
             if bootstrap.reference != *reference {
-                return Err(CircleStateError(
+                return Err(CircleStateError::Invariant(
                     "retained Circle bootstrap reference differs from its access leaf".to_string(),
                 ));
             }
@@ -300,8 +301,7 @@ impl VerifiedCircleActivations {
             circles,
             stream_activations: VerifiedStreamActivations::from_verified_circle_commit(
                 commit, commit_ref,
-            )
-            .map_err(|error| CircleStateError(error.to_string()))?,
+            )?,
             bootstraps: retained.bootstraps,
             local_exclusions: Vec::new(),
             bootstrap_pending_exclusions: Vec::new(),
@@ -321,8 +321,7 @@ impl VerifiedCircleActivations {
             commit.store_root_hash,
             commit_ref,
             author,
-        )
-        .map_err(|error| CircleStateError(error.to_string()))?;
+        )?;
         Self::parse_retained_for_verified_commit(bytes, &verified, recipient_pubkey)
     }
 }
@@ -348,7 +347,7 @@ impl RetainedCircleReference {
     ) -> Result<VerifiedCircleReference, CircleStateError> {
         let commit = verified.value();
         if self.reference != *reference || self.circle_id != reference.circle_id() {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle reference differs from its exact Store commit".to_string(),
             ));
         }
@@ -365,13 +364,7 @@ impl RetainedCircleReference {
             control: self.control,
             local_access,
         };
-        CircleCurrentState::from_verified(commit.candidate_family(), &verified).map_err(
-            |error| {
-                CircleStateError(format!(
-                    "retained Circle activation state failed verification: {error}"
-                ))
-            },
-        )?;
+        CircleCurrentState::from_verified(commit.candidate_family(), &verified)?;
         Ok(verified)
     }
 }
@@ -406,13 +399,13 @@ impl RetainedCircleAccess {
             &self.access.envelope,
             commit.candidate_family(),
         ) {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle access leaf and envelope failed verification".to_string(),
             ));
         }
         if let Some(recipient_pubkey) = recipient_pubkey {
             if self.access.leaf.value.recipient_pubkey != recipient_pubkey {
-                return Err(CircleStateError(
+                return Err(CircleStateError::Invariant(
                     "retained Circle access names another local recipient".to_string(),
                 ));
             }
@@ -423,7 +416,7 @@ impl RetainedCircleAccess {
             .iter()
             .any(|candidate| retained_access_matches(candidate, &self.access))
         {
-            return Err(CircleStateError(
+            return Err(CircleStateError::Invariant(
                 "retained Circle access differs from every exact commit reference".to_string(),
             ));
         }
@@ -434,7 +427,7 @@ impl RetainedCircleAccess {
             ) => Some(VerifiedCircleActive { roster, metadata }),
             (CircleAccessDisposition::Inactive, RetainedCircleAccessState::Inactive) => None,
             _ => {
-                return Err(CircleStateError(
+                return Err(CircleStateError::Invariant(
                     "retained Circle access state differs from its signed disposition".to_string(),
                 ));
             }

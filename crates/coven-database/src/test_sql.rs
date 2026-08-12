@@ -319,7 +319,7 @@ impl DatabaseTestSql<'_> {
                 |row| row.get(0),
             )
             .map_err(DbError::from)?;
-        serde_json::from_str(&state).map_err(|error| DbError::Message(error.to_string()))
+        serde_json::from_str(&state).map_err(DbError::from)
     }
 
     pub(crate) fn remote_objects(
@@ -643,7 +643,7 @@ impl DatabaseTestSql<'_> {
         let root_hash = self.store_root_hash()?;
         let encryption = coven_keys::encryption::EncryptionService::from_key(generation_one_key);
         let key = coven_protocol::circle::derive_row_routing_key(&encryption, root_hash)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         Ok(coven_protocol::circle::row_routing_id(&key, table, row_id))
     }
 
@@ -693,8 +693,8 @@ impl DatabaseTestSql<'_> {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-            let mut input: serde_json::Value = serde_json::from_slice(&canonical_input)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            let mut input: serde_json::Value =
+                serde_json::from_slice(&canonical_input).map_err(DbError::from)?;
             let registration = input
                 .get_mut("activation")
                 .and_then(|value| value.get_mut("registrations"))
@@ -724,8 +724,7 @@ impl DatabaseTestSql<'_> {
                     );
                 }
             }
-            let canonical_input =
-                serde_json::to_vec(&input).map_err(|error| DbError::Message(error.to_string()))?;
+            let canonical_input = serde_json::to_vec(&input).map_err(DbError::from)?;
             let input_hash =
                 coven_protocol::store_commit::ObjectHash::digest(&canonical_input).to_string();
             transaction
@@ -840,9 +839,9 @@ impl DatabaseTestSql<'_> {
                         "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
                         rusqlite::params![
                             object_id,
-                            serde_json::to_string(&remote).map_err(|error| DbError::Message(
-                                format!("serialize rebound retained replay object: {error}")
-                            ))?
+                            serde_json::to_string(&remote).map_err(|error| {
+                                DbError::context("serialize rebound retained replay object", error)
+                            })?
                         ],
                     )
                     .map_err(DbError::from)?;
@@ -954,8 +953,7 @@ impl DatabaseTestSql<'_> {
                 rusqlite::params![
                     commit.coord.stream_id.to_string(),
                     sequence,
-                    serde_json::to_string(commit)
-                        .map_err(|error| DbError::Message(error.to_string()))?,
+                    serde_json::to_string(commit).map_err(DbError::from)?,
                     input_hash.to_string(),
                     coven_protocol::remote_object::remote_object_id(object).to_string(),
                 ],
@@ -1088,8 +1086,7 @@ impl DatabaseTestSql<'_> {
                         "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
                         rusqlite::params![
                             object_id.to_string(),
-                            serde_json::to_string(&record)
-                                .map_err(|error| DbError::Message(error.to_string()))?
+                            serde_json::to_string(&record).map_err(DbError::from)?
                         ],
                     )
                     .map_err(DbError::from)?;
@@ -1124,7 +1121,7 @@ impl DatabaseTestSql<'_> {
                 |row| row.get(0),
             )
             .map_err(DbError::from)?;
-        serde_json::from_str(&encoded).map_err(|error| DbError::Message(error.to_string()))
+        serde_json::from_str(&encoded).map_err(DbError::from)
     }
 
     pub(crate) fn forge_device_in_state_snapshots(
@@ -1138,8 +1135,7 @@ impl DatabaseTestSql<'_> {
         )?;
         for (commit, encoded) in rows {
             let state: coven_protocol::store_commit::ResolvedStoreDeviceState =
-                serde_json::from_str(&encoded)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                serde_json::from_str(&encoded).map_err(DbError::from)?;
             let mut forged_registration = state
                 .devices
                 .values()
@@ -1152,13 +1148,12 @@ impl DatabaseTestSql<'_> {
             forged_registration.device_id = forged_device_id;
             let forged = state
                 .activate_registration(forged_registration, None)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             self.connection
                 .execute(
                     "UPDATE store_device_state_snapshots SET state = ?1 WHERE commit_ref = ?2",
                     rusqlite::params![
-                        serde_json::to_string(&forged)
-                            .map_err(|error| DbError::Message(error.to_string()))?,
+                        serde_json::to_string(&forged).map_err(DbError::from)?,
                         commit,
                     ],
                 )
@@ -1227,8 +1222,7 @@ impl DatabaseTestSql<'_> {
     ) -> Result<(), DbError> {
         let sequence = i64::try_from(reference.coord.sequence())
             .map_err(|error| DbError::context("invalid sequence", error))?;
-        let encoded = serde_json::to_string(reference)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let encoded = serde_json::to_string(reference).map_err(DbError::from)?;
         let removed = self
             .connection
             .execute(
@@ -1285,8 +1279,7 @@ impl DatabaseTestSql<'_> {
         commit_ref: &str,
         state: &coven_protocol::store_commit::ResolvedStoreDeviceState,
     ) -> Result<(), DbError> {
-        let encoded =
-            serde_json::to_string(state).map_err(|error| DbError::Message(error.to_string()))?;
+        let encoded = serde_json::to_string(state).map_err(DbError::from)?;
         let updated = self
             .connection
             .execute(
@@ -1576,7 +1569,7 @@ impl DatabaseTestSql<'_> {
                 |row| row.get::<_, String>(0),
             )
             .map_err(DbError::from)?;
-        serde_json::from_str(&authority).map_err(|error| DbError::Message(error.to_string()))
+        serde_json::from_str(&authority).map_err(DbError::from)
     }
 
     pub(crate) fn latest_published_store_snapshot(&self) -> Result<(i64, Vec<u8>), DbError> {
@@ -1789,7 +1782,7 @@ impl DatabaseTestSql<'_> {
         let root_slot = ObjectSlot::logical(
             coven_protocol::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         let descriptor = StoreCreationDescriptor {
             creation_id: StoreCreationId::from_random_bytes(
                 *ObjectHash::digest(label.as_bytes()).as_bytes(),
@@ -1812,20 +1805,19 @@ impl DatabaseTestSql<'_> {
             founder_registration: ObjectSlot::logical(format!(
                 "store-v1/test/{label}/registration.json"
             ))
-            .map_err(|error| DbError::Message(error.to_string()))?,
+            .map_err(DbError::from)?,
             founder_provider_admin:
                 coven_protocol::provider::FounderProviderAdminGrant::from_test_label(label),
             founder_membership: GrantStreamAnchor::StoreMembership {
                 first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
-                    .map_err(|error| DbError::Message(error.to_string()))?,
+                    .map_err(DbError::from)?,
             },
             founder_recovery: GrantStreamAnchor::OwnerRecovery {
                 first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/recovery/1.json"))
-                    .map_err(|error| DbError::Message(error.to_string()))?,
+                    .map_err(DbError::from)?,
             },
         };
-        let root = StoreProtocolRoot::signed(descriptor, &signer)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let root = StoreProtocolRoot::signed(descriptor, &signer).map_err(DbError::from)?;
         let bytes = root.to_bytes();
         let hash = root.object_hash();
         let object = ExactObjectRef::new(root_slot, bytes.len() as u64, ObjectHash::digest(&bytes));
@@ -1937,8 +1929,8 @@ impl DatabaseTestSql<'_> {
             .map_err(DbError::from)?;
         let mut results = Vec::with_capacity(changesets.len());
         for changeset in changesets {
-            let changeset = crate::ValidatedChangeset::new(changeset, schema.clone())
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            let changeset =
+                crate::ValidatedChangeset::new(changeset, schema.clone()).map_err(DbError::from)?;
             results.push(crate::store::test_apply_changeset(
                 &transaction,
                 self.required_store_dir()?,

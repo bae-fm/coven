@@ -17,7 +17,15 @@ use coven_protocol::store_commit::{
 #[derive(Debug, thiserror::Error)]
 pub enum StoreRegistrationError {
     #[error("Store device registration database state: {0}")]
-    Database(String),
+    Database(#[from] coven_database::DbError),
+    #[error("Store device registration protocol: {0}")]
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("Store device registration JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Store device registration author stream: {0}")]
+    AuthorStreamId(#[from] coven_protocol::causal_grants::AuthorStreamIdParseError),
+    #[error("Store device registration history: {0}")]
+    History(#[source] Box<crate::sync::store::StorePullError>),
     #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("exact Store root authority is absent")]
@@ -26,8 +34,16 @@ pub enum StoreRegistrationError {
     Invalid(String),
     #[error("this Store installation requires an activated Join or Recovery registration")]
     ActivationRequired,
+    #[error("registration publish count has no representable successor")]
+    PublishCountExhausted,
     #[error("Store device registration activation: {0}")]
     Outbound(#[from] crate::sync::store::StoreError),
+}
+
+impl From<crate::sync::store::StorePullError> for StoreRegistrationError {
+    fn from(error: crate::sync::store::StorePullError) -> Self {
+        Self::History(Box::new(error))
+    }
 }
 
 #[cfg(test)]

@@ -2,6 +2,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
+use crate::atomic_file::FileError;
+
 /// Why a string is not a safe path token.
 ///
 /// An untrusted string becomes a path component in several places: a blob's
@@ -42,52 +44,55 @@ pub enum PathTokenError {
     Unindexable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RequiredLocalBlobPathError {
-    Path(PathTokenError),
+    #[error("local blob path: {0}")]
+    Path(#[from] PathTokenError),
+    #[error("local blob {namespace}/{id} is absent")]
     Missing { namespace: String, id: String },
-    Io(String),
+    #[error("local blob file: {0}")]
+    File(#[from] FileError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CachedLocatorRemovalError {
-    Path(PathTokenError),
-    Io(String),
+    #[error("blob cache path: {0}")]
+    Path(#[from] PathTokenError),
+    #[error("blob cache file: {0}")]
+    File(#[from] FileError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LocalBlobRemovalError {
-    Path(PathTokenError),
-    Io(String),
+    #[error("local blob path: {0}")]
+    Path(#[from] PathTokenError),
+    #[error("local blob file: {0}")]
+    File(#[from] FileError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LocalBlobStoreError {
-    Path(PathTokenError),
-    Io(String),
+    #[error("local blob path: {0}")]
+    Path(#[from] PathTokenError),
+    #[error("local blob file: {0}")]
+    File(#[from] FileError),
+    #[error("local blob {} has {actual_size} bytes, expected {expected_size}", path.display())]
+    SizeMismatch {
+        path: PathBuf,
+        expected_size: u64,
+        actual_size: u64,
+    },
 }
 
-impl std::fmt::Display for LocalBlobStoreError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(error) => write!(formatter, "local blob path: {error}"),
-            Self::Io(error) => write!(formatter, "local blob file: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for LocalBlobStoreError {}
-
-impl From<PathTokenError> for LocalBlobStoreError {
-    fn from(error: PathTokenError) -> Self {
-        Self::Path(error)
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreBlobFileError {
-    Path(PathTokenError),
-    Io(String),
+    #[error("store blob path: {0}")]
+    Path(#[from] PathTokenError),
+    #[error("store blob file: {0}")]
+    File(#[from] FileError),
+    #[error("commit store blob: {0}")]
+    Commit(#[from] crate::local_file::CommitNewFileError),
+    #[error("store blob {} has size/hash {actual_size}/{actual_hash}, expected {expected_size}/{expected_hash}", path.display())]
     Integrity {
         path: PathBuf,
         expected_size: u64,
@@ -114,50 +119,6 @@ impl CachedBlobFile {
 
     pub fn size(&self) -> u64 {
         self.size
-    }
-}
-
-impl std::fmt::Display for LocalBlobRemovalError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(error) => write!(formatter, "local blob path: {error}"),
-            Self::Io(error) => write!(formatter, "local blob file: {error}"),
-        }
-    }
-}
-
-impl std::fmt::Display for CachedLocatorRemovalError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(error) => write!(formatter, "blob cache path: {error}"),
-            Self::Io(error) => write!(formatter, "blob cache file: {error}"),
-        }
-    }
-}
-
-impl std::fmt::Display for StoreBlobFileError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(error) => write!(formatter, "store blob path: {error}"),
-            Self::Io(error) => write!(formatter, "store blob file: {error}"),
-            Self::Integrity {
-                path,
-                expected_size,
-                actual_size,
-                expected_hash,
-                actual_hash,
-            } => write!(
-                formatter,
-                "store blob {} has size/hash {actual_size}/{actual_hash}, expected {expected_size}/{expected_hash}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl From<PathTokenError> for StoreBlobFileError {
-    fn from(error: PathTokenError) -> Self {
-        Self::Path(error)
     }
 }
 
@@ -331,7 +292,7 @@ impl StoreDir {
     pub async fn stage_atomic_file(
         &self,
         destination: &Path,
-    ) -> Result<crate::local_file::AtomicStagedFile, String> {
+    ) -> Result<crate::local_file::AtomicStagedFile, FileError> {
         crate::local_file::AtomicStagedFile::create_with_file_sync(
             destination,
             self.file_sync.clone(),
@@ -348,11 +309,11 @@ impl StoreDir {
         )
     }
 
-    pub async fn sync_parent_dir(&self, path: &Path) -> Result<(), String> {
+    pub async fn sync_parent_dir(&self, path: &Path) -> Result<(), FileError> {
         self.file_sync.sync_parent(path).await
     }
 
-    pub fn sync_parent_dir_blocking(&self, path: &Path) -> Result<(), String> {
+    pub fn sync_parent_dir_blocking(&self, path: &Path) -> Result<(), FileError> {
         self.file_sync.sync_parent_blocking(path)
     }
 
@@ -449,15 +410,12 @@ impl StoreDir {
     pub async fn remove_outbound_blob_spool(
         &self,
         locator_hash: crate::object_hash::ObjectHash,
-    ) -> Result<(), String> {
+    ) -> Result<(), FileError> {
         let path = self.outbound_blob_spool_path(locator_hash);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => self.sync_parent_dir(&path).await,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "remove exact blob spool {}: {error}",
-                path.display()
-            )),
+            Err(source) => Err(FileError::at("remove exact blob spool", path, source)),
         }
     }
 
@@ -521,11 +479,11 @@ impl StoreDir {
         let staged = self
             .stage_atomic_file(&destination)
             .await
-            .map_err(StoreBlobFileError::Io)?;
+            .map_err(StoreBlobFileError::File)?;
         let (staged, actual_size, actual_digest) = staged
             .copy_from(source)
             .await
-            .map_err(StoreBlobFileError::Io)?;
+            .map_err(StoreBlobFileError::File)?;
         let actual_hash = crate::object_hash::ObjectHash::from_digest(actual_digest);
         if actual_size != expected_size || actual_hash != expected_hash {
             return Err(StoreBlobFileError::Integrity {
@@ -541,7 +499,7 @@ impl StoreDir {
             Err(crate::local_file::CommitNewFileError::DestinationExists(path)) => {
                 let (actual_size, actual_hash) = exact_file_facts(&path)
                     .await
-                    .map_err(StoreBlobFileError::Io)?;
+                    .map_err(StoreBlobFileError::File)?;
                 if actual_size == expected_size && actual_hash == expected_hash {
                     Ok(())
                 } else {
@@ -554,7 +512,7 @@ impl StoreDir {
                     })
                 }
             }
-            Err(error) => Err(StoreBlobFileError::Io(error.to_string())),
+            Err(error) => Err(StoreBlobFileError::Commit(error)),
         }
     }
 
@@ -570,11 +528,11 @@ impl StoreDir {
             .map_err(StoreBlobFileError::Path)?;
         match file_exists(&path).await {
             Ok(false) => Ok(false),
-            Err(error) => Err(StoreBlobFileError::Io(error)),
+            Err(error) => Err(StoreBlobFileError::File(error)),
             Ok(true) => {
                 let (actual_size, actual_hash) = exact_file_facts(&path)
                     .await
-                    .map_err(StoreBlobFileError::Io)?;
+                    .map_err(StoreBlobFileError::File)?;
                 if actual_size == expected_size && actual_hash == expected_hash {
                     Ok(true)
                 } else {
@@ -657,7 +615,7 @@ impl StoreDir {
         ] {
             remove_file(&path)
                 .await
-                .map_err(CachedLocatorRemovalError::Io)?;
+                .map_err(CachedLocatorRemovalError::File)?;
         }
         Ok(())
     }
@@ -724,7 +682,7 @@ impl StoreDir {
                 namespace: namespace.to_string(),
                 id: id.to_string(),
             }),
-            Err(error) => Err(RequiredLocalBlobPathError::Io(error)),
+            Err(error) => Err(RequiredLocalBlobPathError::File(error)),
         }
     }
 
@@ -735,20 +693,24 @@ impl StoreDir {
         expected_size: u64,
     ) -> Result<Option<PathBuf>, LocalBlobStoreError> {
         let path = self.local_blob_path(namespace, id)?;
-        if !file_exists(&path).await.map_err(LocalBlobStoreError::Io)? {
+        if !file_exists(&path)
+            .await
+            .map_err(LocalBlobStoreError::File)?
+        {
             return Ok(None);
         }
         let actual_size = tokio::fs::metadata(&path)
             .await
-            .map_err(|error| {
-                LocalBlobStoreError::Io(format!("stat local blob {}: {error}", path.display()))
+            .map_err(|source| {
+                LocalBlobStoreError::File(FileError::at("stat local blob", &path, source))
             })?
             .len();
         if actual_size != expected_size {
-            return Err(LocalBlobStoreError::Io(format!(
-                "local blob {} has {actual_size} bytes, expected {expected_size}",
-                path.display()
-            )));
+            return Err(LocalBlobStoreError::SizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            });
         }
         Ok(Some(path))
     }
@@ -761,7 +723,9 @@ impl StoreDir {
         let path = self
             .local_blob_path(namespace, id)
             .map_err(LocalBlobRemovalError::Path)?;
-        remove_file(&path).await.map_err(LocalBlobRemovalError::Io)
+        remove_file(&path)
+            .await
+            .map_err(LocalBlobRemovalError::File)
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.
@@ -788,7 +752,7 @@ impl StoreDir {
             .map_err(StoreBlobFileError::Path)?;
         walk_files(&directory)
             .await
-            .map_err(StoreBlobFileError::Io)
+            .map_err(StoreBlobFileError::File)
             .map(|files| {
                 files
                     .into_iter()
@@ -807,7 +771,7 @@ impl StoreDir {
     ) -> Result<bool, StoreBlobFileError> {
         remove_file(file.path())
             .await
-            .map_err(StoreBlobFileError::Io)
+            .map_err(StoreBlobFileError::File)
     }
 
     /// Remove in-progress write temporaries left by an earlier process — blob
@@ -910,12 +874,12 @@ impl StoreDir {
         let mut staged = self
             .stage_atomic_file(&destination)
             .await
-            .map_err(LocalBlobStoreError::Io)?;
+            .map_err(LocalBlobStoreError::File)?;
         staged
             .write_bytes(bytes)
             .await
-            .map_err(LocalBlobStoreError::Io)?;
-        staged.commit().await.map_err(LocalBlobStoreError::Io)
+            .map_err(LocalBlobStoreError::File)?;
+        staged.commit().await.map_err(LocalBlobStoreError::File)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -931,27 +895,27 @@ impl StoreDir {
         else {
             return Ok(None);
         };
-        tokio::fs::read(&path).await.map(Some).map_err(|error| {
-            LocalBlobStoreError::Io(format!("read local blob {}: {error}", path.display()))
+        tokio::fs::read(&path).await.map(Some).map_err(|source| {
+            LocalBlobStoreError::File(FileError::at("read local blob", path, source))
         })
     }
 }
 
-async fn file_exists(path: &Path) -> Result<bool, String> {
+async fn file_exists(path: &Path) -> Result<bool, FileError> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) => Ok(metadata.is_file()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("stat store blob {}: {error}", path.display())),
+        Err(source) => Err(FileError::at("stat store blob", path, source)),
     }
 }
 
-async fn exact_file_facts(path: &Path) -> Result<(u64, crate::object_hash::ObjectHash), String> {
+async fn exact_file_facts(path: &Path) -> Result<(u64, crate::object_hash::ObjectHash), FileError> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
 
     let mut file = tokio::fs::File::open(path)
         .await
-        .map_err(|error| format!("open store blob {}: {error}", path.display()))?;
+        .map_err(|source| FileError::at("open store blob", path, source))?;
     let mut size = 0_u64;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1 << 20];
@@ -959,13 +923,16 @@ async fn exact_file_facts(path: &Path) -> Result<(u64, crate::object_hash::Objec
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|error| format!("read store blob {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("read store blob", path, source))?;
         if read == 0 {
             break;
         }
         size = size
             .checked_add(read as u64)
-            .ok_or_else(|| format!("store blob size overflow: {}", path.display()))?;
+            .ok_or_else(|| FileError::SizeOverflow {
+                subject: "store blob",
+                path: path.to_path_buf(),
+            })?;
         hasher.update(&buffer[..read]);
     }
     Ok((
@@ -979,58 +946,60 @@ async fn file_is_exact(
     expected_size: u64,
     expected_hash: crate::object_hash::ObjectHash,
 ) -> Result<bool, StoreBlobFileError> {
-    if !file_exists(path).await.map_err(StoreBlobFileError::Io)? {
+    if !file_exists(path).await.map_err(StoreBlobFileError::File)? {
         return Ok(false);
     }
     let (size, hash) = exact_file_facts(path)
         .await
-        .map_err(StoreBlobFileError::Io)?;
+        .map_err(StoreBlobFileError::File)?;
     Ok(size == expected_size && hash == expected_hash)
 }
 
-async fn remove_file(path: &Path) -> Result<bool, String> {
+async fn remove_file(path: &Path) -> Result<bool, FileError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("remove store blob {}: {error}", path.display())),
+        Err(source) => Err(FileError::at("remove store blob", path, source)),
     }
 }
 
-async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, String> {
+async fn walk_files(path: &Path) -> Result<Vec<(PathBuf, u64, u64)>, FileError> {
     let mut files = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(directory) = pending.pop() {
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "read store blob directory {}: {error}",
-                    directory.display()
+            Err(source) => {
+                return Err(FileError::at(
+                    "read store blob directory",
+                    directory,
+                    source,
                 ))
             }
         };
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|error| format!("read store blob directory entry: {error}"))?
-        {
+        while let Some(entry) = entries.next_entry().await.map_err(|source| {
+            FileError::at("read store blob directory entry", &directory, source)
+        })? {
             let entry_path = entry.path();
             let metadata = match entry.metadata().await {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!("stat store blob {}: {error}", entry_path.display()))
-                }
+                Err(source) => return Err(FileError::at("stat store blob", entry_path, source)),
             };
             if metadata.is_dir() {
                 pending.push(entry_path);
             } else if !crate::local_file::AtomicStagedFile::is_staging_path(&entry_path) {
                 let recency = metadata
                     .modified()
-                    .map_err(|error| format!("read store blob modification time: {error}"))?
+                    .map_err(|source| {
+                        FileError::at("read store blob modification time", &entry_path, source)
+                    })?
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| format!("store blob modification time: {error}"))?
+                    .map_err(|source| FileError::ModifiedBeforeUnixEpoch {
+                        path: entry_path.clone(),
+                        source,
+                    })?
                     .as_millis() as u64;
                 files.push((entry_path, recency, metadata.len()));
             }
@@ -1063,36 +1032,43 @@ pub struct StoreOpenGuard {
     _file: std::fs::File,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreOpenGuardError {
+    #[error("store is already open: {}", store_dir.display())]
     AlreadyOpen { store_dir: PathBuf },
-    MalformedPath(String),
-    Io(std::io::Error),
+    #[error("store database path has no parent: {}", path.display())]
+    NoParent { path: PathBuf },
+    #[error("store lock file: {0}")]
+    File(#[from] FileError),
 }
 
 impl StoreOpenGuard {
     pub fn acquire(store_dir: &StoreDir) -> Result<Self, StoreOpenGuardError> {
         let db_path = store_dir.db_path();
         let Some(dir) = db_path.parent() else {
-            return Err(StoreOpenGuardError::MalformedPath(format!(
-                "store database path has no parent: {}",
-                db_path.display()
-            )));
+            return Err(StoreOpenGuardError::NoParent { path: db_path });
         };
-        std::fs::create_dir_all(dir).map_err(StoreOpenGuardError::Io)?;
+        std::fs::create_dir_all(dir).map_err(|source| {
+            StoreOpenGuardError::File(FileError::at("create store directory", dir, source))
+        })?;
+        let lock_path = dir.join(".coven-lock");
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(dir.join(".coven-lock"))
-            .map_err(StoreOpenGuardError::Io)?;
+            .open(&lock_path)
+            .map_err(|source| {
+                StoreOpenGuardError::File(FileError::at("open store lock", &lock_path, source))
+            })?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(StoreOpenGuardError::AlreadyOpen {
                 store_dir: dir.to_path_buf(),
             }),
-            Err(std::fs::TryLockError::Error(error)) => Err(StoreOpenGuardError::Io(error)),
+            Err(std::fs::TryLockError::Error(source)) => Err(StoreOpenGuardError::File(
+                FileError::at("lock store", lock_path, source),
+            )),
         }
     }
 

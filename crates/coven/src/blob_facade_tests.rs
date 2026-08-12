@@ -381,7 +381,7 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     assert!(
         matches!(
             outcome,
-            coven_protocol::blob::DrainOutcome::Drained { uploaded: 1, .. }
+            coven_replication::blob::DrainOutcome::Drained { uploaded: 1, .. }
         ),
         "the drain uploaded the queued photo: {outcome:?}",
     );

@@ -79,7 +79,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .history
             .load_membership_at_exact_heads(&state.heads, &state.resolutions)
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         verify_loaded_control_membership(control, chain)
     }
 
@@ -98,7 +98,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 None,
             )
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         verify_loaded_control_membership(control, chain)
     }
 
@@ -112,12 +112,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         verify_control_context_for_verified_commit(reference, control, verified)?;
         let commit_ref = verified.reference();
         let commit = verified.value();
-        let encryption =
-            EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse Circle authoring access keyring: {error}"
-                ))
-            })?);
+        let encryption = EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
         let mut consumed_stream_activations = BTreeSet::new();
         self.load_circle_roster_chain(
             &VerifiedStreamActivationPrefix::empty(),
@@ -168,7 +163,7 @@ fn verify_loaded_control_membership(
         state.recovery.clone(),
         membership_state_hash,
     )
-    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    .map_err(CircleOperationError::from)?;
     if expected_state != control.value.store_membership_state_ref() {
         return Err(CircleOperationError::InvalidState(
             "circle control Store membership state reference is invalid".to_string(),

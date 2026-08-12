@@ -18,10 +18,30 @@ pub const PREFIX: &str = "coven:";
 
 /// An envelope-level decode failure. Each caller maps this to its own
 /// user-facing error type.
+#[derive(Debug, thiserror::Error)]
 pub enum EnvelopeError {
-    MissingPrefix,
-    InvalidBase64,
-    InvalidJson(String),
+    #[error("missing expected code prefix {expected:?}")]
+    MissingPrefix { expected: String },
+    #[error("invalid base64url payload")]
+    InvalidBase64(#[source] base64::DecodeError),
+    #[error("invalid JSON payload")]
+    InvalidJson(#[source] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FixedHexError {
+    #[error("{label} is not hex")]
+    InvalidHex {
+        label: String,
+        #[source]
+        source: hex::FromHexError,
+    },
+    #[error("{label} must be {expected_len} bytes, got {actual_len}")]
+    InvalidLength {
+        label: String,
+        expected_len: usize,
+        actual_len: usize,
+    },
 }
 
 /// Encode `code` as `{prefix}{base64url(json)}`.
@@ -38,21 +58,31 @@ pub fn decode_code<T: DeserializeOwned>(prefix: &str, s: &str) -> Result<T, Enve
     let trimmed = s.trim();
     let payload = trimmed
         .strip_prefix(prefix)
-        .ok_or(EnvelopeError::MissingPrefix)?;
+        .ok_or_else(|| EnvelopeError::MissingPrefix {
+            expected: prefix.to_string(),
+        })?;
     let bytes = URL_SAFE_NO_PAD
         .decode(payload)
-        .map_err(|_| EnvelopeError::InvalidBase64)?;
-    serde_json::from_slice(&bytes).map_err(|e| EnvelopeError::InvalidJson(e.to_string()))
+        .map_err(EnvelopeError::InvalidBase64)?;
+    serde_json::from_slice(&bytes).map_err(EnvelopeError::InvalidJson)
 }
 
 /// Decode fixed-length hex material carried inside a pasted code.
-pub fn decode_fixed_hex(label: &str, value: &str, expected_len: usize) -> Result<Vec<u8>, String> {
-    let bytes = hex::decode(value).map_err(|error| format!("{label} is not hex: {error}"))?;
+pub fn decode_fixed_hex(
+    label: &str,
+    value: &str,
+    expected_len: usize,
+) -> Result<Vec<u8>, FixedHexError> {
+    let bytes = hex::decode(value).map_err(|source| FixedHexError::InvalidHex {
+        label: label.to_string(),
+        source,
+    })?;
     if bytes.len() != expected_len {
-        return Err(format!(
-            "{label} must be {expected_len} bytes, got {}",
-            bytes.len()
-        ));
+        return Err(FixedHexError::InvalidLength {
+            label: label.to_string(),
+            expected_len,
+            actual_len: bytes.len(),
+        });
     }
     Ok(bytes)
 }

@@ -189,7 +189,10 @@ async fn exchange_code_rejects_wrong_state_before_token_request() {
         .await;
 
     assert!(
-        matches!(result, Err(OAuthError::Denied(ref msg)) if msg.contains("state mismatch")),
+        matches!(
+            result,
+            Err(OAuthError::Denied(OAuthCallbackError::StateMismatch))
+        ),
         "expected state rejection before token request, got {result:?}",
     );
 }
@@ -385,20 +388,15 @@ async fn parse_failure_error_does_not_include_tokens() {
 
     server.await.expect("token server");
     match result {
-        Err(OAuthError::TokenExchange(msg)) => {
+        Err(error @ OAuthError::TokenResponseJson { status, .. }) => {
+            assert_eq!(status, reqwest::StatusCode::OK);
             assert!(
-                msg.contains("parse token response"),
-                "expected parse error, got: {msg}",
-            );
-            assert!(
-                msg.contains("HTTP 200"),
-                "expected status in error, got: {msg}",
-            );
-            assert!(
-                !msg.contains("access-token-that-must-not-be-logged"),
-                "error included access token: {msg}",
+                !error
+                    .to_string()
+                    .contains("access-token-that-must-not-be-logged"),
+                "error included access token: {error}",
             );
         }
-        other => panic!("expected TokenExchange, got {other:?}"),
+        other => panic!("expected TokenResponseJson, got {other:?}"),
     }
 }

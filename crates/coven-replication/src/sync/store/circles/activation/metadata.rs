@@ -30,7 +30,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let root = self.root().clone();
         commit_ref
             .verify_commit(commit)
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         if root.store_root_hash != commit.store_root_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle metadata authority differs from its Store root".to_string(),
@@ -74,11 +74,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 })?;
             let head_encryption = encryption
                 .service_for_fingerprint(tip_object.key_fingerprint.as_bytes())
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle metadata head names an unavailable key fingerprint: {error}"
-                    ))
-                })?;
+                .map_err(CircleOperationError::Encryption)?;
             let context = ProtocolObjectContext::circle(
                 store_root_hash,
                 ProtocolObjectDomain::CircleMetadata,
@@ -89,12 +85,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(&context, &object.object, &prefix)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let head: coven_protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse exact Circle metadata head: {error}"
-                ))
-            })?;
+            let head: coven_protocol::circle::CircleMetadataHead = serde_json::from_slice(&bytes)?;
             let declared_ref =
                 CircleMetadataHeadRef::from_stored_head(&head, object.object.clone());
             let authority = self
@@ -178,11 +169,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             })?;
             let exact_encryption = encryption
                 .service_for_fingerprint(object.key_fingerprint.as_bytes())
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle metadata names an unavailable key fingerprint: {error}"
-                    ))
-                })?;
+                .map_err(CircleOperationError::Encryption)?;
             let exact_context = ProtocolObjectContext::circle(
                 store_root_hash,
                 ProtocolObjectDomain::CircleMetadata,
@@ -193,11 +180,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(&exact_context, &object.object, &prefix)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let entry: CircleMetadata = serde_json::from_slice(&bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse exact Circle metadata entry: {error}"
-                ))
-            })?;
+            let entry: CircleMetadata = serde_json::from_slice(&bytes)?;
             let declared_coord = entry.coord();
             if declared_coord.metadata_hash != coord.metadata_hash {
                 return Err(CircleOperationError::InvalidState(

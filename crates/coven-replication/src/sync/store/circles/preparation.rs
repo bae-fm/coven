@@ -97,8 +97,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
         let identity_signer = local_writer.as_ref();
         let store_root_hash = root.store_root_hash;
         let encryption = EncryptionService::from(
-            MasterKeyring::from_serialized(&draft.keyring)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+            MasterKeyring::from_serialized(&draft.keyring).map_err(CircleOperationError::from)?,
         );
         if encryption.seal_key_fingerprint() != draft.metadata.key_fingerprint {
             return Err(CircleOperationError::InvalidState(
@@ -260,11 +259,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         )
                         .await?;
                         let head: coven_protocol::circle::CircleRosterHead =
-                            serde_json::from_slice(&bytes).map_err(|error| {
-                                CircleOperationError::InvalidState(format!(
-                                    "parse predecessor Circle roster head: {error}"
-                                ))
-                            })?;
+                            serde_json::from_slice(&bytes)?;
                         if !local_writer.verify_circle_roster_head(&head)
                             || head.entry_coord() != reference.coord
                             || head.head_hash() != reference.head_hash
@@ -372,7 +367,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     head.clone(),
                     reference.clone(),
                 )
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
                 let chain = match predecessor_chain {
                     Some(predecessor) => {
                         predecessor.with_exact_successor(entry.clone(), exact_head)
@@ -382,10 +377,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         vec![exact_head],
                     ),
                 }
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-                draft.roster = chain
-                    .try_resolved()
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
+                draft.roster = chain.try_resolved().map_err(CircleOperationError::from)?;
             }
 
             let roster_state = coven_protocol::circle::MergeCircleRosterStateRef {
@@ -415,11 +408,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         )
                         .await?;
                         let head: coven_protocol::circle::CircleMetadataHead =
-                            serde_json::from_slice(&bytes).map_err(|error| {
-                                CircleOperationError::InvalidState(format!(
-                                    "parse predecessor Circle metadata head: {error}"
-                                ))
-                            })?;
+                            serde_json::from_slice(&bytes)?;
                         if !local_writer.verify_circle_metadata_head(&head)
                             || head.coord() != reference.coord
                         {
@@ -505,11 +494,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                         )
                         .await?;
                         let head: coven_protocol::circle::CircleMetadataHead =
-                            serde_json::from_slice(&bytes).map_err(|error| {
-                                CircleOperationError::InvalidState(format!(
-                                    "parse predecessor Circle metadata head: {error}"
-                                ))
-                            })?;
+                            serde_json::from_slice(&bytes)?;
                         head.successor.activation
                     }
                 };
@@ -620,11 +605,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 access.leaf.value.resign(identity_signer);
                 let recipient_x25519 =
                     keys::ed25519_hex_to_x25519_public_key(&access.leaf.value.recipient_pubkey)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "convert Circle access recipient key: {error}"
-                            ))
-                        })?;
+                        .map_err(CircleOperationError::Key)?;
                 let plaintext = serde_json::to_vec(&access.leaf.value)
                     .expect("Circle access serialization cannot fail");
                 access.leaf.bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
@@ -682,11 +663,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await?;
                     let head: coven_protocol::circle::CircleControlHead =
-                        serde_json::from_slice(&bytes).map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle control head: {error}"
-                            ))
-                        })?;
+                        serde_json::from_slice(&bytes)?;
                     (
                         head.successor.next_slot.clone(),
                         head.control.seq.checked_add(1).ok_or_else(|| {
@@ -888,11 +865,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     )
                     .await?;
                     let head: coven_protocol::circle::CircleControlHead =
-                        serde_json::from_slice(&bytes).map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse predecessor Circle control head: {error}"
-                            ))
-                        })?;
+                        serde_json::from_slice(&bytes)?;
                     head.successor.activation
                 }
             };
@@ -1188,7 +1161,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 .map_or(1, |reference| reference.coord.sequence() + 1);
             let stream_id = announcement_stream_id;
             let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
             let coord = StoreCommitCoord {
                 stream_id,
                 sequence: seq,
@@ -1206,7 +1179,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 resolved_devices.recovery.clone(),
                 state_hash,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
             let candidate_family =
                 local_writer.candidate_family_id(store_root_hash, &write_id, &order);
             // A control-conflict resolution covers the losing branches' frontiers by
@@ -1302,14 +1275,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             circle_id: request.circle_id,
                         },
                     );
-                    let keyring_value = coven_keys::encryption::MasterKeyring::from_serialized(
-                        keyring,
-                    )
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "parse Circle bootstrap keyring: {error}"
-                        ))
-                    })?;
+                    let keyring_value =
+                        coven_keys::encryption::MasterKeyring::from_serialized(keyring)?;
                     let circle_encryption =
                         coven_keys::encryption::EncryptionService::from(keyring_value);
                     let recipient_slot = coven_protocol::circle::recipient_slot(
@@ -1323,7 +1290,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let image_bytes = request
                         .read_bootstrap_image()
                         .await
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                        .map_err(CircleOperationError::from)?;
                     let image_hash = ObjectHash::digest(&image_bytes);
                     let image_prefix =
                         coven_protocol::store_commit::circle_bootstrap_image_semantic_prefix(
@@ -1376,9 +1343,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 }
                 CircleOperationRequest::RemoveMember(request) => {
                     if request.circle_id != request.current.control.value.circle_id
-                        || request.roster_chain.try_resolved().map_err(|error| {
-                            CircleOperationError::InvalidState(error.to_string())
-                        })? != request.current.roster
+                        || request
+                            .roster_chain
+                            .try_resolved()
+                            .map_err(CircleOperationError::from)?
+                            != request.current.roster
                     {
                         return Err(CircleOperationError::InvalidState(
                             "Circle member-removal request differs from its current state"
@@ -1422,11 +1391,11 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             request.member_pubkey.clone(),
                             signer,
                         )
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                        .map_err(CircleOperationError::from)?;
                     let remaining_roster = request
                         .roster_chain
                         .resolved_with_successor(removal.clone())
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                        .map_err(CircleOperationError::from)?;
                     let remaining_members = remaining_roster.members();
                     let close_id = coven_protocol::circle::CircleEpochCloseId::from_operation_id(
                         &operation_id,
@@ -1448,13 +1417,8 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                             close_id,
                             intent_hash,
                         );
-                    let intent_encryption = EncryptionService::from(
-                        MasterKeyring::from_serialized(keyring).map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse Circle epoch-close keyring: {error}"
-                            ))
-                        })?,
-                    );
+                    let intent_encryption =
+                        EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
                     let intent_context = ProtocolObjectContext::circle(
                         store_root_hash,
                         ProtocolObjectDomain::CircleEpochCloseIntent,
@@ -1528,7 +1492,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     }
                     let provisional_frontier = order
                         .predecessor_cut()
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                        .map_err(CircleOperationError::from)?
                         .frontier();
                     (
                         CircleTransitionDraft::close_epoch(
@@ -1687,15 +1651,10 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                     let image_bytes = request
                         .read_bootstrap_image()
                         .await
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                        .map_err(CircleOperationError::from)?;
                     let image_hash = ObjectHash::digest(&image_bytes);
-                    let successor_encryption = EncryptionService::from(
-                        MasterKeyring::from_serialized(&draft.keyring).map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse Circle successor keyring: {error}"
-                            ))
-                        })?,
-                    );
+                    let successor_encryption =
+                        EncryptionService::from(MasterKeyring::from_serialized(&draft.keyring)?);
                     let mut bootstrap_objects = Vec::new();
                     for (index, access) in draft.access.iter_mut().enumerate() {
                         let image_prefix =
@@ -1839,7 +1798,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
             )
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
             prepared_objects.insert("store-commit".to_string(), commit_prepared);
             let head_context = ProtocolObjectContext::signed_plaintext(
                 store_root_hash,
@@ -1861,7 +1820,7 @@ impl<'operation, 'storage> CircleCandidatePreparer<'operation, 'storage> {
                 SuccessorLink {
                     activation: local_writer
                         .announcement_activation_id()
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+                        .map_err(CircleOperationError::from)?,
                     predecessor: history_successor
                         .predecessor_head
                         .map(|reference| reference.object),

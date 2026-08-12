@@ -205,7 +205,7 @@ impl<'a> StoreCommitVerifier<'a> {
         })?;
         let activation = registration
             .store_announcement_activation(registration_ref)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+            .map_err(StoreError::from)?
             .activation_id();
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
@@ -268,7 +268,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 Box::new(move || {
                     let unverified: StoreDeviceHead =
                         serde_json::from_slice(&verify_bytes).map_err(|error| {
-                            StoreProtocolError::Malformed(error.to_string())
+                            StoreProtocolError::from(error)
                         })?;
                     if unverified.author_registration != expected_registration
                         || unverified.successor.activation != activation
@@ -330,7 +330,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     object,
                 },
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
             slot = head.successor.next_slot.clone();
             predecessor = Some(reference.clone());
             self.remember_accepted_announcement(
@@ -340,7 +340,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 reference,
                 slot.clone(),
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         }
         let accepted = self
             .accepted_announcements

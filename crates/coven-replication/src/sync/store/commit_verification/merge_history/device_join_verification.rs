@@ -17,10 +17,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let receipts = self
             .load_commit_join_cleanup_receipts(verified_commit.value(), verified_commit.author())
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         Ok(LoadedDeviceJoinCleanupActivation {
             verified_commit,
             receipts,
@@ -37,10 +34,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let membership = self
             .load_predecessor_membership(&activation.verified_commit.value().membership_state)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         if !membership.is_owner_now(&activation.verified_commit.author().author_pubkey) {
             return Err(StorePullError::InvalidState(
                 "device join cleanup activation author is not an active Merge Owner".to_string(),
@@ -106,8 +100,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await
                 .map_err(RegistrationLoadError::Object)?;
             let abandonment: device_join::DeviceJoinAbandonmentObject =
-                serde_json::from_slice(&bytes)
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                serde_json::from_slice(&bytes).map_err(RegistrationLoadError::from)?;
             if abandonment.store_root_hash != self.root.reference().store_root_hash
                 || abandonment.owner_registration != commit.author_registration
                 || abandonment.attempt_slot != *reference.object.slot()
@@ -118,7 +111,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             reference
                 .verify(&abandonment, activating_author)
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                .map_err(RegistrationLoadError::from)?;
         }
         Ok(())
     }
@@ -142,8 +135,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .await
                 .map_err(RegistrationLoadError::Object)?;
             let receipt: device_join::DeviceJoinCleanupReceiptObject =
-                serde_json::from_slice(&bytes)
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                serde_json::from_slice(&bytes).map_err(RegistrationLoadError::from)?;
             if receipt.executor != commit.author_registration
                 || receipt.membership != commit.membership_state
             {
@@ -186,7 +178,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             reference
                 .verify(&receipt, activating_author)
                 .and_then(|_| receipt.verify(&attempt.attempt.value, activating_author))
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                .map_err(RegistrationLoadError::from)?;
             match &receipt.administrator_terminal {
                 device_join::ProviderAdminJoinTerminal::Completed(_) => {}
                 device_join::ProviderAdminJoinTerminal::Cancelled(closure) => {
@@ -197,7 +189,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .value;
                     closure
                         .verify(&administrator)
-                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                        .map_err(RegistrationLoadError::from)?;
                 }
                 device_join::ProviderAdminJoinTerminal::WriteRevoked(revocation) => {
                     let executor = self
@@ -207,14 +199,14 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .value;
                     revocation
                         .verify(&executor)
-                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                        .map_err(RegistrationLoadError::from)?;
                 }
             }
             match &receipt.joiner_terminal {
                 device_join::JoinerJoinTerminal::Ready(_) => {}
-                device_join::JoinerJoinTerminal::Cancelled(closure) => closure
-                    .verify()
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?,
+                device_join::JoinerJoinTerminal::Cancelled(closure) => {
+                    closure.verify().map_err(RegistrationLoadError::from)?
+                }
                 device_join::JoinerJoinTerminal::WriteRevoked(revocation) => {
                     let executor = self
                         .load_registration(&revocation.executor)
@@ -223,7 +215,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                         .value;
                     revocation
                         .verify(&executor)
-                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                        .map_err(RegistrationLoadError::from)?;
                 }
             }
             receipts.push(LoadedCommitJoinCleanupReceipt { receipt, attempt });
@@ -358,10 +350,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let membership = self
             .load_predecessor_membership(membership_state)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         let founder = self.commit_verifier.load_founder_registration().await?;
         let founder_reference =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());

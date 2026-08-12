@@ -17,7 +17,7 @@ pub(crate) fn validate_snapshot_object_owners_on(
     let expected = coven_protocol::remote_object::SnapshotObjectOwner {
         activation: registration
             .store_snapshot_activation(&meta.author_registration)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .activation_id(),
         generation: meta.generation,
     };
@@ -39,7 +39,7 @@ pub async fn verify_snapshot_blob_spools(
                 let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
                     .await
                     .map_err(|error| {
-                        DbError::Message(format!("{label} snapshot blob spool: {error}"))
+                        DbError::context(format!("{label} snapshot blob spool"), error)
                     })?;
                 blob.remote
                     .object()
@@ -151,9 +151,8 @@ pub(crate) fn validate_snapshot_blob_plans_on(
                     ))
                 })?;
             let audience = gate::live_row_audience(conn, gates, table.name(), binding.row_id())
-                .map_err(|error| DbError::Message(error.to_string()))?;
-            let audience = RemoteAudience::try_from(audience)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
+            let audience = RemoteAudience::try_from(audience).map_err(DbError::from)?;
             validate_live_blob_locator(
                 binding.table(),
                 binding.row_id(),

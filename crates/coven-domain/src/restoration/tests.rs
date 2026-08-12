@@ -526,7 +526,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
 /// Every traversal-shaped `sid` is refused at the decode boundary:
 /// `decode_restore_code` returns `RestoreCodeError::InvalidStoreId`, so a decoded
 /// `RestoreCode` never carries a traversal id. Driven end to end, the decode error
-/// propagates as `BootstrapError::InvalidCode` and the restore creates nothing outside
+/// propagates as `BootstrapError::RestoreCode` and the restore creates nothing outside
 /// the stores root.
 ///
 /// The cases share one mechanism and differ only in the malicious id and the
@@ -562,7 +562,7 @@ async fn restore_rejects_traversal_lid_at_decode() {
 
         let result = restore_result_for(&encoded, app_dir).await;
         assert!(
-            matches!(result, Err(BootstrapError::InvalidCode(_))),
+            matches!(result, Err(BootstrapError::RestoreCode(_))),
             "`{sid}` must fail the restore with the propagated decode error, got {result:?}",
         );
         if let Some(target) = escape_target {

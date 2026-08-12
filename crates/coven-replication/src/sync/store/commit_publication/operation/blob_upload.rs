@@ -15,9 +15,9 @@ use coven_database::DbError;
 use coven_database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use coven_protocol::blob::{
-    BlobTransitionObserver, DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures,
-};
+use coven_protocol::blob::BlobTransitionObserver;
+
+use crate::blob::{DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures};
 
 use super::AuthorizedWriterOperation;
 
@@ -274,21 +274,19 @@ impl AuthorizedWriterOperation<'_> {
                 self.store_dir
                     .remove_outbound_blob_spool(stored.locator().locator_hash())
                     .await
-                    .map_err(UploadFailureCause::Local)?;
+                    .map_err(UploadFailureCause::File)?;
                 let locator = stored.locator();
                 self.store_dir
                     .remove_cached_locator(locator.namespace(), locator.locator_hash())
                     .await
-                    .map_err(|error| {
-                        UploadFailureCause::Local(format!("drop cancelled cache copy: {error}"))
-                    })?;
+                    .map_err(UploadFailureCause::CachedRemoval)?;
             }
         }
         self.database
             .finish_cancelled_blob_upload(entry)
             .await
             .map(|_| ())
-            .map_err(|error| UploadFailureCause::Local(error.to_string()))
+            .map_err(UploadFailureCause::Database)
     }
 
     async fn record_outbox_failure(
@@ -348,7 +346,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             Ok(_) => {}
             Err(error) => {
                 return self
-                    .local_failure(&file_id, self.label(), error.to_string())
+                    .local_failure(&file_id, self.label(), UploadFailureCause::Database(error))
                     .await;
             }
         }
@@ -378,7 +376,13 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                                 row.blob().namespace,
                                 row.blob().id
                             );
-                            return self.local_failure(&file_id, self.label(), message).await;
+                            return self
+                                .local_failure(
+                                    &file_id,
+                                    self.label(),
+                                    UploadFailureCause::InvalidState(message),
+                                )
+                                .await;
                         };
                         BlobLocator::browsable(
                             row.blob().namespace.clone(),
@@ -394,7 +398,11 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     Ok(locator) => locator,
                     Err(error) => {
                         return self
-                            .local_failure(&file_id, self.label(), error.to_string())
+                            .local_failure(
+                                &file_id,
+                                self.label(),
+                                UploadFailureCause::Locator(error),
+                            )
                             .await;
                     }
                 };
@@ -413,7 +421,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 {
                     let object_key = stored.object().slot().logical_key().to_string();
                     return self
-                        .local_failure(&file_id, object_key, error.to_string())
+                        .local_failure(&file_id, object_key, UploadFailureCause::Database(error))
                         .await;
                 }
                 self.set_state(OutboxUploadState::Prepared {
@@ -438,7 +446,9 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                         .local_failure(
                             &file_id,
                             self.label(),
-                            "make_remote upload has non-Store package authority".to_string(),
+                            UploadFailureCause::InvalidState(
+                                "make_remote upload has non-Store package authority".to_string(),
+                            ),
                         )
                         .await;
                 }
@@ -462,7 +472,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             if let Err(error) = self.writer.mark_blob_upload_created(&self.entry).await {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self
-                    .local_failure(&file_id, object_key, error.to_string())
+                    .local_failure(&file_id, object_key, UploadFailureCause::Database(error))
                     .await;
             }
             self.set_state(OutboxUploadState::Created {
@@ -480,7 +490,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             if let Err(error) = self.writer.pin_uploaded_blob(&stored, &source_path).await {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self
-                    .local_failure(&file_id, object_key, format!("pin uploaded blob: {error}"))
+                    .local_failure(&file_id, object_key, UploadFailureCause::Pin(error))
                     .await;
             }
         }
@@ -519,7 +529,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             }
             Err(error) => {
                 let object_key = stored.object().slot().logical_key().to_string();
-                self.local_failure(&file_id, object_key, error.to_string())
+                self.local_failure(&file_id, object_key, UploadFailureCause::Database(error))
                     .await
             }
         }
@@ -591,13 +601,14 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         &self,
         file_id: &str,
         object_key: String,
-        message: String,
+        cause: UploadFailureCause,
     ) -> EntryOutcome {
+        let message = cause.to_string();
         self.record_failure(file_id, &message).await;
         EntryOutcome::NotUploaded(UploadFailure {
             entry_id: self.entry.id,
             object_key,
-            cause: UploadFailureCause::Local(message),
+            cause,
         })
     }
 

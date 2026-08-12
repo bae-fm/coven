@@ -383,10 +383,12 @@ pub(crate) fn stored_route_audience(
     if !mirror.0 {
         return Ok(Audience::Local);
     }
-    Audience::from_column(mirror.1.as_deref()).map_err(|error| GateError::InvalidAudience {
-        table: table.to_string(),
-        value: mirror.1,
-        reason: error.to_string(),
+    Audience::from_column(mirror.1.as_deref()).map_err(|source| {
+        GateError::InvalidAudienceEncoding {
+            table: table.to_string(),
+            value: mirror.1,
+            source,
+        }
     })
 }
 
@@ -480,10 +482,12 @@ pub(crate) fn live_row_audience(
                         row_id: id.to_string(),
                     }
                 })?;
-            Audience::from_column(value.as_deref()).map_err(|error| GateError::InvalidAudience {
-                table: table.to_string(),
-                value,
-                reason: error.to_string(),
+            Audience::from_column(value.as_deref()).map_err(|source| {
+                GateError::InvalidAudienceEncoding {
+                    table: table.to_string(),
+                    value,
+                    source,
+                }
             })
         }
         Some(TableGate::Child {
@@ -531,12 +535,12 @@ pub(crate) fn active_circle_control(
     let state: CircleCurrentState =
         serde_json::from_slice(&state).map_err(|error| GateError::InvalidCircleControl {
             circle_id,
-            reason: format!("parse current state: {error}"),
+            source: CircleControlFailure::ParseCurrentState(error),
         })?;
     if !state.verify() || state.circle_id() != circle_id {
         return Err(GateError::InvalidCircleControl {
             circle_id,
-            reason: "current state failed verification".to_string(),
+            source: CircleControlFailure::Verification,
         });
     }
     if state.is_deleted() {
@@ -551,10 +555,14 @@ pub(crate) fn active_circle_control(
     let stored_control = serde_json::to_string(current.coordinate()).map_err(|error| {
         GateError::InvalidCircleControl {
             circle_id,
-            reason: format!("serialize current control coordinate: {error}"),
+            source: CircleControlFailure::SerializeCoordinate(error),
         }
     })?;
-    let parsed = CirclePartitionControl::from_stored_json(stored_control)
-        .map_err(|reason| GateError::InvalidCircleControl { circle_id, reason })?;
+    let parsed = CirclePartitionControl::from_stored_json(stored_control).map_err(|source| {
+        GateError::InvalidCircleControl {
+            circle_id,
+            source: source.into(),
+        }
+    })?;
     Ok(parsed)
 }

@@ -40,13 +40,7 @@ fn resolve_identity_access_leaf(
     let owner_pubkey = &control.value.author_pubkey;
     let owner = (
         owner_pubkey.clone(),
-        recipient_slot_with_peer(identity, owner_pubkey, reference.circle_id()).map_err(
-            |error| {
-                CircleOperationError::InvalidState(format!(
-                    "derive circle Owner recipient slot: {error}"
-                ))
-            },
-        )?,
+        recipient_slot_with_peer(identity, owner_pubkey, reference.circle_id())?,
     );
     let access = verified_access
         .iter()
@@ -62,13 +56,8 @@ fn resolve_identity_access_leaf(
         })?;
     let envelope = access.envelope.clone();
     let leaf_bytes = access.leaf_bytes.clone();
-    let plaintext =
-        keys::seal_box_decrypt(&leaf_bytes, &identity.to_x25519_secret_key()).map_err(|error| {
-            CircleOperationError::InvalidState(format!("open circle access leaf: {error}"))
-        })?;
-    let leaf: CircleAccessLeaf = serde_json::from_slice(&plaintext).map_err(|error| {
-        CircleOperationError::InvalidState(format!("parse circle access leaf: {error}"))
-    })?;
+    let plaintext = keys::seal_box_decrypt(&leaf_bytes, &identity.to_x25519_secret_key())?;
+    let leaf: CircleAccessLeaf = serde_json::from_slice(&plaintext)?;
     let prepared_leaf = PreparedAccessLeaf {
         bytes: leaf_bytes,
         value: leaf,
@@ -211,12 +200,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 )
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let envelope: AccessEnvelope =
-                serde_json::from_slice(&envelope_bytes).map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse circle access envelope: {error}"
-                    ))
-                })?;
+            let envelope: AccessEnvelope = serde_json::from_slice(&envelope_bytes)?;
             if envelope.candidate_family != family
                 || envelope.circle_id != circle_id
                 || envelope.owner_pubkey != reference.envelope.owner_pubkey
@@ -313,7 +297,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 routing_key.cloned(),
             )
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         for binding in &bootstrap.blobs {
             let coven_protocol::blob::RowBlobAuthority::Remote(
                 coven_protocol::audience_package::PackageAudience::Circle {
@@ -361,15 +345,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     "Circle bootstrap row blob has no exact locator".to_string(),
                 )
             })?;
-            self.storage
-                .verify_blob_object(stored)
-                .await
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "verify Circle bootstrap blob {}: {error}",
-                        coven_protocol::remote_object::remote_object_id(stored.object())
-                    ))
-                })?;
+            self.storage.verify_blob_object(stored).await?;
         }
         VerifiedCircleImage::new(
             leaf.circle_id,
@@ -410,10 +386,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         else {
             return Ok(LocalCircleAccess::NoAccess);
         };
-        let epoch_encryption =
-            EncryptionService::from(MasterKeyring::from_serialized(keyring).map_err(|error| {
-                CircleOperationError::InvalidState(format!("parse circle access keyring: {error}"))
-            })?);
+        let epoch_encryption = EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
         let leaf_bootstrap = match bootstrap {
             Some(bootstrap) => Some(
                 self.build_verified_leaf_bootstrap_image(
@@ -444,7 +417,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         let commit = verified.value();
         if commit.circle_controls().is_empty() && commit.stream_activations().is_empty() {
             return VerifiedCircleActivations::none(commit, verified.reference())
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()));
+                .map_err(CircleOperationError::from);
         }
         self.load_with_prefix(
             verified,
@@ -469,12 +442,12 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 commit,
             ))
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         let verified_membership_prefix = history_verifier
             .verified_membership_prefix(crate::sync::store::pull::commit_predecessor_references(
                 commit,
             ))
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         let verified_prefix = VerifiedStreamActivationPrefix::empty();
         Box::pin(self.load_with_prefix(
             verified,
@@ -537,10 +510,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &control_prefix,
             )
             .await?;
-            let control_value: CircleControl =
-                serde_json::from_slice(&control_bytes).map_err(|error| {
-                    CircleOperationError::InvalidState(format!("parse Circle control: {error}"))
-                })?;
+            let control_value: CircleControl = serde_json::from_slice(&control_bytes)?;
             if control_value.control_hash() != reference.control().control_hash() {
                 return Err(CircleOperationError::InvalidState(
                     "Circle control identifies itself as another control".to_string(),
@@ -584,12 +554,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &prefix,
             )
             .await?;
-            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse exact Circle control head: {error}"
-                    ))
-                })?;
+            let head: coven_protocol::circle::CircleControlHead = serde_json::from_slice(&bytes)?;
             let CircleControlCoord {
                 stream_id,
                 author_pubkey,
@@ -713,13 +678,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             let leaf = &prepared_leaf.value;
             let active = match &leaf.disposition {
                 CircleAccessDisposition::Active { keyring, .. } => {
-                    let encryption = EncryptionService::from(
-                        MasterKeyring::from_serialized(keyring).map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "parse circle access keyring: {error}"
-                            ))
-                        })?,
-                    );
+                    let encryption =
+                        EncryptionService::from(MasterKeyring::from_serialized(keyring)?);
                     let authority_roster = self
                         .load_circle_authority_roster(
                             verified_prefix,
@@ -756,7 +716,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                         .await?;
                     let resolved = roster_chain
                         .try_resolved()
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                        .map_err(CircleOperationError::from)?;
                     let close_outcome = self
                         .verify_epoch_close(
                             commit,
@@ -880,7 +840,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         }
         let stream_activations =
             VerifiedStreamActivations::from_verified_circle_commit(commit, commit_ref)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
         Ok(VerifiedCircleActivations::from_verified_parts(
             activations,
             stream_activations,

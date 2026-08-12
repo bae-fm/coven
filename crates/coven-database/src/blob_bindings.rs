@@ -163,7 +163,7 @@ impl Database {
     ) -> Result<Vec<RowBlobRef>, DbError> {
         let mut rows = gates
             .subtree_rows(conn, root_table, root_id)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .into_iter()
             .collect::<Vec<_>>();
         rows.sort();
@@ -234,7 +234,7 @@ impl Database {
             let remote = if !gates.table_is_scoped(&table_name) {
                 gates
                     .root_kept_of(conn, &table_name, &row_id)
-                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .map_err(DbError::from)?
             } else {
                 match crate::live_row_audience(conn, gates, &table_name, &row_id) {
                     Ok(audience) => Some(audience != coven_protocol::circle::Audience::Local),
@@ -242,7 +242,7 @@ impl Database {
                         crate::GateError::MissingAudienceRow { .. }
                         | crate::GateError::MissingAudienceParent { .. },
                     ) => None,
-                    Err(error) => return Err(DbError::Message(error.to_string())),
+                    Err(error) => return Err(DbError::from(error)),
                 }
             };
             match remote {
@@ -385,7 +385,7 @@ impl Database {
                         RowBlobAuthority::PendingRemote(remote_audience),
                         None,
                     )
-                    .map_err(DbError::Message);
+                    .map_err(DbError::from);
                 };
                 if package_authority.remote_audience() != remote_audience {
                     return Err(DbError::Message(format!(
@@ -425,7 +425,7 @@ impl Database {
             authority,
             stored,
         )
-        .map_err(DbError::Message)
+        .map_err(DbError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

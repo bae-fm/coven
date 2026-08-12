@@ -30,8 +30,7 @@ impl DeviceJoinJournalStore {
     ) -> Result<Self, crate::DbError> {
         let path = path.as_ref().to_path_buf();
         if let Some(directory) = path.parent() {
-            std::fs::create_dir_all(directory)
-                .map_err(|error| crate::DbError::Message(error.to_string()))?;
+            std::fs::create_dir_all(directory).map_err(crate::DbError::from)?;
         }
         let connection = rusqlite::Connection::open(&path).map_err(crate::DbError::from)?;
         crate::connection_io::configure_connection_durability(&connection, durability)?;
@@ -286,7 +285,7 @@ pub(crate) fn begin_device_join_on(
     )
     .map_err(crate::DbError::from)?;
     let actual = crate::required_protocol_state_on(conn, key)?;
-    serde_json::from_str(&actual).map_err(|error| crate::DbError::Message(error.to_string()))
+    serde_json::from_str(&actual).map_err(crate::DbError::from)
 }
 
 pub(crate) fn advance_device_join_on(

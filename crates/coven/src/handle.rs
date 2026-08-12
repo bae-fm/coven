@@ -43,12 +43,12 @@ use coven_keys::encryption::SealError;
 use coven_keys::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
 };
-use coven_protocol::blob::DrainOutcome;
 use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
+use coven_replication::blob::DrainOutcome;
 use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use coven_replication::sync::sync_loop::SyncLoopStatus;
 use coven_replication::sync::{BlobCacheError, BlobStream};
@@ -1138,7 +1138,10 @@ impl CovenHandle {
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
-    ) -> Result<std::sync::Arc<coven_replication::sync::test_helpers::TestStore>, String> {
+    ) -> Result<
+        std::sync::Arc<coven_replication::sync::test_helpers::TestStore>,
+        coven_replication::sync::test_helpers::TestError,
+    > {
         self.sync.create_test_store(store_id, signer, home).await
     }
 
@@ -1154,7 +1157,7 @@ impl CovenHandle {
     pub(crate) async fn publish_test_store(
         &self,
         store: &coven_replication::sync::test_helpers::TestStore,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, coven_replication::sync::test_helpers::TestError> {
         self.sync.publish_test_store(store).await
     }
 
@@ -1272,7 +1275,7 @@ impl CovenHandle {
         store: &coven_replication::sync::test_helpers::TestStore,
         owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<(), coven_replication::sync::test_helpers::TestError> {
         self.sync
             .prepare_test_join_snapshot(store, owner, snapshot_path)
             .await

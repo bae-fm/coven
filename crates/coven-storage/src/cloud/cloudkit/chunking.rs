@@ -61,7 +61,7 @@ pub(crate) fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudH
         CloudHomeError::Transport("CloudKit chunk manifest missing magic".to_string())
     })?;
     let body = std::str::from_utf8(body).map_err(|e| {
-        CloudHomeError::Transport(format!("CloudKit chunk manifest is not UTF-8: {e}"))
+        CloudHomeError::transport("CloudKit chunk manifest is not UTF-8".to_string(), e)
     })?;
     let mut lines = body.lines();
     let part_count = lines
@@ -70,22 +70,14 @@ pub(crate) fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudH
             CloudHomeError::Transport("CloudKit chunk manifest missing part count".to_string())
         })?
         .parse::<usize>()
-        .map_err(|e| {
-            CloudHomeError::Transport(format!(
-                "CloudKit chunk manifest part count is invalid: {e}"
-            ))
-        })?;
+        .map_err(|e| CloudHomeError::transport("parse CloudKit chunk manifest part count", e))?;
     let total_len = lines
         .next()
         .ok_or_else(|| {
             CloudHomeError::Transport("CloudKit chunk manifest missing total length".to_string())
         })?
         .parse::<usize>()
-        .map_err(|e| {
-            CloudHomeError::Transport(format!(
-                "CloudKit chunk manifest total length is invalid: {e}"
-            ))
-        })?;
+        .map_err(|e| CloudHomeError::transport("parse CloudKit chunk manifest total length", e))?;
     let upload_id = lines
         .next()
         .ok_or_else(|| {
@@ -180,9 +172,7 @@ impl CloudKitStagingCleanup {
         })
         .await
         .map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "CloudKit atomic-create staging task failed: {error}"
-            ))
+            CloudHomeError::transport("run CloudKit atomic-create staging task", error)
         })?
     }
 
@@ -196,9 +186,7 @@ impl CloudKitStagingCleanup {
         })
         .await
         .map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "CloudKit atomic-create commit task failed: {error}"
-            ))
+            CloudHomeError::transport("run CloudKit atomic-create commit task", error)
         })?
     }
 }

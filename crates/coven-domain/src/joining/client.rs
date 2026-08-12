@@ -60,27 +60,48 @@ pub enum BootstrapError {
     Key(#[from] KeyError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid code: {0}")]
-    InvalidCode(String),
+    #[error("invalid invite code: {0}")]
+    InviteCode(#[from] crate::joining::JoinCodeError),
+    #[error("invalid join request code: {0}")]
+    JoinRequestCode(#[source] coven_foundation::code_envelope::EnvelopeError),
+    #[error("invalid device invite JSON: {0}")]
+    DeviceInviteJson(#[source] serde_json::Error),
+    #[error("device join invite version {0} is not supported")]
+    UnsupportedDeviceInviteVersion(u32),
+    #[error("invalid store id: {0}")]
+    InvalidStoreId(#[from] coven_foundation::store_dir::PathTokenError),
+    #[error("invalid restore code: {0}")]
+    RestoreCode(#[from] crate::restoration::RestoreCodeError),
     #[error("store already exists locally: {0}")]
     StoreExists(String),
     /// A hard crash left a store directory with no saved config, and clearing
     /// that torn-bootstrap residue before retrying failed — so the retry can't
     /// proceed over the leftover directory or keyring entries.
     #[error("could not clear a torn bootstrap for {store_id}: {failures}")]
-    TornBootstrapCleanup { store_id: String, failures: String },
+    TornBootstrapCleanup {
+        store_id: String,
+        failures: BootstrapCleanupFailures,
+    },
     #[error("could not remove cancelled join state for {store_id}: {failures}")]
-    CancelledJoinCleanup { store_id: String, failures: String },
+    CancelledJoinCleanup {
+        store_id: String,
+        failures: BootstrapCleanupFailures,
+    },
     #[error("provider: {0}")]
     Provider(String),
+    #[cfg(feature = "oauth-providers")]
+    #[error("OAuth client configuration: {0}")]
+    OAuthClient(#[from] coven_storage::oauth::OAuthClientCredsError),
     #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]
     ExactSlotsUnavailable {
         provider: coven_foundation::config::CloudProvider,
     },
-    #[error("database: {0}")]
-    Database(String),
+    #[error("database open: {0}")]
+    DatabaseOpen(#[from] coven_database::OpenError),
+    #[error("snapshot blob reconciliation: {0}")]
+    SnapshotBlobReconcile(#[from] coven_replication::sync::store::SnapshotBlobReconcileError),
     #[error("invalid signing key: {0}")]
-    InvalidSigningKey(String),
+    InvalidSigningKey(#[from] SigningKeyError),
     /// The caller's cancel signal fired at a phase boundary, so the join or
     /// restore stopped before saving the store. This returns through the same
     /// failure-cleanup path a real error takes — removing the partly-created
@@ -94,9 +115,58 @@ pub enum BootstrapError {
     /// cause is preserved as a value, not flattened into a string.
     #[error("could not clean up the partial store after bootstrap failed: {cleanup} (bootstrap error: {cause})")]
     Cleanup {
-        cleanup: String,
+        cleanup: BootstrapCleanupFailures,
         cause: Box<BootstrapError>,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SigningKeyError {
+    #[error("{0}")]
+    Material(#[from] coven_foundation::code_envelope::FixedHexError),
+    #[error("activated continuation has no device signing key")]
+    MissingContinuationSigner,
+    #[error("Owner recovery cannot carry an activated device signer")]
+    UnexpectedOwnerRecoverySigner,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapCleanupFailure {
+    #[error("store directory: {0}")]
+    StoreDirectory(#[source] std::io::Error),
+    #[error("master key: {0}")]
+    MasterKey(#[source] KeyError),
+    #[error("identity: {0}")]
+    Identity(#[source] KeyError),
+    #[error("cloud home credentials: {0}")]
+    CloudHomeCredentials(#[source] KeyError),
+}
+
+#[derive(Debug)]
+pub struct BootstrapCleanupFailures(Vec<BootstrapCleanupFailure>);
+
+impl BootstrapCleanupFailures {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for BootstrapCleanupFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BootstrapCleanupFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.first().map(|failure| failure as _)
+    }
 }
 
 impl From<InviteError> for BootstrapError {
@@ -143,7 +213,7 @@ impl<'a> BootstrapCleanup<'a> {
             if !failures.is_empty() {
                 return Err(BootstrapError::TornBootstrapCleanup {
                     store_id: store_id.to_string(),
-                    failures: failures.join("; "),
+                    failures,
                 });
             }
         }
@@ -158,30 +228,30 @@ impl<'a> BootstrapCleanup<'a> {
             cause
         } else {
             BootstrapError::Cleanup {
-                cleanup: failures.join("; "),
+                cleanup: failures,
                 cause: Box::new(cause),
             }
         }
     }
 
     /// Remove every local artifact the bound bootstrap attempt may have written.
-    pub(crate) fn remove(&self) -> Vec<String> {
+    pub(crate) fn remove(&self) -> BootstrapCleanupFailures {
         let mut failures = Vec::new();
 
         if let Err(error) = self.store_dir.remove_tree() {
-            failures.push(format!("store directory: {error}"));
+            failures.push(BootstrapCleanupFailure::StoreDirectory(error));
         }
         if let Err(error) = self.custody.forget() {
-            failures.push(format!("master key: {error}"));
+            failures.push(BootstrapCleanupFailure::MasterKey(error));
         }
         if let Err(error) = self.identity_custody.forget() {
-            failures.push(format!("identity: {error}"));
+            failures.push(BootstrapCleanupFailure::Identity(error));
         }
         if let Err(error) = self.store_keys.delete_cloud_home_credentials() {
-            failures.push(format!("cloud home credentials: {error}"));
+            failures.push(BootstrapCleanupFailure::CloudHomeCredentials(error));
         }
 
-        failures
+        BootstrapCleanupFailures(failures)
     }
 }
 
@@ -225,9 +295,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("Google Drive join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients
-                .config_for(CloudProvider::GoogleDrive)
-                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+            let oauth_config = oauth_clients.config_for(CloudProvider::GoogleDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
@@ -246,9 +314,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("Dropbox join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients
-                .config_for(CloudProvider::Dropbox)
-                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+            let oauth_config = oauth_clients.config_for(CloudProvider::Dropbox)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
@@ -270,9 +336,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("OneDrive join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients
-                .config_for(CloudProvider::OneDrive)
-                .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+            let oauth_config = oauth_clients.config_for(CloudProvider::OneDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 lib_ks.clone(),
@@ -370,18 +434,16 @@ impl DeviceJoinClient {
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
-        let code = crate::joining::decode(invite_code)
-            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
+        let code = crate::joining::decode(invite_code)?;
         let member_pubkey = crate::joining::decode_join_request(join_request_code)
-            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?
+            .map_err(BootstrapError::JoinRequestCode)?
             .public_key;
         coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
             &code.join_info,
             exact_upload_verification,
         )
         .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
-        coven_foundation::store_dir::validate_path_token(&code.store_id)
-            .map_err(|error| BootstrapError::InvalidCode(format!("invalid store id: {error}")))?;
+        coven_foundation::store_dir::validate_path_token(&code.store_id)?;
         let store_dir = layout.store_dir(&code.store_id);
         let store_keys = StoreKeys::bind(code.store_id.clone());
         let custody = key_custody.resolve(&store_keys, &store_dir);
@@ -528,7 +590,7 @@ impl DeviceJoinClient {
         if !failures.is_empty() {
             return Err(BootstrapError::CancelledJoinCleanup {
                 store_id: self.code.store_id.clone(),
-                failures: failures.join("; "),
+                failures,
             });
         }
         coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
@@ -625,18 +687,8 @@ impl DeviceJoinClient {
                 Some(&routing_encryption),
             )
             .await?;
-        match opened
-            .reconcile_snapshot_blobs(cancel)
-            .await
-            .map_err(|error| BootstrapError::Database(error.to_string()))?
-        {
+        match opened.reconcile_snapshot_blobs(cancel).await? {
             SnapshotBlobReconcile::Complete => {}
-            SnapshotBlobReconcile::Incomplete => {
-                return Err(BootstrapError::Database(
-                    "snapshot blob reconciliation did not land every required eager blob"
-                        .to_string(),
-                ));
-            }
             SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
         }
         let published_at = self.clock.now().to_rfc3339();
@@ -688,8 +740,7 @@ impl DeviceJoinClient {
             device_id.clone(),
             self.clock.clone(),
             &self.migrations,
-        )
-        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        )?;
         let database = coven_database::StoreDatabase::from_database(db.clone());
         // Converge over everything the owner published after this device's
         // bootstrap before materializing the commit that activates the join.
@@ -828,27 +879,19 @@ impl DeviceJoinClient {
         self.code
             .membership_floor
             .validate()
-            .map_err(coven_replication::sync::store::InviteError::Crypto)?;
+            .map_err(coven_replication::sync::store::InviteError::MembershipFloor)?;
         let mut history =
             coven_replication::sync::store::HistoryConstructionAuthority::invitation()
                 .open_pinned(&bootstrap_storage, &self.code.store_root)
                 .await
-                .map_err(|error| {
-                    coven_replication::sync::store::InviteError::Crypto(format!(
-                        "membership chain: {error}"
-                    ))
-                })?;
+                .map_err(coven_replication::sync::store::InviteError::from)?;
         let chain = history
             .load_exact_anchored_membership(
                 &self.code.membership_floor.0,
                 Some(&self.code.owner_pubkey),
             )
             .await
-            .map_err(|error| {
-                coven_replication::sync::store::InviteError::Crypto(format!(
-                    "membership chain: {error}"
-                ))
-            })?;
+            .map_err(coven_replication::sync::store::InviteError::from)?;
         let encryption = coven_replication::sync::store::StoreKeyrings::new(
             &bootstrap_storage,
             self.code.store_root.clone(),

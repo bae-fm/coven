@@ -1,5 +1,208 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub enum HeldStorePositionReason {
+    MissingCommit,
+    MissingPredecessor(StoreBatchCommitRef),
+    MissingDependency {
+        device_id: String,
+        commit: StoreBatchCommitRef,
+    },
+    NewerSchema {
+        local: u32,
+        required: u32,
+    },
+    Unauthorized,
+    DeviceExclusionFreeze {
+        proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        target_cut: StoreHistoryCut,
+    },
+    InactiveDevice {
+        terminals: Vec<coven_protocol::store_commit::StoreDeviceExclusionRef>,
+        accepted_cut: StoreHistoryCut,
+    },
+    InvalidChangeset(String),
+    InvalidChangesetIdentity(std::sync::Arc<coven_database::ChangesetIdentityError>),
+    InvalidChangesetDatabase(std::sync::Arc<DbError>),
+    InvalidChangesetBlobDecl(std::sync::Arc<coven_database::BlobDeclError>),
+    InvalidStorePackage(std::sync::Arc<coven_protocol::audience_package::AudiencePackageError>),
+    StorePackageMismatch,
+    InvalidCirclePackage(std::sync::Arc<coven_protocol::audience_package::AudiencePackageError>),
+    CirclePackageMismatch,
+    InvalidCircleBlobAuthority(
+        std::sync::Arc<coven_protocol::audience_package::AudiencePackageError>,
+    ),
+    CirclePackageRead(std::sync::Arc<crate::sync::store::CirclePackageReadError>),
+    ChangesetUnreadable(std::sync::Arc<coven_database::ChangesetError>),
+    InvalidRowIdentity(std::sync::Arc<coven_protocol::synced_schema::RowIdentityError>),
+    BlobDownloadFailed,
+    ForeignKeyDependency,
+    ConstraintConflict(Vec<String>),
+    HashMismatch {
+        referenced_device_id: String,
+        referenced_commit: StoreBatchCommitRef,
+        materialized_hash: ObjectHash,
+    },
+    InvalidSignature,
+    WrongSlot(String),
+    WrongSlotProtocol(std::sync::Arc<StoreProtocolError>),
+    ObjectUnreadableStorage {
+        key: String,
+        source: std::sync::Arc<StorageError>,
+    },
+    ObjectUnreadableProtocol {
+        key: String,
+        source: std::sync::Arc<StoreProtocolError>,
+    },
+    ObjectUnreadablePull {
+        key: String,
+        source: std::sync::Arc<StorePullError>,
+    },
+    InvalidObject(String),
+    InvalidObjectJson(std::sync::Arc<serde_json::Error>),
+    InvalidObjectProtocol(std::sync::Arc<StoreProtocolError>),
+    InvalidObjectPull(std::sync::Arc<StorePullError>),
+}
+
+impl PartialEq for HeldStorePositionReason {
+    fn eq(&self, other: &Self) -> bool {
+        use HeldStorePositionReason as Reason;
+        match (self, other) {
+            (Reason::MissingCommit, Reason::MissingCommit)
+            | (Reason::Unauthorized, Reason::Unauthorized)
+            | (Reason::StorePackageMismatch, Reason::StorePackageMismatch)
+            | (Reason::CirclePackageMismatch, Reason::CirclePackageMismatch)
+            | (Reason::BlobDownloadFailed, Reason::BlobDownloadFailed)
+            | (Reason::ForeignKeyDependency, Reason::ForeignKeyDependency)
+            | (Reason::InvalidSignature, Reason::InvalidSignature) => true,
+            (Reason::MissingPredecessor(left), Reason::MissingPredecessor(right)) => left == right,
+            (
+                Reason::MissingDependency {
+                    device_id: ld,
+                    commit: lc,
+                },
+                Reason::MissingDependency {
+                    device_id: rd,
+                    commit: rc,
+                },
+            ) => ld == rd && lc == rc,
+            (
+                Reason::NewerSchema {
+                    local: ll,
+                    required: lr,
+                },
+                Reason::NewerSchema {
+                    local: rl,
+                    required: rr,
+                },
+            ) => ll == rl && lr == rr,
+            (
+                Reason::DeviceExclusionFreeze {
+                    proposal: lp,
+                    target_cut: lc,
+                },
+                Reason::DeviceExclusionFreeze {
+                    proposal: rp,
+                    target_cut: rc,
+                },
+            ) => lp == rp && lc == rc,
+            (
+                Reason::InactiveDevice {
+                    terminals: lt,
+                    accepted_cut: lc,
+                },
+                Reason::InactiveDevice {
+                    terminals: rt,
+                    accepted_cut: rc,
+                },
+            ) => lt == rt && lc == rc,
+            (Reason::InvalidChangeset(left), Reason::InvalidChangeset(right))
+            | (Reason::WrongSlot(left), Reason::WrongSlot(right))
+            | (Reason::InvalidObject(left), Reason::InvalidObject(right)) => left == right,
+            (Reason::InvalidStorePackage(left), Reason::InvalidStorePackage(right))
+            | (Reason::InvalidCirclePackage(left), Reason::InvalidCirclePackage(right))
+            | (
+                Reason::InvalidCircleBlobAuthority(left),
+                Reason::InvalidCircleBlobAuthority(right),
+            ) => left.to_string() == right.to_string(),
+            (Reason::CirclePackageRead(left), Reason::CirclePackageRead(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::InvalidRowIdentity(left), Reason::InvalidRowIdentity(right)) => left == right,
+            (Reason::ConstraintConflict(left), Reason::ConstraintConflict(right)) => left == right,
+            (
+                Reason::HashMismatch {
+                    referenced_device_id: ld,
+                    referenced_commit: lc,
+                    materialized_hash: lh,
+                },
+                Reason::HashMismatch {
+                    referenced_device_id: rd,
+                    referenced_commit: rc,
+                    materialized_hash: rh,
+                },
+            ) => ld == rd && lc == rc && lh == rh,
+            (
+                Reason::ObjectUnreadableStorage {
+                    key: lk,
+                    source: ls,
+                },
+                Reason::ObjectUnreadableStorage {
+                    key: rk,
+                    source: rs,
+                },
+            ) => lk == rk && ls.to_string() == rs.to_string(),
+            (
+                Reason::ObjectUnreadableProtocol {
+                    key: lk,
+                    source: ls,
+                },
+                Reason::ObjectUnreadableProtocol {
+                    key: rk,
+                    source: rs,
+                },
+            ) => lk == rk && ls.to_string() == rs.to_string(),
+            (
+                Reason::ObjectUnreadablePull {
+                    key: lk,
+                    source: ls,
+                },
+                Reason::ObjectUnreadablePull {
+                    key: rk,
+                    source: rs,
+                },
+            ) => lk == rk && ls.to_string() == rs.to_string(),
+            (Reason::InvalidChangesetIdentity(left), Reason::InvalidChangesetIdentity(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::InvalidChangesetDatabase(left), Reason::InvalidChangesetDatabase(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::InvalidChangesetBlobDecl(left), Reason::InvalidChangesetBlobDecl(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::ChangesetUnreadable(left), Reason::ChangesetUnreadable(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::InvalidObjectJson(left), Reason::InvalidObjectJson(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::InvalidObjectPull(left), Reason::InvalidObjectPull(right)) => {
+                left.to_string() == right.to_string()
+            }
+            (Reason::WrongSlotProtocol(left), Reason::WrongSlotProtocol(right))
+            | (Reason::InvalidObjectProtocol(left), Reason::InvalidObjectProtocol(right)) => {
+                left.to_string() == right.to_string()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for HeldStorePositionReason {}
+
+pub(crate) type ApplyOutcome = coven_protocol::membership::ApplyOutcome<HeldStorePositionReason>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldStoreCoordinate {
     Head {
@@ -133,6 +336,8 @@ pub enum StorePullError {
     RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
     #[error("membership chain: {0}")]
     MembershipChain(#[from] crate::sync::store::membership::AnchoredChainError),
+    #[error("membership protocol: {0}")]
+    MembershipProtocol(#[from] coven_protocol::membership::MembershipError),
     #[error("device join exchange: {0}")]
     DeviceJoinExchange(
         #[from] coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
@@ -168,6 +373,14 @@ pub enum StorePullError {
     BlobDownloads(#[source] crate::sync::store::pull::BlobDownloadFailures),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
+    #[error("Circle package: {0}")]
+    CirclePackage(#[source] Box<crate::sync::store::CirclePackageReadError>),
+}
+
+impl From<crate::sync::store::CirclePackageReadError> for StorePullError {
+    fn from(error: crate::sync::store::CirclePackageReadError) -> Self {
+        Self::CirclePackage(Box::new(error))
+    }
 }
 
 impl StorePullError {
@@ -211,10 +424,13 @@ impl Candidate {
         self.verified.author()
     }
 
-    pub(crate) fn parse_store_package(&self, bytes: &[u8]) -> Result<AudiencePackage, String> {
+    pub(crate) fn parse_store_package(
+        &self,
+        bytes: &[u8],
+    ) -> Result<AudiencePackage, HeldStorePositionReason> {
         let commit = self.commit();
         let package = AudiencePackage::parse(bytes)
-            .map_err(|error| format!("invalid Store audience package: {error}"))?;
+            .map_err(|error| HeldStorePositionReason::InvalidStorePackage(error.into()))?;
         if !matches!(package.audience(), PackageAudience::Store)
             || package.store_root_hash() != commit.store_root_hash
             || package.write_id() != &commit.write_id
@@ -225,7 +441,7 @@ impl Candidate {
                 .as_ref()
                 .is_none_or(|reference| package.schema_version() != reference.schema_version)
         {
-            return Err("Store audience package differs from its exact commit".to_string());
+            return Err(HeldStorePositionReason::StorePackageMismatch);
         }
         Ok(package)
     }
@@ -233,10 +449,10 @@ impl Candidate {
     pub(crate) fn parse_circle_package(
         &self,
         loaded: &LoadedCirclePackage,
-    ) -> Result<AudiencePackage, String> {
+    ) -> Result<AudiencePackage, HeldStorePositionReason> {
         let commit = self.commit();
         let package = AudiencePackage::parse(&loaded.bytes)
-            .map_err(|error| format!("invalid Circle audience package: {error}"))?;
+            .map_err(|error| HeldStorePositionReason::InvalidCirclePackage(error.into()))?;
         let expected = &loaded.reference;
         if !matches!(
             package.audience(),
@@ -253,11 +469,11 @@ impl Candidate {
             || package.candidate_family() != commit.candidate_family()
             || package.schema_version() != expected.package.schema_version
         {
-            return Err("Circle audience package differs from its exact commit".to_string());
+            return Err(HeldStorePositionReason::CirclePackageMismatch);
         }
         package
             .validate_blob_uploader(&commit.author_registration)
-            .map_err(|error| format!("invalid Circle blob authority: {error}"))?;
+            .map_err(|error| HeldStorePositionReason::InvalidCircleBlobAuthority(error.into()))?;
         Ok(package)
     }
 }

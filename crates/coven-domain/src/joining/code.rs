@@ -52,16 +52,16 @@ pub(crate) fn decode(s: &str) -> Result<MemberInvitation, JoinCodeError> {
         &code.wrapped_key.owner_pubkey,
         32,
     )
-    .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
+    .map_err(|source| JoinCodeError::InvalidWrappedKey(WrappedKeyCodeError::Material(source)))?;
     coven_foundation::code_envelope::decode_fixed_hex(
         "wrapped-key recipient public key",
         &code.wrapped_key.recipient_pubkey,
         32,
     )
-    .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
-    code.wrapped_key
-        .validate_identity()
-        .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
+    .map_err(|source| JoinCodeError::InvalidWrappedKey(WrappedKeyCodeError::Material(source)))?;
+    code.wrapped_key.validate_identity().map_err(|source| {
+        JoinCodeError::InvalidWrappedKey(WrappedKeyCodeError::Identity(source))
+    })?;
     if code.membership_floor.0.is_empty() {
         return Err(JoinCodeError::EmptyMembershipFloor);
     }
@@ -100,8 +100,8 @@ pub fn encode_join_request(code: &JoinRequestCode) -> String {
     code_envelope::encode_code("", code)
 }
 
-pub fn decode_join_request(s: &str) -> Result<JoinRequestCode, JoinCodeError> {
-    Ok(code_envelope::decode_code("", s)?)
+pub fn decode_join_request(s: &str) -> Result<JoinRequestCode, EnvelopeError> {
+    code_envelope::decode_code("", s)
 }
 
 /// Build a join request and retain its pending device identity until the join
@@ -112,10 +112,18 @@ pub fn generate_join_request(email: Option<String>) -> Result<String, coven_keys
 }
 
 /// Discard the pending device identity retained for an abandoned join request.
-pub fn abandon_join_request(request_code: &str) -> Result<(), coven_keys::keys::KeyError> {
-    let request = decode_join_request(request_code)
-        .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
-    coven_keys::keys::discard_pending_identity(&request.public_key)
+pub fn abandon_join_request(request_code: &str) -> Result<(), AbandonJoinRequestError> {
+    let request = decode_join_request(request_code)?;
+    coven_keys::keys::discard_pending_identity(&request.public_key)?;
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AbandonJoinRequestError {
+    #[error("invalid join request code: {0}")]
+    Code(#[from] EnvelopeError),
+    #[error("failed to discard pending identity: {0}")]
+    Key(#[from] coven_keys::keys::KeyError),
 }
 
 /// UI-ready info from a decoded invite code.
@@ -151,7 +159,7 @@ pub enum JoinCodeError {
     #[error("The invite code is incomplete or has a typo. Check that you copied the entire code.")]
     InvalidBase64,
     #[error("The invite code is corrupted. Ask the inviter to generate a new one. ({0})")]
-    InvalidJson(String),
+    InvalidJson(#[source] serde_json::Error),
     #[error("This invite code uses unsupported format version v{0}. Ask the inviter to generate a new one.")]
     UnsupportedVersion(u8),
     /// The invite's `store_id` is not a safe path component, so it cannot name a
@@ -167,20 +175,28 @@ pub enum JoinCodeError {
     #[error(
         "The owner key in this invite code is invalid. Ask the inviter to generate a new one. ({0})"
     )]
-    InvalidOwnerPubkey(String),
+    InvalidOwnerPubkey(#[source] coven_foundation::code_envelope::FixedHexError),
     #[error("The wrapped key in this invite code is invalid. Ask the inviter to generate a new one. ({0})")]
-    InvalidWrappedKey(String),
+    InvalidWrappedKey(#[source] WrappedKeyCodeError),
     #[error("The invite code has no membership floor. Ask the inviter to generate a new one.")]
     EmptyMembershipFloor,
     #[error("The membership floor in this invite code is invalid. Ask the inviter to generate a new one. ({0})")]
-    InvalidMembershipFloor(String),
+    InvalidMembershipFloor(#[source] coven_protocol::membership::MembershipFloorError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WrappedKeyCodeError {
+    #[error("invalid wrapped-key material: {0}")]
+    Material(#[source] coven_foundation::code_envelope::FixedHexError),
+    #[error("wrapped-key identity does not match its object slot: {0}")]
+    Identity(#[source] coven_protocol::objects::StorageError),
 }
 
 impl From<EnvelopeError> for JoinCodeError {
     fn from(e: EnvelopeError) -> Self {
         match e {
-            EnvelopeError::MissingPrefix => JoinCodeError::MissingPrefix,
-            EnvelopeError::InvalidBase64 => JoinCodeError::InvalidBase64,
+            EnvelopeError::MissingPrefix { .. } => JoinCodeError::MissingPrefix,
+            EnvelopeError::InvalidBase64(_) => JoinCodeError::InvalidBase64,
             EnvelopeError::InvalidJson(s) => JoinCodeError::InvalidJson(s),
         }
     }

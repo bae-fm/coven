@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 
-use crate::atomic_file::FileSync;
+use crate::atomic_file::{FileError, FileSync};
 
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
 /// (`.tmp.<uuid>`) before the owning durability policy and rename make it the
@@ -22,10 +22,10 @@ pub(crate) fn is_temp_blob_path(path: &Path) -> bool {
         .is_some_and(|name| name.starts_with(TEMP_BLOB_PREFIX))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum StreamWriteError<E> {
     Source(E),
-    Local(String),
+    Local(FileError),
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for StreamWriteError<E> {
@@ -42,8 +42,8 @@ impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for StreamWriteEr
 #[derive(Debug)]
 pub enum ByteStreamWriteError<E> {
     Source(E),
-    SourceCleanup { source: E, cleanup: String },
-    Local(String),
+    SourceCleanup { source: E, cleanup: FileError },
+    Local(FileError),
 }
 
 #[async_trait]
@@ -54,7 +54,7 @@ pub trait PlaintextChunkReader: Send {
 
 enum AtomicChunkWriteError<E> {
     Source(E),
-    Local(String),
+    Local(FileError),
 }
 
 struct AtomicTempFile {
@@ -78,14 +78,26 @@ pub struct PublishedAtomicFile {
     file_sync: FileSync,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum CommitNewFileError {
     #[error("destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("commit new file: {0}")]
-    Filesystem(String),
+    Filesystem(#[from] FileError),
     #[error("{operation}; rollback failed: {rollback}")]
-    RollbackFailed { operation: String, rollback: String },
+    RollbackFailed {
+        operation: Box<CommitNewFileError>,
+        rollback: Box<FileError>,
+    },
+}
+
+impl CommitNewFileError {
+    fn rollback(operation: CommitNewFileError, rollback: FileError) -> Self {
+        Self::RollbackFailed {
+            operation: Box::new(operation),
+            rollback: Box::new(rollback),
+        }
+    }
 }
 
 impl AtomicStagedFile {
@@ -93,20 +105,20 @@ impl AtomicStagedFile {
         is_temp_blob_path(path)
     }
 
-    pub async fn create(destination: &Path) -> Result<Self, String> {
+    pub async fn create(destination: &Path) -> Result<Self, FileError> {
         Self::create_with_file_sync(destination, FileSync::Enabled).await
     }
 
     pub(crate) async fn create_with_file_sync(
         destination: &Path,
         file_sync: FileSync,
-    ) -> Result<Self, String> {
-        let parent = destination
-            .parent()
-            .ok_or_else(|| format!("blob path has no parent dir: {}", destination.display()))?;
+    ) -> Result<Self, FileError> {
+        let parent = destination.parent().ok_or_else(|| FileError::NoParent {
+            path: destination.to_path_buf(),
+        })?;
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|error| format!("create parent dir for {}: {error}", destination.display()))?;
+            .map_err(|source| FileError::at("create parent directory", parent, source))?;
         let staged = AtomicTempFile::create_in(parent)?;
         Ok(Self {
             destination: destination.to_path_buf(),
@@ -128,14 +140,14 @@ impl AtomicStagedFile {
     }
 
     /// Create another unpublished stage governed by the same durability policy.
-    pub async fn stage_peer(&self, destination: &Path) -> Result<Self, String> {
+    pub async fn stage_peer(&self, destination: &Path) -> Result<Self, FileError> {
         Self::create_with_file_sync(destination, self.file_sync.clone()).await
     }
 
-    pub async fn read_bytes(&self) -> Result<Vec<u8>, String> {
+    pub async fn read_bytes(&self) -> Result<Vec<u8>, FileError> {
         tokio::fs::read(self.path())
             .await
-            .map_err(|error| format!("read staged blob {}: {error}", self.path().display()))
+            .map_err(|source| FileError::at("read staged blob", self.path(), source))
     }
 
     /// Hand the reserved path to a writer that performs its own atomic
@@ -149,7 +161,7 @@ impl AtomicStagedFile {
         self.path()
     }
 
-    pub async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
         let staged = self.staged.as_mut().expect("atomic stage is unpublished");
@@ -157,20 +169,20 @@ impl AtomicStagedFile {
         let file = staged.file_mut();
         file.set_len(0)
             .await
-            .map_err(|error| format!("truncate staged blob {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("truncate staged blob", &path, source))?;
         file.seek(std::io::SeekFrom::Start(0))
             .await
-            .map_err(|error| format!("seek staged blob {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("seek staged blob", &path, source))?;
         file.write_all(bytes)
             .await
-            .map_err(|error| format!("write staged blob {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("write staged blob", &path, source))?;
         // Finish Tokio's queued writes before this stage can be inspected or
         // published. The owning durability policy separately decides whether
         // the completed file also needs a physical barrier.
         self.file_sync
             .finish_async_write(file)
             .await
-            .map_err(|error| format!("finish staged blob write {}: {error}", path.display()))
+            .map_err(|source| FileError::at("finish staged blob write", path, source))
     }
 
     /// Fill this unpublished stage from a plaintext stream and apply its file
@@ -185,13 +197,13 @@ impl AtomicStagedFile {
         let staged = self.staged.as_mut().expect("atomic stage is unpublished");
         let path = staged.path.clone();
         let file = staged.file_mut();
-        file.set_len(0).await.map_err(|error| {
-            StreamWriteError::Local(format!("truncate staged blob {}: {error}", path.display()))
+        file.set_len(0).await.map_err(|source| {
+            StreamWriteError::Local(FileError::at("truncate staged blob", &path, source))
         })?;
         file.seek(std::io::SeekFrom::Start(0))
             .await
-            .map_err(|error| {
-                StreamWriteError::Local(format!("seek staged blob {}: {error}", path.display()))
+            .map_err(|source| {
+                StreamWriteError::Local(FileError::at("seek staged blob", &path, source))
             })?;
         let mut written = 0u64;
         loop {
@@ -202,8 +214,8 @@ impl AtomicStagedFile {
             if chunk.is_empty() {
                 break;
             }
-            file.write_all(&chunk).await.map_err(|error| {
-                StreamWriteError::Local(format!("write staged blob {}: {error}", path.display()))
+            file.write_all(&chunk).await.map_err(|source| {
+                StreamWriteError::Local(FileError::at("write staged blob", &path, source))
             })?;
             written += chunk.len() as u64;
         }
@@ -213,11 +225,8 @@ impl AtomicStagedFile {
         self.file_sync
             .finish_async_write(file)
             .await
-            .map_err(|error| {
-                StreamWriteError::Local(format!(
-                    "finish staged blob write {}: {error}",
-                    path.display()
-                ))
+            .map_err(|source| {
+                StreamWriteError::Local(FileError::at("finish staged blob write", path, source))
             })?;
         Ok(written)
     }
@@ -232,19 +241,13 @@ impl AtomicStagedFile {
             let staged = self.staged.as_mut().expect("atomic stage is unpublished");
             let path = staged.path.clone();
             let file = staged.file_mut();
-            file.set_len(0).await.map_err(|error| {
-                AtomicChunkWriteError::Local(format!(
-                    "truncate staged blob {}: {error}",
-                    path.display()
-                ))
+            file.set_len(0).await.map_err(|source| {
+                AtomicChunkWriteError::Local(FileError::at("truncate staged blob", &path, source))
             })?;
             file.seek(std::io::SeekFrom::Start(0))
                 .await
-                .map_err(|error| {
-                    AtomicChunkWriteError::Local(format!(
-                        "seek staged blob {}: {error}",
-                        path.display()
-                    ))
+                .map_err(|source| {
+                    AtomicChunkWriteError::Local(FileError::at("seek staged blob", &path, source))
                 })?;
             let mut written = 0u64;
             while let Some(chunk) = stream
@@ -253,11 +256,8 @@ impl AtomicStagedFile {
                 .transpose()
                 .map_err(AtomicChunkWriteError::Source)?
             {
-                file.write_all(&chunk).await.map_err(|error| {
-                    AtomicChunkWriteError::Local(format!(
-                        "write staged blob {}: {error}",
-                        path.display()
-                    ))
+                file.write_all(&chunk).await.map_err(|source| {
+                    AtomicChunkWriteError::Local(FileError::at("write staged blob", &path, source))
                 })?;
                 written += chunk.len() as u64;
             }
@@ -267,10 +267,11 @@ impl AtomicStagedFile {
             self.file_sync
                 .finish_async_write(file)
                 .await
-                .map_err(|error| {
-                    AtomicChunkWriteError::Local(format!(
-                        "finish staged blob write {}: {error}",
-                        path.display()
+                .map_err(|source| {
+                    AtomicChunkWriteError::Local(FileError::at(
+                        "finish staged blob write",
+                        path,
+                        source,
                     ))
                 })?;
             Ok(written)
@@ -295,10 +296,10 @@ impl AtomicStagedFile {
 
     /// Fill this unpublished stage from one opened source file while computing
     /// the exact identity of the copied bytes from that same descriptor.
-    pub async fn copy_from(self, source: &Path) -> Result<(Self, u64, [u8; 32]), String> {
+    pub async fn copy_from(self, source: &Path) -> Result<(Self, u64, [u8; 32]), FileError> {
         let input = tokio::fs::File::open(source)
             .await
-            .map_err(|error| format!("open copy source {}: {error}", source.display()))?;
+            .map_err(|error| FileError::at("open copy source", source, error))?;
         self.write_open_file_with_facts(input, source).await
     }
 
@@ -306,7 +307,7 @@ impl AtomicStagedFile {
         mut self,
         mut input: tokio::fs::File,
         source: &Path,
-    ) -> Result<(Self, u64, [u8; 32]), String> {
+    ) -> Result<(Self, u64, [u8; 32]), FileError> {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
@@ -319,21 +320,22 @@ impl AtomicStagedFile {
                 let read = input
                     .read(&mut buffer)
                     .await
-                    .map_err(|error| format!("read pin source {}: {error}", source.display()))?;
+                    .map_err(|error| FileError::at("read copy source", source, error))?;
                 if read == 0 {
                     break;
                 }
                 size = size
                     .checked_add(read as u64)
-                    .ok_or_else(|| format!("copy source size overflow: {}", source.display()))?;
+                    .ok_or_else(|| FileError::SizeOverflow {
+                        subject: "copy source",
+                        path: source.to_path_buf(),
+                    })?;
                 hasher.update(&buffer[..read]);
                 staged
                     .file_mut()
                     .write_all(&buffer[..read])
                     .await
-                    .map_err(|error| {
-                        format!("write temp pin {}: {error}", staged.path.display())
-                    })?;
+                    .map_err(|error| FileError::at("write copy stage", &staged.path, error))?;
             }
             // Finish Tokio's queued writes before returning the hash and size.
             // The owning durability policy separately decides whether the
@@ -341,10 +343,8 @@ impl AtomicStagedFile {
             self.file_sync
                 .finish_async_write(staged.file_mut())
                 .await
-                .map_err(|error| {
-                    format!("finish temp pin write {}: {error}", staged.path.display())
-                })?;
-            Ok::<_, String>((size, hasher.finalize().into()))
+                .map_err(|error| FileError::at("finish copy stage", &staged.path, error))?;
+            Ok::<_, FileError>((size, hasher.finalize().into()))
         }
         .await;
         match copy {
@@ -353,7 +353,7 @@ impl AtomicStagedFile {
         }
     }
 
-    pub async fn commit(self) -> Result<(), String> {
+    pub async fn commit(self) -> Result<(), FileError> {
         let file_sync = self.file_sync.clone();
         self.commit_with_sync(|path| {
             let path = path.to_path_buf();
@@ -362,39 +362,39 @@ impl AtomicStagedFile {
         .await
     }
 
-    async fn commit_with_sync<F, Fut>(mut self, sync_committed_parent: F) -> Result<(), String>
+    async fn commit_with_sync<F, Fut>(mut self, sync_committed_parent: F) -> Result<(), FileError>
     where
         F: FnOnce(&Path) -> Fut,
-        Fut: std::future::Future<Output = Result<(), String>>,
+        Fut: std::future::Future<Output = Result<(), FileError>>,
     {
         let mut staged = self.take_stage();
         staged.close();
         let result = async {
             tokio::fs::rename(&staged.path, &self.destination)
                 .await
-                .map_err(|error| {
-                    format!(
-                        "rename verified blob {} -> {}: {error}",
-                        staged.path.display(),
-                        self.destination.display()
+                .map_err(|source| {
+                    FileError::between(
+                        "rename verified blob",
+                        &staged.path,
+                        &self.destination,
+                        source,
                     )
                 })?;
             if let Err(operation) = sync_committed_parent(&self.destination).await {
-                tokio::fs::rename(&self.destination, &staged.path)
-                    .await
-                    .map_err(|rollback| {
-                        format!(
-                            "{operation}; rollback rename {} -> {} failed: {rollback}",
-                            self.destination.display(),
-                            staged.path.display()
-                        )
-                    })?;
-                self.file_sync
-                    .sync_parent(&staged.path)
-                    .await
-                    .map_err(|rollback| {
-                        format!("{operation}; rollback directory sync failed: {rollback}")
-                    })?;
+                if let Err(source) = tokio::fs::rename(&self.destination, &staged.path).await {
+                    return Err(FileError::rollback(
+                        operation,
+                        FileError::between(
+                            "rollback verified blob rename",
+                            &self.destination,
+                            &staged.path,
+                            source,
+                        ),
+                    ));
+                }
+                if let Err(rollback) = self.file_sync.sync_parent(&staged.path).await {
+                    return Err(FileError::rollback(operation, rollback));
+                }
                 return Err(operation);
             }
             Ok(())
@@ -428,7 +428,7 @@ impl AtomicStagedFile {
     ) -> Result<(), CommitNewFileError>
     where
         F: FnMut(&Path) -> Fut,
-        Fut: std::future::Future<Output = Result<(), String>>,
+        Fut: std::future::Future<Output = Result<(), FileError>>,
     {
         let mut staged = self.take_stage();
         staged.close();
@@ -438,65 +438,57 @@ impl AtomicStagedFile {
                 let operation = CommitNewFileError::DestinationExists(self.destination.clone());
                 return match staged.cleanup().await {
                     Ok(()) => Err(operation),
-                    Err(cleanup) => Err(CommitNewFileError::RollbackFailed {
-                        operation: operation.to_string(),
-                        rollback: cleanup,
-                    }),
+                    Err(cleanup) => Err(CommitNewFileError::rollback(operation, cleanup)),
                 };
             }
-            Err(error) => {
-                let operation = format!(
-                    "link verified blob {} -> {}: {error}",
-                    staged.path.display(),
-                    self.destination.display()
+            Err(source) => {
+                let operation = FileError::between(
+                    "link verified blob",
+                    &staged.path,
+                    &self.destination,
+                    source,
                 );
                 return match staged.cleanup().await {
-                    Ok(()) => Err(CommitNewFileError::Filesystem(operation)),
-                    Err(cleanup) => Err(CommitNewFileError::RollbackFailed {
-                        operation,
-                        rollback: cleanup,
-                    }),
+                    Ok(()) => Err(operation.into()),
+                    Err(cleanup) => Err(CommitNewFileError::rollback(operation.into(), cleanup)),
                 };
             }
         }
 
         if let Err(operation) = sync_committed_parent(&self.destination).await {
-            let mut failures = Vec::new();
-            if let Err(error) = self.rollback_new_destination(&operation).await {
-                failures.push(error.to_string());
-            }
-            if let Err(error) = staged.cleanup().await {
-                failures.push(error);
-            }
-            return if failures.is_empty() {
-                Err(CommitNewFileError::Filesystem(operation))
-            } else {
-                Err(CommitNewFileError::RollbackFailed {
-                    operation,
-                    rollback: failures.join("; "),
-                })
+            let destination_rollback = self.rollback_new_destination().await.err();
+            let stage_cleanup = staged.cleanup().await.err();
+            let rollback = match (destination_rollback, stage_cleanup) {
+                (None, None) => return Err(operation.into()),
+                (Some(rollback), None) | (None, Some(rollback)) => rollback,
+                (Some(first), Some(second)) => FileError::rollback(first, second),
             };
+            return Err(CommitNewFileError::rollback(operation.into(), rollback));
         }
         if let Err(operation) = staged.cleanup().await {
-            self.rollback_new_destination(&operation).await?;
-            return Err(CommitNewFileError::Filesystem(operation));
+            return match self.rollback_new_destination().await {
+                Ok(()) => Err(operation.into()),
+                Err(rollback) => Err(CommitNewFileError::rollback(operation.into(), rollback)),
+            };
         }
         if let Err(operation) = sync_committed_parent(&self.destination).await {
-            self.rollback_new_destination(&operation).await?;
-            return Err(CommitNewFileError::Filesystem(operation));
+            return match self.rollback_new_destination().await {
+                Ok(()) => Err(operation.into()),
+                Err(rollback) => Err(CommitNewFileError::rollback(operation.into(), rollback)),
+            };
         }
         Ok(())
     }
 
-    pub async fn discard(mut self) -> Result<(), String> {
+    pub async fn discard(mut self) -> Result<(), FileError> {
         self.take_stage().cleanup().await
     }
 
-    pub fn discard_blocking(mut self) -> Result<(), String> {
+    pub fn discard_blocking(mut self) -> Result<(), FileError> {
         self.take_stage().cleanup_blocking()
     }
 
-    pub fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, String> {
+    pub fn publish_for_transaction(mut self) -> Result<PublishedAtomicFile, FileError> {
         let staged = self.take_stage();
         staged.publish_blocking(&self.destination, &self.file_sync)?;
         Ok(PublishedAtomicFile {
@@ -509,27 +501,15 @@ impl AtomicStagedFile {
         self.staged.take().expect("atomic stage is unpublished")
     }
 
-    async fn rollback_new_destination(&self, operation: &str) -> Result<(), CommitNewFileError> {
+    async fn rollback_new_destination(&self) -> Result<(), FileError> {
         tokio::fs::remove_file(&self.destination)
             .await
-            .map_err(|error| CommitNewFileError::RollbackFailed {
-                operation: operation.to_string(),
-                rollback: format!(
-                    "remove new destination {}: {error}",
-                    self.destination.display()
-                ),
-            })?;
-        self.file_sync
-            .sync_parent(&self.destination)
-            .await
-            .map_err(|rollback| CommitNewFileError::RollbackFailed {
-                operation: operation.to_string(),
-                rollback,
-            })
+            .map_err(|source| FileError::at("remove new destination", &self.destination, source))?;
+        self.file_sync.sync_parent(&self.destination).await
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+    pub async fn write_for_test(destination: &Path, bytes: &[u8]) -> Result<(), FileError> {
         let mut staged = Self::create_with_file_sync(destination, FileSync::Disabled).await?;
         staged.write_bytes(bytes).await?;
         staged.commit().await
@@ -553,14 +533,15 @@ impl Drop for AtomicStagedFile {
 }
 
 impl PublishedAtomicFile {
-    pub fn rollback(self) -> Result<(), String> {
+    pub fn rollback(self) -> Result<(), FileError> {
         match std::fs::remove_file(&self.destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(format!(
-                    "remove published file {}: {error}",
-                    self.destination.display()
+            Err(source) => {
+                return Err(FileError::at(
+                    "remove published file",
+                    &self.destination,
+                    source,
                 ));
             }
         }
@@ -569,17 +550,15 @@ impl PublishedAtomicFile {
 }
 
 impl AtomicTempFile {
-    fn create_in(parent: &Path) -> Result<Self, String> {
+    fn create_in(parent: &Path) -> Result<Self, FileError> {
         let named = tempfile::Builder::new()
             .prefix(TEMP_BLOB_PREFIX)
             .tempfile_in(parent)
-            .map_err(|error| {
-                format!("create temporary blob under {}: {error}", parent.display())
-            })?;
+            .map_err(|source| FileError::at("create temporary blob", parent, source))?;
         let (file, path) = named.into_parts();
         let path = path
             .keep()
-            .map_err(|error| format!("retain temporary blob path: {error}"))?;
+            .map_err(|source| FileError::at("retain temporary blob path", parent, source.error))?;
         Ok(Self {
             path,
             file: Some(tokio::fs::File::from_std(file)),
@@ -600,42 +579,40 @@ impl AtomicTempFile {
         self.armed = false;
     }
 
-    async fn cleanup(mut self) -> Result<(), String> {
+    async fn cleanup(mut self) -> Result<(), FileError> {
         self.close();
         let cleanup = match tokio::fs::remove_file(&self.path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "remove temporary blob {}: {error}",
-                self.path.display()
-            )),
+            Err(source) => Err(FileError::at("remove temporary blob", &self.path, source)),
         };
         self.armed = false;
         cleanup
     }
 
-    fn cleanup_blocking(mut self) -> Result<(), String> {
+    fn cleanup_blocking(mut self) -> Result<(), FileError> {
         self.close();
         let cleanup = match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "remove temporary blob {}: {error}",
-                self.path.display()
-            )),
+            Err(source) => Err(FileError::at("remove temporary blob", &self.path, source)),
         };
         self.armed = false;
         cleanup
     }
 
-    async fn fail<T>(self, operation: String) -> Result<T, String> {
+    async fn fail<T>(self, operation: FileError) -> Result<T, FileError> {
         match self.cleanup().await {
             Ok(()) => Err(operation),
-            Err(cleanup) => Err(format!("{operation}; {cleanup}")),
+            Err(cleanup) => Err(FileError::rollback(operation, cleanup)),
         }
     }
 
-    fn publish_blocking(mut self, destination: &Path, file_sync: &FileSync) -> Result<(), String> {
+    fn publish_blocking(
+        mut self,
+        destination: &Path,
+        file_sync: &FileSync,
+    ) -> Result<(), FileError> {
         self.close();
         let operation = match std::fs::rename(&self.path, destination) {
             Ok(()) => match file_sync.sync_parent_blocking(destination) {
@@ -645,29 +622,28 @@ impl AtomicTempFile {
                 }
                 Err(operation) => {
                     let rollback = std::fs::rename(destination, &self.path)
-                        .map_err(|error| {
-                            format!(
-                                "rollback rename {} -> {}: {error}",
-                                destination.display(),
-                                self.path.display()
+                        .map_err(|source| {
+                            FileError::between(
+                                "rollback published file rename",
+                                destination,
+                                &self.path,
+                                source,
                             )
                         })
                         .and_then(|()| file_sync.sync_parent_blocking(&self.path));
                     match rollback {
                         Ok(()) => operation,
-                        Err(rollback) => format!("{operation}; {rollback}"),
+                        Err(rollback) => FileError::rollback(operation, rollback),
                     }
                 }
             },
-            Err(error) => format!(
-                "rename temporary blob {} -> {}: {error}",
-                self.path.display(),
-                destination.display()
-            ),
+            Err(source) => {
+                FileError::between("rename temporary blob", &self.path, destination, source)
+            }
         };
         match self.cleanup_blocking() {
             Ok(()) => Err(operation),
-            Err(cleanup) => Err(format!("{operation}; {cleanup}")),
+            Err(cleanup) => Err(FileError::rollback(operation, cleanup)),
         }
     }
 }
@@ -695,17 +671,17 @@ impl Drop for AtomicTempFile {
 /// Size and SHA-256 digest of the file at `path`, streamed. The one
 /// filesystem primitive for computing a file's identity facts; callers hold
 /// the protocol reference and compare.
-pub async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), String> {
+pub async fn file_facts(path: &Path) -> Result<(u64, [u8; 32]), FileError> {
     let (_, size, digest) =
         read_selected_with_facts(path, ExactReadSelection::IdentityOnly).await?;
     Ok((size, digest))
 }
 
-pub async fn file_len(path: &Path) -> Result<u64, String> {
+pub async fn file_len(path: &Path) -> Result<u64, FileError> {
     tokio::fs::metadata(path)
         .await
         .map(|metadata| metadata.len())
-        .map_err(|e| format!("stat local blob {}: {e}", path.display()))
+        .map_err(|source| FileError::at("stat local blob", path, source))
 }
 
 #[derive(Clone, Copy)]
@@ -718,10 +694,10 @@ enum ExactReadSelection {
 async fn read_selected_with_facts(
     path: &Path,
     selection: ExactReadSelection,
-) -> Result<(Vec<u8>, u64, [u8; 32]), String> {
+) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
     let mut file = tokio::fs::File::open(path)
         .await
-        .map_err(|error| format!("open exact file {}: {error}", path.display()))?;
+        .map_err(|source| FileError::at("open exact file", path, source))?;
     read_open_file_with_facts(&mut file, path, selection).await
 }
 
@@ -729,7 +705,7 @@ async fn read_open_file_with_facts(
     file: &mut tokio::fs::File,
     path: &Path,
     selection: ExactReadSelection,
-) -> Result<(Vec<u8>, u64, [u8; 32]), String> {
+) -> Result<(Vec<u8>, u64, [u8; 32]), FileError> {
     use sha2::{Digest, Sha256};
 
     #[cfg(test)]
@@ -743,13 +719,16 @@ async fn read_open_file_with_facts(
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|error| format!("read exact file {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("read exact file", path, source))?;
         if read == 0 {
             break;
         }
         size = size
             .checked_add(read as u64)
-            .ok_or_else(|| format!("exact file size overflow: {}", path.display()))?;
+            .ok_or_else(|| FileError::SizeOverflow {
+                subject: "exact file",
+                path: path.to_path_buf(),
+            })?;
         hasher.update(&buffer[..read]);
         match selection {
             ExactReadSelection::IdentityOnly => {}
@@ -783,14 +762,14 @@ pub struct OpenFile {
 
 impl OpenFile {
     /// Open `path` and stat it for the length its reads are bounded by.
-    pub async fn open(path: &Path) -> Result<Self, String> {
+    pub async fn open(path: &Path) -> Result<Self, FileError> {
         let file = tokio::fs::File::open(path)
             .await
-            .map_err(|error| format!("open local file {}: {error}", path.display()))?;
+            .map_err(|source| FileError::at("open local file", path, source))?;
         let size = file
             .metadata()
             .await
-            .map_err(|error| format!("stat local file {}: {error}", path.display()))?
+            .map_err(|source| FileError::at("stat local file", path, source))?
             .len();
         Ok(Self {
             file: tokio::sync::Mutex::new(file),
@@ -806,64 +785,52 @@ impl OpenFile {
     /// Read exactly `len` bytes at `offset`. The caller bounds the range against
     /// [`size`](Self::size); a file that cannot supply them is an error, never a
     /// short result.
-    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, String> {
+    pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileError> {
         use tokio::io::AsyncSeekExt;
 
         if len == 0 {
             return Ok(Vec::new());
         }
-        let mut buffer = vec![
-            0_u8;
-            usize::try_from(len).map_err(|_| format!(
-                "local file range is too large: {len} bytes"
-            ))?
-        ];
+        let mut buffer =
+            vec![0_u8; usize::try_from(len).map_err(|_| FileError::RangeTooLarge { len })?];
         let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(offset))
             .await
-            .map_err(|error| {
-                format!(
-                    "seek local file {} to {offset}: {error}",
-                    self.path.display()
-                )
-            })?;
-        file.read_exact(&mut buffer).await.map_err(|error| {
-            format!(
-                "read {len} bytes at {offset} from local file {}: {error}",
-                self.path.display()
-            )
-        })?;
+            .map_err(|source| FileError::at("seek local file range", &self.path, source))?;
+        file.read_exact(&mut buffer)
+            .await
+            .map_err(|source| FileError::at("read local file range", &self.path, source))?;
         Ok(buffer)
     }
 }
 
 #[cfg(test)]
-pub(crate) async fn read(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) async fn read(path: &Path) -> Result<Vec<u8>, FileError> {
     tokio::fs::read(path)
         .await
-        .map_err(|e| format!("read local blob {}: {e}", path.display()))
+        .map_err(|source| FileError::at("read local blob", path, source))
 }
 
 #[cfg(test)]
-pub(crate) async fn exists(path: &Path) -> Result<bool, String> {
+pub(crate) async fn exists(path: &Path) -> Result<bool, FileError> {
     tokio::fs::try_exists(path)
         .await
-        .map_err(|e| format!("check local blob {}: {e}", path.display()))
+        .map_err(|source| FileError::at("check local blob", path, source))
 }
 
 #[cfg(test)]
-pub(crate) async fn rename(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) async fn rename(from: &Path, to: &Path) -> Result<(), FileError> {
     tokio::fs::rename(from, to)
         .await
-        .map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
+        .map_err(|source| FileError::between("rename file", from, to, source))
 }
 
 #[cfg(test)]
-pub(crate) async fn remove_file(path: &Path) -> Result<bool, String> {
+pub(crate) async fn remove_file(path: &Path) -> Result<bool, FileError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("remove file {}: {error}", path.display())),
+        Err(source) => Err(FileError::at("remove file", path, source)),
     }
 }
 

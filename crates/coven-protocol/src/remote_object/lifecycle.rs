@@ -84,14 +84,11 @@ impl RemoteObjectRecord {
                         .carried_locator_bytes()
                         .ok_or(RemoteObjectRecordError::PayloadPlacement)?;
                     validate_semantic_hash(record.identity.semantic_hash, locator_bytes)?;
-                    let locator = crate::blob::locator::BlobLocator::parse(locator_bytes).map_err(
-                        |error| RemoteObjectRecordError::InvalidDomain(error.to_string()),
-                    )?;
+                    let locator = crate::blob::locator::BlobLocator::parse(locator_bytes)?;
                     crate::blob::locator::StoredBlobRef::new(
                         locator,
                         record.identity.object.clone(),
-                    )
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                    )?;
                 }
                 record.state.validate()?;
             }
@@ -165,13 +162,8 @@ impl RemoteObjectRecord {
             Self::CandidateCommit(record) => {
                 validate_semantic_hash(record.semantic_hash, canonical_semantic_bytes)?;
                 let commit: crate::store_commit::StoreBatchCommit =
-                    serde_json::from_slice(canonical_semantic_bytes).map_err(|error| {
-                        RemoteObjectRecordError::InvalidDomain(error.to_string())
-                    })?;
-                record
-                    .identity
-                    .verify_commit(&commit)
-                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                    serde_json::from_slice(canonical_semantic_bytes)?;
+                record.identity.verify_commit(&commit)?;
                 match &record.state {
                     CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {}
                     CandidateCommitState::CleanupPending { proof }

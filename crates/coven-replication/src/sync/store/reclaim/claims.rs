@@ -53,9 +53,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         authorization: &ReclaimAuthorizationRef,
         activation: &ReclaimCommitActivation,
     ) -> Result<(), StoreReclaimError> {
-        activation
-            .validate()
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+        activation.validate().map_err(StoreReclaimError::from)?;
         let commit_ref = activation.commit();
         let verified_commit = self
             .history()
@@ -101,9 +99,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         evidence: &ReclaimEvidence,
     ) -> Result<ReclaimTarget, StoreReclaimError> {
         let root = self.root.clone();
-        evidence
-            .verify()
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+        evidence.verify().map_err(StoreReclaimError::from)?;
         if evidence.store_root_hash != root.store_root_hash {
             return Err(StoreReclaimError::Authorization(
                 "reclaim evidence belongs to another Store root".to_string(),
@@ -252,7 +248,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .read_protocol_object(&context, object, &prefix)
             .await?;
         coven_protocol::audience_package::AudiencePackage::parse(&bytes)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))
+            .map_err(StoreReclaimError::from)
     }
 
     pub(super) async fn verify_circle_package_reclaim_claim(
@@ -301,7 +297,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         &author.value,
                     )
                     .await
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+                    .map_err(StoreReclaimError::from)?;
                 let (_, snapshot) = stream
                     .into_iter()
                     .find(|(reference, _)| *reference == claim.covering_snapshot.snapshot)
@@ -318,7 +314,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 let expected = history
                     .stable_circle_acknowledgements(circle_id, cut)
                     .await
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+                    .map_err(StoreReclaimError::from)?
                     .ok_or_else(|| {
                         StoreReclaimError::Authorization(
                             "Circle snapshot is not acknowledgement-stable across every active-access device"
@@ -433,7 +429,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 circle_id,
                 &claim.target.package.control,
             )
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+            .map_err(StoreReclaimError::from)?
         {
             return Err(StoreReclaimError::Authorization(
                 "Circle package lies within its accepted epoch cutoff and is not reclaimable as beyond-cutoff"
@@ -516,7 +512,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         if history
             .stable_circle_acknowledgements(circle_id, &superseding.1.bootstrap.coverage)
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+            .map_err(StoreReclaimError::from)?
             .is_none()
         {
             return Err(StoreReclaimError::Authorization(
@@ -543,7 +539,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 &claim.covering_snapshot.snapshot,
             )
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         let snapshot = coven_database::PublishedStoreSnapshot {
             reference,
             successor_slot: metadata.successor.next_slot.clone(),
@@ -561,7 +557,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
                 | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner,
             ) => return Err(StoreReclaimError::NoSnapshot),
-            Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
+            Err(error) => return Err(StoreReclaimError::from(error)),
         };
         let mut expected_acknowledgements = authority
             .acknowledgements
@@ -637,7 +633,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let acknowledgement = history
             .load_circle_acknowledgement(acknowledgement_ref)
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         // The recipient's signed acknowledgement is the sole authority for the coverage
         // the Owner deletes: the target must be exactly what the recipient said it was
         // seeded from, so the Owner never fabricates the image, cut, or activation.
@@ -665,7 +661,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 let registrations = database
                     .activated_store_device_registration_records()
                     .await
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+                    .map_err(StoreReclaimError::from)?;
                 let seed = &claim.target.coverage.bootstrap.coverage;
                 let streams = history
                     .load_circle_snapshot_streams(circle_id, &current_control, &registrations)

@@ -8,7 +8,9 @@ use syn::visit::{self, Visit};
 mod capability_boundaries;
 mod module_dependencies;
 mod owner_dependency_boundary;
-use module_dependencies::{find_module_dependency_violations, ModuleDependencyViolation};
+use module_dependencies::{
+    find_module_dependency_violations, ModuleDependencyError, ModuleDependencyViolation,
+};
 use owner_dependency_boundary::{
     find_owner_dependency_leaks, find_owner_dependency_leaks_with_policy, OwnerDependencyLeak,
 };
@@ -862,6 +864,43 @@ struct CheckResult {
     module_dependencies: Vec<ModuleDependencyViolation>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CheckError {
+    #[error("read {}: {source}", path.display())]
+    ReadFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}: {source}", path.display())]
+    ParseFile {
+        path: PathBuf,
+        #[source]
+        source: syn::Error,
+    },
+    #[error("relativize {} against {}: {source}", path.display(), root.display())]
+    Relativize {
+        path: PathBuf,
+        root: PathBuf,
+        #[source]
+        source: std::path::StripPrefixError,
+    },
+    #[error("read directory {}: {source}", path.display())]
+    ReadDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read directory entry in {}: {source}", path.display())]
+    ReadDirectoryEntry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    ModuleDependency(#[from] ModuleDependencyError),
+}
+
 const CAPABILITY_BOUNDARY_FLAGS: &[(&str, &[GatedCapability])] = &[
     ("--network-boundary", NETWORK_BOUNDARY),
     ("--crypto-boundary", CRYPTO_BOUNDARY),
@@ -1210,7 +1249,7 @@ fn check_owner_dependency_only(
     rust_roots: &[PathBuf],
     extra_capability_types: &[String],
     allowed_capability_outputs: &[String],
-) -> Result<Vec<OwnerDependencyLeak>, String> {
+) -> Result<Vec<OwnerDependencyLeak>, CheckError> {
     let files = rust_files_in(root, rust_roots)?;
     Ok(find_owner_dependency_leaks_with_policy(
         &files,
@@ -1229,7 +1268,7 @@ fn check(
     check_transient_component_bundles: bool,
     capability_boundaries: &[&'static [GatedCapability]],
     check_module_dependencies: bool,
-) -> Result<CheckResult, String> {
+) -> Result<CheckResult, CheckError> {
     let files = rust_files(root)?;
     let structs = collect_structs(&files);
     let owners = infer_owners(&structs);
@@ -1537,11 +1576,11 @@ fn forbidden_sqlite_path(path: &syn::Path) -> Option<&'static str> {
     None
 }
 
-fn rust_files(root: &Path) -> Result<Vec<RustFile>, String> {
+fn rust_files(root: &Path) -> Result<Vec<RustFile>, CheckError> {
     rust_files_in(root, &[PathBuf::from("crates")])
 }
 
-fn rust_files_in(root: &Path, rust_roots: &[PathBuf]) -> Result<Vec<RustFile>, String> {
+fn rust_files_in(root: &Path, rust_roots: &[PathBuf]) -> Result<Vec<RustFile>, CheckError> {
     let mut paths = Vec::new();
     for rust_root in rust_roots {
         collect_rust_paths(&root.join(rust_root), &mut paths)?;
@@ -1551,13 +1590,21 @@ fn rust_files_in(root: &Path, rust_roots: &[PathBuf]) -> Result<Vec<RustFile>, S
     paths
         .into_iter()
         .map(|path| {
-            let source = std::fs::read_to_string(&path)
-                .map_err(|error| format!("read {}: {error}", path.display()))?;
-            let syntax = syn::parse_file(&source)
-                .map_err(|error| format!("parse {}: {error}", path.display()))?;
+            let source = std::fs::read_to_string(&path).map_err(|source| CheckError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+            let syntax = syn::parse_file(&source).map_err(|source| CheckError::ParseFile {
+                path: path.clone(),
+                source,
+            })?;
             let relative_path = path
                 .strip_prefix(root)
-                .map_err(|error| format!("relativize {}: {error}", path.display()))?
+                .map_err(|source| CheckError::Relativize {
+                    path: path.clone(),
+                    root: root.to_path_buf(),
+                    source,
+                })?
                 .to_string_lossy()
                 .replace('\\', "/");
             Ok(RustFile {
@@ -1568,11 +1615,15 @@ fn rust_files_in(root: &Path, rust_roots: &[PathBuf]) -> Result<Vec<RustFile>, S
         .collect()
 }
 
-fn collect_rust_paths(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
-    for entry in std::fs::read_dir(directory)
-        .map_err(|error| format!("read directory {}: {error}", directory.display()))?
-    {
-        let entry = entry.map_err(|error| format!("read directory entry: {error}"))?;
+fn collect_rust_paths(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), CheckError> {
+    for entry in std::fs::read_dir(directory).map_err(|source| CheckError::ReadDirectory {
+        path: directory.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CheckError::ReadDirectoryEntry {
+            path: directory.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
         if path.is_dir() {
             if path.file_name().is_some_and(|name| {

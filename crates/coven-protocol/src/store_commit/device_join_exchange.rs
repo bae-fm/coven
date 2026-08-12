@@ -40,7 +40,7 @@ pub enum DeviceJoinExchangeError {
     #[error("device join reserved slots are not distinct")]
     DuplicateReservedSlot,
     #[error("provider: {0}")]
-    Provider(String),
+    Provider(#[from] crate::provider::ProviderProbeError),
     #[error("{0}")]
     Storage(#[from] crate::objects::StorageError),
     #[error("{0}")]
@@ -251,8 +251,7 @@ impl DeviceProviderAdmissionApprovalBody {
         }
         self.access_grant
             .grant
-            .verify(&offer.provider, administrator)
-            .map_err(|error| DeviceJoinExchangeError::Provider(error.to_string()))?;
+            .verify(&offer.provider, administrator)?;
         let same_principal = offer.provider_admin.provider == self.request.peer_provider;
         if same_principal
             != matches!(

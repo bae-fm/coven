@@ -124,7 +124,7 @@ impl<'a> StoreCommitVerifier<'a> {
             Box::new(move || {
                 serde_json::from_slice::<StoreCommitAuthorProjection>(&parse_bytes)
                     .map(|projection| projection.body.author_registration)
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+                    .map_err(StoreProtocolError::from)
             }),
         )
         .await?;
@@ -159,7 +159,7 @@ impl<'a> StoreCommitVerifier<'a> {
             && commit.device_exclusion_outcomes().is_empty()
         {
             return VerifiedStoreDeviceOperations::without_exclusions(commit)
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()));
+                .map_err(RegistrationLoadError::from);
         }
         let predecessor = predecessor_membership.ok_or_else(|| {
             RegistrationLoadError::Invalid(
@@ -384,7 +384,7 @@ impl<'a> StoreCommitVerifier<'a> {
                     let predecessor_cut = commit
                         .order
                         .predecessor_cut()
-                        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+                        .map_err(RegistrationLoadError::from)?;
                     let predecessor_target = predecessor_cut
                         .0
                         .get(&target_stream)
@@ -411,12 +411,12 @@ impl<'a> StoreCommitVerifier<'a> {
                     RetainedStoreDeviceExclusionProposal::from_verified(&proposal),
                     &outcome,
                 )
-                .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?,
+                .map_err(RegistrationLoadError::from)?,
             );
         }
         RetainedStoreDeviceOperations::from_sources(proposals, outcomes)
             .verify_for(self.root.reference(), commit)
-            .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
+            .map_err(RegistrationLoadError::from)
     }
 
     pub(crate) async fn read_protocol_object(

@@ -237,9 +237,7 @@ impl StoreMemberProviderAccessGrant {
         administrator_registration: &StoreDeviceRegistration,
         administrator_signer: &dyn coven_keys::keys::DeviceSigningAuthority,
     ) -> Result<Self, ProviderProbeError> {
-        administrator
-            .verify_registration(administrator_registration)
-            .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
+        administrator.verify_registration(administrator_registration)?;
         if administrator_signer.public_key_hex() != administrator_registration.device_signing_pubkey
         {
             return invalid("provider access grant signer is not the administrator device");
@@ -267,9 +265,7 @@ impl StoreMemberProviderAccessGrant {
         store: &StoreProviderBinding,
         administrator: &StoreDeviceRegistration,
     ) -> Result<(), ProviderProbeError> {
-        self.administrator
-            .verify_registration(administrator)
-            .map_err(|error| ProviderProbeError::InvalidReceipt(error.to_string()))?;
+        self.administrator.verify_registration(administrator)?;
         self.provider
             .validate_for(store)
             .map_err(ProviderProbeError::Storage)?;

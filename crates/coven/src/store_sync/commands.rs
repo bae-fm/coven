@@ -99,7 +99,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .propose_device_exclusion(device_id)
             .await
-            .map_err(SyncError::DeviceExclusion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn cancel_device_exclusion(
@@ -110,7 +110,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .cancel_device_exclusion(proposal)
             .await
-            .map_err(SyncError::DeviceExclusion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn finalize_device_exclusion(
@@ -121,7 +121,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_device_exclusion(proposal)
             .await
-            .map_err(SyncError::DeviceExclusion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn begin_owner_promotion(
@@ -132,7 +132,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .begin_owner_promotion(device_id)
             .await
-            .map_err(SyncError::OwnerPromotion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn accept_owner_promotion(
@@ -143,7 +143,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .accept_owner_promotion(request)
             .await
-            .map_err(SyncError::OwnerPromotion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn finalize_owner_promotion(
@@ -154,7 +154,7 @@ impl StoreSync {
             .ok_or(SyncError::LoopNotRunning)?
             .finalize_owner_promotion(acceptance)
             .await
-            .map_err(SyncError::OwnerPromotion)
+            .map_err(Into::into)
     }
 
     pub(crate) async fn create_circle(

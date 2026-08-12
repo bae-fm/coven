@@ -27,10 +27,28 @@ pub enum StoreAckError {
     Object(#[from] StoreObjectError),
     #[error("outbound Store acknowledgement is invalid: {0}")]
     InvalidOutbound(String),
+    #[error("outbound Store acknowledgement prepared commit: {0}")]
+    PreparedCommit(#[from] coven_protocol::prepared_commit::PreparedCommitError),
     #[error("Store acknowledgement activation: {0}")]
     Outbound(#[from] StoreError),
+    #[error("Store acknowledgement sync cycle: {0}")]
+    SyncCycle(#[source] Box<crate::sync::cycle::SyncCycleFailure>),
+    #[error("Store acknowledgement writer authorization: {0}")]
+    WriterAuthorization(#[source] Box<crate::sync::store::StoreWriterAuthorizationError>),
     #[error("Store acknowledgement snapshot: {0}")]
     Snapshot(#[from] snapshot::SnapshotError),
+}
+
+impl From<crate::sync::cycle::SyncCycleFailure> for StoreAckError {
+    fn from(error: crate::sync::cycle::SyncCycleFailure) -> Self {
+        Self::SyncCycle(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreWriterAuthorizationError> for StoreAckError {
+    fn from(error: crate::sync::store::StoreWriterAuthorizationError) -> Self {
+        Self::WriterAuthorization(Box::new(error))
+    }
 }
 
 pub(crate) struct AuthorizedAcknowledgements<'operation, 'storage> {
@@ -64,23 +82,23 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .map_err(|error| {
                 SyncCycleFailure::operation("publish queued Store acknowledgement", error)
             })?;
-        let frontier = CommitFrontier::from_refs(
-            self.database
-                .materialized_frontier()
-                .await
-                .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?,
-        )
-        .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
+        let frontier =
+            CommitFrontier::from_refs(self.database.materialized_frontier().await.map_err(
+                |error| SyncCycleFailure::operation("read Store acknowledgement frontier", error),
+            )?)
+            .map_err(|error| {
+                SyncCycleFailure::operation("shape Store acknowledgement frontier", error)
+            })?;
         Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
             .await
-            .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
         Box::pin(
             self.writer
                 .circles()
                 .stage_acknowledgements(&frontier, sync_time),
         )
         .await
-        .map_err(|error| format!("stage Circle acknowledgements: {error}"))?;
+        .map_err(|error| SyncCycleFailure::operation("stage Circle acknowledgements", error))?;
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
@@ -150,7 +168,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         let activation = self
             .local_writer
             .acknowledgement_activation_id()
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreAckError::from)?;
         let acknowledgement = self
             .local_writer
             .sign_device_acknowledgement(
@@ -167,7 +185,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                     next_slot,
                 },
             )
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreAckError::from)?;
         let prepared = self
             .storage
             .prepare_protocol_object(
@@ -328,9 +346,3 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
 
 #[cfg(test)]
 mod tests;
-
-impl From<coven_protocol::prepared_commit::PreparedCommitError> for StoreAckError {
-    fn from(error: coven_protocol::prepared_commit::PreparedCommitError) -> Self {
-        StoreAckError::InvalidOutbound(error.to_string())
-    }
-}

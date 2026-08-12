@@ -58,11 +58,65 @@ pub(crate) fn stored_cloud_key(stored: &StoredBlobRef) -> &str {
     stored.object().slot().logical_key()
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum ExistingTombstone {
     Valid,
     Absent,
-    Invalid(String),
+    Invalid(InvalidTombstone),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum InvalidTombstone {
+    #[error("open failed: {0}")]
+    Open(#[source] coven_protocol::objects::StorageError),
+    #[error("parse failed: {0}")]
+    Parse(#[source] serde_json::Error),
+    #[error("signed stored blob {actual:?} does not match {expected:?}")]
+    StoredReference {
+        actual: StoredBlobRef,
+        expected: StoredBlobRef,
+    },
+    #[error("signature verification failed")]
+    Signature,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TombstoneDrainError {
+    #[error("tombstone read failed: {0}")]
+    Read(#[source] coven_protocol::objects::StorageError),
+    #[error("tombstone serialization failed: {0}")]
+    Serialize(#[source] serde_json::Error),
+    #[error("tombstone write failed: {0}")]
+    Write(#[source] coven_protocol::objects::StorageError),
+    #[error("blob deletion database state: {0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("pending delete query returned non-delete outbox entry {entry_id}")]
+    NonDeleteOutboxEntry { entry_id: i64 },
+    #[error("failed to record delete failure for {cloud_key} (entry {entry_id}): {source}")]
+    RecordFailure {
+        cloud_key: String,
+        entry_id: i64,
+        #[source]
+        source: coven_database::DbError,
+    },
+    #[error("tombstone write failed for {cloud_key}: {source}")]
+    Publish {
+        cloud_key: String,
+        #[source]
+        source: Box<TombstoneDrainError>,
+    },
+    #[error("failed to validate an existing tombstone for {cloud_key}: {source}")]
+    Validate {
+        cloud_key: String,
+        #[source]
+        source: Box<TombstoneDrainError>,
+    },
+    #[error("failed to remove delete outbox entry {entry_id}: {source}")]
+    RemoveOutboxEntry {
+        entry_id: i64,
+        #[source]
+        source: coven_database::DbError,
+    },
 }
 
 /// One coherent pass that drains queued blob deletions into signed tombstones.
@@ -188,29 +242,33 @@ impl<'a> TombstoneDrain<'a> {
     async fn existing_tombstone_state(
         &self,
         expected_stored: &StoredBlobRef,
-    ) -> Result<ExistingTombstone, String> {
+    ) -> Result<ExistingTombstone, TombstoneDrainError> {
         let decoded = match self.storage.read_blob_tombstone(expected_stored).await {
             Ok(Some(decoded)) => decoded,
             Ok(None) => return Ok(ExistingTombstone::Absent),
             Err(coven_protocol::objects::StorageError::InvalidContent(error)) => {
-                return Ok(ExistingTombstone::Invalid(format!("open failed: {error}")));
+                return Ok(ExistingTombstone::Invalid(InvalidTombstone::Open(
+                    coven_protocol::objects::StorageError::InvalidContent(error),
+                )));
             }
-            Err(error) => return Err(format!("tombstone read failed: {error}")),
+            Err(error) => return Err(TombstoneDrainError::Read(error)),
         };
         let tombstone: BlobTombstoneJson = match serde_json::from_slice(&decoded) {
             Ok(tombstone) => tombstone,
-            Err(e) => return Ok(ExistingTombstone::Invalid(format!("parse failed: {e}"))),
+            Err(error) => {
+                return Ok(ExistingTombstone::Invalid(InvalidTombstone::Parse(error)));
+            }
         };
         if &tombstone.stored != expected_stored {
-            return Ok(ExistingTombstone::Invalid(format!(
-                "signed stored blob {:?} does not match {expected_stored:?}",
-                tombstone.stored
-            )));
+            return Ok(ExistingTombstone::Invalid(
+                InvalidTombstone::StoredReference {
+                    actual: tombstone.stored,
+                    expected: expected_stored.clone(),
+                },
+            ));
         }
         if !tombstone.verify(self.store_id) {
-            return Ok(ExistingTombstone::Invalid(
-                "signature verification failed".to_string(),
-            ));
+            return Ok(ExistingTombstone::Invalid(InvalidTombstone::Signature));
         }
         Ok(ExistingTombstone::Valid)
     }
@@ -219,19 +277,18 @@ impl<'a> TombstoneDrain<'a> {
         &self,
         stored: &StoredBlobRef,
         deleted_at: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), TombstoneDrainError> {
         let tombstone = BlobTombstoneJson::signed(
             self.store_id,
             stored.clone(),
             deleted_at.to_string(),
             self.keypair,
         );
-        let bytes = serde_json::to_vec(&tombstone)
-            .map_err(|e| format!("tombstone serialization failed: {e}"))?;
+        let bytes = serde_json::to_vec(&tombstone).map_err(TombstoneDrainError::Serialize)?;
         self.storage
             .write_blob_tombstone(stored, bytes)
             .await
-            .map_err(|e| format!("tombstone write failed: {e}"))
+            .map_err(TombstoneDrainError::Write)
     }
 
     async fn record_outbox_failure(
@@ -240,16 +297,17 @@ impl<'a> TombstoneDrain<'a> {
         cloud_key: &str,
         error: &str,
         attempted_at: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), TombstoneDrainError> {
         if let Err(record_error) = self
             .db
             .record_outbox_failure(entry, error, attempted_at)
             .await
         {
-            return Err(format!(
-                "Failed to record delete failure for {cloud_key} (entry {}): {record_error}",
-                entry.id
-            ));
+            return Err(TombstoneDrainError::RecordFailure {
+                cloud_key: cloud_key.to_owned(),
+                entry_id: entry.id,
+                source: record_error,
+            });
         }
         Ok(())
     }
@@ -274,13 +332,10 @@ impl<'a> TombstoneDrain<'a> {
     /// Write each due deletion as a signed tombstone, then remove its outbox row.
     /// Existing valid tombstones keep their original deletion time; any failed
     /// validation or publication records retry state and fails the pass.
-    pub(crate) async fn drain(&self) -> Result<usize, String> {
+    pub(crate) async fn drain(&self) -> Result<usize, TombstoneDrainError> {
         let db = self.db;
         let clock = self.clock;
-        let deletes = db
-            .pending_blob_deletes()
-            .await
-            .map_err(|e| format!("Failed to get pending deletes: {e}"))?;
+        let deletes = db.pending_blob_deletes().await?;
 
         let now = clock.now();
         let now_rfc = now.to_rfc3339();
@@ -291,14 +346,10 @@ impl<'a> TombstoneDrain<'a> {
                 crate::blob::retry::entry_in_backoff(&entry, now)
                     .map(|in_backoff| (entry, in_backoff))
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Failed to read delete retry schedule: {error}"))?;
+            .collect::<Result<Vec<_>, _>>()?;
         for (entry, in_backoff) in scheduled_deletes {
             let OutboxOperation::Delete { stored } = &entry.operation else {
-                return Err(format!(
-                    "pending delete query returned non-delete outbox entry {}",
-                    entry.id
-                ));
+                return Err(TombstoneDrainError::NonDeleteOutboxEntry { entry_id: entry.id });
             };
             let cloud_key = stored_cloud_key(stored);
             if in_backoff {
@@ -318,9 +369,13 @@ impl<'a> TombstoneDrain<'a> {
                 }
                 Ok(ExistingTombstone::Absent) => {
                     if let Err(e) = self.write_signed_tombstone(stored, &now_rfc).await {
-                        self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
+                        let detail = e.to_string();
+                        self.record_outbox_failure(&entry, cloud_key, &detail, &now_rfc)
                             .await?;
-                        return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
+                        return Err(TombstoneDrainError::Publish {
+                            cloud_key: cloud_key.to_owned(),
+                            source: Box::new(e),
+                        });
                     }
                     count += 1;
                 }
@@ -331,19 +386,24 @@ impl<'a> TombstoneDrain<'a> {
                         "replacing invalid tombstone object"
                     );
                     if let Err(e) = self.write_signed_tombstone(stored, &now_rfc).await {
-                        self.record_outbox_failure(&entry, cloud_key, &e, &now_rfc)
+                        let detail = e.to_string();
+                        self.record_outbox_failure(&entry, cloud_key, &detail, &now_rfc)
                             .await?;
-                        return Err(format!("Tombstone write failed for {cloud_key}: {e}"));
+                        return Err(TombstoneDrainError::Publish {
+                            cloud_key: cloud_key.to_owned(),
+                            source: Box::new(e),
+                        });
                     }
                     count += 1;
                 }
                 Err(e) => {
-                    let msg = format!("tombstone validation failed: {e}");
-                    self.record_outbox_failure(&entry, cloud_key, &msg, &now_rfc)
+                    let detail = format!("tombstone validation failed: {e}");
+                    self.record_outbox_failure(&entry, cloud_key, &detail, &now_rfc)
                         .await?;
-                    return Err(format!(
-                        "Failed to validate an existing tombstone for {cloud_key}: {e}"
-                    ));
+                    return Err(TombstoneDrainError::Validate {
+                        cloud_key: cloud_key.to_owned(),
+                        source: Box::new(e),
+                    });
                 }
             }
 
@@ -351,8 +411,11 @@ impl<'a> TombstoneDrain<'a> {
             // intent row. If this remove fails the row stays and the next drain finds
             // the tombstone already present, so it removes the row without touching the
             // tombstone — the deletion is never lost and the grace never moves.
-            db.remove_blob_delete(&entry).await.map_err(|error| {
-                format!("Failed to remove delete outbox entry {}: {error}", entry.id)
+            db.remove_blob_delete(&entry).await.map_err(|source| {
+                TombstoneDrainError::RemoveOutboxEntry {
+                    entry_id: entry.id,
+                    source,
+                }
             })?;
         }
 

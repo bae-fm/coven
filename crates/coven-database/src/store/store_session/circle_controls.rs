@@ -62,7 +62,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
@@ -87,7 +87,7 @@ impl StoreSession<'_> {
     ) -> Result<(), DbError> {
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let superseded = superseded.as_str().to_string();
@@ -215,9 +215,7 @@ impl StoreSession<'_> {
                 ))
             })?
             .clone();
-        let candidate_owned = journal
-            .candidate_owned_objects()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let candidate_owned = journal.candidate_owned_objects().map_err(DbError::from)?;
         tx.execute(
             "INSERT OR IGNORE INTO circle_operation_uploads (operation_id, step)
              VALUES (?1, ?2)",
@@ -225,11 +223,7 @@ impl StoreSession<'_> {
         )
         .map_err(DbError::from)?;
         if candidate_owned.contains(&object) {
-            mark_uploaded_object_on(&tx, remote_object_id(&object)).map_err(|error| {
-                DbError::Message(format!(
-                    "Circle upload step {step:?} of operation {operation_id}: {error}"
-                ))
-            })?;
+            mark_uploaded_object_on(&tx, remote_object_id(&object))?;
         }
         tx.commit().map_err(DbError::from)
     }
@@ -246,7 +240,7 @@ impl StoreSession<'_> {
         }
         let remotes = journal
             .closed_remote_objects(&prepared_objects)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let owner = journal.operation().commit_ref.clone();
         let row = PreparedCircleOperationRow::from_journal(&journal)?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
@@ -329,9 +323,7 @@ impl StoreSession<'_> {
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
-        journal
-            .block(block)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        journal.block(block).map_err(DbError::from)?;
         update_circle_operation_phase_on(&tx, &journal)?;
         tx.commit().map_err(DbError::from)
     }
@@ -341,9 +333,7 @@ impl StoreSession<'_> {
         let mut journal = load_circle_operation_on(&tx, &operation_id)?.ok_or_else(|| {
             DbError::Message(format!("circle operation {operation_id} is absent"))
         })?;
-        journal
-            .unblock()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        journal.unblock().map_err(DbError::from)?;
         update_circle_operation_phase_on(&tx, &journal)?;
         tx.commit().map_err(DbError::from)
     }
@@ -358,9 +348,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
         let authority = &mut *self.authority;
         let gates = self.gates;
         let tx = self.store.transaction;
-        journal
-            .validate_identity()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        journal.validate_identity().map_err(DbError::from)?;
         let durable =
             load_circle_operation_on(tx, journal.operation_id.as_str())?.ok_or_else(|| {
                 DbError::Message(format!(
@@ -475,7 +463,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 ));
             }
             let device_operations = VerifiedStoreDeviceOperations::without_exclusions(&commit)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let prepared_head = operation
                 .prepared_objects
                 .get("store-head")
@@ -544,7 +532,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                 gates,
                 &std::collections::BTreeSet::from([creation.circle_id]),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         }
         if !journal.is_finalizing()
             && matches!(
@@ -553,9 +541,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             )
         {
             let mut waiting = journal;
-            waiting
-                .wait_for_close_responses()
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            waiting.wait_for_close_responses().map_err(DbError::from)?;
             update_circle_operation_phase_on(tx, &waiting)?;
         } else {
             release_operation_payloads_on(tx, &journal.operation_id)?;

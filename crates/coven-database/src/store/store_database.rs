@@ -274,7 +274,10 @@ impl StoreDatabase {
             .await
     }
 
-    pub(super) async fn sync_store_parent_dir(&self, path: &std::path::Path) -> Result<(), String> {
+    pub(super) async fn sync_store_parent_dir(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), coven_foundation::atomic_file::FileError> {
         self.database.sync_store_parent_dir(path).await
     }
 

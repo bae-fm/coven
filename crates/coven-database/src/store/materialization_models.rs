@@ -138,7 +138,7 @@ impl RetainedAudiencePackage {
         }
         package
             .validate_blob_uploader(&commit.author_registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         match package.audience() {
             coven_protocol::audience_package::PackageAudience::Store => {
                 let reference = commit.store_package().ok_or_else(|| {
@@ -154,7 +154,7 @@ impl RetainedAudiencePackage {
                 }
                 commit
                     .verify_store_package(&package.to_bytes())
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    .map_err(DbError::from)?;
                 Ok(Self::Store {
                     reference: reference.clone(),
                     package,
@@ -184,7 +184,7 @@ impl RetainedAudiencePackage {
                 }
                 commit
                     .verify_circle_package(*circle_id, &package.to_bytes())
-                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    .map_err(DbError::from)?;
                 Ok(Self::Circle {
                     reference: reference.clone(),
                     package,
@@ -471,7 +471,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
         let commit_ref = verified_commit.reference();
         history_evidence
             .validate_for(commit_ref, commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         if verified_commit.store_root_hash() != root.store_root_hash
             || commit.store_root_hash != root.store_root_hash
             || activation_head.author_registration != commit.author_registration
@@ -519,7 +519,7 @@ impl<'a> VerifiedMergeMaterialization<'a> {
             ));
         }
         RetainedStoreDeviceRegistrationActivations::from_verified(root, commit, registrations)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         Ok(Self {
             root,
             verified_commit,

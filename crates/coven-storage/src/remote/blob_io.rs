@@ -118,9 +118,13 @@ impl BlobRangeReader {
             )));
         }
         let header = self.opener.header();
-        let chunks = header.covering_chunks(offset, end).map_err(|error| {
-            StorageError::InvalidContent(format!("blob range {offset}..{end}: {error}"))
-        })?;
+        let chunks =
+            header
+                .covering_chunks(offset, end)
+                .map_err(|source| StorageError::Decryption {
+                    context: format!("blob range {offset}..{end}"),
+                    source: source.into(),
+                })?;
         let mut plaintext = Vec::with_capacity(len as usize);
         for run in header.request_runs(chunks, self.window) {
             let span = header.sealed_span(run.clone());
@@ -132,7 +136,10 @@ impl BlobRangeReader {
                 .await?;
             let covered = header.plaintext_span(run.clone());
             let opened = self.opener.open_chunks(run, &sealed).map_err(|error| {
-                StorageError::Decryption(format!("blob range {offset}..{end}: {error}"))
+                StorageError::Decryption {
+                    context: format!("blob range {offset}..{end}"),
+                    source: error.into(),
+                }
             })?;
             let from = (offset.max(covered.start) - covered.start) as usize;
             let to = (end.min(covered.end) - covered.start) as usize;
@@ -312,8 +319,7 @@ pub(crate) fn split_sealed_blob(
     EncryptionError,
 > {
     let (fingerprint, rest) = KeyTag::read(stored)?;
-    let header = SealedBlobHeader::parse(rest)
-        .map_err(|error| EncryptionError::Decryption(error.to_string()))?;
+    let header = SealedBlobHeader::parse(rest)?;
     Ok((
         coven_keys::encryption::KeyFingerprint::from_bytes(fingerprint),
         header,
@@ -329,9 +335,8 @@ pub fn open_sealed_blob(
     stored: &[u8],
     encryption: &EncryptionService,
     aad_context: &[u8],
-) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
-    let (fingerprint, header, chunks) =
-        split_sealed_blob(stored).map_err(|error| error.to_string())?;
+) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), EncryptionError> {
+    let (fingerprint, header, chunks) = split_sealed_blob(stored)?;
     let plaintext = encryption
         .blob_opener(
             header,
@@ -339,10 +344,8 @@ pub fn open_sealed_blob(
                 context: aad_context.to_vec(),
             },
             aad_context,
-        )
-        .map_err(|error| error.to_string())?
-        .open_chunks(0..header.chunk_count(), chunks)
-        .map_err(|error| error.to_string())?;
+        )?
+        .open_chunks(0..header.chunk_count(), chunks)?;
     Ok((fingerprint, plaintext))
 }
 
@@ -359,9 +362,11 @@ pub(crate) fn verified_sealed_blob_opener(
     aad_context: &[u8],
 ) -> Result<coven_keys::encryption::SealedBlobOpener, StorageError> {
     let locator = blob.locator();
-    let (fingerprint, header, _) = split_sealed_blob(prefix).map_err(|error| {
-        StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))
-    })?;
+    let (fingerprint, header, _) =
+        split_sealed_blob(prefix).map_err(|source| StorageError::Decryption {
+            context: format!("blob {}", locator.locator_hash()),
+            source,
+        })?;
     if fingerprint != *key_fingerprint {
         return Err(StorageError::InvalidContent(format!(
             "blob {} stored key fingerprint differs from its locator",
@@ -369,11 +374,9 @@ pub(crate) fn verified_sealed_blob_opener(
         )));
     }
     let encryption = opening_encryption_for_scope(scope.clone(), master, fingerprint.as_bytes())
-        .map_err(|error| {
-            StorageError::Decryption(format!(
-                "blob {} audience key: {error}",
-                locator.locator_hash()
-            ))
+        .map_err(|source| StorageError::Decryption {
+            context: format!("blob {} audience key", locator.locator_hash()),
+            source,
         })?;
     if header.plaintext_len() != locator.plaintext_size() {
         return Err(StorageError::InvalidContent(format!(
@@ -392,8 +395,9 @@ pub(crate) fn verified_sealed_blob_opener(
             },
             aad_context,
         )
-        .map_err(|error| {
-            StorageError::Decryption(format!("blob {}: {error}", locator.locator_hash()))
+        .map_err(|source| StorageError::Decryption {
+            context: format!("blob {}", locator.locator_hash()),
+            source: source.into(),
         })
 }
 
@@ -440,9 +444,7 @@ impl coven_foundation::local_file::PlaintextChunkReader for ExactBlobPlaintextRe
                         "blob plaintext read length does not fit this platform".to_string(),
                     )
                 })?;
-                let chunk = self.source.next_chunk(wanted).await.map_err(|error| {
-                    crate::local_file::PlaintextChunkError::Local(error.to_string())
-                })?;
+                let chunk = self.source.next_chunk(wanted).await?;
                 if chunk.is_empty() {
                     return Err(crate::local_file::PlaintextChunkError::InvalidContent(
                         format!("blob {} plaintext ended early", self.locator_hash),
@@ -461,11 +463,11 @@ impl coven_foundation::local_file::PlaintextChunkReader for ExactBlobPlaintextRe
                 let sealed = read_source_exact(&mut self.source, sealed_len, self.locator_hash)
                     .await
                     .map_err(crate::local_file::PlaintextChunkError::Remote)?;
-                let plaintext = opener.open_chunk(index, &sealed).map_err(|error| {
-                    crate::local_file::PlaintextChunkError::InvalidContent(format!(
-                        "blob {}: {error}",
-                        self.locator_hash
-                    ))
+                let plaintext = opener.open_chunk(index, &sealed).map_err(|source| {
+                    crate::local_file::PlaintextChunkError::Decryption {
+                        context: format!("blob {}", self.locator_hash),
+                        source: source.into(),
+                    }
                 })?;
                 *next_chunk += 1;
                 plaintext

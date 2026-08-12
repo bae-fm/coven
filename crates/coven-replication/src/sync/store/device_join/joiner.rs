@@ -1,4 +1,4 @@
-use super::journal::{database_error, provider_error};
+use super::journal::database_error;
 use super::*;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 
@@ -194,7 +194,7 @@ impl<'storage> JoiningStore<'storage> {
         let membership = history
             .load_and_install_owner_membership(&founder_pubkey)
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         history
             .device_join()
             .validate_store_owner()
@@ -270,7 +270,7 @@ impl<'storage> JoiningStore<'storage> {
             .history
             .pull(&membership, Some(&self.identity), routing_encryption)
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         self.membership = execution.membership;
         Ok(execution.result)
     }
@@ -383,7 +383,7 @@ impl<'storage> JoiningStore<'storage> {
                         &self.identity,
                     ))
                     .await
-                    .map_err(provider_error)?,
+                    .map_err(DeviceJoinError::ProviderProbe)?,
                 )
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
@@ -394,9 +394,7 @@ impl<'storage> JoiningStore<'storage> {
         let readiness = Box::new(readiness);
         tokio::task::spawn_blocking(move || journal.record_readiness(*bootstrap, *readiness))
             .await
-            .map_err(|error| {
-                DeviceJoinError::Store(format!("joiner readiness journal task failed: {error}"))
-            })?
+            .map_err(DeviceJoinError::JoinTask)?
     }
 
     pub async fn complete(
@@ -560,7 +558,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         let membership = history
             .load_and_install_owner_membership(&founder_pubkey)
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         history
             .device_join()
             .validate_store_owner()
@@ -838,7 +836,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                 let slot = storage
                     .reserve_cross_principal_response_slot(challenge.probe_id)
                     .await
-                    .map_err(provider_error)?;
+                    .map_err(DeviceJoinError::ProviderProbe)?;
                 DeviceProviderResponseReservation::CrossPrincipal {
                     response_slot: slot,
                 }
@@ -857,7 +855,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             },
             identity,
         )
-        .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+        .map_err(DeviceJoinError::from)?;
         prepare_registration_object(storage.as_ref(), &registration, registration_slot.clone())?;
         if access_request != *approval.request {
             return Err(DeviceJoinError::JournalConflict);
@@ -946,7 +944,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                     .observe_exact_slot(&attempt.value.registration_slot)
                     .await
                     .map(SlotDisposition::from)
-                    .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
+                    .map_err(DeviceJoinError::ProviderStorage)?;
                 let initial_ack = self
                     .storage
                     .observe_exact_slot(
@@ -958,7 +956,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                     )
                     .await
                     .map(SlotDisposition::from)
-                    .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
+                    .map_err(DeviceJoinError::ProviderStorage)?;
                 let response = match &attempt.value.provider_response {
                     DeviceProviderResponseReservation::SamePrincipal => {
                         JoinerResponseDisposition::SamePrincipal
@@ -969,7 +967,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
                                 .observe_exact_slot(response_slot)
                                 .await
                                 .map(SlotDisposition::from)
-                                .map_err(|error| DeviceJoinError::Provider(error.to_string()))?,
+                                .map_err(DeviceJoinError::ProviderStorage)?,
                         )
                     }
                 };
@@ -997,7 +995,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
             self.storage
                 .delete_exact_slot_and_verify_absent(&slot)
                 .await
-                .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
+                .map_err(DeviceJoinError::ProviderStorage)?;
         }
         let closure = JoinerJoinClosure::signed(
             cancellation.outcome,

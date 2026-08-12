@@ -86,10 +86,7 @@ impl StoreOperationPlanCommon {
         &self,
         acknowledgement: &super::store_commit::StoreAck,
     ) -> Result<(), StoreError> {
-        let predecessor_cut = self
-            .order
-            .predecessor_cut()
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let predecessor_cut = self.order.predecessor_cut().map_err(StoreError::from)?;
         if !self
             .writer
             .is_authored_by_registration(&acknowledgement.registration)
@@ -187,9 +184,7 @@ impl StoreOperationCommitPlan {
     }
 
     pub(crate) fn predecessor_cut(&self) -> Result<StoreHistoryCut, StoreError> {
-        self.order
-            .predecessor_cut()
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+        self.order.predecessor_cut().map_err(StoreError::from)
     }
 
     pub(crate) fn membership_state(&self) -> &super::circle_control::StoreMembershipStateRef {
@@ -236,7 +231,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<super::store_commit::RetainedStoreDeviceExclusionProposal, StoreError> {
         self.writer
             .retain_device_exclusion_proposal(reference, proposal, target)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     pub(crate) fn retain_device_exclusion_outcome(
@@ -247,7 +242,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<super::store_commit::RetainedStoreDeviceExclusionOutcome, StoreError> {
         self.writer
             .retain_device_exclusion_outcome(reference, proposal, outcome)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     pub(crate) fn announcement_activation_id(
@@ -255,7 +250,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<super::store_commit::StreamActivationId, StoreError> {
         self.writer
             .announcement_activation_id()
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     pub(crate) fn verify_prepared_commit(
@@ -265,7 +260,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<super::store_commit::VerifiedStoreBatchCommit, StoreError> {
         self.writer
             .verify_prepared_commit(bytes, self.root.store_root_hash, self.coord.clone(), object)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     pub(crate) async fn retain_acknowledgement(
@@ -304,7 +299,7 @@ impl StoreOperationCommitPlan {
     ) -> Result<coven_protocol::reclaim::ReclaimEvidence, StoreError> {
         self.writer
             .sign_reclaim_evidence(self.root.store_root_hash, claim)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+            .map_err(StoreError::from)
     }
 
     pub(crate) fn sign_reclaim_authorization(

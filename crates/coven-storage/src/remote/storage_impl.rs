@@ -47,7 +47,10 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         let aad_context = cloud_aad_context(&self.store_id, &key);
         self.open_stored_data(stored_bytes, &aad_context)
             .map(Some)
-            .map_err(|error| StorageError::InvalidContent(error.to_string()))
+            .map_err(|source| StorageError::Decryption {
+                context: format!("blob tombstone {key}"),
+                source,
+            })
     }
 
     async fn write_blob_tombstone(
@@ -82,10 +85,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 .and_then(|key| key.strip_prefix(crate::BLOB_TOMBSTONE_PREFIX))
                 .and_then(|encoded| encoded.parse().ok());
             let Some(object_id) = object_id else {
-                listed.push(crate::ListedBlobTombstone::Invalid {
-                    provider_key: key,
-                    reason: "unexpected tombstone key format".to_string(),
-                });
+                listed.push(crate::ListedBlobTombstone::InvalidKey { provider_key: key });
                 continue;
             };
             let stored_bytes = self.home.read(&key).await.map_err(StorageError::from)?;
@@ -95,9 +95,9 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                     object_id,
                     plaintext,
                 }),
-                Err(error) => listed.push(crate::ListedBlobTombstone::Invalid {
+                Err(error) => listed.push(crate::ListedBlobTombstone::InvalidBody {
                     provider_key: key,
-                    reason: format!("open failed: {error}"),
+                    source: std::sync::Arc::new(error),
                 }),
             }
         }
@@ -489,10 +489,12 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         match tokio::fs::metadata(&spool_file).await {
             Ok(metadata) => {
                 if !metadata.is_file() {
-                    return Err(StorageError::LocalFilesystem(format!(
-                        "blob spool path is not a file: {}",
-                        spool_file.display()
-                    )));
+                    return Err(StorageError::LocalFilesystem(
+                        coven_foundation::atomic_file::FileError::NotFile {
+                            subject: "blob spool path",
+                            path: spool_file,
+                        },
+                    ));
                 }
                 let (stored_size, stored_hash) = crate::local_file::exact_file_facts(&spool_file)
                     .await
@@ -503,8 +505,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                     stored_hash,
                 );
                 let blob =
-                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
-                        .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)?;
                 let mut reader =
                     ExactBlobPlaintextReader::new(&spool_file, &self.store_id, &blob, protection)
                         .await?;
@@ -514,7 +515,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                         1 << 20,
                     )
                     .await
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    .map_err(StorageError::from)?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -523,10 +524,13 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(StorageError::LocalFilesystem(format!(
-                    "inspect blob spool {}: {error}",
-                    spool_file.display()
-                )));
+                return Err(StorageError::LocalFilesystem(
+                    coven_foundation::atomic_file::FileError::Path {
+                        operation: "inspect blob spool",
+                        path: spool_file,
+                        source: error,
+                    },
+                ));
             }
         }
 
@@ -618,8 +622,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                     stored_hash,
                 );
                 let blob =
-                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)
-                        .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    coven_protocol::blob::locator::StoredBlobRef::new(locator.clone(), object)?;
                 let mut reader = ExactBlobPlaintextReader::new(
                     &spool_file,
                     &self.store_id,
@@ -633,14 +636,14 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                         1 << 20,
                     )
                     .await
-                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    .map_err(StorageError::from)?;
                     if chunk.is_empty() {
                         break;
                     }
                 }
                 Ok(coven_protocol::objects::BlobSpoolWrite::Reused)
             }
-            Err(error) => Err(StorageError::LocalFilesystem(error.to_string())),
+            Err(error) => Err(StorageError::CommitNewFile(error)),
         }
     }
 
@@ -680,7 +683,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             locator.clone(),
             ExactObjectRef::new(slot, stored_size, stored_hash),
         )
-        .map_err(|error| StorageError::InvalidContent(error.to_string()))
+        .map_err(StorageError::from)
     }
 
     async fn create_blob_object_from_file(
@@ -747,16 +750,8 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 .write_plaintext(&mut reader)
                 .await
                 .map_err(|error| match error {
-                    coven_foundation::local_file::StreamWriteError::Source(
-                        crate::local_file::PlaintextChunkError::Remote(error),
-                    ) => error,
-                    coven_foundation::local_file::StreamWriteError::Source(
-                        crate::local_file::PlaintextChunkError::InvalidContent(error),
-                    ) => StorageError::InvalidContent(error),
-                    coven_foundation::local_file::StreamWriteError::Source(
-                        crate::local_file::PlaintextChunkError::Local(error),
-                    )
-                    | coven_foundation::local_file::StreamWriteError::Local(error) => {
+                    coven_foundation::local_file::StreamWriteError::Source(error) => error.into(),
+                    coven_foundation::local_file::StreamWriteError::Local(error) => {
                         StorageError::LocalFilesystem(error)
                     }
                 })?;
@@ -898,7 +893,7 @@ impl CloudSyncConnection {
         {
             let (size, digest) = coven_foundation::local_file::file_facts(staged.path())
                 .await
-                .map_err(|error| StorageError::LocalFilesystem(error.to_string()))?;
+                .map_err(StorageError::LocalFilesystem)?;
             object.verify_stored_facts(
                 staged.path(),
                 size,

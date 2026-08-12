@@ -96,6 +96,8 @@
 //! blob (in `pinned/`) survives because it lives in the other folder.
 
 use coven_database::DbError;
+use coven_foundation::atomic_file::FileError;
+use coven_foundation::local_file::CommitNewFileError;
 use coven_foundation::store_dir::{
     CachedLocatorRemovalError, PathTokenError, RequiredLocalBlobPathError, StoreBlobFileError,
 };
@@ -201,8 +203,9 @@ pub enum BlobCacheError {
     /// rather than masked.
     NoCloudHome,
     /// A local-disk failure: a cache write, a folder move, or a test cache reset.
-    /// Carries a human-readable cause.
-    Io(String),
+    File(FileError),
+    /// Publishing a staged cache file failed.
+    Commit(CommitNewFileError),
     /// A blob-metadata query failed — resolving the blob's locality, looking up its
     /// external ref, or reading its cache budget or expected size. A database read
     /// the blob path depends on, distinct from a disk I/O failure.
@@ -210,7 +213,9 @@ pub enum BlobCacheError {
     /// Building the sync storage from config failed — missing credentials or cloud
     /// configuration — when a Remote blob needed it. A configuration fault, not a
     /// disk I/O error.
-    StorageSetup(String),
+    StorageSetup(coven_storage::cloud::setup::StorageSetupError),
+    /// The blob's declared authority cannot open its stored representation.
+    OpeningAuthority(coven_protocol::blob::BlobOpeningAuthorityError),
     /// A registered external blob ref (a user-provided Local blob's user-owned
     /// file) points at a file that is no longer there — the user moved, renamed, or
     /// deleted it. Terminal: an external blob has no cloud copy to fall back to, so
@@ -221,7 +226,7 @@ pub enum BlobCacheError {
         path: std::path::PathBuf,
         /// The underlying read failure — a missing file or a real I/O error,
         /// preserved rather than collapsed so the host sees why the read failed.
-        source: String,
+        source: FileError,
     },
     /// A registered external blob's file is present but its length no longer matches
     /// the registered `size` — the user truncated it or replaced it with a
@@ -230,6 +235,12 @@ pub enum BlobCacheError {
     ExternalSizeMismatch {
         id: String,
         path: std::path::PathBuf,
+    },
+    /// A local-store blob has a different length from its stored declaration.
+    LocalSizeMismatch {
+        path: std::path::PathBuf,
+        expected_size: u64,
+        actual_size: u64,
     },
     /// A **Local** blob (its gated locality root's gate is off) has no copy in the
     /// local store. A Local blob has no cloud copy, so there is nothing to fall back
@@ -259,6 +270,15 @@ pub enum BlobCacheError {
         expected_hash: coven_protocol::store_commit::ObjectHash,
         actual_hash: coven_protocol::store_commit::ObjectHash,
     },
+    /// Adding the requested range length overflowed its offset.
+    RangeOverflow { id: String, offset: u64, len: u64 },
+    /// The requested range lies outside the opened blob.
+    RangeOutOfBounds {
+        id: String,
+        offset: u64,
+        end: u64,
+        size: u64,
+    },
 }
 
 /// A Remote blob read needs sync storage; if building it from config fails
@@ -267,7 +287,7 @@ pub enum BlobCacheError {
 /// setup failure's message at this API boundary.
 impl From<coven_storage::cloud::setup::StorageSetupError> for BlobCacheError {
     fn from(e: coven_storage::cloud::setup::StorageSetupError) -> Self {
-        BlobCacheError::StorageSetup(e.to_string())
+        BlobCacheError::StorageSetup(e)
     }
 }
 
@@ -279,9 +299,11 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::NoCloudHome => {
                 write!(f, "no cloud home connected to read a Remote blob")
             }
-            BlobCacheError::Io(e) => write!(f, "blob cache I/O error: {e}"),
+            BlobCacheError::File(e) => write!(f, "blob cache file error: {e}"),
+            BlobCacheError::Commit(e) => write!(f, "publish blob cache file: {e}"),
             BlobCacheError::Metadata(e) => write!(f, "blob metadata error: {e}"),
             BlobCacheError::StorageSetup(e) => write!(f, "sync storage setup failed: {e}"),
+            BlobCacheError::OpeningAuthority(e) => write!(f, "blob opening authority: {e}"),
             BlobCacheError::ExternalMissing { id, path, source } => write!(
                 f,
                 "external blob {id} could not be read at {}: {source}",
@@ -290,6 +312,15 @@ impl std::fmt::Display for BlobCacheError {
             BlobCacheError::ExternalSizeMismatch { id, path } => write!(
                 f,
                 "external blob {id} at {} no longer matches its registered size",
+                path.display()
+            ),
+            BlobCacheError::LocalSizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            } => write!(
+                f,
+                "local blob {} has {actual_size} bytes, expected {expected_size}",
                 path.display()
             ),
             BlobCacheError::NoLocalCopy { namespace, id } => write!(
@@ -315,11 +346,46 @@ impl std::fmt::Display for BlobCacheError {
                 "local blob {} has size/hash {actual_size}/{actual_hash}, expected {expected_size}/{expected_hash}",
                 path.display()
             ),
+            BlobCacheError::RangeOverflow { id, offset, len } => write!(
+                f,
+                "blob range overflow for {id}: offset={offset}, len={len}"
+            ),
+            BlobCacheError::RangeOutOfBounds {
+                id,
+                offset,
+                end,
+                size,
+            } => write!(
+                f,
+                "blob range {offset}..{end} for {id} exceeds blob size {size}"
+            ),
         }
     }
 }
 
-impl std::error::Error for BlobCacheError {}
+impl std::error::Error for BlobCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Path(source) => Some(source),
+            Self::Storage(source) => Some(source),
+            Self::File(source) => Some(source),
+            Self::Commit(source) => Some(source),
+            Self::Metadata(source) => Some(source),
+            Self::StorageSetup(source) => Some(source),
+            Self::OpeningAuthority(source) => Some(source),
+            Self::ExternalMissing { source, .. } => Some(source),
+            Self::NoCloudHome
+            | Self::ExternalSizeMismatch { .. }
+            | Self::LocalSizeMismatch { .. }
+            | Self::NoLocalCopy { .. }
+            | Self::LocalityUnresolved { .. }
+            | Self::NoExternalRef { .. }
+            | Self::LocalIntegrity { .. }
+            | Self::RangeOverflow { .. }
+            | Self::RangeOutOfBounds { .. } => None,
+        }
+    }
+}
 
 impl From<PathTokenError> for BlobCacheError {
     fn from(e: PathTokenError) -> Self {
@@ -334,7 +400,7 @@ impl From<RequiredLocalBlobPathError> for BlobCacheError {
             RequiredLocalBlobPathError::Missing { namespace, id } => {
                 Self::NoLocalCopy { namespace, id }
             }
-            RequiredLocalBlobPathError::Io(error) => Self::Io(error),
+            RequiredLocalBlobPathError::File(error) => Self::File(error),
         }
     }
 }
@@ -343,7 +409,7 @@ impl From<CachedLocatorRemovalError> for BlobCacheError {
     fn from(error: CachedLocatorRemovalError) -> Self {
         match error {
             CachedLocatorRemovalError::Path(error) => Self::Path(error),
-            CachedLocatorRemovalError::Io(error) => Self::Io(error),
+            CachedLocatorRemovalError::File(error) => Self::File(error),
         }
     }
 }
@@ -352,7 +418,8 @@ impl From<StoreBlobFileError> for BlobCacheError {
     fn from(error: StoreBlobFileError) -> Self {
         match error {
             StoreBlobFileError::Path(error) => Self::Path(error),
-            StoreBlobFileError::Io(error) => Self::Io(error),
+            StoreBlobFileError::File(error) => Self::File(error),
+            StoreBlobFileError::Commit(error) => Self::Commit(error),
             StoreBlobFileError::Integrity {
                 path,
                 expected_size,
@@ -387,7 +454,16 @@ impl From<coven_foundation::store_dir::LocalBlobStoreError> for BlobCacheError {
         use coven_foundation::store_dir::LocalBlobStoreError;
         match e {
             LocalBlobStoreError::Path(p) => BlobCacheError::Path(p),
-            LocalBlobStoreError::Io(s) => BlobCacheError::Io(s),
+            LocalBlobStoreError::File(error) => BlobCacheError::File(error),
+            LocalBlobStoreError::SizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            } => BlobCacheError::LocalSizeMismatch {
+                path,
+                expected_size,
+                actual_size,
+            },
         }
     }
 }
@@ -455,23 +531,27 @@ impl BlobStream {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let end = offset.checked_add(len).ok_or_else(|| {
-            BlobCacheError::Io(format!(
-                "blob range overflow for {}: offset={offset}, len={len}",
-                self.blob.id
-            ))
-        })?;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| BlobCacheError::RangeOverflow {
+                id: self.blob.id.clone(),
+                offset,
+                len,
+            })?;
         let source_size = self.plaintext_size();
         if end > source_size {
-            return Err(BlobCacheError::Io(format!(
-                "blob range {offset}..{end} for {} exceeds blob size {source_size}",
-                self.blob.id
-            )));
+            return Err(BlobCacheError::RangeOutOfBounds {
+                id: self.blob.id.clone(),
+                offset,
+                end,
+                size: source_size,
+            });
         }
         match &self.source {
-            BlobStreamSource::Local(file) => {
-                file.read_at(offset, len).await.map_err(BlobCacheError::Io)
-            }
+            BlobStreamSource::Local(file) => file
+                .read_at(offset, len)
+                .await
+                .map_err(BlobCacheError::File),
             BlobStreamSource::Remote(reader) => reader
                 .read_at(offset, len)
                 .await

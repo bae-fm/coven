@@ -81,32 +81,27 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
     pub(crate) async fn verify_membership_control(
         &mut self,
         verified_commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,
-    ) -> Result<coven_protocol::circle_activation::VerifiedCircleActivations, String> {
+    ) -> Result<coven_protocol::circle_activation::VerifiedCircleActivations, pull::StorePullError>
+    {
         let root = self.history_verifier.verified_root().reference().clone();
         if verified_commit.store_root_hash() != root.store_root_hash {
-            return Err(
+            return Err(pull::StorePullError::InvalidState(
                 "authenticated Merge membership control belongs to another Store root".into(),
-            );
+            ));
         }
         let commit_ref = verified_commit.reference();
         let commit = verified_commit.value();
         self.history_verifier
             .verify_refs(pull::commit_predecessor_references(commit))
-            .await
-            .map_err(|error| error.to_string())?;
-        let predecessor_state = self
-            .history_verifier
-            .verified_predecessor_state(commit)
-            .map_err(|error| error.to_string())?;
+            .await?;
+        let predecessor_state = self.history_verifier.verified_predecessor_state(commit)?;
         let verified_membership_activations = self
             .history_verifier
-            .verified_membership_prefix(pull::commit_predecessor_references(commit))
-            .map_err(|error| error.to_string())?;
+            .verified_membership_prefix(pull::commit_predecessor_references(commit))?;
         let pending_resolution = self
             .history_verifier
             .verify_resolution_activation_acceptance(commit)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         let predecessor_membership = self
             .history_verifier
             .load_predecessor_membership_at_verified_prefix(
@@ -115,16 +110,12 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 pending_resolution.as_ref(),
             )
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => error.to_string(),
-                RegistrationLoadError::Invalid(error) => error,
-            })?;
+            .map_err(pull::StorePullError::from)?;
         verify_merge_membership_state_ref(
             &commit.membership_state,
             &predecessor_membership,
             &predecessor_state,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         self.history_verifier
             .verify_membership_control_with_retained_history(
                 commit_ref,
@@ -239,9 +230,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         }
         self.verify_snapshots_for_acknowledgement(&candidates)
             .await
-            .map_err(|error| {
-                crate::sync::store::snapshots::SnapshotError::UnauthorizedAuthor(error.to_string())
-            })?;
+            .map_err(crate::sync::store::snapshots::SnapshotError::from)?;
         Ok(
             crate::sync::store::snapshots::select_maximal_store_snapshot(candidates).map(
                 |snapshot| coven_protocol::store_commit::StoreSnapshotLocator {
@@ -261,9 +250,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .membership_head_cursors()
             .await
-            .map_err(|error| {
-                crate::sync::store::membership::MembershipOpsError::Database(error.to_string())
-            })?;
+            .map_err(crate::sync::store::membership::MembershipOpsError::Database)?;
         let chain = Box::pin(
             self.history_verifier
                 .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
@@ -272,9 +259,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         self.database
             .persist_membership_head_cursors(chain.head_refs().to_vec())
             .await
-            .map_err(|error| {
-                crate::sync::store::membership::MembershipOpsError::Database(error.to_string())
-            })?;
+            .map_err(crate::sync::store::membership::MembershipOpsError::Database)?;
         Ok(chain)
     }
 
@@ -287,9 +272,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .database
             .membership_head_cursors()
             .await
-            .map_err(|error| {
-                crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string())
-            })?;
+            .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
         let chain = Box::pin(
             self.history_verifier
                 .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
@@ -337,9 +320,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             founder_registration_ref.clone(),
             founder_registration,
         )
-        .map_err(|error| {
-            crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string())
-        })?;
+        .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
         self.database
             .install_store_owner_anchor(
                 owner_anchor,
@@ -348,9 +329,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 },
             )
             .await
-            .map_err(|error| {
-                crate::sync::store::membership::AnchoredChainError::LoadFailed(error.to_string())
-            })?;
+            .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
         Ok(chain)
     }
 

@@ -44,7 +44,7 @@ pub(crate) fn validate_commit_join_attempts(
     let bootstrap_cut = commit
         .order
         .predecessor_cut()
-        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+        .map_err(RegistrationLoadError::from)?;
     for reference in commit
         .device_join_attempt_decisions()
         .iter()

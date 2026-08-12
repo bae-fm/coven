@@ -107,8 +107,7 @@ impl CandidateNonactivation {
 
     pub fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         let commit: crate::store_commit::StoreBatchCommit =
-            serde_json::from_slice(&self.candidate.canonical_signed_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+            serde_json::from_slice(&self.candidate.canonical_signed_bytes)?;
         if commit.seq() != self.candidate.coord.sequence() {
             return Err(RemoteObjectRecordError::InvalidProof(
                 "candidate coordinate differs from its signed bytes".to_string(),
@@ -118,21 +117,19 @@ impl CandidateNonactivation {
             &commit,
             self.candidate.coord.clone(),
             self.candidate.object.clone(),
-        )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        )?;
         self.proof.validate_for(&reference, &commit)
     }
 
     pub fn reference(&self) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
         let commit: crate::store_commit::StoreBatchCommit =
-            serde_json::from_slice(&self.candidate.canonical_signed_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+            serde_json::from_slice(&self.candidate.canonical_signed_bytes)?;
         StoreBatchCommitRef::from_commit(
             &commit,
             self.candidate.coord.clone(),
             self.candidate.object.clone(),
         )
-        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
+        .map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -281,9 +278,8 @@ impl VerifiedCandidateNonactivation {
                 "dependent retraction does not descend from terminal evidence".to_string(),
             ));
         }
-        let commit = candidate
-            .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let commit =
+            candidate.verify_nonactivation_candidate(author.store_root.store_root_hash, author)?;
         let candidate_reference = commit.reference().clone();
         let dependency_reference = dependency.candidate_reference()?;
         let value = Self {
@@ -315,9 +311,8 @@ impl VerifiedCandidateNonactivation {
         author: &crate::store_commit::StoreDeviceRegistration,
         activation_head_object: ExactObjectRef,
     ) -> Result<Self, RemoteObjectRecordError> {
-        let commit = candidate
-            .verify_nonactivation_candidate(author.store_root.store_root_hash, author)
-            .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let commit =
+            candidate.verify_nonactivation_candidate(author.store_root.store_root_hash, author)?;
         let candidate_reference = commit.reference().clone();
         if authority.durable.candidate != candidate {
             return Err(RemoteObjectRecordError::InvalidProof(
@@ -456,7 +451,7 @@ impl CandidateNonactivationProof {
                 crate::store_commit::validate_store_history_cut(
                     &crate::store_commit::StoreHistoryCut::from_commits(accepted_cut.clone()),
                 )
-                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
+                .map_err(Into::into)
             }
             Self::MergeMembershipGrantRevocation {
                 membership,

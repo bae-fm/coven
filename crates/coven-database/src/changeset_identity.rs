@@ -8,7 +8,7 @@ use coven_protocol::synced_schema::{RowIdentityError, SyncedTable};
 #[derive(Debug, thiserror::Error)]
 pub enum ChangesetIdentityError {
     #[error("changeset row identity validation failed: {0}")]
-    Parse(String),
+    Parse(#[from] rusqlite::Error),
     #[error("changeset contains undeclared table {0:?}")]
     UndeclaredTable(String),
     #[error(transparent)]
@@ -24,15 +24,9 @@ pub(crate) fn validate_changeset_row_identities(
     }
 
     let input: &mut dyn std::io::Read = &mut &bytes[..];
-    let mut iter = ChangesetIter::start_strm(&input)
-        .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?;
-    while let Some(item) = iter
-        .next()
-        .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?
-    {
-        let op = item
-            .op()
-            .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?;
+    let mut iter = ChangesetIter::start_strm(&input).map_err(ChangesetIdentityError::Parse)?;
+    while let Some(item) = iter.next().map_err(ChangesetIdentityError::Parse)? {
+        let op = item.op().map_err(ChangesetIdentityError::Parse)?;
         let table_name = op.table_name();
         let table = tables
             .iter()
@@ -70,12 +64,12 @@ fn required_changeset_id(
     table: &str,
     side_name: &'static str,
     side: ChangesetSide,
-) -> Result<String, RowIdentityError> {
+) -> Result<String, ChangesetIdentityError> {
     optional_changeset_id(item, table, side_name, side)?.ok_or_else(|| {
-        RowIdentityError::MissingPrimaryKey {
+        ChangesetIdentityError::Row(RowIdentityError::MissingPrimaryKey {
             table: table.to_string(),
             side: side_name,
-        }
+        })
     })
 }
 
@@ -84,7 +78,7 @@ fn optional_changeset_id(
     table: &str,
     side_name: &'static str,
     side: ChangesetSide,
-) -> Result<Option<String>, RowIdentityError> {
+) -> Result<Option<String>, ChangesetIdentityError> {
     let value = match side {
         ChangesetSide::Old => item.old_value(0),
         ChangesetSide::New => item.new_value(0),
@@ -92,24 +86,21 @@ fn optional_changeset_id(
     let value = match value {
         Ok(value) => value,
         Err(rusqlite::Error::InvalidColumnIndex(_)) => return Ok(None),
-        Err(error) => {
-            return Err(RowIdentityError::NonUtf8PrimaryKey {
-                table: table.to_string(),
-                reason: error.to_string(),
-            })
-        }
+        Err(error) => return Err(ChangesetIdentityError::Parse(error)),
     };
     let ValueRef::Text(bytes) = value else {
         return Err(RowIdentityError::NonTextPrimaryKey {
             table: table.to_string(),
             side: side_name,
-        });
+        }
+        .into());
     };
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map(Some)
         .map_err(|error| RowIdentityError::NonUtf8PrimaryKey {
             table: table.to_string(),
-            reason: error.to_string(),
+            source: error,
         })
+        .map_err(ChangesetIdentityError::from)
 }

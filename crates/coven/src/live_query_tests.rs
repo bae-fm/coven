@@ -110,7 +110,7 @@ async fn query_errors_do_not_end_the_subscription() {
     let query_fail = fail.clone();
     let mut count = handle.subscribe(move |sql| {
         if query_fail.load(Ordering::Acquire) {
-            return Err(CovenError::Database(DbError::Message(
+            return Err(CovenError::from(DbError::Message(
                 "query failure".to_string(),
             )));
         }
@@ -146,7 +146,7 @@ async fn rolled_back_writes_do_not_wake_live_queries() {
                 "INSERT INTO notes (id, body, _updated_at) VALUES (?1, ?2, ?3)",
                 ("note-rolled-back", "Discarded body", stamp),
             )?;
-            Err::<(), _>(CovenError::Database(DbError::Message(
+            Err::<(), _>(CovenError::from(DbError::Message(
                 "refuse transaction".to_string(),
             )))
         })

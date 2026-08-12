@@ -108,7 +108,7 @@ impl<'source> ExactUpload<'source> {
             ExactUploadSource::Bytes(bytes) => Ok(BlobBody::from_bytes(bytes.to_vec())),
             ExactUploadSource::File(path) => BlobBody::from_file(path)
                 .await
-                .map_err(CloudHomeError::Transport),
+                .map_err(CloudHomeError::Local),
         }
     }
 }

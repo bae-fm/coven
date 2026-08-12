@@ -79,7 +79,7 @@ pub(crate) use audience::{
 };
 pub use audience::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
-    CirclePartitionControl, RoutingChanges, StoreAudienceTransitions,
+    CirclePartitionControl, CirclePartitionControlError, RoutingChanges, StoreAudienceTransitions,
 };
 pub use model::Gates;
 #[cfg(any(test, feature = "test-utils"))]
@@ -157,7 +157,7 @@ pub enum GateError {
     },
     MissingGateColumn(String, String),
     MissingFkColumn(String, String),
-    ForeignKeySchema(String),
+    ForeignKeySchema(crate::ForeignKeySchemaError),
     CompositeGateForeignKey {
         table: String,
         parent: String,
@@ -178,8 +178,33 @@ pub enum GateError {
         value: Option<String>,
         reason: String,
     },
+    InvalidAudienceEncoding {
+        table: String,
+        value: Option<String>,
+        source: coven_protocol::circle::CircleIdError,
+    },
     InvalidInboundAudiencePackage(String),
+    InvalidInboundAudienceEncoding {
+        context: String,
+        source: coven_protocol::circle::CircleIdError,
+    },
+    InvalidInboundRowIdentity {
+        context: String,
+        source: coven_protocol::synced_schema::RowIdentityError,
+    },
     InvalidMaterializedRouting(String),
+    InvalidMaterializedRoutingId {
+        context: String,
+        source: coven_protocol::circle::RowRoutingIdError,
+    },
+    InvalidMaterializedAudience {
+        context: String,
+        source: coven_protocol::circle::CircleIdError,
+    },
+    InvalidMaterializedRowIdentity {
+        context: String,
+        source: coven_protocol::synced_schema::RowIdentityError,
+    },
     MissingChangesetPrimaryKey(String),
     MissingAudienceRow {
         table: String,
@@ -201,7 +226,7 @@ pub enum GateError {
     },
     InvalidCircleControl {
         circle_id: coven_protocol::circle::CircleId,
-        reason: String,
+        source: CircleControlFailure,
     },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
     /// descendant — no synced table has a foreign key into it after the
@@ -257,11 +282,31 @@ impl std::fmt::Display for GateError {
                 value,
                 reason,
             } => write!(f, "scoped table {table} has invalid audience {value:?}: {reason}"),
+            GateError::InvalidAudienceEncoding {
+                table,
+                value,
+                source,
+            } => write!(f, "scoped table {table} has invalid audience {value:?}: {source}"),
             GateError::InvalidInboundAudiencePackage(reason) => {
                 write!(f, "invalid inbound audience package: {reason}")
             }
+            GateError::InvalidInboundAudienceEncoding { context, source } => {
+                write!(f, "invalid inbound audience package: {context}: {source}")
+            }
+            GateError::InvalidInboundRowIdentity { context, source } => {
+                write!(f, "invalid inbound audience package: {context}: {source}")
+            }
             GateError::InvalidMaterializedRouting(reason) => {
                 write!(f, "invalid materialized routing state: {reason}")
+            }
+            GateError::InvalidMaterializedRoutingId { context, source } => {
+                write!(f, "invalid materialized routing state: {context}: {source}")
+            }
+            GateError::InvalidMaterializedAudience { context, source } => {
+                write!(f, "invalid materialized routing state: {context}: {source}")
+            }
+            GateError::InvalidMaterializedRowIdentity { context, source } => {
+                write!(f, "invalid materialized routing state: {context}: {source}")
             }
             GateError::MissingChangesetPrimaryKey(table) => {
                 write!(f, "scoped changeset row in {table} has no primary key")
@@ -287,8 +332,8 @@ impl std::fmt::Display for GateError {
             GateError::CircleDeleted { circle_id } => {
                 write!(f, "circle {circle_id} is deleted and accepts no writes")
             }
-            GateError::InvalidCircleControl { circle_id, reason } => {
-                write!(f, "circle {circle_id} has invalid active control: {reason}")
+            GateError::InvalidCircleControl { circle_id, source } => {
+                write!(f, "circle {circle_id} has invalid active control: {source}")
             }
             GateError::NoGatedDescendants(tbl) => {
                 write!(
@@ -312,7 +357,36 @@ impl std::fmt::Display for GateError {
     }
 }
 
-impl std::error::Error for GateError {}
+impl std::error::Error for GateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Session { source, .. } | Self::Sql(_, source) => Some(source),
+            Self::ForeignKeySchema(source) => Some(source),
+            Self::CreateTableSchema(source) => Some(source),
+            Self::InvalidCircleControl { source, .. } => Some(source),
+            Self::InvalidAudienceEncoding { source, .. } => Some(source),
+            Self::InvalidInboundAudienceEncoding { source, .. }
+            | Self::InvalidMaterializedAudience { source, .. } => Some(source),
+            Self::InvalidInboundRowIdentity { source, .. }
+            | Self::InvalidMaterializedRowIdentity { source, .. } => Some(source),
+            Self::InvalidMaterializedRoutingId { source, .. } => Some(source),
+            Self::Cleanup { operation, .. } => Some(operation.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CircleControlFailure {
+    #[error("parse current state: {0}")]
+    ParseCurrentState(serde_json::Error),
+    #[error("current state failed verification")]
+    Verification,
+    #[error("serialize current control coordinate: {0}")]
+    SerializeCoordinate(serde_json::Error),
+    #[error(transparent)]
+    PartitionControl(#[from] CirclePartitionControlError),
+}
 
 impl From<crate::CreateTableSchemaError> for GateError {
     fn from(error: crate::CreateTableSchemaError) -> Self {

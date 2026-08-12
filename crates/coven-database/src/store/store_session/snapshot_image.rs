@@ -59,6 +59,51 @@ pub enum SnapshotImageError {
     NoSyncedTables,
     #[error("failed to scope snapshot down to shareable data: {0}")]
     Projection(String),
+    #[error("snapshot database: {0}")]
+    Database(#[source] Box<DbError>),
+    #[error("snapshot gate: {0}")]
+    Gate(#[from] crate::GateError),
+    #[error("snapshot row routing key: {0}")]
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
+    #[error("snapshot SQLite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("snapshot remote object: {0}")]
+    RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
+    #[error("snapshot blob declarations: {0}")]
+    BlobDecl(#[from] crate::BlobDeclError),
+    #[error("snapshot routing contract: {0}")]
+    RoutingContract(#[from] crate::SyncRoutingContractError),
+    #[error("snapshot projection {operation}: {source}")]
+    ProjectionSqlite {
+        operation: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("snapshot projection {operation}: {source}")]
+    ProjectionDatabase {
+        operation: String,
+        #[source]
+        source: Box<DbError>,
+    },
+    #[error("snapshot projection {operation}: {source}")]
+    ProjectionIo {
+        operation: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("snapshot projection {operation}: {source}")]
+    ProjectionPayloadStore {
+        operation: String,
+        #[source]
+        source: crate::PayloadStoreError,
+    },
+    #[error("snapshot blob {namespace}/{id} plaintext hash: {source}")]
+    BlobHash {
+        namespace: String,
+        id: String,
+        #[source]
+        source: coven_foundation::object_hash::InvalidObjectHash,
+    },
     #[error(
         "could not remove staged snapshot database {path}: {cleanup}",
         path = .path.display()
@@ -74,6 +119,12 @@ pub enum SnapshotImageError {
         cleanup: String,
         cause: Box<SnapshotImageError>,
     },
+}
+
+impl From<DbError> for SnapshotImageError {
+    fn from(error: DbError) -> Self {
+        Self::Database(Box::new(error))
+    }
 }
 
 #[derive(Debug)]
@@ -143,7 +194,7 @@ impl SnapshotDatabaseImage {
         let gates = match crate::Gates::from_tables(connection, tables) {
             Ok(gates) => gates,
             Err(error) => {
-                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                return self.finish(Err(SnapshotImageError::from(error)));
             }
         };
         let routing_key = if gates.has_scoped_graph() {
@@ -158,7 +209,7 @@ impl SnapshotDatabaseImage {
             match coven_protocol::circle::derive_row_routing_key(encryption, root.store_root_hash) {
                 Ok(routing_key) => Some(routing_key),
                 Err(error) => {
-                    return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                    return self.finish(Err(SnapshotImageError::from(error)));
                 }
             }
         } else {
@@ -168,19 +219,19 @@ impl SnapshotDatabaseImage {
         let source_image = match crate::connection_io::serialize_database_image(connection) {
             Ok(image) => image,
             Err(error) => {
-                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                return self.finish(Err(SnapshotImageError::from(error)));
             }
         };
         let mut snapshot = match Connection::open_in_memory().map_err(DbError::from) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                return self.finish(Err(SnapshotImageError::from(error)));
             }
         };
         if let Err(error) =
             crate::connection_io::deserialize_database_image_into(&mut snapshot, &source_image)
         {
-            return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+            return self.finish(Err(SnapshotImageError::from(error)));
         }
         if let Err(error) = Self::project(
             &mut snapshot,
@@ -205,7 +256,7 @@ impl SnapshotDatabaseImage {
         let image = match crate::connection_io::serialize_database_image(&snapshot) {
             Ok(image) => image,
             Err(error) => {
-                return self.finish(Err(SnapshotImageError::Projection(error.to_string())));
+                return self.finish(Err(SnapshotImageError::from(error)));
             }
         };
         drop(snapshot);
@@ -245,12 +296,12 @@ impl SnapshotDatabaseImage {
     }
 
     pub async fn read(&self) -> Result<Vec<u8>, SnapshotImageError> {
-        tokio::fs::read(&self.path).await.map_err(|error| {
-            SnapshotImageError::Projection(format!(
-                "read staged snapshot database {}: {error}",
-                self.path.display()
-            ))
-        })
+        tokio::fs::read(&self.path)
+            .await
+            .map_err(|error| SnapshotImageError::ProjectionIo {
+                operation: format!("read staged snapshot database {}", self.path.display()),
+                source: error,
+            })
     }
 
     pub fn read_and_discard(self) -> Result<Vec<u8>, SnapshotImageError> {
@@ -324,8 +375,8 @@ impl SnapshotDatabaseImage {
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         audience: &coven_protocol::circle::Audience,
     ) -> Result<(), SnapshotImageError> {
-        let gates = crate::Gates::from_tables(connection, synced)
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        let gates =
+            crate::Gates::from_tables(connection, synced).map_err(SnapshotImageError::from)?;
         if gates.has_scoped_graph() && routing_key.is_none() {
             return Err(SnapshotImageError::Projection(
                 "scoped snapshot projection requires a row-routing key".to_string(),
@@ -333,19 +384,20 @@ impl SnapshotDatabaseImage {
         }
         let transaction = connection
             .unchecked_transaction()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
         transaction
             .pragma_update(None, "defer_foreign_keys", "ON")
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
         let coverage =
             crate::store::materialized_commit_index::materialized_frontier_on(&transaction, None)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
         let cleared_materialization_tables = ["materialized_commits"];
         for table in cleared_materialization_tables {
             transaction
                 .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(table)))
-                .map_err(|error| {
-                    SnapshotImageError::Projection(format!("clear {table}: {error}"))
+                .map_err(|error| SnapshotImageError::ProjectionSqlite {
+                    operation: format!("clear {table}"),
+                    source: error,
                 })?;
         }
         if matches!(audience, coven_protocol::circle::Audience::Store) {
@@ -354,10 +406,10 @@ impl SnapshotDatabaseImage {
             let mut authority = super::VerifiedStoreAuthority::default();
             records
                 .retain_snapshot_replay_inputs(&mut authority, root)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
             records
                 .retain_snapshot_device_states(&mut authority, root, coverage)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
         }
         let preserved_non_synced_tables = match audience {
             coven_protocol::circle::Audience::Store => SNAPSHOT_PRESERVED_NON_SYNCED_TABLES,
@@ -368,9 +420,12 @@ impl SnapshotDatabaseImage {
                 ));
             }
         };
-        for table in crate::user_table_names(connection)
-            .map_err(|error| SnapshotImageError::Projection(format!("list user tables: {error}")))?
-        {
+        for table in crate::user_table_names(connection).map_err(|error| {
+            SnapshotImageError::ProjectionSqlite {
+                operation: "list user tables".to_string(),
+                source: error,
+            }
+        })? {
             if synced.iter().any(|synced| synced.name() == table)
                 || preserved_non_synced_tables.contains(&table.as_str())
                 || cleared_materialization_tables.contains(&table.as_str())
@@ -379,18 +434,19 @@ impl SnapshotDatabaseImage {
             }
             transaction
                 .execute_batch(&format!("DELETE FROM {}", crate::quote_ident(&table)))
-                .map_err(|error| {
-                    SnapshotImageError::Projection(format!("clear {table}: {error}"))
+                .map_err(|error| SnapshotImageError::ProjectionSqlite {
+                    operation: format!("clear {table}"),
+                    source: error,
                 })?;
         }
 
         match audience {
             coven_protocol::circle::Audience::Store => gates
                 .delete_gated_false(&transaction)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
+                .map_err(SnapshotImageError::from)?,
             coven_protocol::circle::Audience::Circle(_) => {
                 crate::retain_snapshot_audience_rows(&transaction, &gates, audience)
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                    .map_err(SnapshotImageError::from)?;
             }
             coven_protocol::circle::Audience::Local => {
                 return Err(SnapshotImageError::Projection(
@@ -400,19 +456,20 @@ impl SnapshotDatabaseImage {
         }
         if let Some(routing_key) = routing_key {
             crate::prune_private_routes_without_rows(&transaction, &gates)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
             crate::validate_snapshot_routing_state(&transaction, &gates, routing_key, audience)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
         }
 
         scope_authenticated_blob_graph(&transaction, synced)?;
-        transaction
-            .commit()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        transaction.commit().map_err(SnapshotImageError::from)?;
         if matches!(audience, coven_protocol::circle::Audience::Store) {
-            connection
-                .execute_batch("VACUUM")
-                .map_err(|error| SnapshotImageError::Projection(format!("vacuum: {error}")))?;
+            connection.execute_batch("VACUUM").map_err(|error| {
+                SnapshotImageError::ProjectionSqlite {
+                    operation: "vacuum".to_string(),
+                    source: error,
+                }
+            })?;
         }
         Ok(())
     }
@@ -420,10 +477,8 @@ impl SnapshotDatabaseImage {
     fn strip_circle_transport_state(connection: &mut Connection) -> Result<(), SnapshotImageError> {
         connection
             .pragma_update(None, "foreign_keys", "ON")
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
+        let transaction = connection.transaction().map_err(SnapshotImageError::from)?;
         // These rows are the copy's, describing the spool of the device that
         // built it, so they are deleted without releasing any payload claim.
         transaction
@@ -434,18 +489,16 @@ impl SnapshotDatabaseImage {
                  DELETE FROM remote_objects;
                  DELETE FROM retained_merge_materializations;",
             )
-            .map_err(|error| {
-                SnapshotImageError::Projection(format!(
-                    "strip Circle snapshot transport state: {error}"
-                ))
+            .map_err(|error| SnapshotImageError::ProjectionSqlite {
+                operation: "strip Circle snapshot transport state".to_string(),
+                source: error,
             })?;
-        transaction
-            .commit()
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        transaction.commit().map_err(SnapshotImageError::from)?;
         connection.execute_batch("VACUUM").map_err(|error| {
-            SnapshotImageError::Projection(format!(
-                "vacuum Circle snapshot transport projection: {error}"
-            ))
+            SnapshotImageError::ProjectionSqlite {
+                operation: "vacuum Circle snapshot transport projection".to_string(),
+                source: error,
+            }
         })?;
         Ok(())
     }
@@ -458,19 +511,15 @@ impl SnapshotDatabaseImage {
             let source = std::fs::read(self.path()).map_err(SnapshotImageError::Io)?;
             let mut connection = Connection::open_in_memory()
                 .map_err(DbError::from)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
             crate::connection_io::deserialize_database_image_into(&mut connection, &source)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
             connection
                 .pragma_update(None, "foreign_keys", "ON")
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            let transaction = connection
-                .transaction()
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                .map_err(SnapshotImageError::from)?;
+            let transaction = connection.transaction().map_err(SnapshotImageError::from)?;
             for blob in blobs {
-                blob.remote
-                    .validate()
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+                blob.remote.validate().map_err(SnapshotImageError::from)?;
                 if blob.bindings.is_empty()
                     || blob
                         .bindings
@@ -482,20 +531,27 @@ impl SnapshotDatabaseImage {
                     ));
                 }
                 crate::install_snapshot_blob_plan_on(&transaction, blob).map_err(|error| {
-                    SnapshotImageError::Projection(format!("install snapshot blob: {error}"))
+                    SnapshotImageError::ProjectionDatabase {
+                        operation: "install snapshot blob".to_string(),
+                        source: Box::new(error),
+                    }
                 })?;
             }
-            transaction
-                .commit()
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            transaction.commit().map_err(SnapshotImageError::from)?;
             connection.execute_batch("VACUUM").map_err(|error| {
-                SnapshotImageError::Projection(format!("vacuum snapshot closure: {error}"))
+                SnapshotImageError::ProjectionSqlite {
+                    operation: "vacuum snapshot closure".to_string(),
+                    source: error,
+                }
             })?;
             let image = crate::connection_io::serialize_database_image(&connection)
-                .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-            connection.close().map_err(|(_, error)| {
-                SnapshotImageError::Projection(format!("close snapshot closure image: {error}"))
-            })?;
+                .map_err(SnapshotImageError::from)?;
+            connection
+                .close()
+                .map_err(|(_, error)| SnapshotImageError::ProjectionSqlite {
+                    operation: "close snapshot closure image".to_string(),
+                    source: error,
+                })?;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
@@ -515,20 +571,20 @@ impl SnapshotDatabaseImage {
         snapshot: &Connection,
         tables: &[SyncedTable],
     ) -> Result<Vec<SnapshotBlobFact>, SnapshotImageError> {
-        let declarations = crate::BlobDecls::from_tables(snapshot, tables)
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        let declarations =
+            crate::BlobDecls::from_tables(snapshot, tables).map_err(SnapshotImageError::from)?;
         let publications = declarations
             .publication_blobs_in_db(snapshot)
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
-        let gates = crate::Gates::from_tables(live, tables)
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
+        let gates = crate::Gates::from_tables(live, tables).map_err(SnapshotImageError::from)?;
         let mut facts = Vec::with_capacity(publications.len());
         for publication in publications {
             let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
-                SnapshotImageError::Projection(format!(
-                    "snapshot blob {}/{} plaintext hash: {error}",
-                    publication.blob.namespace, publication.blob.id
-                ))
+                SnapshotImageError::BlobHash {
+                    namespace: publication.blob.namespace.clone(),
+                    id: publication.blob.id.clone(),
+                    source: error,
+                }
             })?;
             let external_path =
                 if publication.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
@@ -547,7 +603,7 @@ impl SnapshotDatabaseImage {
                         |row| row.get::<_, String>(0),
                     )
                     .optional()
-                    .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
+                    .map_err(SnapshotImageError::from)?
                     .map(PathBuf::from)
                 } else {
                     None
@@ -562,21 +618,21 @@ impl SnapshotDatabaseImage {
                 publication.plaintext_size,
                 plaintext_hash,
             )
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
             let audience = match crate::live_row_audience(
                 live,
                 &gates,
                 &publication.table,
                 &publication.row_id,
             )
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
+            .map_err(SnapshotImageError::from)?
             {
                 coven_protocol::circle::Audience::Store => SnapshotBlobAudience::Store,
                 coven_protocol::circle::Audience::Circle(circle_id) => {
                     SnapshotBlobAudience::Circle {
                         circle_id,
                         control: crate::active_circle_control(live, circle_id)
-                            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?,
+                            .map_err(SnapshotImageError::from)?,
                     }
                 }
                 coven_protocol::circle::Audience::Local => {
@@ -828,7 +884,7 @@ impl StoreDatabase {
             Ok(verification.map(|()| image))
         })
         .await
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
+        .map_err(SnapshotImageError::from)?
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -870,7 +926,7 @@ impl StoreDatabase {
 }
 
 pub(super) fn snapshot_image_db_error(error: SnapshotImageError) -> DbError {
-    DbError::Message(error.to_string())
+    DbError::from(error)
 }
 
 fn require_no_unpublished_store_writes(connection: &Connection) -> Result<(), DbError> {
@@ -934,7 +990,10 @@ fn scope_authenticated_blob_graph(
                  PRIMARY KEY (table_name, row_id, column_name, row_stamp)
              ) STRICT;",
         )
-        .map_err(|error| SnapshotImageError::Projection(format!("create blob scope: {error}")))?;
+        .map_err(|error| SnapshotImageError::ProjectionSqlite {
+            operation: "create blob scope".to_string(),
+            source: error,
+        })?;
     for table in synced {
         let Some(declaration) = table.blob() else {
             continue;
@@ -951,11 +1010,9 @@ fn scope_authenticated_blob_graph(
                 ),
                 rusqlite::params![table.name(), &declaration.id_column],
             )
-            .map_err(|error| {
-                SnapshotImageError::Projection(format!(
-                    "collect live blob bindings for {:?}: {error}",
-                    table.name()
-                ))
+            .map_err(|error| SnapshotImageError::ProjectionSqlite {
+                operation: format!("collect live blob bindings for {:?}", table.name()),
+                source: error,
             })?;
     }
     // As above: the projection prunes the copy's rows, never this device's
@@ -985,8 +1042,9 @@ fn scope_authenticated_blob_graph(
              );
              DROP TABLE snapshot_live_blob_bindings;",
         )
-        .map_err(|error| {
-            SnapshotImageError::Projection(format!("scope blob ownership graph: {error}"))
+        .map_err(|error| SnapshotImageError::ProjectionSqlite {
+            operation: "scope blob ownership graph".to_string(),
+            source: error,
         })?;
     Ok(())
 }
@@ -1005,9 +1063,9 @@ pub(super) fn verify_circle_bootstrap_image(
     }
     let mut connection = Connection::open_in_memory()
         .map_err(DbError::from)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     crate::connection_io::deserialize_database_image_into(&mut connection, image)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     verify_circle_bootstrap_connection(&connection, reference, circle_id, tables, routing_key)
 }
 
@@ -1020,10 +1078,10 @@ pub(crate) fn verify_circle_bootstrap_connection(
 ) -> Result<(), SnapshotImageError> {
     connection
         .pragma_update(None, "foreign_keys", "ON")
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     let schema_version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     if schema_version != reference.schema_version {
         return Err(SnapshotImageError::Projection(format!(
             "Circle bootstrap schema is {schema_version}, expected {}",
@@ -1031,14 +1089,13 @@ pub(crate) fn verify_circle_bootstrap_connection(
         )));
     }
     let routing_contract = crate::SyncRoutingContract::from_connection(connection, tables)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     if routing_contract.hash() != reference.sync_routing_hash {
         return Err(SnapshotImageError::Projection(
             "Circle bootstrap routing contract differs from its signed hash".to_string(),
         ));
     }
-    let gates = crate::Gates::from_tables(connection, tables)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+    let gates = crate::Gates::from_tables(connection, tables).map_err(SnapshotImageError::from)?;
     if gates.has_scoped_graph() {
         let routing_key = routing_key.ok_or_else(|| {
             SnapshotImageError::Projection(
@@ -1052,13 +1109,13 @@ pub(crate) fn verify_circle_bootstrap_connection(
             routing_key,
             &coven_protocol::circle::Audience::Circle(circle_id),
         )
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     }
-    let declarations = crate::BlobDecls::from_tables(connection, tables)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+    let declarations =
+        crate::BlobDecls::from_tables(connection, tables).map_err(SnapshotImageError::from)?;
     let rows = declarations
         .publication_blobs_in_db(connection)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+        .map_err(SnapshotImageError::from)?;
     if rows.len() != reference.blobs.len() {
         return Err(SnapshotImageError::Projection(
             "Circle bootstrap blob closure does not exactly cover its image rows".to_string(),
@@ -1096,9 +1153,7 @@ pub(crate) fn verify_circle_bootstrap_connection(
             ));
         }
     }
-    for table in crate::user_table_names(connection)
-        .map_err(|error| SnapshotImageError::Projection(error.to_string()))?
-    {
+    for table in crate::user_table_names(connection).map_err(SnapshotImageError::from)? {
         if tables.iter().any(|synced| synced.name() == table)
             || matches!(table.as_str(), "_coven_audience" | "_coven_row_routes")
         {
@@ -1110,7 +1165,7 @@ pub(crate) fn verify_circle_bootstrap_connection(
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| SnapshotImageError::Projection(error.to_string()))?;
+            .map_err(SnapshotImageError::from)?;
         if count != 0 {
             return Err(SnapshotImageError::Projection(format!(
                 "Circle bootstrap retains non-projection table {table:?}"

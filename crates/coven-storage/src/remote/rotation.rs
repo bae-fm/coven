@@ -2,16 +2,40 @@ use super::*;
 
 pub struct PendingRotation(std::sync::RwLock<Option<RotationGate>>);
 
+#[derive(Debug, thiserror::Error)]
+pub enum RotationStateError {
+    #[error("rotation gate transition failed: {0}")]
+    Gate(#[from] coven_protocol::objects::RotationGateError),
+    #[error("rotation state lock is poisoned")]
+    LockPoisoned,
+    #[error("rotation candidate gate is absent during proven nonactivation")]
+    MissingCandidateDuringNonactivation,
+    #[error("rotation candidate gate is absent during candidate replacement")]
+    MissingCandidateDuringReplacement,
+}
+
 pub trait CloudSyncRotationStateAccess: Send + Sync {
-    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
-    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
-    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String>;
+    fn mark_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError>;
+    fn mark_committed_mutation(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError>;
+    fn remove_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError>;
     fn replace_candidate_mutation(
         &self,
         generation: u64,
         previous: ObjectHash,
         replacement: ObjectHash,
-    ) -> Result<(), String>;
+    ) -> Result<(), RotationStateError>;
     fn gate(&self) -> Option<RotationGate>;
     fn install_durable_gate(&self, gate: Option<RotationGate>);
     fn check(&self, live_generation: Option<u64>) -> Result<(), RotationPending>;
@@ -32,8 +56,11 @@ impl PendingRotation {
         &self,
         generation: u64,
         mutation: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), String> {
-        let mut recorded = self.0.write().unwrap();
+    ) -> Result<(), RotationStateError> {
+        let mut recorded = self
+            .0
+            .write()
+            .map_err(|_| RotationStateError::LockPoisoned)?;
         *recorded = Some(RotationGate::with_candidate(
             recorded.clone(),
             generation,
@@ -46,8 +73,11 @@ impl PendingRotation {
         &self,
         generation: u64,
         mutation: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), String> {
-        let mut recorded = self.0.write().unwrap();
+    ) -> Result<(), RotationStateError> {
+        let mut recorded = self
+            .0
+            .write()
+            .map_err(|_| RotationStateError::LockPoisoned)?;
         *recorded = Some(RotationGate::commit_candidate(
             recorded.clone(),
             generation,
@@ -60,11 +90,14 @@ impl PendingRotation {
         &self,
         generation: u64,
         mutation: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), String> {
-        let mut recorded = self.0.write().unwrap();
-        let gate = recorded.clone().ok_or_else(|| {
-            "rotation candidate gate is absent during proven nonactivation".to_string()
-        })?;
+    ) -> Result<(), RotationStateError> {
+        let mut recorded = self
+            .0
+            .write()
+            .map_err(|_| RotationStateError::LockPoisoned)?;
+        let gate = recorded
+            .clone()
+            .ok_or(RotationStateError::MissingCandidateDuringNonactivation)?;
         *recorded = gate.remove_candidate(generation, mutation)?;
         Ok(())
     }
@@ -74,11 +107,14 @@ impl PendingRotation {
         generation: u64,
         previous: coven_protocol::store_commit::ObjectHash,
         replacement: coven_protocol::store_commit::ObjectHash,
-    ) -> Result<(), String> {
-        let mut recorded = self.0.write().unwrap();
-        let gate = recorded.clone().ok_or_else(|| {
-            "rotation candidate gate is absent during candidate replacement".to_string()
-        })?;
+    ) -> Result<(), RotationStateError> {
+        let mut recorded = self
+            .0
+            .write()
+            .map_err(|_| RotationStateError::LockPoisoned)?;
+        let gate = recorded
+            .clone()
+            .ok_or(RotationStateError::MissingCandidateDuringReplacement)?;
         *recorded = Some(gate.replace_candidate_mutation(generation, previous, replacement)?);
         Ok(())
     }
@@ -113,8 +149,11 @@ impl PendingRotation {
     /// rediscovery (e.g. a decoy wrap from a non-rotating owner) can never erase
     /// a genuinely newer generation already known to be pending.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn mark_committed(&self, generation: u64) -> Result<(), String> {
-        let mut recorded = self.0.write().unwrap();
+    pub fn mark_committed(&self, generation: u64) -> Result<(), RotationStateError> {
+        let mut recorded = self
+            .0
+            .write()
+            .map_err(|_| RotationStateError::LockPoisoned)?;
         *recorded = Some(RotationGate::merge_peer_commit(
             recorded.clone(),
             generation,
@@ -135,15 +174,27 @@ impl PendingRotation {
 }
 
 impl CloudSyncRotationStateAccess for PendingRotation {
-    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn mark_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         PendingRotation::mark_candidate(self, generation, mutation)
     }
 
-    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn mark_committed_mutation(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         PendingRotation::mark_committed_mutation(self, generation, mutation)
     }
 
-    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn remove_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         PendingRotation::remove_candidate(self, generation, mutation)
     }
 
@@ -152,7 +203,7 @@ impl CloudSyncRotationStateAccess for PendingRotation {
         generation: u64,
         previous: ObjectHash,
         replacement: ObjectHash,
-    ) -> Result<(), String> {
+    ) -> Result<(), RotationStateError> {
         PendingRotation::replace_candidate_mutation(self, generation, previous, replacement)
     }
 

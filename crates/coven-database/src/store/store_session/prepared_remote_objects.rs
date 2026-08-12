@@ -17,15 +17,19 @@ struct UploadedBlobSpool {
 }
 
 impl UploadedBlobSpool {
-    async fn retire(&self, database: &StoreDatabase) -> Result<(), String> {
+    async fn retire(
+        &self,
+        database: &StoreDatabase,
+    ) -> Result<(), coven_foundation::atomic_file::FileError> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "remove uploaded prepared blob spool {}: {error}",
-                    self.path.display()
-                ))
+            Err(source) => {
+                return Err(coven_foundation::atomic_file::FileError::Path {
+                    operation: "remove uploaded prepared blob spool",
+                    path: self.path.clone(),
+                    source,
+                })
             }
         }
         database.sync_store_parent_dir(&self.path).await
@@ -293,7 +297,7 @@ impl StoreDatabase {
             .await?;
 
         for spool in spools {
-            spool.retire(self).await.map_err(DbError::Message)?;
+            spool.retire(self).await.map_err(DbError::File)?;
             self.clear_uploaded_blob_spool(spool).await?;
         }
         Ok(())
@@ -344,9 +348,7 @@ impl StoreDatabase {
                 {
                     let (size, digest) = coven_foundation::local_file::file_facts(spool_path)
                         .await
-                        .map_err(|error| {
-                            DbError::Message(format!("prepared blob spool: {error}"))
-                        })?;
+                        .map_err(DbError::File)?;
                     prepared
                         .blob()
                         .object()

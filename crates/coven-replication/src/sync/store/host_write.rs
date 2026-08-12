@@ -162,9 +162,7 @@ impl HostWriteBlobStaging {
                         .store_dir
                         .stage_atomic_file(&spool_path)
                         .await
-                        .map_err(|error| {
-                            move_materialization_error(fact, DbError::Message(error))
-                        })?;
+                        .map_err(|error| move_materialization_error(fact, DbError::File(error)))?;
                     let sealed = match destination {
                         BlobMoveDestination::Store { .. } => {
                             self.storage
@@ -327,7 +325,7 @@ impl HostWriteBlobStaging {
             .store_dir
             .stage_atomic_file(&destination)
             .await
-            .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
+            .map_err(|error| move_materialization_error(fact, DbError::File(error)))?;
         let staged = match opening {
             BlobMoveOpening::Store => {
                 self.storage
@@ -411,7 +409,7 @@ impl HostWriteBlobStaging {
             .store_dir
             .stage_atomic_file(&destination)
             .await
-            .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?;
+            .map_err(|error| move_materialization_error(fact, DbError::File(error)))?;
         let staged = match opening {
             BlobMoveOpening::Store => {
                 self.storage
@@ -429,7 +427,7 @@ impl HostWriteBlobStaging {
             Provenance::HostProvided => staged
                 .commit()
                 .await
-                .map_err(|error| move_materialization_error(fact, DbError::Message(error)))?,
+                .map_err(|error| move_materialization_error(fact, DbError::File(error)))?,
             Provenance::UserProvided => staged
                 .commit_new()
                 .await
@@ -497,17 +495,28 @@ impl StagedAudienceBlobFile {
         Self { path }
     }
 
-    async fn rollback(self, store_dir: &StoreDir) -> Result<(), String> {
+    async fn rollback(
+        self,
+        store_dir: &StoreDir,
+    ) -> Result<(), coven_database::StagedBlobRollbackReason> {
         match tokio::fs::remove_file(&self.path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err("staged audience blob disappeared before rollback".to_string());
+                return Err(coven_database::StagedBlobRollbackReason::Missing);
             }
-            Err(error) => {
-                return Err(format!("remove staged audience blob: {error}"));
+            Err(source) => {
+                return Err(coven_foundation::atomic_file::FileError::at(
+                    "remove staged audience blob",
+                    &self.path,
+                    source,
+                )
+                .into());
             }
         }
-        store_dir.sync_parent_dir(&self.path).await
+        store_dir
+            .sync_parent_dir(&self.path)
+            .await
+            .map_err(Into::into)
     }
 }
 

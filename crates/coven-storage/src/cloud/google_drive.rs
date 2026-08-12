@@ -274,9 +274,7 @@ impl GoogleDriveCloudHome {
                 Ok(id) => return Ok(DriveFileIdentity { id, create_token }),
                 Err(error) => error,
             },
-            Err(error) => {
-                CloudHomeError::Transport(format!("create {key}: read response: {error}"))
-            }
+            Err(error) => CloudHomeError::transport(format!("create {key}: read response"), error),
         };
         match self.find_created_file_id(encoded, &create_token).await {
             Ok(Some(file_id)) => match self.delete_created_file(key, &file_id).await {
@@ -789,9 +787,10 @@ impl GoogleDriveCloudHome {
             )));
         };
         let location = location.to_str().map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "append resumable create {key}: invalid Location header: {error}"
-            ))
+            CloudHomeError::transport(
+                format!("read append resumable create Location header for {key}"),
+                error,
+            )
         })?;
         if location.is_empty() {
             return Err(CloudHomeError::Transport(format!(

@@ -8,7 +8,10 @@ pub(crate) use circle::{CircleSnapshotReader, CircleSnapshotWriter};
 pub(crate) use publication::AuthorizedSnapshotPublication;
 
 pub(crate) use image::should_create_snapshot;
-pub use image::{PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError};
+pub use image::{
+    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotBlobReconcileError, SnapshotError,
+    SnapshotSpoolCleanupError,
+};
 
 use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
 
@@ -188,18 +191,14 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                     chrono::DateTime::parse_from_rfc3339(created_at).map_err(|error| {
                         crate::sync::cycle::SyncCycleFailure::operation(
                             "read Store snapshot cadence",
-                            SnapshotError::PublicationState(format!(
-                                "cycle timestamp is invalid: {error}"
-                            )),
+                            SnapshotError::Timestamp(error),
                         )
                     })?;
                 let previous = chrono::DateTime::parse_from_rfc3339(&snapshot.meta.created_at)
                     .map_err(|error| {
                         crate::sync::cycle::SyncCycleFailure::operation(
                             "read Store snapshot cadence",
-                            SnapshotError::PublicationState(format!(
-                                "published Store snapshot has an invalid creation time: {error}"
-                            )),
+                            SnapshotError::Timestamp(error),
                         )
                     })?;
                 Some(current.signed_duration_since(previous).num_hours().max(0) as u64)
@@ -345,7 +344,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             resolved_devices.recovery.clone(),
             resolved.state_hash,
         )
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         let state = StoreSnapshotState {
             membership: membership_state,
             devices,
@@ -354,7 +353,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             .writer
             .prepare_merge_snapshot_history_summary(&coverage, membership, &resolved_devices)
             .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let storage = self.storage.as_ref();
         let previous = database
             .latest_local_store_snapshot()
@@ -381,16 +380,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             activation: self
                 .local_writer
                 .snapshot_activation_id()
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?,
+                .map_err(SnapshotError::from)?,
             generation,
         };
         let (db_image, snapshot_blobs) = self
             .prepare_snapshot_blobs(snapshot, snapshot_owner)
             .await?;
-        let image_bytes = db_image
-            .read()
-            .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        let image_bytes = db_image.read().await.map_err(SnapshotError::from)?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = ProtocolObjectContext::store_encrypted(
             store_root_hash,
@@ -432,7 +428,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let activation = self
             .local_writer
             .snapshot_activation_id()
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let meta = self
             .local_writer
             .sign_snapshot(
@@ -451,7 +447,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                     next_slot,
                 },
             )
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let meta_prepared = storage
             .prepare_protocol_object(
                 &meta_context,
@@ -547,7 +543,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 },
                 &authority,
             )
-            .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
             if captured
                 .fact
                 .previous
@@ -569,7 +565,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             captured.fact.plaintext_size,
             captured.fact.plaintext_hash,
         ))
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         if let Some(index) = coalesced.get(&coalesce_key).copied() {
             let stored = prepared[index].bindings[0].blob().clone();
             let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
@@ -579,7 +575,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 captured.fact.column,
                 stored,
             )
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
             prepared[index].bindings.push(binding);
             continue;
         }
@@ -602,7 +598,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 .await,
         };
         let (binding, blob) = prepared_blob
-            .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
             && !blob.uploaded_verified
         {
@@ -627,7 +623,7 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
             &blob.stored,
             owner.clone(),
         )
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+        .map_err(SnapshotError::from)?
         .into_record();
         prepared.push(coven_database::PreparedSnapshotBlob {
             bindings: vec![binding],
@@ -640,14 +636,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
     Ok::<(), SnapshotError>(())
     }.await;
         if let Err(error) = preparation {
-            cleanup_snapshot_spools(self.store_dir, &prepared)
-                .await
-                .map_err(|cleanup| {
-                    SnapshotError::PublicationState(format!(
-                    "snapshot blob preparation failed: {error}; spool cleanup failed: {cleanup}"
-                ))
-                })?;
-            return Err(error);
+            return match cleanup_snapshot_spools(self.store_dir, &prepared).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(SnapshotError::SpoolCleanupAfterFailure {
+                    cause: Box::new(error),
+                    cleanup,
+                }),
+            };
         }
         if prepared.is_empty() {
             return Ok((db_image, prepared));
@@ -655,14 +650,13 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         let image = match db_image.install_blob_graph(&prepared) {
             Ok(image) => image,
             Err(error) => {
-                cleanup_snapshot_spools(self.store_dir, &prepared)
-                    .await
-                    .map_err(|cleanup| {
-                        SnapshotError::PublicationState(format!(
-                        "snapshot image closure failed: {error}; spool cleanup failed: {cleanup}"
-                    ))
-                    })?;
-                return Err(error.into());
+                return match cleanup_snapshot_spools(self.store_dir, &prepared).await {
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(SnapshotError::SpoolCleanupAfterFailure {
+                        cause: Box::new(error.into()),
+                        cleanup,
+                    }),
+                };
             }
         };
         Ok((image, prepared))
@@ -676,14 +670,14 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
     ) -> Result<SnapshotMeta, SnapshotError> {
         self.local_writer
             .parse_snapshot_stream_entry(bytes, self.writer.store_root(), reference)
-            .map_err(|error| SnapshotError::Parse(error.to_string()))
+            .map_err(SnapshotError::from)
     }
 }
 
 async fn cleanup_snapshot_spools(
     store_dir: &StoreDir,
     prepared: &[coven_database::PreparedSnapshotBlob],
-) -> Result<(), String> {
+) -> Result<(), SnapshotSpoolCleanupError> {
     let mut paths = std::collections::BTreeSet::new();
     for path in prepared.iter().filter_map(|blob| blob.spool_path.as_ref()) {
         if paths.insert(path.clone()) {
@@ -697,20 +691,27 @@ async fn remove_snapshot_spool(
     store_dir: &StoreDir,
     path: &std::path::Path,
     require_present: bool,
-) -> Result<(), String> {
+) -> Result<(), SnapshotSpoolCleanupError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
             return Ok(());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!("snapshot spool {} is absent", path.display()));
+            return Err(SnapshotSpoolCleanupError::Missing {
+                path: path.to_path_buf(),
+            });
         }
-        Err(error) => {
-            return Err(format!("remove snapshot spool {}: {error}", path.display()));
+        Err(source) => {
+            return Err(coven_foundation::atomic_file::FileError::at(
+                "remove snapshot spool",
+                path,
+                source,
+            )
+            .into());
         }
     }
-    store_dir.sync_parent_dir(path).await
+    store_dir.sync_parent_dir(path).await.map_err(Into::into)
 }
 
 pub(crate) fn select_maximal_store_snapshot(

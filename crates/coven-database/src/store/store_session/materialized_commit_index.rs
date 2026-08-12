@@ -91,7 +91,7 @@ impl StoreSession<'_> {
                             .commit()
                             .order
                             .predecessor_cut()
-                            .map_err(|error| DbError::Message(error.to_string()))?
+                            .map_err(DbError::from)?
                             .0
                             .into_values(),
                     );
@@ -197,8 +197,7 @@ impl StoreSession<'_> {
             &root,
             &reference,
         )?;
-        ReferencedStoreDeviceRegistration::verified(reference, registration)
-            .map_err(|error| DbError::Message(error.to_string()))
+        ReferencedStoreDeviceRegistration::verified(reference, registration).map_err(DbError::from)
     }
 
     fn local_activated_registration_ref(
@@ -222,9 +221,8 @@ impl StoreSession<'_> {
         let authority = serde_json::from_str(&authority)
             .map_err(|error| DbError::context("activated Store registration authority", error))?;
         let registration = ReferencedStoreDeviceRegistration::verified(reference, registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        ActivatedStoreDeviceRegistration::verified(registration, authority)
-            .map_err(|error| DbError::Message(error.to_string()))
+            .map_err(DbError::from)?;
+        ActivatedStoreDeviceRegistration::verified(registration, authority).map_err(DbError::from)
     }
 
     fn activated_store_device_registration_for_device(
@@ -259,10 +257,10 @@ impl StoreSession<'_> {
         let authority = serde_json::from_str(&authority)
             .map_err(|error| DbError::context("activated Store registration authority", error))?;
         let registration = ReferencedStoreDeviceRegistration::verified(reference, registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         ActivatedStoreDeviceRegistration::verified(registration, authority)
             .map(Some)
-            .map_err(|error| DbError::Message(error.to_string()))
+            .map_err(DbError::from)
     }
 }
 
@@ -337,9 +335,7 @@ impl StoreDatabase {
         &self,
         order: &coven_protocol::store_commit::StoreCommitOrder,
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
-        let cut = order
-            .predecessor_cut()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let cut = order.predecessor_cut().map_err(DbError::from)?;
         self.call_store(move |session| session.store_device_state_for_history_cut(cut))
             .await
     }

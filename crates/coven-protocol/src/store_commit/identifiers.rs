@@ -114,9 +114,7 @@ impl StoreBatchCommitDeletionTarget {
         expected_store_root_hash: ObjectHash,
         author: &StoreDeviceRegistration,
     ) -> Result<VerifiedStoreBatchCommit, StoreProtocolError> {
-        self.object
-            .verify(&self.canonical_signed_bytes)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        self.object.verify(&self.canonical_signed_bytes)?;
         let commit = VerifiedStoreBatchCommit::parse_prepared(
             &self.canonical_signed_bytes,
             expected_store_root_hash,
@@ -515,7 +513,9 @@ impl CommitFrontier {
         commits
             .into_iter()
             .map(|(stream_id, commit)| {
-                let stream_id = stream_id.parse().map_err(StoreProtocolError::Malformed)?;
+                let stream_id = stream_id
+                    .parse()
+                    .map_err(StoreProtocolError::AuthorStreamId)?;
                 Ok((stream_id, commit))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()

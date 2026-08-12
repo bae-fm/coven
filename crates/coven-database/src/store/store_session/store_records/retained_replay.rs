@@ -377,30 +377,28 @@ impl StoreRecords<'_> {
         self.validate_replay_authority(&baseline)?;
         let installed_image_hash = self
             .install_payload(&image_bytes)
-            .map_err(|error| DbError::Message(format!("install retained replay image: {error}")))?;
+            .map_err(|error| DbError::context("install retained replay image", error))?;
         if installed_image_hash != baseline.image_payload_hash {
             return Err(DbError::Message(
                 "installed retained replay image has a different content address".to_string(),
             ));
         }
         let authority_bytes = baseline.canonical_authority_bytes()?;
-        let authority_hash = self.install_payload(&authority_bytes).map_err(|error| {
-            DbError::Message(format!("install retained replay authority: {error}"))
-        })?;
+        let authority_hash = self
+            .install_payload(&authority_bytes)
+            .map_err(|error| DbError::context("install retained replay authority", error))?;
         self.insert_retained_replay_baseline_row(&baseline, authority_hash)?;
         let installed_image = self
             .verified_payload(installed_image_hash)
-            .map_err(|error| {
-                DbError::Message(format!("read installed retained replay image: {error}"))
-            })?;
+            .map_err(|error| DbError::context("read installed retained replay image", error))?;
         if installed_image != image_bytes {
             return Err(DbError::Message(
                 "installed retained replay image differs from its prepared bytes".to_string(),
             ));
         }
-        let installed_authority = self.verified_payload(authority_hash).map_err(|error| {
-            DbError::Message(format!("read installed retained replay authority: {error}"))
-        })?;
+        let installed_authority = self
+            .verified_payload(authority_hash)
+            .map_err(|error| DbError::context("read installed retained replay authority", error))?;
         if installed_authority != authority_bytes {
             return Err(DbError::Message(
                 "installed retained replay authority differs from its canonical bytes".to_string(),
@@ -440,9 +438,7 @@ impl StoreTransaction<'_, '_> {
         self,
         baseline: &crate::RetainedReplayBaseline,
     ) -> Result<Vec<u8>, DbError> {
-        baseline
-            .image_bytes(self.transaction, self.store_dir)
-            .map_err(|error| DbError::Message(error.to_string()))
+        baseline.image_bytes(self.transaction, self.store_dir)
     }
 
     pub(crate) fn claimed_circle_bootstrap_coverage_refs(
@@ -632,12 +628,12 @@ impl StoreTransaction<'_, '_> {
                 materialization.commit_ref().object.clone(),
                 materialization.commit().to_bytes(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?,
+            .map_err(DbError::from)?,
             activation_head: coven_protocol::objects::PreparedExactObject::new(
                 materialization.activation_head_object().clone(),
                 materialization.activation_head().to_bytes(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?,
+            .map_err(DbError::from)?,
             history_evidence: materialization.history_evidence().clone(),
             membership_objects: materialization.membership_objects().cloned(),
             packages,
@@ -647,12 +643,12 @@ impl StoreTransaction<'_, '_> {
                     materialization.commit(),
                     materialization.registrations(),
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?,
+                .map_err(DbError::from)?,
                 device_operations: materialization.device_operations().to_retained(),
                 circle_activations: materialization
                     .circle_activations()
                     .to_retained()
-                    .map_err(|error| DbError::Message(error.to_string()))?,
+                    .map_err(DbError::from)?,
                 package_application: materialization.package_application(),
             },
         };

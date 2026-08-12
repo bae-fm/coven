@@ -396,16 +396,26 @@ pub struct MembershipHeadRef {
     pub object: ExactObjectRef,
 }
 
-pub fn validate_membership_floor(floor: &[MembershipHeadRef]) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MembershipFloorError {
+    #[error("membership floor is empty")]
+    Empty,
+    #[error("membership floor contains sequence zero")]
+    SequenceZero,
+    #[error("membership floor is not strictly ordered by author stream")]
+    NotStrictlyOrdered,
+}
+
+pub fn validate_membership_floor(floor: &[MembershipHeadRef]) -> Result<(), MembershipFloorError> {
     if floor.is_empty() {
-        return Err("membership floor is empty".to_string());
+        return Err(MembershipFloorError::Empty);
     }
     for (index, reference) in floor.iter().enumerate() {
         if reference.coord.seq == 0 {
-            return Err("membership floor contains sequence zero".to_string());
+            return Err(MembershipFloorError::SequenceZero);
         }
         if index > 0 && floor[index - 1].coord.stream_key() >= reference.coord.stream_key() {
-            return Err("membership floor is not strictly ordered by author stream".to_string());
+            return Err(MembershipFloorError::NotStrictlyOrdered);
         }
     }
     Ok(())
@@ -795,52 +805,9 @@ impl LocalStoreMembership {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeldStorePositionReason {
-    MissingCommit,
-    MissingPredecessor(StoreBatchCommitRef),
-    MissingDependency {
-        device_id: String,
-        commit: StoreBatchCommitRef,
-    },
-    NewerSchema {
-        local: u32,
-        required: u32,
-    },
-    Unauthorized,
-    DeviceExclusionFreeze {
-        proposal: super::store_commit::StoreDeviceExclusionProposalRef,
-        target_cut: crate::store_commit::StoreHistoryCut,
-    },
-    InactiveDevice {
-        terminals: Vec<super::store_commit::StoreDeviceExclusionRef>,
-        accepted_cut: crate::store_commit::StoreHistoryCut,
-    },
-    InvalidChangeset(String),
-    InvalidRowIdentity {
-        table: String,
-        reason: String,
-    },
-    BlobDownloadFailed,
-    ForeignKeyDependency,
-    ConstraintConflict(Vec<String>),
-    HashMismatch {
-        referenced_device_id: String,
-        referenced_commit: StoreBatchCommitRef,
-        materialized_hash: ObjectHash,
-    },
-    InvalidSignature,
-    WrongSlot(String),
-    ObjectUnreadable {
-        key: String,
-        detail: String,
-    },
-    InvalidObject(String),
-}
-
-pub enum ApplyOutcome {
+pub enum ApplyOutcome<R> {
     Applied(Vec<coven_foundation::changeset::RowChange>),
-    Held(HeldStorePositionReason),
+    Held(R),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -848,7 +815,7 @@ pub enum ApplyOutcome {
 pub struct MembershipFloor(pub Vec<MembershipHeadRef>);
 
 impl MembershipFloor {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), MembershipFloorError> {
         crate::membership::validate_membership_floor(&self.0)
     }
 }

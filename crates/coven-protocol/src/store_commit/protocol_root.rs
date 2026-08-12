@@ -135,23 +135,15 @@ impl StoreProtocolRoot {
 impl StoreProtocolRootBody {
     fn validate_descriptor(&self) -> Result<(), StoreProtocolError> {
         let descriptor = &self.descriptor;
-        descriptor
-            .provider
-            .validate()
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        descriptor.provider.validate()?;
         descriptor
             .founder_provider_admin
             .provider
-            .validate_for(&descriptor.provider)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        descriptor
-            .founder_provider_admin
-            .capability
-            .verify(
-                &descriptor.provider,
-                &descriptor.founder_provider_admin.provider,
-            )
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            .validate_for(&descriptor.provider)?;
+        descriptor.founder_provider_admin.capability.verify(
+            &descriptor.provider,
+            &descriptor.founder_provider_admin.provider,
+        )?;
         if !matches!(
             descriptor.founder_recovery,
             GrantStreamAnchor::OwnerRecovery { .. }

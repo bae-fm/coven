@@ -11,7 +11,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let root = self.root.clone();
         let storage = self.storage.clone();
         let frontier = CommitFrontier::from_refs(self.database.materialized_frontier().await?)
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         for control in controls {
             let CircleControlState::EpochClose(close) = control.value.state() else {
                 return Err(CircleOperationError::InvalidState(
@@ -55,7 +55,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .read_prepared_protocol_slot(&context, &participant.response_slot, &prefix)
                 .await
                 .map_err(StoreObjectError::from)?;
-            match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)? {
+            match CircleEpochCloseResponseSlotValue::parse(&winner_bytes)
+                .map_err(CircleOperationError::EpochCloseResponse)?
+            {
                 CircleEpochCloseResponseSlotValue::Response(winner) => {
                     if !self
                         .local_writer
@@ -99,7 +101,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             let member_pubkey = match &journal.intent {
                 CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
                 _ => {
-                    return Err(CircleOperationError::Journal(format!(
+                    return Err(CircleOperationError::JournalState(format!(
                         "Circle operation {} waits for close responses without a removal intent",
                         journal.operation_id
                     )));
@@ -120,7 +122,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     &journal.operation_id,
                 )
             {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleOperationError::JournalState(format!(
                     "Circle operation {} differs from its close id",
                     journal.operation_id
                 )));
@@ -137,7 +139,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .try_fold(close.provisional_frontier.clone(), |cutoff, frontier| {
                     cutoff
                         .join(frontier.clone())
-                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+                        .map_err(CircleOperationError::from)
                 })?;
             let bootstrap = self
                 .snapshots()
@@ -147,7 +149,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .history()
                 .load_commit(&activation_commit_ref)
                 .await
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
             let activation_commit = activation.value();
             if activation_commit.candidate_family() != current.candidate_family {
                 return Err(CircleOperationError::InvalidState(format!(
@@ -187,7 +189,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 .close_intent
                 .clone()
                 .ok_or_else(|| {
-                    CircleOperationError::Journal(format!(
+                    CircleOperationError::JournalState(format!(
                         "Circle operation {} lost its close intent",
                         journal.operation_id
                     ))
@@ -216,7 +218,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 || prepared.journal.circle_id != journal.circle_id
                 || prepared.journal.intent != journal.intent
             {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleOperationError::JournalState(format!(
                     "Circle operation {} finalization changed its durable identity",
                     journal.operation_id
                 )));
@@ -229,7 +231,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 routing_encryption,
                 self.root.store_root_hash,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
             self.publisher()
                 .publish(&journal.operation_id, Some(&routing_key))
                 .await?;
@@ -274,12 +276,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 Err(StorageError::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(StoreObjectError::from(error).into()),
             };
-            let slot_value = CircleEpochCloseResponseSlotValue::parse(&bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle epoch-close response slot for device {} failed to parse: {error}",
-                    participant.registration.device_id
-                ))
-            })?;
+            let slot_value = CircleEpochCloseResponseSlotValue::parse(&bytes)
+                .map_err(CircleOperationError::EpochCloseResponse)?;
             let settlement = match &slot_value {
                 CircleEpochCloseResponseSlotValue::Response(response) => {
                     let registration = self
@@ -293,14 +291,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         )));
                     }
                     CircleEpochCloseSettlement::Response(
-                        CircleEpochCloseResponseRef::from_response(response, object).map_err(
-                            |error| {
-                                CircleOperationError::InvalidState(format!(
-                                    "Circle epoch-close response from device {} has an invalid exact reference: {error}",
-                                    participant.registration.device_id
-                                ))
-                            },
-                        )?,
+                        CircleEpochCloseResponseRef::from_response(response, object)
+                            .map_err(CircleOperationError::from)?,
                     )
                 }
                 CircleEpochCloseResponseSlotValue::Exclusion(exclusion) => {
@@ -313,14 +305,8 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                         )));
                     }
                     CircleEpochCloseSettlement::Exclusion(
-                        CircleEpochCloseExclusionRef::from_exclusion(exclusion, object).map_err(
-                            |error| {
-                                CircleOperationError::InvalidState(format!(
-                                    "Circle epoch-close exclusion for device {} has an invalid exact reference: {error}",
-                                    participant.registration.device_id
-                                ))
-                            },
-                        )?,
+                        CircleEpochCloseExclusionRef::from_exclusion(exclusion, object)
+                            .map_err(CircleOperationError::from)?,
                     )
                 }
             };

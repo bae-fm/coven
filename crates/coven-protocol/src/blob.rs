@@ -534,7 +534,7 @@ impl RowBlobRef {
         plaintext_hash: crate::store_commit::ObjectHash,
         authority: RowBlobAuthority,
         stored: Option<locator::StoredBlobRef>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RowBlobRefError> {
         let remote = match &authority {
             RowBlobAuthority::Local => None,
             RowBlobAuthority::PendingRemote(audience) => Some(audience.clone()),
@@ -546,44 +546,40 @@ impl RowBlobRef {
             (RowBlobAuthority::Remote(_), Some(expected), Some(stored))
                 if &stored.locator().audience() == expected => {}
             (RowBlobAuthority::Local, None, Some(_)) => {
-                return Err("Local row blob carries a remote locator".to_string());
+                return Err(RowBlobRefError::LocalHasLocator);
             }
             (RowBlobAuthority::PendingRemote(_), Some(_), Some(_)) => {
-                return Err("pending remote row blob carries a cloud locator".to_string());
+                return Err(RowBlobRefError::PendingHasLocator);
             }
             (RowBlobAuthority::Remote(_), Some(_), None) => {
-                return Err("remote row blob has no exact locator".to_string());
+                return Err(RowBlobRefError::RemoteMissingLocator);
             }
             (RowBlobAuthority::Remote(_), Some(expected), Some(stored)) => {
-                return Err(format!(
-                    "row audience {expected:?} differs from locator audience {:?}",
-                    stored.locator().audience()
-                ));
+                return Err(RowBlobRefError::AudienceMismatch {
+                    row: expected.clone(),
+                    locator: stored.locator().audience(),
+                });
             }
             _ => unreachable!("authority determines whether a remote audience exists"),
         }
         if let Some(stored) = &stored {
             let locator = stored.locator();
             if locator.namespace() != blob.namespace {
-                return Err(format!(
-                    "row blob namespace {:?} differs from locator namespace {:?}",
-                    blob.namespace,
-                    locator.namespace()
-                ));
+                return Err(RowBlobRefError::NamespaceMismatch {
+                    row: blob.namespace.clone(),
+                    locator: locator.namespace().to_string(),
+                });
             }
             if locator.blob_id() != blob.id {
-                return Err(format!(
-                    "row blob id {:?} differs from locator id {:?}",
-                    blob.id,
-                    locator.blob_id()
-                ));
+                return Err(RowBlobRefError::IdMismatch {
+                    row: blob.id.clone(),
+                    locator: locator.blob_id().to_string(),
+                });
             }
             if locator.plaintext_size() != plaintext_size
                 || locator.plaintext_hash() != plaintext_hash
             {
-                return Err(
-                    "row blob plaintext size or hash differs from its exact locator".to_string(),
-                );
+                return Err(RowBlobRefError::PlaintextMismatch);
             }
             match locator {
                 locator::BlobLocator::Opaque {
@@ -592,9 +588,7 @@ impl RowBlobRef {
                     ..
                 } => {
                     if scope != &blob.scope {
-                        return Err(
-                            "row blob encryption scope differs from its exact locator".to_string()
-                        );
+                        return Err(RowBlobRefError::ScopeMismatch);
                     }
                     if let RowBlobAuthority::Remote(
                         crate::audience_package::PackageAudience::Circle {
@@ -604,17 +598,13 @@ impl RowBlobRef {
                     ) = &authority
                     {
                         if key_fingerprint != expected {
-                            return Err(
-                                "row blob Circle key differs from its exact locator".to_string()
-                            );
+                            return Err(RowBlobRefError::CircleKeyMismatch);
                         }
                     }
                 }
                 locator::BlobLocator::Browsable { cloud_path, .. } => {
                     if blob.cloud_path.as_deref() != Some(cloud_path) {
-                        return Err(
-                            "row blob cloud path differs from its exact locator".to_string()
-                        );
+                        return Err(RowBlobRefError::CloudPathMismatch);
                     }
                 }
             }
@@ -671,6 +661,33 @@ impl RowBlobRef {
     pub fn stored(&self) -> Option<&locator::StoredBlobRef> {
         self.stored.as_ref()
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RowBlobRefError {
+    #[error("Local row blob carries a remote locator")]
+    LocalHasLocator,
+    #[error("pending remote row blob carries a cloud locator")]
+    PendingHasLocator,
+    #[error("remote row blob has no exact locator")]
+    RemoteMissingLocator,
+    #[error("row audience {row:?} differs from locator audience {locator:?}")]
+    AudienceMismatch {
+        row: locator::RemoteAudience,
+        locator: locator::RemoteAudience,
+    },
+    #[error("row blob namespace {row:?} differs from locator namespace {locator:?}")]
+    NamespaceMismatch { row: String, locator: String },
+    #[error("row blob id {row:?} differs from locator id {locator:?}")]
+    IdMismatch { row: String, locator: String },
+    #[error("row blob plaintext size or hash differs from its exact locator")]
+    PlaintextMismatch,
+    #[error("row blob encryption scope differs from its exact locator")]
+    ScopeMismatch,
+    #[error("row blob Circle key differs from its exact locator")]
+    CircleKeyMismatch,
+    #[error("row blob cloud path differs from its exact locator")]
+    CloudPathMismatch,
 }
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:
@@ -821,155 +838,6 @@ mod cloud_path_tests {
 /// concurrent writer mid-publish.
 pub const BLOB_TOMBSTONE_GRACE: chrono::Duration = chrono::Duration::days(7);
 
-/// What one upload-queue drain pass did.
-///
-/// A pass that uploads nothing does so for one of four unlike reasons, and the
-/// variant names which: the queue was empty, every entry was still inside its
-/// retry backoff, the host had uploads paused, or entries were attempted and
-/// none produced a new cloud object. Only [`Drained`](Self::Drained) carries a
-/// count, so "nothing happened" can never be read as "the work is done".
-#[derive(Debug)]
-pub enum DrainOutcome {
-    /// At least one queued entry was attempted.
-    Drained {
-        /// Cloud objects this pass created.
-        ///
-        /// Zero is a real answer here: an entry another pass had already created
-        /// but not finished — a drain that died between the cloud write and its
-        /// durable finalization — is finished by this pass and leaves the queue
-        /// without a new object being written, so it is not counted. The count
-        /// reports objects newly written to the cloud, not entries retired.
-        uploaded: usize,
-        /// The drain stopped early because an upload just *completed a make_remote*: the
-        /// last of a gated root's user-provided blobs landed, so coven flipped the gate true
-        /// and broke the drain so this cycle publishes the now-shareable subtree (and
-        /// the loop runs the next cycle promptly to drain any other root's blobs).
-        /// `false` when the queue drained in one pass, so the loop waits its
-        /// normal interval.
-        yielded_for_publish: bool,
-        /// Exact failed queue entries. Provider failures remain typed so the sync
-        /// loop can report Offline; local/semantic failures stay per-entry warnings.
-        failures: UploadFailures,
-    },
-    /// The queue held no entries at all.
-    QueueEmpty,
-    /// The queue held entries and every one of them is still inside its retry
-    /// backoff window, so none was attempted.
-    AllInBackoff,
-    /// The host's observer has uploads paused, so nothing was admitted. Entries
-    /// eligible to run are still queued and the next pass after a resume takes
-    /// them.
-    Paused,
-}
-
-/// Readers for a test that planted work and expects the pass to have attempted
-/// it. Each panics on any other disposition, so a drain that found an empty
-/// queue — the shape a lost race produces — fails the test where it happened
-/// instead of quietly reading as a zero count.
-#[cfg(any(test, feature = "test-utils"))]
-impl DrainOutcome {
-    #[track_caller]
-    fn drained(&self) -> (usize, bool, &UploadFailures) {
-        match self {
-            Self::Drained {
-                uploaded,
-                yielded_for_publish,
-                failures,
-            } => (*uploaded, *yielded_for_publish, failures),
-            other => panic!("expected a drain that attempted queued entries, got {other:?}"),
-        }
-    }
-
-    #[track_caller]
-    pub fn uploaded(&self) -> usize {
-        self.drained().0
-    }
-
-    #[track_caller]
-    pub fn yielded_for_publish(&self) -> bool {
-        self.drained().1
-    }
-
-    #[track_caller]
-    pub fn failures(&self) -> &UploadFailures {
-        self.drained().2
-    }
-
-    #[track_caller]
-    pub fn into_failures(self) -> UploadFailures {
-        match self {
-            Self::Drained { failures, .. } => failures,
-            other => panic!("expected a drain that attempted queued entries, got {other:?}"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum UploadFailureCause {
-    Local(String),
-    Storage(crate::objects::StorageError),
-}
-
-impl std::fmt::Display for UploadFailureCause {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Local(reason) => write!(formatter, "local upload source: {reason}"),
-            Self::Storage(error) => write!(formatter, "blob storage: {error}"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct UploadFailure {
-    pub entry_id: i64,
-    pub object_key: String,
-    pub cause: UploadFailureCause,
-}
-
-#[derive(Debug)]
-pub struct UploadFailures(Vec<UploadFailure>);
-
-impl UploadFailures {
-    pub fn new(failures: Vec<UploadFailure>) -> Self {
-        Self(failures)
-    }
-
-    pub fn failures(&self) -> &[UploadFailure] {
-        &self.0
-    }
-
-    pub fn has_transport_failure(&self) -> bool {
-        self.0.iter().any(|failure| {
-            matches!(&failure.cause, UploadFailureCause::Storage(error) if error.is_transport())
-        })
-    }
-}
-
-impl std::fmt::Display for UploadFailures {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} blob upload(s) failed", self.0.len())?;
-        for failure in &self.0 {
-            write!(
-                formatter,
-                "; entry {} {}: {}",
-                failure.entry_id, failure.object_key, failure.cause
-            )?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for UploadFailures {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.iter().find_map(|failure| match &failure.cause {
-            UploadFailureCause::Storage(error) if error.is_transport() => {
-                Some(error as &(dyn std::error::Error + 'static))
-            }
-            _ => None,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeferredLocalBlobDisposition {
@@ -987,16 +855,22 @@ impl DeferredLocalBlobDisposition {
         }
     }
 
-    pub fn from_db(raw: &str) -> Result<Self, String> {
+    pub fn from_db(raw: &str) -> Result<Self, DeferredLocalBlobDispositionError> {
         match raw {
             "drop" => Ok(Self::Drop),
             "cache" => Ok(Self::Cache),
             "pin" => Ok(Self::Pin),
-            other => Err(format!(
-                "unknown disposition in published blob drop intent: {other}"
-            )),
+            other => Err(DeferredLocalBlobDispositionError {
+                value: other.to_string(),
+            }),
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("unknown disposition in published blob drop intent: {value}")]
+pub struct DeferredLocalBlobDispositionError {
+    value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

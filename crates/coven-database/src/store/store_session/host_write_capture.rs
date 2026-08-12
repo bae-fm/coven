@@ -144,7 +144,7 @@ impl<'transaction, 'connection> HostWriteBlobTransaction<'transaction, 'connecti
             reference,
             registration,
         )
-        .map_err(|error| DbError::Message(error.to_string()))
+        .map_err(DbError::from)
     }
 
     pub fn circle_publication_context(
@@ -232,7 +232,7 @@ impl StoreDatabase {
     ) -> Result<Vec<u8>, DbError> {
         let captured = Self::drain_host_change_journal_on(session)?;
         crate::changeset_identity::validate_changeset_row_identities(&captured, synced_tables)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         Ok(captured)
     }
 
@@ -251,7 +251,7 @@ impl StoreDatabase {
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let changes = crate::walk_changeset(changeset)
-            .map_err(|error| DbError::Message(format!("read Store write blobs: {error}")))?;
+            .map_err(|error| DbError::context("read Store write blobs", error))?;
         let mut facts = BTreeMap::new();
         for change in changes {
             let Some(publication) = blob_decls
@@ -580,7 +580,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 .map(|blob| {
                     blob_decls
                         .row_for_blob_in_namespace(transaction, &blob.namespace, &blob.id)
-                        .map_err(|error| HostWriteError::Blob(error.to_string()))
+                        .map_err(HostWriteError::BlobDeclaration)
                         .map(|row| match row {
                             Some((table, row_id)) => {
                                 crate::local_blob_cleanup_intents::LocalBlobCleanupIntent::for_row(
@@ -609,7 +609,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         });
                     }
                     Ok(None) => {}
-                    Err(error) => return Err(HostWriteError::Blob(error.to_string())),
+                    Err(error) => return Err(HostWriteError::BlobDeclaration(error)),
                 }
                 let leased = transaction
                     .query_row(
@@ -646,7 +646,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                         let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
                         if blob_decls
                             .blob_id_is_referenced(transaction, &blob.namespace, &blob.id)
-                            .map_err(|error| DbError::Message(error.to_string()))?
+                            .map_err(DbError::from)?
                         {
                             return Err(HostWriteError::BlobStillReferenced {
                                 namespace: blob.namespace.clone(),
@@ -861,7 +861,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 StoreDatabase::drain_host_change_journal(&mut journal, synced_tables)
                     .map_err(E::from)?;
             validate_scoped_foreign_key_audiences(&tx, gates)
-                .map_err(|error| DbError::Message(error.to_string()))
+                .map_err(DbError::from)
                 .map_err(E::from)?;
             // A move whose blobs get re-sealed owes those rows new stamps, and the
             // rows have to reach the destination audience carrying them — so the
@@ -876,7 +876,7 @@ impl<'connection, 'operation> CapturedStoreWriteTransaction<'connection, 'operat
                 Some(AudienceBlobMoveMaterialization::Host(_))
             ) {
                 let moves = audience_moves(&tx, &captured, gates)
-                    .map_err(|error| DbError::Message(error.to_string()))
+                    .map_err(DbError::from)
                     .map_err(E::from)?;
                 if StoreDatabase::advance_moved_blob_row_stamps_on(&tx, &moves, blob_decls)
                     .map_err(E::from)?

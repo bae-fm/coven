@@ -3,6 +3,14 @@ use std::sync::Arc;
 
 use super::*;
 
+fn injected_file_error(operation: &'static str, path: &Path) -> FileError {
+    FileError::at(
+        operation,
+        path,
+        std::io::Error::other("injected filesystem failure"),
+    )
+}
+
 /// SHA-256 over `bytes`, the digest the exact-read facts report.
 fn digest(bytes: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
@@ -127,12 +135,40 @@ async fn an_open_file_serves_ranges_from_the_inode_it_opened() {
         .read_at(original.len() as u64 - 2, 5)
         .await
         .expect_err("a range past the end must fail, not short-read");
-    assert!(
-        past_end.contains("read 5 bytes at"),
-        "the error names the range it could not serve: {past_end}",
-    );
+    assert!(matches!(
+        past_end,
+        FileError::Path {
+            operation: "read local file range",
+            source,
+            ..
+        } if source.kind() == std::io::ErrorKind::UnexpectedEof
+    ));
 
     assert_eq!(read(&path).await.expect("read replacement"), replacement);
+}
+
+#[tokio::test]
+async fn opening_a_missing_file_preserves_the_io_cause() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let path = tmp.path().join("missing.bin");
+
+    let error = match OpenFile::open(&path).await {
+        Ok(_) => panic!("opening an absent file must fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        crate::atomic_file::FileError::Path {
+            operation,
+            path: error_path,
+            source,
+        } => {
+            assert_eq!(operation, "open local file");
+            assert_eq!(error_path, path);
+            assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        }
+        other => panic!("unexpected error: {other}"),
+    }
 }
 
 #[tokio::test]
@@ -197,20 +233,15 @@ async fn plaintext_stream_fills_the_reserved_stage_before_commit() {
         .expect("write plaintext source");
     struct TestFileReader {
         file: tokio::fs::File,
-        path: std::path::PathBuf,
     }
 
     #[async_trait]
     impl PlaintextChunkReader for TestFileReader {
-        type Error = String;
-        async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        type Error = std::io::Error;
+        async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, std::io::Error> {
             use tokio::io::AsyncReadExt;
             let mut chunk = vec![0u8; max];
-            let read = self
-                .file
-                .read(&mut chunk)
-                .await
-                .map_err(|error| format!("read {}: {error}", self.path.display()))?;
+            let read = self.file.read(&mut chunk).await?;
             chunk.truncate(read);
             Ok(chunk)
         }
@@ -220,7 +251,6 @@ async fn plaintext_stream_fills_the_reserved_stage_before_commit() {
         file: tokio::fs::File::open(&source_path)
             .await
             .expect("open plaintext source"),
-        path: source_path,
     };
     let mut staged = AtomicStagedFile::create(&destination)
         .await
@@ -275,9 +305,9 @@ fn disabled_durability_waits_for_streamed_writes_to_finish() {
 
     #[async_trait]
     impl PlaintextChunkReader for BlockingChunkReader {
-        type Error = String;
+        type Error = std::convert::Infallible;
 
-        async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, std::convert::Infallible> {
             self.chunks_read += 1;
             match self.chunks_read {
                 1 => Ok(vec![1; max.min(128 * 1024)]),
@@ -357,11 +387,20 @@ async fn staged_file_publish_rolls_back_when_directory_sync_fails() {
         .await
         .expect("write staged file");
     let error = staged
-        .commit_with_sync(|_| async { Err("injected directory sync failure".to_string()) })
+        .commit_with_sync(|path| {
+            let error = injected_file_error("injected directory sync", path);
+            async move { Err(error) }
+        })
         .await
         .expect_err("directory sync failure must reject publication");
 
-    assert_eq!(error, "injected directory sync failure");
+    assert!(matches!(
+        error,
+        FileError::Path {
+            operation: "injected directory sync",
+            ..
+        }
+    ));
     assert!(!destination.exists());
     assert!(temp_entries(tmp.path()).await.is_empty());
 }
@@ -381,10 +420,10 @@ async fn staged_new_file_refuses_to_replace_an_existing_user_file() {
         .await
         .expect("write verified staged file");
 
-    assert_eq!(
+    assert!(matches!(
         staged.commit_new().await,
-        Err(CommitNewFileError::DestinationExists(destination.clone()))
-    );
+        Err(CommitNewFileError::DestinationExists(path)) if path == destination
+    ));
     assert_eq!(read(&destination).await.unwrap(), b"user file");
     assert!(temp_entries(tmp.path()).await.is_empty());
 }
@@ -423,11 +462,12 @@ async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
     let sync_count_for_call = sync_count.clone();
 
     let error = staged
-        .commit_new_with_sync(move |_| {
+        .commit_new_with_sync(move |path| {
             let invocation = sync_count_for_call.fetch_add(1, Ordering::SeqCst);
+            let path = path.to_path_buf();
             async move {
                 if invocation == 1 {
-                    Err("injected final directory sync failure".to_string())
+                    Err(injected_file_error("injected final directory sync", &path))
                 } else {
                     Ok(())
                 }
@@ -436,10 +476,13 @@ async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
         .await
         .expect_err("final directory sync failure must be reported");
 
-    assert_eq!(
+    assert!(matches!(
         error,
-        CommitNewFileError::Filesystem("injected final directory sync failure".to_string())
-    );
+        CommitNewFileError::Filesystem(FileError::Path {
+            operation: "injected final directory sync",
+            ..
+        })
+    ));
     assert_eq!(sync_count.load(Ordering::SeqCst), 2);
     assert!(!destination.exists());
     assert!(!staged_path.exists());
@@ -550,10 +593,15 @@ async fn failed_atomic_temp_cleanup_reports_the_remaining_target() {
         .await
         .expect_err("an unremovable atomic temp must fail cleanup");
 
-    assert!(
-        error.contains("remove temporary blob") && path.exists(),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        FileError::Path {
+            operation: "remove temporary blob",
+            path: error_path,
+            ..
+        } if error_path == path
+    ));
+    assert!(path.exists());
     tokio::fs::remove_dir(path)
         .await
         .expect("remove cleanup obstruction");

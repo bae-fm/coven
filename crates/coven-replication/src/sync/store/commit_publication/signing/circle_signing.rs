@@ -164,7 +164,7 @@ impl LocalStoreWriter {
             coven_protocol::store_commit::DeviceStreamAnchor::CircleAcknowledgements {
                 circle_id,
                 first_slot: self.circle_ack_first_slot(circle_id).map_err(|error| {
-                    coven_protocol::store_commit::StoreProtocolError::Malformed(error.to_string())
+                    coven_protocol::store_commit::StoreProtocolError::from(error)
                 })?,
             },
         )
@@ -321,9 +321,7 @@ impl LocalStoreWriter {
                 ..coven_protocol::store_commit::StoreCommitOperationsInput::empty()
             },
         )
-        .map_err(|error| {
-            crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
-        })
+        .map_err(crate::sync::store::circles::CircleOperationError::from)
     }
 
     pub(crate) fn verify_prepared_circle_commit(
@@ -337,9 +335,7 @@ impl LocalStoreWriter {
         crate::sync::store::circles::CircleOperationError,
     > {
         self.verify_prepared_commit(bytes, store_root_hash, coord, object)
-            .map_err(|error| {
-                crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
-            })
+            .map_err(crate::sync::store::circles::CircleOperationError::from)
     }
 
     pub(crate) fn sign_circle_store_head(
@@ -352,9 +348,7 @@ impl LocalStoreWriter {
         crate::sync::store::circles::CircleOperationError,
     > {
         self.sign_device_head(root_hash, commit, successor)
-            .map_err(|error| {
-                crate::sync::store::circles::CircleOperationError::InvalidState(error.to_string())
-            })
+            .map_err(crate::sync::store::circles::CircleOperationError::from)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

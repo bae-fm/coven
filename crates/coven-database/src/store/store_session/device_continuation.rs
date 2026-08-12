@@ -105,7 +105,7 @@ impl StoreDatabase {
         continuation
             .registration
             .verify_registration(&registration)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let derived_device = registration
             .device_signer(identity_signer)
             .map_err(|error| DbError::context("continued device signer", error))?;
@@ -157,7 +157,7 @@ impl StoreDatabase {
                     &registration,
                     reference,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
                 if verified != *meta {
                     return Err(DbError::Message(
                         "continued snapshot changed during exact verification".into(),

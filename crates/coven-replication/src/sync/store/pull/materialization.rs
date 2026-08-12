@@ -8,9 +8,9 @@ pub enum Readiness {
 
 pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionReason {
     match error {
-        StoreObjectError::Storage(source) => HeldStorePositionReason::ObjectUnreadable {
+        StoreObjectError::Storage(source) => HeldStorePositionReason::ObjectUnreadableStorage {
             key: "exact Store object".to_string(),
-            detail: source.to_string(),
+            source: source.into(),
         },
         StoreObjectError::InvalidObject { key, source, .. } => match *source {
             StoreProtocolError::InvalidSignature => HeldStorePositionReason::InvalidSignature,
@@ -19,11 +19,11 @@ pub(crate) fn held_object_error(error: StoreObjectError) -> HeldStorePositionRea
             | StoreProtocolError::StoreRootMismatch { .. }
             | StoreProtocolError::StoreMismatch { .. }
             | StoreProtocolError::FounderMismatch { .. } => {
-                HeldStorePositionReason::WrongSlot(source.to_string())
+                HeldStorePositionReason::WrongSlotProtocol(source.into())
             }
-            source => HeldStorePositionReason::ObjectUnreadable {
+            source => HeldStorePositionReason::ObjectUnreadableProtocol {
                 key,
-                detail: source.to_string(),
+                source: source.into(),
             },
         },
     }

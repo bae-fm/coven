@@ -219,9 +219,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.identity,
         )
-        .map_err(|error| {
-            crate::sync::store::membership::InviteError::InvalidDurableMutation(error.to_string())
-        })?;
+        .map_err(crate::sync::store::membership::InviteError::from)?;
         chain
             .signed_conflict_resolution(
                 store_root_hash,

@@ -280,9 +280,7 @@ impl<'store, 'connection> StoreTransaction<'store, 'connection> {
             for partition in &remote_partitions {
                 affected.extend(
                     crate::walk_changeset(&partition.changeset)
-                        .map_err(|error| {
-                            DbError::Message(format!("read affected write rows: {error}"))
-                        })?
+                        .map_err(DbError::from)?
                         .into_iter()
                         .filter(|row| !is_routing_table(&row.table))
                         .map(|row| {

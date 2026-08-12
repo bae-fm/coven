@@ -22,9 +22,26 @@ use coven_keys::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 /// Verified Circle activation state that contradicts itself, its control, or
 /// the commit that carries it. Produced by the activation values' own
 /// validation; workflow errors wrap it at the operation boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid Circle state: {0}")]
-pub struct CircleStateError(pub(crate) String);
+#[derive(Debug, thiserror::Error)]
+pub enum CircleStateError {
+    #[error("invalid Circle state: {0}")]
+    Invariant(String),
+    #[error("invalid Circle state protocol: {0}")]
+    Protocol(#[from] crate::store_commit::StoreProtocolError),
+    #[error("{operation}: {source}")]
+    Json {
+        operation: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{operation} for Circle {circle_id}: {source}")]
+    Encryption {
+        operation: &'static str,
+        circle_id: crate::circle::CircleId,
+        #[source]
+        source: coven_keys::encryption::EncryptionError,
+    },
+}
 
 mod access;
 mod activations;
@@ -46,10 +63,7 @@ pub fn verify_control_context_for_verified_commit(
     control: &PreparedCircleControl,
     verified: &VerifiedStoreBatchCommit,
 ) -> Result<(), CircleStateError> {
-    verified
-        .reference()
-        .verify_commit(verified.value())
-        .map_err(|error| CircleStateError(error.to_string()))?;
+    verified.reference().verify_commit(verified.value())?;
     let commit = verified.value();
     let author = verified.author();
     let device_matches = control.value.value.order.device_id == author.device_id.to_string();
@@ -60,7 +74,7 @@ pub fn verify_control_context_for_verified_commit(
         || control.value.author_pubkey != author.author_pubkey
         || !device_matches
     {
-        return Err(CircleStateError(
+        return Err(CircleStateError::Invariant(
             "circle control context differs from its Store reference and commit".to_string(),
         ));
     }

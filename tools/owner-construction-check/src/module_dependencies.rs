@@ -127,18 +127,24 @@ pub(crate) struct ModuleDependencyViolation {
     pub(crate) to_region: Region,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ModuleDependencyError {
+    #[error("top-level module {module} has no region assignment in MODULE_REGIONS")]
+    UnassignedModule { module: String },
+}
+
 pub(crate) fn find_module_dependency_violations(
     files: &[RustFile],
-) -> Result<Vec<ModuleDependencyViolation>, String> {
+) -> Result<Vec<ModuleDependencyViolation>, ModuleDependencyError> {
     let regions: BTreeMap<&str, Region> = MODULE_REGIONS.iter().copied().collect();
     let known_modules = top_level_modules(files);
     if let Some(unassigned) = known_modules
         .iter()
         .find(|module| !regions.contains_key(module.as_str()))
     {
-        return Err(format!(
-            "top-level module {unassigned} has no region assignment in MODULE_REGIONS"
-        ));
+        return Err(ModuleDependencyError::UnassignedModule {
+            module: unassigned.clone(),
+        });
     }
     let reexports = root_reexports(files, &known_modules);
     let mut violations = BTreeSet::new();

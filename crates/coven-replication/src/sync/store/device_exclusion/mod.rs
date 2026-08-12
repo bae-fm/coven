@@ -75,12 +75,14 @@ pub enum StoreDeviceExclusionError {
     Object(#[from] coven_protocol::objects::StoreObjectError),
     #[error("Store-device exclusion protocol: {0}")]
     Protocol(#[from] StoreProtocolError),
+    #[error("Store-device exclusion JSON: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("Store-device exclusion publication: {0}")]
     Outbound(#[from] StoreError),
     #[error("Store-device exclusion storage: {0}")]
     Storage(#[from] coven_protocol::objects::StorageError),
     #[error("Store-device exclusion journal: {0}")]
-    Journal(String),
+    Journal(#[from] StoreDeviceExclusionJournalError),
     #[error("Store-device exclusion state is invalid: {0}")]
     InvalidState(String),
 }
@@ -752,12 +754,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
             .device_exclusion_history()
             .load_proposal(intended_ref.proposal())
             .await?;
-        let unverified: StoreDeviceExclusionOutcome =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                StoreDeviceExclusionError::InvalidState(format!(
-                    "occupied exclusion outcome slot is malformed: {error}"
-                ))
-            })?;
+        let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(&bytes)?;
         let winner_ref = StoreDeviceExclusionOutcomeRef::from_outcome(
             &unverified,
             &proposal.object.value,
@@ -943,12 +940,6 @@ fn require_pending_proposal(
         ));
     }
     Ok(())
-}
-
-impl From<StoreDeviceExclusionJournalError> for StoreDeviceExclusionError {
-    fn from(error: StoreDeviceExclusionJournalError) -> Self {
-        Self::Journal(error.to_string())
-    }
 }
 
 #[cfg(test)]

@@ -181,11 +181,11 @@ fn install_circle_bootstrap_remote_objects_from_reference_on(
             let mut remote = crate::load_remote_object_on(conn, object_id)?;
             remote
                 .merge_blob_activation(stored, activation_commit)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             remote
         } else {
             remote_object::RemoteObjectRecord::activated_blob(stored, activation_commit.clone())
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 .into_record()
         };
         conn.execute(

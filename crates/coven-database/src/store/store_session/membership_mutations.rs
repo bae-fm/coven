@@ -55,13 +55,7 @@ impl StoreSession<'_> {
     ) -> Result<coven_protocol::membership::AuthorStreamId, DbError> {
         let conn = self.conn;
         let existing = crate::get_protocol_state_on(conn, key)?
-            .map(|value| {
-                value.parse().map_err(|error| {
-                    DbError::Message(format!(
-                        "membership author stream state is malformed: {error}"
-                    ))
-                })
-            })
+            .map(|value| value.parse().map_err(DbError::from))
             .transpose()?;
         if let Some(existing) = existing {
             if reusable.contains(&existing) {
@@ -379,7 +373,7 @@ impl StoreSession<'_> {
                 Some(remote) => {
                     if !remote
                         .candidate_cleanup_complete(&candidate)
-                        .map_err(|error| DbError::Message(error.to_string()))?
+                        .map_err(DbError::from)?
                     {
                         return Err(DbError::Message(format!(
                             "membership authority {object_id} still owns its losing candidate"
@@ -678,11 +672,7 @@ impl StoreDatabase {
         progress_bytes: Vec<u8>,
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<CandidateCleanupObject>, DbError> {
-        if nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != candidate
-        {
+        if nonactivation.candidate_reference().map_err(DbError::from)? != candidate {
             return Err(DbError::Message(
                 "verified nonactivation names another membership candidate".to_string(),
             ));

@@ -33,7 +33,7 @@ impl StoreJoining {
         role: MemberRole,
     ) -> Result<coven_domain::joining::DeviceJoinInvite, SyncError> {
         let member_pubkey = coven_domain::joining::decode_join_request(join_request_code)
-            .map_err(|error| SyncError::InvalidJoinRequest(error.to_string()))?
+            .map_err(SyncError::InvalidJoinRequest)?
             .public_key;
         let invite_code = self.membership.invite(&member_pubkey, None, role).await?;
         let bundle = self.sync.begin_device_join_bundle(&member_pubkey).await?;

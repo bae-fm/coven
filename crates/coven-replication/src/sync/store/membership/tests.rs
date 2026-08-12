@@ -460,8 +460,8 @@ async fn store_membership_reads_require_the_installed_owner_anchor() {
     assert!(
         matches!(
             &error,
-            MembershipOpsError::Chain(AnchoredChainError::LoadFailed(message))
-                if message.contains("owner anchor is absent")
+            MembershipOpsError::Store(crate::sync::store::StoreError::SyncCycle(failure))
+                if failure.contains("Store owner anchor is absent")
         ),
         "{error}"
     );
@@ -498,8 +498,8 @@ async fn store_membership_reads_reject_tampered_founder_state() {
     assert!(
         matches!(
             &error,
-            MembershipOpsError::Chain(AnchoredChainError::LoadFailed(message))
-                if message.contains("Store device genesis")
+            MembershipOpsError::Store(crate::sync::store::StoreError::SyncCycle(failure))
+                if failure.contains("Store device genesis state")
         ),
         "{error}"
     );

@@ -64,7 +64,7 @@ fn row_ref(
     plaintext_hash: ObjectHash,
     authority: RowBlobAuthority,
     stored: StoredBlobRef,
-) -> Result<RowBlobRef, String> {
+) -> Result<RowBlobRef, RowBlobRefError> {
     RowBlobRef::new(
         "albums".to_string(),
         "album-a".to_string(),

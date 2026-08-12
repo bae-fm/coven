@@ -14,9 +14,7 @@ fn stored_semantic_payload(
             remote.object_id()
         )));
     };
-    records
-        .payload(hash)
-        .map_err(|error| DbError::Message(error.to_string()))
+    records.payload(hash).map_err(DbError::from)
 }
 
 impl crate::store::store_session::StoreTransaction<'_, '_> {
@@ -90,7 +88,7 @@ impl StoreDatabase {
             .activation
             .registrations
             .verify_for(root, &unverified)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let introduced_registration = |reference: &StoreDeviceRegistrationRef| {
             let mut matches = unverified
                 .device_registrations()
@@ -167,7 +165,7 @@ impl StoreDatabase {
             commit_ref.coord.clone(),
             input.commit.reference().clone(),
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         if &exact_ref != commit_ref {
             return Err(DbError::Message(
                 "retained Merge commit differs from its materialized coordinate".to_string(),
@@ -208,7 +206,7 @@ impl StoreDatabase {
             .activation
             .device_operations
             .verify_for(root, &commit)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let local_identity = match records.local_activated_registration_ref()? {
             Some(reference) => Some(match introduced_registration(&reference)? {
                 Some(registration) => registration.author_pubkey.clone(),
@@ -225,7 +223,7 @@ impl StoreDatabase {
             &verified_commit,
             local_identity.as_deref(),
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         if commit.control().is_some() != input.membership_objects.is_some() {
             return Err(DbError::Message(
                 "retained Merge membership closure differs from its exact Store control"
@@ -472,14 +470,10 @@ impl StoreDatabase {
             }
             let state = records.store_device_snapshot(reference)?;
             let expected_state = coven_protocol::store_commit::StoreDeviceStateRef::from_resolved(
-                CommitFrontier(
-                    summary
-                        .frontier()
-                        .map_err(|error| DbError::Message(error.to_string()))?,
-                ),
+                CommitFrontier(summary.frontier().map_err(DbError::from)?),
                 &state,
             )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
             if summary.post_state != expected_state {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint state differs from its signed reference".to_string(),

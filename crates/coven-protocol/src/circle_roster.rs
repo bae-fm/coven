@@ -469,8 +469,70 @@ pub enum CircleRosterError {
     MissingCheckpointGrant { grant: MembershipGrantId },
     #[error("checkpoint lacks retirement evidence for Circle grant {grant}")]
     MissingCheckpointRetirementEvidence { grant: MembershipGrantId },
-    #[error("Circle roster causal history: {0}")]
-    Causal(String),
+    #[error("Circle roster causal history is empty")]
+    CausalEmpty,
+    #[error("Circle roster stream {stream:?} has conflicting entries at sequence {seq}")]
+    CausalConflictingSequence {
+        stream: CircleAuthorStreamKey,
+        seq: u64,
+    },
+    #[error("Circle roster stream {stream:?} is missing sequence {seq}")]
+    CausalMissingSequence {
+        stream: CircleAuthorStreamKey,
+        seq: u64,
+    },
+    #[error("Circle roster entry {index} has predecessor {actual:?}, expected {expected:?}")]
+    CausalBrokenStreamLink {
+        index: usize,
+        expected: Option<ObjectHash>,
+        actual: Option<ObjectHash>,
+    },
+    #[error("Circle roster entry {index} does not carry its exact own-stream dependency")]
+    CausalMissingOwnDependency { index: usize },
+    #[error("Circle roster entry {index} has a dependency under the wrong stream key")]
+    CausalDependencyStreamMismatch { index: usize },
+    #[error("Circle roster entry {index} depends on missing coordinate {dependency:?}")]
+    CausalMissingDependency {
+        index: usize,
+        dependency: CircleRosterCoord,
+    },
+    #[error("Circle roster dependency graph contains a cycle")]
+    CausalDependencyCycle,
+    #[error("Circle roster causal founder is invalid")]
+    CausalInvalidFounder,
+    #[error("Circle roster entry {index} author is not active under Owner grant {grant}")]
+    CausalAuthorGrantInactive {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error("Circle roster entry {index} creates already-defined grant {grant}")]
+    CausalDuplicateGrant {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error(
+        "Circle roster entry {index} replaces or removes grant {grant} owned by another member"
+    )]
+    CausalGrantOwnerMismatch {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error("Circle roster entry {index} does not name the exact active grants for member {member_pubkey}")]
+    CausalGrantSetMismatch { index: usize, member_pubkey: String },
+    #[error("Circle roster entry {index} removes no exact grants")]
+    CausalEmptyRemoval { index: usize },
+    #[error("Circle roster entry {index} removes Owner grant {grant} without its exact observed frontier")]
+    CausalMissingOwnerRevocationBarrier {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error("Circle roster entry {index} carries an invalid frontier for Owner grant {grant}")]
+    CausalInvalidOwnerRevocationBarrier {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error("Circle roster causal history leaves no active Owner")]
+    CausalNoActiveOwner,
     #[error(
         "Circle roster revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
     )]
@@ -480,10 +542,60 @@ pub enum CircleRosterError {
 impl From<CausalGrantError<CircleRosterCoord>> for CircleRosterError {
     fn from(error: CausalGrantError<CircleRosterCoord>) -> Self {
         match error {
+            CausalGrantError::Empty => Self::CausalEmpty,
+            CausalGrantError::ConflictingSequence { stream, seq } => {
+                Self::CausalConflictingSequence { stream, seq }
+            }
+            CausalGrantError::MissingSequence { stream, seq } => {
+                Self::CausalMissingSequence { stream, seq }
+            }
+            CausalGrantError::BrokenStreamLink {
+                index,
+                expected,
+                actual,
+            } => Self::CausalBrokenStreamLink {
+                index,
+                expected,
+                actual,
+            },
+            CausalGrantError::MissingOwnDependency { index } => {
+                Self::CausalMissingOwnDependency { index }
+            }
+            CausalGrantError::DependencyStreamMismatch { index } => {
+                Self::CausalDependencyStreamMismatch { index }
+            }
+            CausalGrantError::MissingDependency { index, dependency } => {
+                Self::CausalMissingDependency { index, dependency }
+            }
+            CausalGrantError::DependencyCycle => Self::CausalDependencyCycle,
+            CausalGrantError::InvalidFounder => Self::CausalInvalidFounder,
+            CausalGrantError::AuthorGrantInactive { index, grant } => {
+                Self::CausalAuthorGrantInactive { index, grant }
+            }
+            CausalGrantError::DuplicateGrant { index, grant } => {
+                Self::CausalDuplicateGrant { index, grant }
+            }
+            CausalGrantError::GrantOwnerMismatch { index, grant } => {
+                Self::CausalGrantOwnerMismatch { index, grant }
+            }
+            CausalGrantError::GrantSetMismatch {
+                index,
+                member_pubkey,
+            } => Self::CausalGrantSetMismatch {
+                index,
+                member_pubkey,
+            },
+            CausalGrantError::EmptyRemoval { index } => Self::CausalEmptyRemoval { index },
+            CausalGrantError::MissingOwnerRevocationBarrier { index, grant } => {
+                Self::CausalMissingOwnerRevocationBarrier { index, grant }
+            }
+            CausalGrantError::InvalidOwnerRevocationBarrier { index, grant } => {
+                Self::CausalInvalidOwnerRevocationBarrier { index, grant }
+            }
+            CausalGrantError::NoActiveOwner => Self::CausalNoActiveOwner,
             CausalGrantError::RevocationCycleTooWide { sources, maximum } => {
                 Self::RevocationCycleTooWide { sources, maximum }
             }
-            error => Self::Causal(error.to_string()),
         }
     }
 }

@@ -156,7 +156,7 @@ impl DropboxCloudHome {
             return Err(classify_write_error(status, &body, key));
         }
         let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-            CloudHomeError::Transport(format!("parse upload session {key}: {error}"))
+            CloudHomeError::transport(format!("parse upload session {key}"), error)
         })?;
         json["session_id"]
             .as_str()
@@ -204,7 +204,7 @@ impl DropboxCloudHome {
             return Err(classify_write_error(status, &body, key));
         }
         let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-            CloudHomeError::Transport(format!("append {key}: parse response: {error}"))
+            CloudHomeError::transport(format!("append {key}: parse response"), error)
         })?;
         json["id"]
             .as_str()
@@ -251,16 +251,16 @@ impl DropboxCloudHome {
             })?
             .to_str()
             .map_err(|error| {
-                CloudHomeError::Transport(format!(
-                    "exact Dropbox read for {} returned invalid metadata: {error}",
-                    slot.logical_key()
-                ))
+                CloudHomeError::transport(
+                    format!("read exact Dropbox metadata for {}", slot.logical_key()),
+                    error,
+                )
             })?;
         let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "exact Dropbox read for {} returned malformed metadata: {error}",
-                slot.logical_key()
-            ))
+            CloudHomeError::transport(
+                format!("parse exact Dropbox metadata for {}", slot.logical_key()),
+                error,
+            )
         })?;
         self.exact_metadata_from_json(slot, &metadata)?;
         Ok(response)
@@ -384,9 +384,10 @@ impl DropboxCloudHome {
         let status = resp.status();
         let resp_body = http::body_text(resp).await;
         let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
-            CloudHomeError::Transport(format!(
-                "share folder (HTTP {status}): unparseable response: {e}: {resp_body}"
-            ))
+            CloudHomeError::transport(
+                format!("parse share-folder response (HTTP {status}): {resp_body}"),
+                e,
+            )
         })?;
 
         // Immediate: {".tag": "complete", "shared_folder_id": "..."}
@@ -480,9 +481,10 @@ impl DropboxCloudHome {
                 )));
             }
             let json: serde_json::Value = serde_json::from_str(&resp_body).map_err(|e| {
-                CloudHomeError::Transport(format!(
-                    "{operation} job status: unparseable response: {e}: {resp_body}"
-                ))
+                CloudHomeError::transport(
+                    format!("parse {operation} job status response: {resp_body}"),
+                    e,
+                )
             })?;
             match json[".tag"].as_str() {
                 Some("complete") => return complete(&json),
@@ -603,7 +605,7 @@ enum DropboxRevokeLaunch {
 
 fn parse_dropbox_revoke_launch(body: &str) -> Result<DropboxRevokeLaunch, CloudHomeError> {
     let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-        CloudHomeError::Transport(format!("revoke access: unparseable response: {e}: {body}"))
+        CloudHomeError::transport(format!("parse revoke-access response: {body}"), e)
     })?;
     match json[".tag"].as_str() {
         Some("complete") => Ok(DropboxRevokeLaunch::Complete),
@@ -934,7 +936,7 @@ impl OAuthRestHome for DropboxCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
         let mut keys = Vec::new();
         if let Some(entries) = json["entries"].as_array() {
             for entry in entries {

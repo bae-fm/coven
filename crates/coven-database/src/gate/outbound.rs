@@ -839,11 +839,11 @@ impl<'a> DeletedAudiences<'a> {
                             row_id: key.1.clone(),
                         })?
                         .clone();
-                    Audience::from_column(value.as_deref()).map_err(|error| {
-                        GateError::InvalidAudience {
+                    Audience::from_column(value.as_deref()).map_err(|source| {
+                        GateError::InvalidAudienceEncoding {
                             table: key.0.clone(),
                             value,
-                            reason: error.to_string(),
+                            source,
                         }
                     })
                 }

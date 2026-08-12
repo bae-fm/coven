@@ -361,7 +361,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     })?;
                     let package =
                         coven_protocol::audience_package::AudiencePackage::parse(semantic_bytes)
-                            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                            .map_err(StoreError::from)?;
                     let stream_id = package.commit_coord().stream_id.to_string();
                     let sequence = package.commit_coord().sequence;
                     let (context, prefix) = match package.audience() {
@@ -415,7 +415,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 }
                 coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { locator_bytes } => {
                     let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
-                        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                        .map_err(StoreError::from)?;
                     let uploader = locator.uploader().clone();
                     let registration = database
                         .activated_store_device_registration(uploader.clone())
@@ -425,7 +425,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         locator,
                         remote.object().clone(),
                     )
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                    .map_err(StoreError::from)?;
                     if prepared_state {
                         let path = prepared.spool_path.as_deref().ok_or_else(|| {
                             StoreError::InvalidOutbound(format!(

@@ -54,8 +54,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
     ) -> Result<MergeSubsetOutcome, DbError> {
         let applied_changeset = source
             .validate_subset(bytes.clone())
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let actual_changes = crate::walk_changeset(&bytes).map_err(DbError::Message)?;
+            .map_err(DbError::from)?;
+        let actual_changes = crate::walk_changeset(&bytes).map_err(DbError::Changeset)?;
         if let Some(receiver_wall_ms) = timestamp_policy.received_wall_ms() {
             advance_max_updated_at(
                 changeset_max,
@@ -89,12 +89,12 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     )
                 })?,
             )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         }
         let winning_rows = self.current_winning_rows(source.schema(), &bytes)?;
-        let old_changes = crate::walk_old_changeset(&bytes).map_err(DbError::Message)?;
+        let old_changes = crate::walk_old_changeset(&bytes).map_err(DbError::Changeset)?;
         let cleanup = local_blob_cleanup_intents(blob_decls, &old_changes, &actual_changes)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         for intent in cleanup {
             self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
         }
@@ -130,8 +130,8 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     gates,
                     routing_key,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?;
-                if let Err(tables) = self
+                .map_err(DbError::from)?;
+                if let Some(tables) = self
                     .apply_merge_subset(
                         blob_decls,
                         gates,
@@ -144,14 +144,14 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         returned_changes,
                         package_reported_fk_violation,
                     )?
-                    .extend_winning_rows(&mut winning_rows)
+                    .append_winning_rows(&mut winning_rows)
                 {
                     return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
                 }
                 let rows =
                     crate::filter_inbound_store_rows(conn, &inbound.rows, gates, routing_key)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                if let Err(tables) = self
+                        .map_err(DbError::from)?;
+                if let Some(tables) = self
                     .apply_merge_subset(
                         blob_decls,
                         gates,
@@ -164,7 +164,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                         returned_changes,
                         package_reported_fk_violation,
                     )?
-                    .extend_winning_rows(&mut winning_rows)
+                    .append_winning_rows(&mut winning_rows)
                 {
                     return Ok(MergeSubsetOutcome::ConstraintConflict(tables));
                 }
@@ -197,7 +197,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                     gates,
                     routing_key,
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
                 return self.apply_merge_subset(
                     blob_decls,
                     gates,
@@ -291,7 +291,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
             .find(|prepared| matches!(prepared.package.audience(), PackageAudience::Store))
             .map(|prepared| crate::store_audience_transitions(prepared.package.changeset()))
             .transpose()
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .unwrap_or_default();
         for prepared in packages {
             let PreparedMergeMaterializationPackage { package, changeset } = prepared;
@@ -310,9 +310,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 MergeSubsetOutcome::Applied(rows) => rows,
                 MergeSubsetOutcome::ConstraintConflict(tables) => {
                     return Ok(AppliedMergeMaterialization {
-                        outcome: ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(
-                            tables,
-                        )),
+                        outcome: crate::MaterializationOutcome::Held(
+                            crate::MaterializationHold::ConstraintConflict(tables),
+                        ),
                         max_updated_at: None,
                         write_status_notifications: Vec::new(),
                         retained: None,
@@ -367,19 +367,18 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map_err(DbError::from)?;
         }
         crate::prune_ineligible_scoped_rows(conn, gates, &inactive_circles)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        crate::validate_scoped_foreign_key_audiences(conn, gates)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
+        crate::validate_scoped_foreign_key_audiences(conn, gates).map_err(DbError::from)?;
         let mut removal_changeset = Vec::new();
         removal_session
             .changeset_strm(&mut removal_changeset)
             .map_err(DbError::from)?;
         drop(removal_session);
-        let removed = crate::walk_old_changeset(&removal_changeset).map_err(DbError::Message)?;
+        let removed = crate::walk_old_changeset(&removal_changeset).map_err(DbError::Changeset)?;
         let removal_changes =
-            crate::walk_changeset(&removal_changeset).map_err(DbError::Message)?;
+            crate::walk_changeset(&removal_changeset).map_err(DbError::Changeset)?;
         let removal_cleanup = local_blob_cleanup_intents(blob_decls, &removed, &removal_changes)
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         returned_changes.extend(removal_changes);
         for intent in removal_cleanup {
             self.record_obsolete_blob_cleanup_intent(blob_decls, &intent)?;
@@ -394,7 +393,9 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
                 .map_err(DbError::from)?;
             if violations {
                 return Ok(AppliedMergeMaterialization {
-                    outcome: ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency),
+                    outcome: crate::MaterializationOutcome::Held(
+                        crate::MaterializationHold::ForeignKeyDependency,
+                    ),
                     max_updated_at: None,
                     write_status_notifications: Vec::new(),
                     retained: None,
@@ -423,7 +424,7 @@ impl<'transaction, 'connection> MergeMaterializationTransaction<'transaction, 'c
         let retained =
             self.record_verified_merge_materialization(registrations_lookup, verified)?;
         Ok(AppliedMergeMaterialization {
-            outcome: ApplyOutcome::Applied(returned_changes),
+            outcome: crate::MaterializationOutcome::Applied(returned_changes),
             max_updated_at: changeset_max,
             write_status_notifications: Vec::new(),
             retained: Some(retained),

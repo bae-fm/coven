@@ -18,35 +18,48 @@ enum ColumnCell {
     Present(Option<String>),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ChangesetError {
+    #[error("start changeset iterator: {0}")]
+    Start(#[source] rusqlite::Error),
+    #[error("advance changeset iterator: {0}")]
+    Next(#[source] rusqlite::Error),
+    #[error("read changeset operation: {0}")]
+    Operation(#[source] rusqlite::Error),
+    #[error("read changeset {side:?} value for column {column}: {source}")]
+    Value {
+        side: &'static str,
+        column: usize,
+        #[source]
+        source: rusqlite::Error,
+    },
+}
+
 /// Walk a changeset and return every row change with its column values.
 ///
 /// Returns an empty vec for an empty changeset.
-pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
+pub fn walk(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, ChangesetError> {
     walk_with_update_values(changeset_bytes, UpdateValue::New)
 }
 
-pub fn walk_old(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, String> {
+pub fn walk_old(changeset_bytes: &[u8]) -> Result<Vec<RowChange>, ChangesetError> {
     walk_with_update_values(changeset_bytes, UpdateValue::Old)
 }
 
 fn walk_with_update_values(
     changeset_bytes: &[u8],
     update_value: UpdateValue,
-) -> Result<Vec<RowChange>, String> {
+) -> Result<Vec<RowChange>, ChangesetError> {
     if changeset_bytes.is_empty() {
         return Ok(Vec::new());
     }
 
     let input: &mut dyn std::io::Read = &mut &changeset_bytes[..];
-    let mut iter =
-        ChangesetIter::start_strm(&input).map_err(|e| format!("changeset start failed: {e}"))?;
+    let mut iter = ChangesetIter::start_strm(&input).map_err(ChangesetError::Start)?;
 
     let mut changes = Vec::new();
-    while let Some(item) = iter
-        .next()
-        .map_err(|e| format!("changeset next failed: {e}"))?
-    {
-        let op = item.op().map_err(|e| format!("changeset op failed: {e}"))?;
+    while let Some(item) = iter.next().map_err(ChangesetError::Next)? {
+        let op = item.op().map_err(ChangesetError::Operation)?;
         let change_op = match op.code() {
             Action::SQLITE_INSERT => ChangeOp::Insert,
             Action::SQLITE_UPDATE => ChangeOp::Update,
@@ -83,7 +96,7 @@ fn extract_col(
     col: usize,
     op: ChangeOp,
     update_value: UpdateValue,
-) -> Result<ColumnCell, String> {
+) -> Result<ColumnCell, ChangesetError> {
     match op {
         ChangeOp::Insert => changeset_value(item, col, UpdateValue::New),
         ChangeOp::Delete => changeset_value(item, col, UpdateValue::Old),
@@ -104,7 +117,7 @@ fn changeset_value(
     item: &rusqlite::session::ChangesetItem,
     col: usize,
     side: UpdateValue,
-) -> Result<ColumnCell, String> {
+) -> Result<ColumnCell, ChangesetError> {
     let value = match side {
         UpdateValue::New => item.new_value(col),
         UpdateValue::Old => item.old_value(col),
@@ -112,9 +125,14 @@ fn changeset_value(
     match value {
         Ok(value) => Ok(ColumnCell::Present(value_ref_to_string(value))),
         Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(ColumnCell::Absent),
-        Err(e) => Err(format!(
-            "changeset {side:?} value read failed for column {col}: {e}"
-        )),
+        Err(source) => Err(ChangesetError::Value {
+            side: match side {
+                UpdateValue::New => "new",
+                UpdateValue::Old => "old",
+            },
+            column: col,
+            source,
+        }),
     }
 }
 

@@ -1,9 +1,47 @@
 use super::join_validation::*;
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum RegistrationLoadError {
-    Object(StoreObjectError),
+    #[error("registration object: {0}")]
+    Object(#[from] StoreObjectError),
+    #[error("registration protocol: {0}")]
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("registration database: {0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("registration JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("registration device join exchange: {0}")]
+    DeviceJoinExchange(
+        #[from] coven_protocol::store_commit::device_join_exchange::DeviceJoinExchangeError,
+    ),
+    #[error("registration membership chain: {0}")]
+    AnchoredChain(#[from] crate::sync::store::AnchoredChainError),
+    #[error("registration Store pull: {0}")]
+    Pull(#[source] Box<StorePullError>),
+    #[error("registration state is invalid: {0}")]
     Invalid(String),
+}
+
+impl From<StorePullError> for RegistrationLoadError {
+    fn from(error: StorePullError) -> Self {
+        Self::Pull(Box::new(error))
+    }
+}
+
+impl From<RegistrationLoadError> for StorePullError {
+    fn from(error: RegistrationLoadError) -> Self {
+        match error {
+            RegistrationLoadError::Object(error) => Self::Object(error),
+            RegistrationLoadError::Protocol(error) => Self::Protocol(error),
+            RegistrationLoadError::Database(error) => Self::Database(error),
+            RegistrationLoadError::Json(error) => Self::Serialization(error),
+            RegistrationLoadError::DeviceJoinExchange(error) => Self::DeviceJoinExchange(error),
+            RegistrationLoadError::AnchoredChain(error) => Self::MembershipChain(error),
+            RegistrationLoadError::Pull(error) => *error,
+            RegistrationLoadError::Invalid(error) => Self::InvalidState(error),
+        }
+    }
 }
 
 pub(crate) struct VerifiedCommitJoinOutcome {
@@ -18,7 +56,7 @@ pub(crate) fn registration_attempt_error(error: StorePullError) -> RegistrationL
         StorePullError::Storage(error) => {
             RegistrationLoadError::Object(StoreObjectError::Storage(error))
         }
-        error => RegistrationLoadError::Invalid(error.to_string()),
+        error => RegistrationLoadError::from(error),
     }
 }
 

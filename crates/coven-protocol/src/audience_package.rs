@@ -199,8 +199,7 @@ impl AudiencePackage {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, AudiencePackageError> {
-        let package: Self = serde_json::from_slice(bytes)
-            .map_err(|error| AudiencePackageError::Malformed(error.to_string()))?;
+        let package: Self = serde_json::from_slice(bytes).map_err(AudiencePackageError::Json)?;
         package.validate()?;
         if package.to_bytes() != bytes {
             return Err(AudiencePackageError::NonCanonicalEncoding);
@@ -268,13 +267,9 @@ impl AudiencePackage {
         if self.version != STORE_PROTOCOL_VERSION {
             return Err(AudiencePackageError::UnsupportedVersion(self.version));
         }
-        self.commit_coord
-            .validate()
-            .map_err(|error| AudiencePackageError::InvalidCommitCoord(error.to_string()))?;
+        self.commit_coord.validate()?;
         if let PackageAudience::Circle { control, .. } = &self.audience {
-            control
-                .validate()
-                .map_err(|error| AudiencePackageError::InvalidCircleControl(error.to_string()))?;
+            control.validate()?;
         }
         let expected_audience = self.audience.remote_audience();
         let mut previous_sort_key = None;
@@ -327,14 +322,14 @@ impl AudiencePackage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum AudiencePackageError {
     #[error("unsupported audience package version {0}")]
     UnsupportedVersion(u32),
     #[error("invalid audience package Store commit coordinate: {0}")]
-    InvalidCommitCoord(String),
+    InvalidCommitCoord(#[from] crate::store_commit::StoreProtocolError),
     #[error("invalid Circle control coordinate: {0}")]
-    InvalidCircleControl(String),
+    InvalidCircleControl(#[from] crate::circle_control::CircleControlCoordError),
     #[error("row blob binding has empty {0}")]
     EmptyBindingField(&'static str),
     #[error(
@@ -376,7 +371,7 @@ pub enum AudiencePackageError {
     #[error("row blob locator bindings are not canonically sorted")]
     UnsortedBindings,
     #[error("malformed audience package: {0}")]
-    Malformed(String),
+    Json(#[source] serde_json::Error),
     #[error("audience package bytes are not canonical")]
     NonCanonicalEncoding,
 }
@@ -637,22 +632,22 @@ mod tests {
         unknown_field["unknown"] = serde_json::json!(true);
         assert!(matches!(
             AudiencePackage::parse(&serde_json::to_vec(&unknown_field).unwrap()),
-            Err(AudiencePackageError::Malformed(_))
+            Err(AudiencePackageError::Json(_))
         ));
 
         let mut unknown_variant: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         unknown_variant["audience"] = serde_json::json!({ "unknown": {} });
         assert!(matches!(
             AudiencePackage::parse(&serde_json::to_vec(&unknown_variant).unwrap()),
-            Err(AudiencePackageError::Malformed(_))
+            Err(AudiencePackageError::Json(_))
         ));
 
         let mut noncanonical = bytes;
         noncanonical.push(b'\n');
-        assert_eq!(
+        assert!(matches!(
             AudiencePackage::parse(&noncanonical),
             Err(AudiencePackageError::NonCanonicalEncoding)
-        );
+        ));
     }
 
     #[test]

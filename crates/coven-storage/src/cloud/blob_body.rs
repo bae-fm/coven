@@ -98,7 +98,25 @@ impl BlobSource {
                 let chunk = reader
                     .next_chunk(stride)
                     .await
-                    .map_err(CloudHomeError::Transport)?;
+                    .map_err(|error| match error {
+                        crate::local_file::PlaintextChunkError::Remote(error) => {
+                            CloudHomeError::BlobSource(error)
+                        }
+                        crate::local_file::PlaintextChunkError::InvalidContent(message) => {
+                            CloudHomeError::InvalidBlobSource(message)
+                        }
+                        crate::local_file::PlaintextChunkError::Local(error) => {
+                            CloudHomeError::Local(error)
+                        }
+                        crate::local_file::PlaintextChunkError::Decryption { context, source } => {
+                            CloudHomeError::BlobSource(
+                                coven_protocol::objects::StorageError::Decryption {
+                                    context,
+                                    source,
+                                },
+                            )
+                        }
+                    })?;
                 if chunk.is_empty() {
                     *eof = true;
                     // A sealed empty file still emits one tag-only chunk, so a
@@ -135,7 +153,7 @@ impl BlobBody {
         }
     }
 
-    pub async fn from_file(path: &Path) -> Result<Self, String> {
+    pub async fn from_file(path: &Path) -> Result<Self, coven_foundation::atomic_file::FileError> {
         let len = coven_foundation::local_file::file_len(path).await?;
         let reader = crate::local_file::open_reader(path).await?;
         Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))

@@ -21,7 +21,7 @@ impl StoreSession<'_> {
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
         let mut candidates = Vec::new();
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
-            witness.validate().map_err(DbError::Message)?;
+            witness.validate().map_err(DbError::from)?;
             let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
                 records,
                 verified_authority,
@@ -101,16 +101,14 @@ impl StoreSession<'_> {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(DbError::from)?;
-        let reference = durable
-            .reference()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let reference = durable.reference().map_err(DbError::from)?;
         let mut candidates = Vec::new();
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
         let store_transaction =
             crate::store::store_session::StoreTransaction::new(&tx, self.store_dir);
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
-            witness.validate().map_err(DbError::Message)?;
+            witness.validate().map_err(DbError::from)?;
             if witness.original_position().commit() != &reference {
                 return Err(DbError::Message(
                     "fresh excluded-author head evidence differs from the retraction witness"
@@ -186,7 +184,7 @@ impl StoreSession<'_> {
             let inert = load_protocol_inert_object_on(&tx, object_id)?;
             if inert
                 .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 != Some(durable.proof())
             {
                 return Err(DbError::Message(
@@ -349,7 +347,7 @@ impl StoreDatabase {
         }
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         self.call_store(move |session| {
             session.reconcile_merge_candidate_terminal_head(
                 &root,

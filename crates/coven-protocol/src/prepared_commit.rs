@@ -11,20 +11,26 @@ use crate::store_commit::{
 
 /// A prepared commit whose parts contradict each other or cannot form valid
 /// remote-object records. Workflow errors wrap it at the operation boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid prepared Store operation: {0}")]
-pub struct PreparedCommitError(pub(crate) String);
-
-impl From<crate::objects::StorageError> for PreparedCommitError {
-    fn from(error: crate::objects::StorageError) -> Self {
-        PreparedCommitError(error.to_string())
-    }
-}
-
-impl From<StoreObjectError> for PreparedCommitError {
-    fn from(error: StoreObjectError) -> Self {
-        PreparedCommitError(error.to_string())
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum PreparedCommitError {
+    #[error("invalid prepared Store operation: {0}")]
+    Invariant(String),
+    #[error("prepared Store operation storage: {0}")]
+    Storage(#[from] crate::objects::StorageError),
+    #[error("prepared Store operation object: {0}")]
+    StoreObject(#[from] StoreObjectError),
+    #[error("prepared Store protocol: {0}")]
+    Protocol(#[from] crate::store_commit::StoreProtocolError),
+    #[error("prepared membership transition: {0}")]
+    Membership(#[from] crate::membership_mutation::MembershipPreparationError),
+    #[error("{operation}: {source}")]
+    Json {
+        operation: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("prepared Store remote object: {0}")]
+    RemoteObject(#[from] crate::remote_object::RemoteObjectRecordError),
 }
 
 /// A signed commit and the exact object it is published as.
@@ -86,7 +92,7 @@ impl PreparedStoreOperationCommit {
             &commit_bytes,
             &commit_bytes,
         )
-        .map_err(|error| PreparedCommitError(error.to_string()))?];
+        .map_err(PreparedCommitError::from)?];
         objects.push(
             crate::remote_object::RemoteObjectRecord::candidate_activated_store_head(
                 self.head_ref(),
@@ -94,7 +100,7 @@ impl PreparedStoreOperationCommit {
                 &head_bytes,
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?,
+            .map_err(PreparedCommitError::from)?,
         );
         Ok(objects)
     }
@@ -107,13 +113,9 @@ impl PreparedStoreOperationCommit {
         transition: &PreparedMembershipTransition,
         publication: &PreparedMembershipPublication,
     ) -> Result<(), PreparedCommitError> {
-        self.validate_closed_shape().map_err(PreparedCommitError)?;
-        transition
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
-        publication
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
+        self.validate_closed_shape()?;
+        transition.validate().map_err(PreparedCommitError::from)?;
+        publication.validate().map_err(PreparedCommitError::from)?;
         if self.commit.control()
             != Some(&StoreControl {
                 transition: transition.transition.clone(),
@@ -127,7 +129,7 @@ impl PreparedStoreOperationCommit {
                     if commit == &self.reference
             )
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership authority graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -145,7 +147,7 @@ impl PreparedStoreOperationCommit {
         let expected_wraps = match &transition.entry.change {
             super::membership::MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
             _ => {
-                return Err(PreparedCommitError(
+                return Err(PreparedCommitError::Invariant(
                     "Merge membership removal graph contains another change".to_string(),
                 ))
             }
@@ -156,7 +158,7 @@ impl PreparedStoreOperationCommit {
                 .zip(wraps)
                 .any(|(reference, prepared)| reference != &prepared.reference)
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership removal wraps differ from its exact entry".to_string(),
             ));
         }
@@ -171,9 +173,11 @@ impl PreparedStoreOperationCommit {
         reference: &super::membership::StoreMembershipConflictResolutionRef,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         self.validate_merge_membership_activation(transition, publication)?;
-        let resolution_bytes = serde_json::to_vec(resolution).map_err(|error| {
-            PreparedCommitError(format!("serialize Store membership resolution: {error}"))
-        })?;
+        let resolution_bytes =
+            serde_json::to_vec(resolution).map_err(|source| PreparedCommitError::Json {
+                operation: "serialize Store membership resolution",
+                source,
+            })?;
         if !matches!(
             &transition.entry.change,
             super::membership::MembershipChange::ResolutionActivation {
@@ -184,7 +188,7 @@ impl PreparedStoreOperationCommit {
             || reference.conflict_hash != resolution.conflict_hash
             || reference.resolver_pubkey != resolution.resolver_pubkey
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership resolution graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -196,7 +200,7 @@ impl PreparedStoreOperationCommit {
                 &resolution_bytes,
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
+            .map_err(PreparedCommitError::from)?;
         self.close_merge_membership_remote_objects(transition, publication, &[], vec![authority])
     }
 
@@ -212,7 +216,7 @@ impl PreparedStoreOperationCommit {
             super::membership::MembershipChange::SetMember { wrapped_key: expected, role: super::membership::StoreMembershipRoleGrant::Owner { .. }, .. }
                 if expected == &wrapped_key.reference
         ) {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge Owner-promotion graph differs from its activating Store candidate"
                     .to_string(),
             ));
@@ -234,16 +238,16 @@ impl PreparedStoreOperationCommit {
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let family = self.commit.candidate_family();
         let mut objects = self.candidate_remote_objects()?;
-        let entry_bytes = serde_json::to_vec(&transition.entry).map_err(|error| {
-            PreparedCommitError(format!(
-                "serialize Merge membership candidate entry: {error}"
-            ))
-        })?;
-        let head_bytes = serde_json::to_vec(&publication.head).map_err(|error| {
-            PreparedCommitError(format!(
-                "serialize Merge membership candidate head: {error}"
-            ))
-        })?;
+        let entry_bytes =
+            serde_json::to_vec(&transition.entry).map_err(|source| PreparedCommitError::Json {
+                operation: "serialize Merge membership candidate entry",
+                source,
+            })?;
+        let head_bytes =
+            serde_json::to_vec(&publication.head).map_err(|source| PreparedCommitError::Json {
+                operation: "serialize Merge membership candidate head",
+                source,
+            })?;
         // Membership entries and heads are signed plaintext, so the canonical
         // value is also what goes to storage.
         objects.push(
@@ -254,7 +258,7 @@ impl PreparedStoreOperationCommit {
                 &entry_bytes,
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?,
+            .map_err(PreparedCommitError::from)?,
         );
         objects.push(
             crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_head(
@@ -264,15 +268,15 @@ impl PreparedStoreOperationCommit {
                 &head_bytes,
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?,
+            .map_err(PreparedCommitError::from)?,
         );
         for prepared in wraps {
             let value = prepared.validate().map_err(PreparedCommitError::from)?;
-            let canonical = serde_json::to_vec(&value).map_err(|error| {
-                PreparedCommitError(format!(
-                    "serialize Merge membership candidate wrap: {error}"
-                ))
-            })?;
+            let canonical =
+                serde_json::to_vec(&value).map_err(|source| PreparedCommitError::Json {
+                    operation: "serialize Merge membership candidate wrap",
+                    source,
+                })?;
             objects.push(
                 crate::remote_object::RemoteObjectRecord::candidate_exclusive_merge_membership_wrapped_store_key(
                     family,
@@ -281,7 +285,7 @@ impl PreparedStoreOperationCommit {
                     prepared.object.stored_bytes(),
                     self.reference.clone(),
                 )
-                .map_err(|error| PreparedCommitError(error.to_string()))?,
+                .map_err(PreparedCommitError::from)?,
             );
         }
         objects.extend(authorities);
@@ -290,37 +294,24 @@ impl PreparedStoreOperationCommit {
             .iter()
             .any(|object| !unique.insert(object.record().object_id()))
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership authority graph repeats an exact object".to_string(),
             ));
         }
         Ok(objects)
     }
 
-    pub fn validate_closed_shape(&self) -> Result<(), String> {
-        self.reference
-            .verify_commit(&self.commit)
-            .map_err(|error| error.to_string())?;
-        if self
-            .reference
-            .object
-            .verify(&self.commit.to_bytes())
-            .is_err()
-        {
-            return Err(
-                "prepared Store operation does not bind its exact commit bytes".to_string(),
-            );
+    pub fn validate_closed_shape(&self) -> Result<(), PreparedCommitError> {
+        self.reference.verify_commit(&self.commit)?;
+        self.reference.object.verify(&self.commit.to_bytes())?;
+        if self.head.commit != self.reference {
+            return Err(PreparedCommitError::Invariant(
+                "prepared Store operation head names another commit".to_string(),
+            ));
         }
-        if self.head.commit != self.reference
-            || self.head_object.verify(&self.head.to_bytes()).is_err()
-        {
-            return Err(
-                "prepared Store operation does not bind its exact activation head".to_string(),
-            );
-        }
+        self.head_object.verify(&self.head.to_bytes())?;
         self.history_evidence
-            .validate_for(&self.reference, &self.commit)
-            .map_err(|error| error.to_string())?;
+            .validate_for(&self.reference, &self.commit)?;
         Ok(())
     }
 
@@ -356,7 +347,7 @@ impl PreparedStoreOperationCommit {
         acknowledgement: &crate::objects::ExactProtocolObject<super::store_commit::StoreAck>,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         let reference = self.commit.acknowledgement().ok_or_else(|| {
-            PreparedCommitError(
+            PreparedCommitError::Invariant(
                 "prepared acknowledgement operation has no exact acknowledgement ref".to_string(),
             )
         })?;
@@ -364,7 +355,7 @@ impl PreparedStoreOperationCommit {
             || reference.ack_hash != acknowledgement.value.ack_hash()
             || acknowledgement.value.to_bytes() != acknowledgement.bytes
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "prepared acknowledgement operation differs from its exact acknowledgement object"
                     .to_string(),
             ));
@@ -376,7 +367,7 @@ impl PreparedStoreOperationCommit {
                 acknowledgement.prepared.stored_bytes(),
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
+            .map_err(PreparedCommitError::from)?;
         self.retained_authority_remote_objects(vec![authority])
     }
 
@@ -390,7 +381,7 @@ impl PreparedStoreOperationCommit {
             .iter()
             .find(|reference| &reference.object == acknowledgement.prepared.reference())
             .ok_or_else(|| {
-                PreparedCommitError(
+                PreparedCommitError::Invariant(
                     "prepared activation does not name its Circle acknowledgement object"
                         .to_string(),
                 )
@@ -399,7 +390,7 @@ impl PreparedStoreOperationCommit {
             || reference.ack_hash != acknowledgement.value.ack_hash()
             || acknowledgement.value.to_bytes() != acknowledgement.bytes
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "prepared Circle acknowledgement differs from its exact acknowledgement object"
                     .to_string(),
             ));
@@ -411,7 +402,7 @@ impl PreparedStoreOperationCommit {
                 acknowledgement.prepared.stored_bytes(),
                 self.reference.clone(),
             )
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
+            .map_err(PreparedCommitError::from)?;
         self.retained_authority_remote_objects(vec![authority])
     }
 
@@ -420,7 +411,7 @@ impl PreparedStoreOperationCommit {
         authorities: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<Vec<crate::remote_object::ClosedRemoteObject>, PreparedCommitError> {
         if authorities.is_empty() {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Store operation has no retained authority objects".to_string(),
             ));
         }
@@ -430,13 +421,13 @@ impl PreparedStoreOperationCommit {
                 if matches!(&record.state, crate::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
                     if ownership.pending == std::collections::BTreeSet::from([self.reference.clone()])))
             {
-                return Err(PreparedCommitError(
+                return Err(PreparedCommitError::Invariant(
                     "Store operation retained authority has different candidate ownership"
                         .to_string(),
                 ));
             }
             if !authority_ids.insert(authority.record().object_id()) {
-                return Err(PreparedCommitError(
+                return Err(PreparedCommitError::Invariant(
                     "Store operation repeats a retained authority object".to_string(),
                 ));
             }
@@ -460,7 +451,7 @@ impl PreparedStoreOperationCommit {
             || winner.successor.activation != current.successor.activation
             || winner.successor.predecessor != current.successor.predecessor
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "alternate Merge head differs from the prepared activation point".to_string(),
             ));
         }
@@ -474,32 +465,30 @@ impl PreparedStoreOperationCommit {
         publication: &PreparedMembershipPublication,
         resolution_value: Option<&super::membership::StoreMembershipConflictResolution>,
     ) -> Result<(), PreparedCommitError> {
-        publication
-            .validate()
-            .map_err(|error| PreparedCommitError(error.to_string()))?;
+        publication.validate().map_err(PreparedCommitError::from)?;
         let reference = self.common.reference.clone();
         let commit = self.common.commit.clone();
         let Some(StoreControl { transition }) = commit.control() else {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership proof accompanies another Store control".to_string(),
             ));
         };
         if !transition.matches_head(&publication.head, &publication.head_ref)
             || publication.entry_ref != transition.body.entry
         {
-            return Err(PreparedCommitError(
+            return Err(PreparedCommitError::Invariant(
                 "Merge membership proof differs from its signed Store transition".to_string(),
             ));
         }
         let resolution = match &publication.entry.change {
             super::membership::MembershipChange::ResolutionActivation { resolution } => {
                 let value = resolution_value.ok_or_else(|| {
-                    PreparedCommitError(
+                    PreparedCommitError::Invariant(
                         "Merge resolution activation lacks its exact resolution proof".to_string(),
                     )
                 })?;
                 if value.resolution_ref(resolution.object.clone()) != *resolution {
-                    return Err(PreparedCommitError(
+                    return Err(PreparedCommitError::Invariant(
                         "Merge resolution proof differs from its exact reference".to_string(),
                     ));
                 }
@@ -507,7 +496,7 @@ impl PreparedStoreOperationCommit {
             }
             _ if resolution_value.is_none() => (None, None),
             _ => {
-                return Err(PreparedCommitError(
+                return Err(PreparedCommitError::Invariant(
                     "non-resolution membership proof carries a resolution".to_string(),
                 ))
             }
@@ -525,7 +514,7 @@ impl PreparedStoreOperationCommit {
                 resolution_value: resolution.1,
             },
         ));
-        self.validate_closed_shape().map_err(PreparedCommitError)?;
+        self.validate_closed_shape()?;
         Ok(())
     }
 }

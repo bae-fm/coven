@@ -60,7 +60,7 @@ async fn failed_owner_anchor_install_does_not_publish_connection_authority() {
         Err(error) => error,
     };
     assert!(
-        error.contains("injected owner anchor failure"),
+        error.to_string().contains("injected owner anchor failure"),
         "unexpected owner anchor failure: {error}"
     );
     assert_eq!(
@@ -111,7 +111,25 @@ async fn owner_anchor_install_verifies_the_stored_replay_image_payload() {
         Err(error) => error,
     };
 
-    assert!(error.contains("invalid compressed bytes"), "{error}");
+    let initialization = error
+        .initialization_source()
+        .expect("fixture error retains Store initialization source");
+    assert!(
+        matches!(
+            initialization,
+            StoreInitializationError::ProtocolRoot(
+                crate::sync::store::protocol_root::StoreProtocolRootError::Database(
+                    coven_database::DbError::Context { source, .. }
+                )
+            ) if matches!(
+                source.as_ref(),
+                coven_database::DbError::PayloadStore(
+                    coven_database::PayloadStoreError::CompressionIo { .. }
+                )
+            )
+        ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

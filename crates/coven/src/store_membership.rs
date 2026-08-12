@@ -121,20 +121,8 @@ fn decode_operation_code<T: serde::de::DeserializeOwned>(
     prefix: &str,
     code: &str,
 ) -> Result<T, SyncError> {
-    coven_foundation::code_envelope::decode_code(prefix, code).map_err(|error| {
-        let message = match error {
-            coven_foundation::code_envelope::EnvelopeError::MissingPrefix => {
-                format!("expected a code beginning with {prefix}")
-            }
-            coven_foundation::code_envelope::EnvelopeError::InvalidBase64 => {
-                "the code is not valid base64url".to_string()
-            }
-            coven_foundation::code_envelope::EnvelopeError::InvalidJson(error) => {
-                format!("the code payload is invalid: {error}")
-            }
-        };
-        SyncError::InvalidMembershipOperationCode(message)
-    })
+    coven_foundation::code_envelope::decode_code(prefix, code)
+        .map_err(SyncError::InvalidMembershipOperationCode)
 }
 
 #[cfg(test)]

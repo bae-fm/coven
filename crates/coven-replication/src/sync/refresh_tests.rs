@@ -93,7 +93,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
     ) -> Result<String, MembershipOpsError> {
         self.bind_device(db, db_store_dir.clone(), user_keypair)
             .await
-            .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+            .map_err(MembershipOpsError::Store)?
             .remove_member(
                 public_key_hex,
                 current_encryption,
@@ -117,11 +117,11 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         let device = self
             .bind_device(db, db_store_dir.clone(), owner_keypair)
             .await
-            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            .map_err(MembershipOpsError::Store)?;
         let mut writer = device
             .authorize_writer()
             .await
-            .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            .map_err(MembershipOpsError::Store)?;
         writer
             .revoke_member_without_local_adoption_for_test(
                 revokee_pubkey,

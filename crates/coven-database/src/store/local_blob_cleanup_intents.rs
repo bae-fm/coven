@@ -116,13 +116,11 @@ impl LocalBlobCleanupIntent {
         namespace: String,
         blob_id: String,
         identity: String,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, coven_foundation::object_hash::InvalidObjectHash> {
         if identity == "local" {
             return Ok(Self::local(namespace, blob_id));
         }
-        let locator_hash = identity
-            .parse()
-            .map_err(|error| format!("invalid exact local cleanup identity: {error}"))?;
+        let locator_hash = identity.parse()?;
         Ok(Self::exact(namespace, blob_id, locator_hash))
     }
 
@@ -139,28 +137,19 @@ impl LocalBlobCleanupIntent {
     }
 
     pub async fn apply(&self, store_dir: &StoreDir) -> Result<(), DbError> {
-        let cleanup = match &self.identity {
+        match &self.identity {
             LocalBlobCleanupIdentity::Local => store_dir
                 .remove_local_blob(self.namespace(), self.blob_id())
                 .await
                 .map(|_| ())
-                .map_err(|error| error.to_string()),
+                .map_err(DbError::from),
             LocalBlobCleanupIdentity::Exact(locator_hash) => store_dir
                 .remove_cached_locator(self.namespace(), *locator_hash)
                 .await
-                .map_err(|error| error.to_string()),
-            LocalBlobCleanupIdentity::Row { .. } => {
-                return Err(DbError::Message(
-                    "persisted local cleanup intent is row-bound".to_string(),
-                ));
-            }
-        };
-        cleanup.map_err(|error| {
-            DbError::Message(format!(
-                "remove local copies for {}/{}: {error}",
-                self.namespace(),
-                self.blob_id()
-            ))
-        })
+                .map_err(DbError::from),
+            LocalBlobCleanupIdentity::Row { .. } => Err(DbError::Message(
+                "persisted local cleanup intent is row-bound".to_string(),
+            )),
+        }
     }
 }

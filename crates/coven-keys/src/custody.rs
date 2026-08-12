@@ -65,8 +65,7 @@ impl MasterKeyCustody for KeyringCustody {
         self.keys
             .get_encryption_key()?
             .map(|serialized| {
-                MasterKeyring::from_serialized(&serialized)
-                    .map_err(|error| KeyError::Crypto(error.to_string()))
+                MasterKeyring::from_serialized(&serialized).map_err(KeyError::Encryption)
             })
             .transpose()
     }
@@ -92,9 +91,8 @@ impl CustodySecret for MasterKeyring {
     }
 
     fn from_bytes(bytes: Vec<u8>) -> Result<Self, KeyError> {
-        let serialized = String::from_utf8(bytes)
-            .map_err(|e| KeyError::Crypto(format!("decrypted master keyring is not UTF-8: {e}")))?;
-        MasterKeyring::from_serialized(&serialized).map_err(|e| KeyError::Crypto(e.to_string()))
+        let serialized = String::from_utf8(bytes)?;
+        MasterKeyring::from_serialized(&serialized).map_err(KeyError::Encryption)
     }
 }
 
@@ -279,7 +277,7 @@ mod tests {
             .expect_err("wrong passphrase must not unlock");
         assert!(
             error.to_string().to_lowercase().contains("passphrase")
-                || matches!(error, KeyError::Crypto(_))
+                || matches!(error, KeyError::PassphraseEnvelopeDecryption)
         );
     }
 

@@ -104,7 +104,7 @@ impl CircleCurrentState {
     pub fn from_verified(
         candidate_family: CandidateFamilyId,
         activation: &VerifiedCircleReference,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CircleStateError> {
         let current = CircleCurrentControl::from_verified(activation);
         // A deletion is terminal and carries no live access material; it reduces
         // to Deleted regardless of any retained access leaf.
@@ -113,7 +113,9 @@ impl CircleCurrentState {
             return if state.verify() {
                 Ok(state)
             } else {
-                Err("verified Circle deletion cannot form a valid current state".to_string())
+                Err(CircleStateError::Invariant(
+                    "verified Circle deletion cannot form a valid current state".to_string(),
+                ))
             };
         }
         let state = match &activation.local_access {
@@ -146,9 +148,9 @@ impl CircleCurrentState {
                     crate::circle::CircleControlState::ActiveEpoch(_) => Self::Active(accessible),
                     crate::circle::CircleControlState::EpochClose(_) => Self::Closing(accessible),
                     crate::circle::CircleControlState::Deleted(_) => {
-                        return Err(
-                            "verified Circle deletion cannot carry active access".to_string()
-                        )
+                        return Err(CircleStateError::Invariant(
+                            "verified Circle deletion cannot carry active access".to_string(),
+                        ))
                     }
                 }
             }
@@ -156,16 +158,22 @@ impl CircleCurrentState {
         if state.verify() {
             Ok(state)
         } else {
-            Err("verified Circle activation cannot form a valid current state".to_string())
+            Err(CircleStateError::Invariant(
+                "verified Circle activation cannot form a valid current state".to_string(),
+            ))
         }
     }
 
-    pub fn advance(self, next: Self) -> Result<Self, String> {
+    pub fn advance(self, next: Self) -> Result<Self, CircleStateError> {
         if !self.verify() || !next.verify() {
-            return Err("Circle current-state reduction received invalid state".to_string());
+            return Err(CircleStateError::Invariant(
+                "Circle current-state reduction received invalid state".to_string(),
+            ));
         }
         if self.circle_id() != next.circle_id() {
-            return Err("Circle current-state reduction crossed Circle identities".to_string());
+            return Err(CircleStateError::Invariant(
+                "Circle current-state reduction crossed Circle identities".to_string(),
+            ));
         }
         match self {
             Self::Active(active) => advance_resolved_control(active.current, next),
@@ -177,14 +185,16 @@ impl CircleCurrentState {
             // concurrent branch that does not cover it surfaces as the conflict
             // the Owner must resolve, exactly like any racing successor.
             Self::Deleted(deleted) => {
-                let next_current = next
-                    .resolved_control()
-                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+                let next_current = next.resolved_control().ok_or_else(|| {
+                    CircleStateError::Invariant(
+                        "new Circle activation is already conflicted".to_string(),
+                    )
+                })?;
                 if next_current.causally_covers(&deleted) {
-                    return Err(
+                    return Err(CircleStateError::Invariant(
                         "Circle deletion is terminal; a control descending from it is invalid"
                             .to_string(),
-                    );
+                    ));
                 }
                 let mut branches = vec![*deleted, next_current.clone()];
                 canonicalize_control_branches(&mut branches)?;
@@ -193,7 +203,11 @@ impl CircleCurrentState {
             Self::ControlConflict { mut branches } => {
                 let next_current = next
                     .resolved_control()
-                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?
+                    .ok_or_else(|| {
+                        CircleStateError::Invariant(
+                            "new Circle activation is already conflicted".to_string(),
+                        )
+                    })?
                     .clone();
                 branches.retain(|branch| !next_current.causally_covers(branch));
                 if branches.is_empty() {
@@ -444,7 +458,7 @@ impl CircleCurrentState {
             return Ok(None);
         }
         if !verify_accessible_state(active) {
-            return Err(CircleStateError(format!(
+            return Err(CircleStateError::Invariant(format!(
                 "Circle {} current package access is invalid",
                 active.current.circle_id()
             )));
@@ -528,10 +542,10 @@ fn verify_accessible_state(state: &CircleAccessibleState) -> bool {
 fn advance_resolved_control(
     current: CircleCurrentControl,
     next: CircleCurrentState,
-) -> Result<CircleCurrentState, String> {
-    let next_current = next
-        .resolved_control()
-        .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+) -> Result<CircleCurrentState, CircleStateError> {
+    let next_current = next.resolved_control().ok_or_else(|| {
+        CircleStateError::Invariant("new Circle activation is already conflicted".to_string())
+    })?;
     if next_current.causally_covers(&current) {
         Ok(next)
     } else {
@@ -541,13 +555,17 @@ fn advance_resolved_control(
     }
 }
 
-fn canonicalize_control_branches(branches: &mut [CircleCurrentControl]) -> Result<(), String> {
+fn canonicalize_control_branches(
+    branches: &mut [CircleCurrentControl],
+) -> Result<(), CircleStateError> {
     branches.sort_by_key(CircleCurrentControl::control_hash);
     if branches
         .windows(2)
         .any(|pair| pair[0].control_hash() == pair[1].control_hash())
     {
-        return Err("Circle control conflict contains a duplicate branch".to_string());
+        return Err(CircleStateError::Invariant(
+            "Circle control conflict contains a duplicate branch".to_string(),
+        ));
     }
     Ok(())
 }

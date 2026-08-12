@@ -218,7 +218,7 @@ impl StoreSession<'_> {
                         .commit
                         .value
                         .verify_store_package(package.semantic_bytes())
-                        .map_err(|error| DbError::Message(error.to_string()))?;
+                        .map_err(DbError::from)?;
                 }
                 coven_protocol::audience_package::PackageAudience::Circle { circle_id, .. } => {
                     let partition = partitions
@@ -242,7 +242,7 @@ impl StoreSession<'_> {
                         .commit
                         .value
                         .verify_circle_package(*circle_id, package.semantic_bytes())
-                        .map_err(|error| DbError::Message(error.to_string()))?;
+                        .map_err(DbError::from)?;
                 }
             }
             indexed.insert(package.remote_object_id());

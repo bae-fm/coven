@@ -39,8 +39,9 @@ impl StoreSession<'_> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let image_facts =
             crate::payload_store::write_payload_file_blocking(&tx, self.store_dir, image.path())
-                .map_err(|error| {
-                    SnapshotImageError::Projection(format!("spool Circle snapshot image: {error}"))
+                .map_err(|source| SnapshotImageError::ProjectionPayloadStore {
+                    operation: "spool Circle snapshot image".to_string(),
+                    source,
                 });
         let (image_hash, _) = image.finish(image_facts).map_err(snapshot_image_db_error)?;
         let image_prepared_hash = crate::payload_store::write_payload_blocking(
@@ -105,7 +106,7 @@ impl StoreSession<'_> {
                     "{}.json",
                     circle_snapshot_slot_prefix(meta.circle_id, &device_id, 0)
                 ))
-                .map_err(|error| DbError::Message(error.to_string()))?,
+                .map_err(DbError::from)?,
             ),
         };
         if meta.generation != expected_generation
@@ -126,7 +127,7 @@ impl StoreSession<'_> {
             meta.circle_id,
             &device_id,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         if meta.successor.activation != activation
             || meta.successor.next_slot.logical_key()
                 != format!(
@@ -155,19 +156,19 @@ impl StoreSession<'_> {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 meta.circle_id.to_string(),
-                serde_json::to_string(&reference).map_err(|error| DbError::Message(format!(
-                    "serialize exact Circle snapshot ref: {error}"
-                )))?,
-                serde_json::to_string(&meta_prepared).map_err(|error| DbError::Message(
-                    format!("serialize prepared Circle snapshot metadata: {error}")
-                ))?,
+                serde_json::to_string(&reference).map_err(|error| {
+                    DbError::context("serialize exact Circle snapshot ref", error)
+                })?,
+                serde_json::to_string(&meta_prepared).map_err(|error| {
+                    DbError::context("serialize prepared Circle snapshot metadata", error)
+                })?,
                 serde_json::to_string(&meta.bootstrap.image).map_err(|error| {
                     DbError::context("serialize exact Circle snapshot image ref", error)
                 })?,
                 meta.to_bytes(),
-                serde_json::to_string(&blobs).map_err(|error| DbError::Message(format!(
-                    "serialize prepared Circle snapshot blobs: {error}"
-                )))?,
+                serde_json::to_string(&blobs).map_err(|error| {
+                    DbError::context("serialize prepared Circle snapshot blobs", error)
+                })?,
             ],
         )
         .map_err(DbError::from)?;
@@ -251,9 +252,9 @@ impl StoreSession<'_> {
             rusqlite::params![
                 circle_id.to_string(),
                 accepted_generation,
-                serde_json::to_string(&accepted).map_err(|error| DbError::Message(format!(
-                    "serialize published Circle snapshot ref: {error}"
-                )))?,
+                serde_json::to_string(&accepted).map_err(|error| {
+                    DbError::context("serialize published Circle snapshot ref", error)
+                })?,
                 serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
                     |error| DbError::context("serialize Circle snapshot successor slot", error)
                 )?,

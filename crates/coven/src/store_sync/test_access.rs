@@ -30,7 +30,10 @@ impl StoreSync {
         store_id: &str,
         signer: coven_keys::keys::UserKeypair,
         home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
-    ) -> Result<std::sync::Arc<coven_replication::sync::test_helpers::TestStore>, String> {
+    ) -> Result<
+        std::sync::Arc<coven_replication::sync::test_helpers::TestStore>,
+        coven_replication::sync::test_helpers::TestError,
+    > {
         coven_replication::sync::test_helpers::TestStore::create_with_database(
             self.database.clone(),
             self.store_dir.clone(),
@@ -45,7 +48,7 @@ impl StoreSync {
     pub(crate) async fn publish_test_store(
         &self,
         store: &coven_replication::sync::test_helpers::TestStore,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, coven_replication::sync::test_helpers::TestError> {
         store
             .publish_pending_store_database(&self.database, &self.store_dir)
             .await
@@ -60,19 +63,13 @@ impl StoreSync {
             std::collections::BTreeMap<String, u64>,
             coven_replication::sync::store::StorePullResult,
         ),
-        coven_replication::sync::cycle::SyncCycleFailure,
+        coven_replication::sync::test_helpers::TestError,
     > {
         let device = store
             .open_into_store_database(&self.database, self.store_dir.clone())
-            .await
-            .map_err(coven_replication::sync::cycle::SyncCycleFailure::from)?;
+            .await?;
         let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
-        let mut authorization = device.authorize_writer().await.map_err(|error| {
-            coven_replication::sync::cycle::SyncCycleFailure::operation(
-                "authorize Store writer",
-                error,
-            )
-        })?;
+        let mut authorization = device.authorize_writer().await?;
         let result = authorization.pull(Some(&routing_encryption)).await?;
         let sequences = result
             .frontier
@@ -88,15 +85,14 @@ impl StoreSync {
         store: &coven_replication::sync::test_helpers::TestStore,
         owner: &coven_keys::keys::UserKeypair,
         snapshot_path: std::path::PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<(), coven_replication::sync::test_helpers::TestError> {
         let owner_device = store
             .bind_store_device(&self.database, self.store_dir.clone(), owner)
             .await?;
         let snapshot = self
             .database
             .capture_snapshot_image_for_test(store.root().clone(), snapshot_path, None)
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         let coverage =
             coven_protocol::store_commit::CommitFrontier(std::collections::BTreeMap::new());
         owner_device
@@ -190,7 +186,10 @@ impl StoreSync {
         connected_sync!(self)
             .ok_or_else(|| StorageError::Storage("sync connection is not installed".to_string()))?
             .open_sealed_blob_for_test(bytes, context)
-            .map_err(StorageError::Storage)
+            .map_err(|source| StorageError::Decryption {
+                context: "open test sealed blob".to_string(),
+                source,
+            })
     }
 
     #[cfg(test)]

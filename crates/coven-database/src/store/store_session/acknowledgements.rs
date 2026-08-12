@@ -35,7 +35,7 @@ impl StoreSession<'_> {
         }
         for remote in candidate
             .acknowledgement_remote_objects(&outbound.ack)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
         {
             persist_exact_remote_object_on(
                 &tx,
@@ -47,7 +47,7 @@ impl StoreSession<'_> {
         for circle in &outbound.circle_acknowledgements {
             for remote in candidate
                 .circle_acknowledgement_remote_objects(&circle.ack)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
             {
                 persist_exact_remote_object_on(
                     &tx,
@@ -105,7 +105,7 @@ impl StoreSession<'_> {
             let commit = load_remote_object_on(&tx, remote_object_id(&candidate.reference.object))?;
             if commit
                 .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 != Some(nonactivation.proof())
             {
                 return Err(DbError::Message(
@@ -117,7 +117,7 @@ impl StoreSession<'_> {
                 load_protocol_inert_object_on(&tx, remote_object_id(&outbound.reference.object))?;
             if inert
                 .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 != Some(nonactivation.proof())
             {
                 return Err(DbError::Message(
@@ -128,7 +128,7 @@ impl StoreSession<'_> {
             let head_remote = load_remote_object_on(&tx, remote_object_id(&head.object))?;
             if head_remote
                 .candidate_nonactivation_proof(&candidate.reference)
-                .map_err(|error| DbError::Message(error.to_string()))?
+                .map_err(DbError::from)?
                 != Some(nonactivation.proof())
             {
                 return Err(DbError::Message(
@@ -225,7 +225,7 @@ impl StoreSession<'_> {
         let mut candidate = candidate;
         candidate
             .adopt_merge_head(winner, winner_prepared.reference().clone())
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         set_outbound_store_ack_activation_on(
             &tx,
             expected,
@@ -294,7 +294,7 @@ impl StoreSession<'_> {
         let commit = load_remote_object_on(&tx, commit_id)?;
         let proof = commit
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .ok_or_else(|| {
                 DbError::Message("losing Store acknowledgement commit lacks its proof".to_string())
             })?;
@@ -307,7 +307,7 @@ impl StoreSession<'_> {
         let head_remote = load_remote_object_on(&tx, head_id)?;
         if head_remote
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(proof)
         {
             return Err(DbError::Message(
@@ -318,7 +318,7 @@ impl StoreSession<'_> {
             load_protocol_inert_object_on(&tx, remote_object_id(&outbound.reference.object))?;
         if inert
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(proof)
         {
             return Err(DbError::Message(
@@ -352,9 +352,7 @@ impl StoreDatabase {
         expected: StoreAckRef,
         nonactivation: VerifiedCandidateNonactivation,
     ) -> Result<(), DbError> {
-        let verified_candidate = nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        let verified_candidate = nonactivation.candidate_reference().map_err(DbError::from)?;
         if !matches!(
             nonactivation.proof(),
             CandidateNonactivationProof::MergeWinner { .. }

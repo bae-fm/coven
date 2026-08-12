@@ -52,7 +52,7 @@ impl StoreTransaction<'_, '_> {
             install.store_root.value.descriptor.founder_grant.clone(),
             &install.store_root.value.descriptor.founder_recovery,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         validate_snapshot_object_owners_on(conn, &root, &install.snapshot.meta)?;
         install_store_root_authority_on(conn, &root, &install.store_root.bytes)?;
         install_store_founder_state_on(

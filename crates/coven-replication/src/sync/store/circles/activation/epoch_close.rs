@@ -39,7 +39,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 != commit
                     .order
                     .predecessor_cut()
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                    .map_err(CircleOperationError::from)?
                     .frontier()
         {
             return Err(CircleOperationError::InvalidState(
@@ -51,7 +51,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .await?;
         let remaining = roster_chain
             .resolved_with_successor(intent.removal.clone())
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         if remaining.state_hash() != intent.remaining_roster_state_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle epoch-close intent names another remaining roster".to_string(),
@@ -128,12 +128,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             )
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        let intent: coven_protocol::circle::CircleEpochCloseIntent = serde_json::from_slice(&bytes)
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse Circle epoch-close intent: {error}"
-                ))
-            })?;
+        let intent: coven_protocol::circle::CircleEpochCloseIntent =
+            serde_json::from_slice(&bytes)?;
         if !intent.verify()
             || intent.store_root_hash != store_root_hash
             || intent.circle_id != control.value.circle_id
@@ -301,13 +297,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let coven_protocol::circle::CircleEpochCloseSlotValue::Outcome(outcome) =
-            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes).map_err(
-                |error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse Circle epoch-close outcome: {error}"
-                    ))
-                },
-            )?
+            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&outcome_bytes)?
         else {
             return Err(CircleOperationError::InvalidState(
                 "Circle epoch-close outcome slot holds a cancellation for a finalized successor"
@@ -355,14 +345,8 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             // Dispatch on the slot's actual settled arm, not the outcome's claim: the
             // outcome's declared settlement must equal the one derived here, which is
             // what refuses an outcome naming an exclusion for a slot holding a response.
-            let slot_value = coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(
-                &bytes,
-            )
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "parse Circle epoch-close response slot: {error}"
-                ))
-            })?;
+            let slot_value =
+                coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)?;
             let settlement = match &slot_value {
                 coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(response) => {
                     let registration = self
@@ -524,13 +508,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
         let coven_protocol::circle::CircleEpochCloseSlotValue::Cancellation(cancellation) =
-            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes).map_err(
-                |error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse Circle epoch-close cancellation: {error}"
-                    ))
-                },
-            )?
+            coven_protocol::circle::CircleEpochCloseSlotValue::parse(&cancellation_bytes)?
         else {
             return Err(CircleOperationError::InvalidState(
                 "Circle reopen outcome slot holds a final outcome, not a cancellation".to_string(),

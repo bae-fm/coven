@@ -60,7 +60,7 @@ impl PreparedAudiencePackage {
         })?;
         let read = |hash| {
             crate::payload_store::read_payload_blocking(conn, store_dir, hash)
-                .map_err(|error| DbError::Message(error.to_string()))
+                .map_err(DbError::from)
         };
         let semantic_bytes = read(semantic_hash)?;
         let stored_bytes = read(stored_hash)?;
@@ -293,7 +293,7 @@ mod tests {
         include_body: bool,
         include_locator: bool,
         include_binding: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), DbError> {
         use coven_protocol::audience_package::RowBlobLocatorBinding;
         use coven_protocol::blob::BlobScope;
         use coven_protocol::causal_grants::AuthorStreamId;
@@ -318,12 +318,10 @@ mod tests {
         let uploader = StoreDeviceRegistrationRef {
             device_id: "01"
                 .repeat(32)
-                .parse::<coven_protocol::store_commit::StoreDeviceId>()
-                .map_err(|error| error.to_string())?,
+                .parse::<coven_protocol::store_commit::StoreDeviceId>()?,
             registration_hash: ObjectHash::digest(uploader_bytes),
             object: ExactObjectRef::new(
-                ObjectSlot::logical("store-v1/registrations/outbound-graph.json".to_string())
-                    .map_err(|error| error.to_string())?,
+                ObjectSlot::logical("store-v1/registrations/outbound-graph.json".to_string())?,
                 uploader_bytes.len() as u64,
                 ObjectHash::digest(uploader_bytes),
             ),
@@ -337,15 +335,14 @@ mod tests {
             coven_keys::encryption::KeyFingerprint::from_bytes([3; 32]),
             7,
             ObjectHash::digest(b"content"),
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let stored_bytes = b"sealed-content".to_vec();
         let object = ExactObjectRef::new(
-            ObjectSlot::logical(locator.semantic_key()).map_err(|error| error.to_string())?,
+            ObjectSlot::logical(locator.semantic_key())?,
             stored_bytes.len() as u64,
             ObjectHash::digest(&stored_bytes),
         );
-        let stored = StoredBlobRef::new(locator, object).map_err(|error| error.to_string())?;
+        let stored = StoredBlobRef::new(locator, object)?;
         let bindings = if include_binding {
             vec![RowBlobLocatorBinding::new(
                 "items",
@@ -353,8 +350,7 @@ mod tests {
                 "stamp-a",
                 "media_blob",
                 stored.clone(),
-            )
-            .map_err(|error| error.to_string())?]
+            )?]
         } else {
             Vec::new()
         };
@@ -390,11 +386,10 @@ mod tests {
                 b"changeset".to_vec(),
                 bindings,
             )
-        }
-        .map_err(|error| error.to_string())?;
+        }?;
         let package_bytes = package.to_bytes();
         let package_object = ExactObjectRef::new(
-            ObjectSlot::logical("test/package".to_string()).map_err(|error| error.to_string())?,
+            ObjectSlot::logical("test/package".to_string())?,
             package_bytes.len() as u64,
             ObjectHash::digest(&package_bytes),
         );
@@ -405,8 +400,7 @@ mod tests {
             package_bytes.clone(),
             package_bytes,
             package_object,
-        )
-        .map_err(|error| error.to_string())?];
+        )?];
         let blobs = if include_locator {
             vec![PreparedAudienceBlob {
                 remote_object_id: blob_id,
@@ -425,7 +419,6 @@ mod tests {
             &object_ids,
             &PreparedAudienceObjects { packages, blobs },
         )
-        .map_err(|error| error.to_string())
     }
 
     /// A publishable blob needs all three of its parts: the body among the

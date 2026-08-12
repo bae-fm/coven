@@ -17,7 +17,7 @@ impl StoreSession<'_> {
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status {
-            witness.validate().map_err(DbError::Message)?;
+            witness.validate().map_err(DbError::from)?;
             let candidate = witness.original_position().commit();
             let StoreCommitCoord {
                 stream_id,
@@ -119,7 +119,7 @@ impl StoreSession<'_> {
         let status: WriteStatus = serde_json::from_str(&raw_status)
             .map_err(|error| DbError::context("Merge cleanup status", error))?;
         if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &status {
-            witness.validate().map_err(DbError::Message)?;
+            witness.validate().map_err(DbError::from)?;
             let candidate = crate::StoreDatabase::load_merge_retraction_cleanup_on(
                 records,
                 verified_authority,
@@ -236,7 +236,7 @@ impl StoreSession<'_> {
         let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = status else {
             return Ok(());
         };
-        witness.validate().map_err(DbError::Message)?;
+        witness.validate().map_err(DbError::from)?;
         let candidate_ref = witness.original_position().commit().clone();
         let candidate = crate::store::store_session::StoreTransaction::new(&tx, self.store_dir)
             .load_merge_retraction_cleanup(verified_authority, &candidate_ref)?;
@@ -301,7 +301,7 @@ impl StoreSession<'_> {
         let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
         let proof = remote
             .candidate_nonactivation_proof(candidate)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             .ok_or_else(|| {
                 DbError::Message("Merge retraction cleanup has no terminal proof".to_string())
             })?;
@@ -334,7 +334,7 @@ impl StoreSession<'_> {
                     &prepared.commit,
                     proof.clone(),
                 )
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
                 validate_terminal_nonactivation_authority_on(
                     records,
                     verified_authority,
@@ -343,7 +343,7 @@ impl StoreSession<'_> {
                 )?;
                 TerminalCandidateAuthority::DependencyRetraction(
                     coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
-                        .map_err(|error| DbError::Message(error.to_string()))?,
+                        .map_err(DbError::from)?,
                 )
             }
             coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {
@@ -388,10 +388,7 @@ impl StoreSession<'_> {
             verified_authority,
             candidate,
         )?;
-        if durable
-            .reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != *candidate
+        if durable.reference().map_err(DbError::from)? != *candidate
             || head_nonactivation.head().object() != &prepared.head_object
         {
             return Err(DbError::Message(
@@ -422,7 +419,7 @@ impl StoreSession<'_> {
         let remote = load_remote_object_on(conn, remote_object_id(&candidate.object))?;
         if remote
             .candidate_nonactivation_proof(candidate)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(durable.proof())
         {
             return Err(DbError::Message(
@@ -514,7 +511,7 @@ impl StoreDatabase {
     ) -> Result<(), DbError> {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         self.call_store(move |session| {
             session.confirm_merge_retraction_cleanup_nonactivation(
                 &root,

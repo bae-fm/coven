@@ -251,9 +251,7 @@ impl CloudKitCloudHome {
         })
         .await
         .map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "CloudKit atomic-create staging task failed: {error}"
-            ))
+            CloudHomeError::transport("run CloudKit atomic-create staging task", error)
         })?
     }
 
@@ -351,7 +349,7 @@ where
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| CloudHomeError::Transport(format!("spawn_blocking failed: {e}")))?
+        .map_err(|e| CloudHomeError::transport("spawn_blocking failed".to_string(), e))?
 }
 
 struct BlockingState<T> {

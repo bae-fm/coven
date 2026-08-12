@@ -61,7 +61,7 @@ impl DeviceStateResolver<'_> {
                 return database
                     .resolved_store_device_state(reference)
                     .await
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()));
+                    .map_err(RegistrationLoadError::from);
             }
             DeviceStateResolver::Loaded { genesis, states } => {
                 let frontier = &reference.frontier().0;
@@ -81,7 +81,7 @@ impl DeviceStateResolver<'_> {
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     )
-                    .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?
+                    .map_err(RegistrationLoadError::from)?
                 }
             }
         };

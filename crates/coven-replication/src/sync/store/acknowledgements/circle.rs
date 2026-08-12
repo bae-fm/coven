@@ -59,7 +59,7 @@ impl<'operation, 'storage> CircleAcknowledgementReader<'operation, 'storage> {
             .await
             .map_err(StoreObjectError::from)?;
         CircleAck::parse_at(&bytes, self.root, reference, author.value())
-            .map_err(|error| StoreAckError::InvalidOutbound(error.to_string()))
+            .map_err(StoreAckError::from)
     }
 
     pub(crate) async fn stable_dominating(

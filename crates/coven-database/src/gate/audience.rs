@@ -12,7 +12,7 @@ use super::outbound::{
     query_column_present, query_column_text, row_id_for_column_value, DeletedAudiences,
     DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
 };
-use super::{all_row_ids, query_mapped_rows, query_row_optional, GateError};
+use super::{all_row_ids, query_mapped_rows, query_row_optional, CircleControlFailure, GateError};
 use crate::quote_ident;
 use coven_protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
@@ -72,11 +72,18 @@ pub struct CirclePartitionControl {
     stored_json: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CirclePartitionControlError {
+    #[error("parse Circle partition control: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid Circle partition control: {0}")]
+    Control(#[from] coven_protocol::circle_control::CircleControlCoordError),
+}
+
 impl CirclePartitionControl {
-    pub fn from_stored_json(stored_json: String) -> Result<Self, String> {
-        let coordinate: CircleControlCoord =
-            serde_json::from_str(&stored_json).map_err(|error| error.to_string())?;
-        coordinate.validate().map_err(|error| error.to_string())?;
+    pub fn from_stored_json(stored_json: String) -> Result<Self, CirclePartitionControlError> {
+        let coordinate: CircleControlCoord = serde_json::from_str(&stored_json)?;
+        coordinate.validate()?;
         Ok(Self {
             coordinate,
             stored_json,

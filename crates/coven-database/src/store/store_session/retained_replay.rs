@@ -51,7 +51,7 @@ pub(super) fn load_replay_baseline_metadata_on(
         .map_err(|error| DbError::context("retained replay authority hash", error))?;
     let authority_bytes = records
         .verified_payload(authority_hash)
-        .map_err(|error| DbError::Message(format!("read retained replay authority: {error}")))?;
+        .map_err(|error| DbError::context("read retained replay authority", error))?;
     let authority: RetainedReplayAuthority = serde_json::from_slice(&authority_bytes)
         .map_err(|error| DbError::context("retained replay authority", error))?;
     if serde_json::to_string(&parsed_exact_cut)
@@ -406,9 +406,9 @@ impl RetainedReplaySnapshotAuthority {
                 .reference()
                 .object
                 .verify(&bytes)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let parsed = StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             if &parsed != registration.value() {
                 return Err(DbError::Message(
                     "retained snapshot registration is not canonical".to_string(),
@@ -417,7 +417,7 @@ impl RetainedReplaySnapshotAuthority {
             registration
                 .reference()
                 .verify_registration(registration.value())
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
                 DbError::Message(
                     "retained snapshot active device has no acknowledgement".to_string(),
@@ -425,7 +425,7 @@ impl RetainedReplaySnapshotAuthority {
             })?;
             acknowledgement
                 .validate_chain(&self.store_root, registration)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let (acknowledgement_ref, acknowledgement_value) =
                 acknowledgement.latest().ok_or_else(|| {
                     DbError::Message(
@@ -437,14 +437,14 @@ impl RetainedReplaySnapshotAuthority {
                 .activating_commit
                 .object
                 .verify(&commit_bytes)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let parsed_commit = VerifiedStoreBatchCommit::parse(
                 &commit_bytes,
                 self.store_root.store_root_hash,
                 &acknowledgement.activating_commit,
                 registration.value(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
             if parsed_commit.value() != &acknowledgement.activating_commit_value
                 || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
                 || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
@@ -517,7 +517,7 @@ impl RetainedReplayBaseline {
             store_dir,
             self.image_payload_hash,
         )
-        .map_err(|error| DbError::Message(format!("read retained replay image: {error}")))
+        .map_err(|error| DbError::context("read retained replay image", error))
     }
 
     pub(crate) fn validate_image(

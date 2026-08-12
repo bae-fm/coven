@@ -191,7 +191,10 @@ impl Database {
         self.connection.stage_host_write_blobs(blobs).await
     }
 
-    pub(crate) async fn sync_store_parent_dir(&self, path: &Path) -> Result<(), String> {
+    pub(crate) async fn sync_store_parent_dir(
+        &self,
+        path: &Path,
+    ) -> Result<(), coven_foundation::atomic_file::FileError> {
         self.connection.sync_store_parent_dir(path).await
     }
 

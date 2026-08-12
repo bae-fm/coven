@@ -49,7 +49,7 @@ impl Default for WriteBatch {
 pub struct BlobFileFailure {
     pub namespace: String,
     pub id: String,
-    pub reason: String,
+    pub reason: coven_foundation::atomic_file::FileError,
 }
 
 impl std::fmt::Display for BlobFileFailure {
@@ -126,20 +126,20 @@ impl StagedBlob {
         self.staged.as_mut().expect("blob is staged")
     }
 
-    fn publish(&mut self) -> Result<(), String> {
+    fn publish(&mut self) -> Result<(), coven_foundation::atomic_file::FileError> {
         let staged = self.staged.take().expect("blob is staged");
         self.published = Some(staged.publish_for_transaction()?);
         Ok(())
     }
 
-    async fn discard(mut self) -> Result<(), String> {
+    async fn discard(mut self) -> Result<(), coven_foundation::atomic_file::FileError> {
         match self.staged.take() {
             Some(staged) => staged.discard().await,
             None => Ok(()),
         }
     }
 
-    fn rollback(mut self) -> Result<(), String> {
+    fn rollback(mut self) -> Vec<coven_foundation::atomic_file::FileError> {
         let mut failures = Vec::new();
         if let Some(published) = self.published.take() {
             if let Err(error) = published.rollback() {
@@ -151,11 +151,7 @@ impl StagedBlob {
                 failures.push(error);
             }
         }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        failures
     }
 
     fn commit(mut self) {
@@ -192,7 +188,7 @@ impl StagedBlobBatch {
             let (namespace, id) = (blob.namespace.clone(), blob.id.clone());
             if let Err(reason) = blob.discard().await {
                 failures.push(BlobFileFailure {
-                    namespace,
+                    namespace: namespace.clone(),
                     id,
                     reason,
                 });
@@ -229,10 +225,10 @@ impl StagedBlobBatch {
         let mut failures = Vec::new();
         for blob in self.blobs.into_iter().rev() {
             let (namespace, id) = (blob.namespace.clone(), blob.id.clone());
-            if let Err(reason) = blob.rollback() {
+            for reason in blob.rollback() {
                 failures.push(BlobFileFailure {
-                    namespace,
-                    id,
+                    namespace: namespace.clone(),
+                    id: id.clone(),
                     reason,
                 });
             }
@@ -271,34 +267,42 @@ impl<R, E> HostWriteOperation<R, E> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HostWriteError<E> {
-    Host(E),
-    Database(DbError),
-    Blob(String),
-    UnsafeBlobPath(PathTokenError),
+    #[error("host write closure failed: {0}")]
+    Host(#[source] E),
+    #[error("database write failed: {0}")]
+    Database(#[source] DbError),
+    #[error("local blob write failed: {0}")]
+    Blob(#[source] coven_foundation::atomic_file::FileError),
+    #[error("blob declaration failed: {0}")]
+    BlobDeclaration(#[source] crate::BlobDeclError),
+    #[error("unsafe blob path: {0}")]
+    UnsafeBlobPath(#[source] PathTokenError),
+    #[error("the host write closure panicked")]
     WriteClosurePanicked,
+    #[error(
+        "write failed: {write}; failed to remove installed local blobs during rollback: {rollback}"
+    )]
     WriteRollbackFailed {
+        #[source]
         write: Box<Self>,
         rollback: BlobFileFailures,
     },
+    #[error("write failed: {operation}; failed to remove unpublished local blobs: {cleanup}")]
     BlobCleanupFailed {
+        #[source]
         operation: Box<Self>,
         cleanup: BlobFileFailures,
     },
-    BlobStillReferenced {
-        namespace: String,
-        id: String,
-    },
-    BlobAlreadyReferenced {
-        namespace: String,
-        id: String,
-    },
-    BlobOwnedByPendingWrite {
-        namespace: String,
-        id: String,
-    },
-    Io(std::io::Error),
+    #[error("blob {namespace}/{id} is still referenced by a row after the write")]
+    BlobStillReferenced { namespace: String, id: String },
+    #[error("blob {namespace}/{id} is already referenced by a row")]
+    BlobAlreadyReferenced { namespace: String, id: String },
+    #[error("blob {namespace}/{id} is owned by an unpublished write")]
+    BlobOwnedByPendingWrite { namespace: String, id: String },
+    #[error("host write I/O failed: {0}")]
+    Io(#[source] std::io::Error),
 }
 
 impl<E> From<DbError> for HostWriteError<E> {

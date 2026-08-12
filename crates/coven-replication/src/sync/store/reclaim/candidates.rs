@@ -81,10 +81,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 self.storage.as_ref(),
             ))
             .await
-            .map_err(|error| StoreReclaimError::Journal(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
             for remote in object
                 .remote_objects(&candidate)
-                .map_err(|error| StoreReclaimError::Journal(error.to_string()))?
+                .map_err(StoreReclaimError::from)?
             {
                 if matches!(
                     remote.record(),
@@ -219,7 +219,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             })?;
         let receipt = plan
             .sign_reclaim_receipt(authorization.clone(), provider_admin_grant)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreReclaimReceipt,
@@ -346,7 +346,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         coven_protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
                             .extension(),
                     )
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
+                    .map_err(StoreReclaimError::from)?,
                 )
             }
             ReclaimTarget::CircleSnapshotImage(target) => {
@@ -373,7 +373,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                         coven_protocol::objects::ProtectedObjectDomain::CircleSnapshotImage
                             .extension(),
                     )
-                    .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?,
+                    .map_err(StoreReclaimError::from)?,
                 )
             }
             ReclaimTarget::AudienceBlob(_) => {
@@ -406,7 +406,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             for snapshot in history
                 .load_store_snapshot_stream(registration.reference(), registration.value())
                 .await
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+                .map_err(StoreReclaimError::from)?
             {
                 authorized.push(snapshot);
             }
@@ -427,7 +427,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 crate::sync::store::pull::StorePullError::SnapshotAuthorInactive
                 | crate::sync::store::pull::StorePullError::SnapshotAuthorNotOwner,
             ) => return Err(StoreReclaimError::NoSnapshot),
-            Err(error) => return Err(StoreReclaimError::Authorization(error.to_string())),
+            Err(error) => return Err(StoreReclaimError::from(error)),
         };
         let snapshot = selected.snapshot;
         let image = storage

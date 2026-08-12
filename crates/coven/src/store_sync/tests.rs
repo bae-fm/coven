@@ -219,11 +219,18 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let SyncError::CloudHome(cloud_home_error) = &error else {
         panic!("expected CloudHome(_), got {error:?}");
     };
-    assert!(matches!(cloud_home_error, CloudHomeError::Configuration(_)));
+    let CloudHomeError::ConfigurationSource { operation, source } = cloud_home_error else {
+        panic!("expected source-bearing configuration error, got {cloud_home_error:?}");
+    };
+    assert_eq!(operation, "read S3 credentials");
+    assert!(matches!(
+        source.downcast_ref::<KeyError>(),
+        Some(KeyError::Json {
+            operation: "parse cloud home credentials JSON",
+            ..
+        })
+    ));
     assert!(!cloud_home_error.is_retryable());
-    assert!(error
-        .to_string()
-        .contains("malformed cloud home credentials JSON"));
 }
 
 #[tokio::test]
@@ -517,7 +524,12 @@ async fn foreign_founder_installs_no_connection() {
 
     assert!(matches!(
         error,
-        SyncError::Init(coven_replication::sync::cycle::InitSyncError::StoreProtocolRoot(_))
+        SyncError::Init(source) if matches!(
+            *source,
+            coven_replication::sync::cycle::InitSyncError::Initialization(
+                coven_replication::sync::store::StoreInitializationError::ProtocolRoot(_)
+            )
+        )
     ));
     assert!(!sync.is_connected());
     assert!(!sync.has_remote_storage_for_test());

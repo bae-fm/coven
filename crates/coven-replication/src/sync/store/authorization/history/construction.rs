@@ -32,8 +32,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let database = self.database.clone();
         let mut device_id = database
             .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            .await?;
         let identity_is_founder = self
             .history_verifier
             .verified_root()
@@ -42,9 +41,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .founder_pubkey
             == coven_keys::keys::public_key_hex(identity);
         if device_id.is_none() && !identity_is_founder {
-            return Err(StoreInitializationError::ProtocolRoot(
-                "opening a Store for a non-founder requires an installed local device".to_string(),
-            ));
+            return Err(StoreInitializationError::NonFounderDeviceMissing);
         }
         let founder_pubkey = self
             .history_verifier
@@ -54,22 +51,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .founder_pubkey
             .clone();
         self.load_and_install_owner_membership(&founder_pubkey)
-            .await
-            .map_err(|error| StoreInitializationError::MembershipAnchor(error.to_string()))?;
+            .await?;
         if device_id.is_none() && identity_is_founder {
-            self.install_existing_founder_device(identity)
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            self.install_existing_founder_device(identity).await?;
             device_id = database
                 .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
-                .await
-                .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+                .await?;
         }
-        let device_id = device_id.ok_or_else(|| {
-            StoreInitializationError::ProtocolRoot(
-                "initialized Store has no local device registration id".to_string(),
-            )
-        })?;
+        let device_id = device_id.ok_or(StoreInitializationError::LocalDeviceMissing)?;
         let store = Store::new(
             database,
             Arc::clone(self.storage),
@@ -114,11 +103,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
                 ),
             );
         }
-        founder.value.device_signer(signer).map_err(|error| {
-            crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
-                error.to_string(),
-            )
-        })?;
+        founder.value.device_signer(signer)?;
 
         let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -173,23 +158,14 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .read_prepared_protocol_slot(&ack_context, first_slot, &ack_prefix)
             .await
             .map_err(coven_protocol::objects::StoreObjectError::from)?;
-        let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes).map_err(|error| {
-            crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
-                error.to_string(),
-            )
-        })?;
+        let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes)?;
         let ack_ref = StoreAckRef {
             registration: registration_ref.clone(),
             sequence: unverified_ack.sequence,
             ack_hash: unverified_ack.ack_hash(),
             object: ack_prepared.reference().clone(),
         };
-        let ack =
-            StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value).map_err(|error| {
-                crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
-                    error.to_string(),
-                )
-            })?;
+        let ack = StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value)?;
         if ack.registration != registration_ref {
             return Err(
                 crate::sync::store::authorization::registration::StoreRegistrationError::Invalid(
@@ -214,7 +190,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
             .map_err(|error| {
                 crate::sync::store::authorization::registration::StoreRegistrationError::Database(
-                    error.to_string(),
+                    error,
                 )
             })
     }

@@ -166,7 +166,10 @@ async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
         .await
         .expect_err("publication requires the exact durable operation id");
 
-    assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
+    assert!(
+        matches!(error, CircleOperationError::JournalState(_)),
+        "{error}"
+    );
     assert_eq!(
         coven_database::StoreDatabase::new(&db)
             .circle_operation(&journal.operation_id)

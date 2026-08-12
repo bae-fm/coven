@@ -32,7 +32,7 @@ impl StoreCircles {
         let identity_pubkey = self
             .security
             .required_identity_public_key_hex()
-            .map_err(|error| crate::CircleError::Identity(error.to_string()))?;
+            .map_err(crate::CircleError::Identity)?;
         let store_members = self
             .membership
             .members()
@@ -128,7 +128,7 @@ impl StoreCircles {
         self.database
             .circle_states(&identity_pubkey, store_members)
             .await
-            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
+            .map_err(crate::CircleError::Database)
     }
 
     pub(crate) async fn members(
@@ -139,7 +139,7 @@ impl StoreCircles {
         self.database
             .get_circle_members(circle_id, &identity_pubkey, store_members)
             .await
-            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
+            .map_err(crate::CircleError::Database)
     }
 
     pub(crate) async fn operations(
@@ -148,7 +148,7 @@ impl StoreCircles {
         self.database
             .get_circle_operations()
             .await
-            .map_err(|error| crate::CircleError::Protocol(error.to_string()))
+            .map_err(crate::CircleError::Database)
     }
 
     pub(crate) async fn close_status(

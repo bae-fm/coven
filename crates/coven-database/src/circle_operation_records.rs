@@ -29,9 +29,7 @@ pub struct PreparedCircleOperationRow {
 
 impl PreparedCircleOperationRow {
     pub fn from_journal(journal: &CircleOperationJournal) -> Result<Self, DbError> {
-        journal
-            .validate_identity()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        journal.validate_identity().map_err(DbError::from)?;
         Ok(Self {
             operation_id: journal.operation_id.as_str().to_string(),
             circle_id: journal.circle_id.to_string(),
@@ -98,12 +96,8 @@ pub fn parse_circle_operation_row(
         progress,
         uploaded,
     };
-    journal
-        .validate_identity()
-        .map_err(|error| DbError::Message(error.to_string()))?;
-    journal
-        .validate_uploaded()
-        .map_err(|error| DbError::Message(error.to_string()))?;
+    journal.validate_identity().map_err(DbError::from)?;
+    journal.validate_uploaded().map_err(DbError::from)?;
     Ok(journal)
 }
 

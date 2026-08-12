@@ -43,7 +43,7 @@ pub use cipher::CloudKeyringFacts;
 pub use cipher::{
     cloud_aad_context, AdoptedCloudKeyRotation, CloudKeyringMerge, CloudSyncCipherStateAccess,
 };
-pub use rotation::{CloudSyncRotationStateAccess, PendingRotation};
+pub use rotation::{CloudSyncRotationStateAccess, PendingRotation, RotationStateError};
 
 /// How a cloud home protects its objects at rest. An `Encrypted` home seals
 /// every object under the store key (the default); a `Plaintext` home stores
@@ -149,8 +149,7 @@ impl CloudSyncConnection {
     ) -> Result<(), StorageError> {
         authority
             .reference
-            .verify_registration(authority.registration)
-            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+            .verify_registration(authority.registration)?;
         if locator.uploader() != authority.reference {
             return Err(StorageError::InvalidContent(format!(
                 "blob locator uploader {:?} differs from its exact write authority",
@@ -258,12 +257,12 @@ impl CloudSyncConnection {
             operation,
             Box::new(move || {
                 object.verify(&stored)?;
-                cipher.open(stored, &aad_context).map_err(|error| {
-                    StorageError::Decryption(format!(
-                        "protocol object {}: {error}",
-                        object.slot().logical_key()
-                    ))
-                })
+                cipher
+                    .open(stored, &aad_context)
+                    .map_err(|source| StorageError::Decryption {
+                        context: format!("protocol object {}", object.slot().logical_key()),
+                        source,
+                    })
             }),
         )
         .await
@@ -293,11 +292,11 @@ impl CloudSyncConnection {
                     ObjectHash::digest(&stored),
                 );
                 let prepared = PreparedExactObject::new(object, stored.clone())?;
-                let opened = cipher.open(stored, &aad_context).map_err(|error| {
-                    StorageError::Decryption(format!(
-                        "protocol object {}: {error}",
-                        slot.logical_key()
-                    ))
+                let opened = cipher.open(stored, &aad_context).map_err(|source| {
+                    StorageError::Decryption {
+                        context: format!("protocol object {}", slot.logical_key()),
+                        source,
+                    }
                 })?;
                 Ok((opened, prepared))
             }),
@@ -449,7 +448,10 @@ impl CloudSyncConnection {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn mark_rotation_committed_for_test(&self, generation: u64) -> Result<(), String> {
+    pub fn mark_rotation_committed_for_test(
+        &self,
+        generation: u64,
+    ) -> Result<(), RotationStateError> {
         self.pending_rotation.mark_committed(generation)
     }
 
@@ -494,7 +496,10 @@ impl CloudSyncCipherStateAccess for CloudSyncConnection {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<
+        (coven_keys::encryption::KeyFingerprint, Vec<u8>),
+        coven_keys::encryption::EncryptionError,
+    > {
         self.cipher.open_sealed_blob_for_test(stored, aad_context)
     }
 
@@ -515,16 +520,28 @@ impl CloudSyncCipherStateAccess for CloudSyncConnection {
 }
 
 impl CloudSyncRotationStateAccess for CloudSyncConnection {
-    fn mark_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn mark_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         self.pending_rotation.mark_candidate(generation, mutation)
     }
 
-    fn mark_committed_mutation(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn mark_committed_mutation(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         self.pending_rotation
             .mark_committed_mutation(generation, mutation)
     }
 
-    fn remove_candidate(&self, generation: u64, mutation: ObjectHash) -> Result<(), String> {
+    fn remove_candidate(
+        &self,
+        generation: u64,
+        mutation: ObjectHash,
+    ) -> Result<(), RotationStateError> {
         self.pending_rotation.remove_candidate(generation, mutation)
     }
 
@@ -533,7 +550,7 @@ impl CloudSyncRotationStateAccess for CloudSyncConnection {
         generation: u64,
         previous: ObjectHash,
         replacement: ObjectHash,
-    ) -> Result<(), String> {
+    ) -> Result<(), RotationStateError> {
         self.pending_rotation
             .replace_candidate_mutation(generation, previous, replacement)
     }
@@ -560,7 +577,7 @@ where
 {
     coven_foundation::blocking::run(work)
         .await
-        .map_err(|error| StorageError::Storage(format!("{operation}: {error}")))?
+        .map_err(|source| StorageError::Blocking { operation, source })?
 }
 
 async fn read_source_exact(
@@ -570,10 +587,7 @@ async fn read_source_exact(
 ) -> Result<Vec<u8>, StorageError> {
     let mut bytes = Vec::with_capacity(len);
     while bytes.len() < len {
-        let chunk = source
-            .next_chunk(len - bytes.len())
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
+        let chunk = source.next_chunk(len - bytes.len()).await?;
         if chunk.is_empty() {
             return Err(StorageError::InvalidContent(format!(
                 "blob {locator_hash} stored body ended after {} of {len} required bytes",

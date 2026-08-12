@@ -27,7 +27,7 @@ pub use rotation::LocalRotation;
 pub use rotation::RotationPending;
 #[cfg(any(test, feature = "test-utils"))]
 pub use rotation::RotationPendingState;
-pub use rotation::{RotationGate, ROTATION_GATE_STATE_KEY};
+pub use rotation::{RotationGate, RotationGateError, ROTATION_GATE_STATE_KEY};
 
 /// Authenticated storage context for one immutable semantic object.
 ///
@@ -307,10 +307,16 @@ impl PreparedExactObject {
 }
 
 /// Error type for storage operations.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("storage operation failed: {0}")]
     Storage(String),
+    #[error("storage backend failed while {operation}: {source}")]
+    Backend {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("{operation}; storage cleanup failed: {cleanup}")]
     CleanupFailed {
         #[source]
@@ -327,6 +333,24 @@ pub enum StorageError {
     Configuration(String),
     #[error("storage object parse failed: {0}")]
     Parse(String),
+    #[error("storage object JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("storage key custody failed: {0}")]
+    Key(#[from] coven_keys::keys::KeyError),
+    #[error("provider probe journal is invalid: {0}")]
+    ProviderProbeJournal(#[from] crate::provider::ProviderProbeJournalError),
+    #[error("Store protocol object is invalid: {0}")]
+    StoreProtocol(#[source] Box<crate::store_commit::StoreProtocolError>),
+    #[error("stored blob reference is invalid: {0}")]
+    BlobLocator(#[from] crate::blob::locator::BlobLocatorError),
+    #[error("storage worker failed while {operation}: {source}")]
+    Blocking {
+        operation: &'static str,
+        #[source]
+        source: coven_foundation::blocking::BlockingTaskError,
+    },
+    #[error("storage URL is invalid: {0}")]
+    Url(#[from] url::ParseError),
     #[error("object not found: {0}")]
     NotFound(String),
     #[error("storage object already exists: {0}")]
@@ -337,12 +361,22 @@ pub enum StorageError {
     /// journal records.
     #[error("prepared exact object differs from its durable bytes: {0}")]
     PreparedObjectMismatch(String),
-    #[error("decryption failed: {0}")]
-    Decryption(String),
+    #[error("decryption failed for {context}: {source}")]
+    Decryption {
+        context: String,
+        #[source]
+        source: coven_keys::encryption::EncryptionError,
+    },
     #[error("remote blob content is invalid: {0}")]
     InvalidContent(String),
     #[error("local blob filesystem failed: {0}")]
-    LocalFilesystem(String),
+    LocalFilesystem(#[from] coven_foundation::atomic_file::FileError),
+    #[error("storage I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("publishing a new local file failed: {0}")]
+    CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
+    #[error("unsafe blob path: {0}")]
+    UnsafeBlobPath(#[from] coven_foundation::store_dir::PathTokenError),
     /// This device has not adopted a store-key rotation the cloud already
     /// committed; see [`RotationPending`].
     #[error("{0}")]
@@ -350,9 +384,19 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    pub fn backend(
+        operation: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Backend {
+            operation: operation.into(),
+            source: Box::new(source),
+        }
+    }
+
     pub fn is_transport(&self) -> bool {
         match self {
-            Self::Storage(_) => true,
+            Self::Storage(_) | Self::Backend { .. } => true,
             Self::CleanupFailed { operation, .. } | Self::UnresolvedOutcome { operation, .. } => {
                 operation.is_transport()
             }
@@ -368,12 +412,9 @@ impl StorageError {
     }
 }
 
-impl From<coven_foundation::store_dir::PathTokenError> for StorageError {
-    /// A blob id/namespace/cloud_path that can't form a safe object key is bad
-    /// data, surfaced so the caller refuses the blob rather than reaching storage
-    /// with a key that could escape its prefix.
-    fn from(e: coven_foundation::store_dir::PathTokenError) -> Self {
-        StorageError::Parse(format!("unsafe blob path: {e}"))
+impl From<crate::store_commit::StoreProtocolError> for StorageError {
+    fn from(source: crate::store_commit::StoreProtocolError) -> Self {
+        Self::StoreProtocol(Box::new(source))
     }
 }
 
@@ -499,7 +540,7 @@ pub enum StoreObjectError {
 pub fn decode_protocol_object<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<T, StoreProtocolError> {
-    serde_json::from_slice(bytes).map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+    serde_json::from_slice(bytes).map_err(StoreProtocolError::from)
 }
 
 /// Reject an object that names a different Store root than the one it was read

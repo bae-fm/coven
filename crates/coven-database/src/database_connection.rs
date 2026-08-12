@@ -435,7 +435,10 @@ impl DatabaseConnection {
         crate::store::StagedBlobBatch::stage(&self.context.store_dir, blobs).await
     }
 
-    pub(crate) async fn sync_store_parent_dir(&self, path: &Path) -> Result<(), String> {
+    pub(crate) async fn sync_store_parent_dir(
+        &self,
+        path: &Path,
+    ) -> Result<(), coven_foundation::atomic_file::FileError> {
         self.context.store_dir.sync_parent_dir(path).await
     }
 
@@ -642,8 +645,7 @@ mod tests {
             let _ = job_db
                 .call_database(move |_session| {
                     std::thread::sleep(Duration::from_millis(300));
-                    std::fs::write(&job_marker, b"landed")
-                        .map_err(|e| DbError::Message(e.to_string()))
+                    std::fs::write(&job_marker, b"landed").map_err(DbError::from)
                 })
                 .await;
         });

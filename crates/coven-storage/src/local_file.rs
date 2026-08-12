@@ -12,11 +12,8 @@ pub struct PlaintextReader(
 );
 
 impl PlaintextReader {
-    pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        self.0
-            .next_chunk(max)
-            .await
-            .map_err(|error| error.to_string())
+    pub(crate) async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError> {
+        self.0.next_chunk(max).await
     }
 
     #[cfg(test)]
@@ -28,20 +25,45 @@ impl PlaintextReader {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum PlaintextChunkError {
     #[error(transparent)]
     Remote(#[from] coven_protocol::objects::StorageError),
     #[error("invalid remote content: {0}")]
     InvalidContent(String),
+    #[error("decrypt remote content {context}: {source}")]
+    Decryption {
+        context: String,
+        #[source]
+        source: coven_keys::encryption::EncryptionError,
+    },
     #[error("local plaintext source: {0}")]
-    Local(String),
+    Local(coven_foundation::atomic_file::FileError),
 }
 
-pub(crate) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("open local blob {} for streaming: {e}", path.display()))?;
+impl From<PlaintextChunkError> for coven_protocol::objects::StorageError {
+    fn from(error: PlaintextChunkError) -> Self {
+        match error {
+            PlaintextChunkError::Remote(error) => error,
+            PlaintextChunkError::InvalidContent(message) => Self::InvalidContent(message),
+            PlaintextChunkError::Decryption { context, source } => {
+                Self::Decryption { context, source }
+            }
+            PlaintextChunkError::Local(error) => Self::LocalFilesystem(error),
+        }
+    }
+}
+
+pub(crate) async fn open_reader(
+    path: &Path,
+) -> Result<PlaintextReader, coven_foundation::atomic_file::FileError> {
+    let file = tokio::fs::File::open(path).await.map_err(|source| {
+        coven_foundation::atomic_file::FileError::Path {
+            operation: "open local blob for streaming",
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
     Ok(PlaintextReader(Box::new(FilePlaintextReader {
         file,
         path: path.to_path_buf(),
@@ -51,7 +73,8 @@ pub(crate) async fn open_reader(path: &Path) -> Result<PlaintextReader, String> 
 /// Stream the exact stored size and SHA-256 identity of a local file.
 pub(crate) async fn exact_file_facts(
     path: &Path,
-) -> Result<(u64, coven_protocol::store_commit::ObjectHash), String> {
+) -> Result<(u64, coven_protocol::store_commit::ObjectHash), coven_foundation::atomic_file::FileError>
+{
     let (size, digest) = coven_foundation::local_file::file_facts(path).await?;
     Ok((
         size,
@@ -73,8 +96,12 @@ impl coven_foundation::local_file::PlaintextChunkReader for FilePlaintextReader 
         let mut buf = vec![0u8; max];
         let mut filled = 0;
         while filled < max {
-            let read = self.file.read(&mut buf[filled..]).await.map_err(|e| {
-                PlaintextChunkError::Local(format!("read local blob {}: {e}", self.path.display()))
+            let read = self.file.read(&mut buf[filled..]).await.map_err(|source| {
+                PlaintextChunkError::Local(coven_foundation::atomic_file::FileError::Path {
+                    operation: "read local blob",
+                    path: self.path.clone(),
+                    source,
+                })
             })?;
             if read == 0 {
                 break;

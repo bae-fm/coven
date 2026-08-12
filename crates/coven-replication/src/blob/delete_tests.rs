@@ -74,13 +74,25 @@ struct TombstoneCollector {
     store: crate::sync::store::Store,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum TombstoneCollectorError {
+    #[error(transparent)]
+    Initialization(#[from] crate::sync::store::StoreInitializationError),
+    #[error(transparent)]
+    Authorization(
+        #[from] crate::sync::store::commit_publication::operation::StoreWriterAuthorizationError,
+    ),
+    #[error(transparent)]
+    GarbageCollection(#[from] crate::sync::store::commit_publication::operation::TombstoneGcError),
+}
+
 impl TombstoneCollector {
     async fn load(
         database: StoreDatabase,
         fixture: &TestStore,
         storage: Arc<dyn CloudSyncObjectStorage>,
         identity: &UserKeypair,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TombstoneCollectorError> {
         let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         Ok(Self {
             store: fixture
@@ -93,7 +105,7 @@ impl TombstoneCollector {
         database: StoreDatabase,
         fixture: &TestStore,
         storage: Arc<dyn CloudSyncObjectStorage>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TombstoneCollectorError> {
         Self::for_founder_with_storage(database, fixture, storage).await
     }
 
@@ -101,7 +113,7 @@ impl TombstoneCollector {
         database: StoreDatabase,
         fixture: &TestStore,
         storage: Arc<dyn CloudSyncObjectStorage>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TombstoneCollectorError> {
         let (_store_dir_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
         Ok(Self {
             store: fixture
@@ -110,13 +122,16 @@ impl TombstoneCollector {
         })
     }
 
-    async fn collect(&self, clock: &dyn coven_foundation::clock::Clock) -> Result<usize, String> {
-        self.store
+    async fn collect(
+        &self,
+        clock: &dyn coven_foundation::clock::Clock,
+    ) -> Result<usize, TombstoneCollectorError> {
+        Ok(self
+            .store
             .authorize_writer()
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
             .gc_tombstones(clock)
-            .await
+            .await?)
     }
 }
 
@@ -195,7 +210,7 @@ async fn drain_at(
     storage: &dyn coven_storage::CloudSyncObjectStorage,
     keypair: &UserKeypair,
     clock: &dyn coven_foundation::clock::Clock,
-) -> Result<usize, String> {
+) -> Result<usize, crate::blob::delete::TombstoneDrainError> {
     TombstoneDrain::new(store_database, storage, "lib", keypair, clock)
         .drain()
         .await
@@ -538,7 +553,10 @@ async fn delete_validation_failure_backs_off_then_retries() {
     let error = drain_at(&store_database, &intercepted, &kp, &first)
         .await
         .expect_err("failed validation fails the drain");
-    assert!(error.contains("Failed to validate"), "{error}");
+    assert!(matches!(
+        error,
+        crate::blob::delete::TombstoneDrainError::Validate { .. }
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let first_row = db
@@ -620,7 +638,10 @@ async fn delete_write_failure_backs_off_then_retries() {
     let error = drain_at(&store_database, &intercepted, &kp, &first)
         .await
         .expect_err("failed write fails the drain");
-    assert!(error.contains("Tombstone write failed"), "{error}");
+    assert!(matches!(
+        error,
+        crate::blob::delete::TombstoneDrainError::Publish { .. }
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let first_row = db
@@ -707,7 +728,10 @@ async fn corrupt_delete_backoff_timestamp_fails_before_remote_effects() {
                 let error = Box::pin(drain.drain())
                     .await
                     .expect_err("a corrupt retry timestamp fails the drain");
-                assert!(error.contains("unparseable last_attempt_at"), "{error}");
+                assert!(
+                    error.to_string().contains("unparseable last_attempt_at"),
+                    "{error}"
+                );
                 assert!(
                     storage
                         .stored_tombstone_bytes(&storage.tombstone_provider_key(&corrupt))
@@ -1025,7 +1049,10 @@ async fn tombstone_gc_fails_when_the_referencing_row_locality_is_unresolved() {
         .await
         .expect_err("unresolved locality fails GC");
 
-    assert!(error.contains("locality is unresolved"), "{error}");
+    assert!(
+        error.to_string().contains("locality is unresolved"),
+        "{error}"
+    );
     assert!(
         storage
             .contains_stored_blob_object(&stored)
@@ -1928,7 +1955,15 @@ async fn exact_blob_delete_failure_leaves_tombstone_for_retry() {
         .collect(&past)
         .await
         .expect_err("exact delete failure fails GC");
-    assert!(error.contains("Failed to delete blob"), "{error}");
+    assert!(matches!(
+        error,
+        TombstoneCollectorError::GarbageCollection(
+            crate::sync::store::commit_publication::operation::TombstoneGcError::Storage {
+                ref operation,
+                ..
+            }
+        ) if operation.starts_with("delete blob ")
+    ));
     assert!(storage
         .contains_stored_blob_object(&stored)
         .await
@@ -1984,7 +2019,15 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         .collect(&past)
         .await
         .expect_err("tombstone delete failure fails GC");
-    assert!(error.contains("Failed to delete tombstone"), "{error}");
+    assert!(matches!(
+        error,
+        TombstoneCollectorError::GarbageCollection(
+            crate::sync::store::commit_publication::operation::TombstoneGcError::Storage {
+                ref operation,
+                ..
+            }
+        ) if operation.starts_with("delete tombstone ")
+    ));
     assert!(
         !storage
             .contains_stored_blob_object(&old)

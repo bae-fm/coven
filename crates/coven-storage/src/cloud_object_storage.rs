@@ -29,15 +29,18 @@ pub fn blob_tombstone_key(
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum ListedBlobTombstone {
     Opened {
         object_id: coven_protocol::store_commit::ObjectHash,
         plaintext: Vec<u8>,
     },
-    Invalid {
+    InvalidKey {
         provider_key: String,
-        reason: String,
+    },
+    InvalidBody {
+        provider_key: String,
+        source: std::sync::Arc<coven_keys::encryption::EncryptionError>,
     },
 }
 

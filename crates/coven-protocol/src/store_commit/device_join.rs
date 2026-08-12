@@ -217,7 +217,7 @@ impl DeviceJoinAttempt {
     ) -> Result<UnverifiedDeviceJoinAttempt, StoreProtocolError> {
         serde_json::from_slice(bytes)
             .map(UnverifiedDeviceJoinAttempt)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+            .map_err(StoreProtocolError::from)
     }
 }
 

@@ -10,7 +10,10 @@ mod tests;
 #[cfg(test)]
 mod transport_tests;
 
-pub use client::{BootstrapError, DeviceJoinClient};
+pub use client::{
+    BootstrapCleanupFailure, BootstrapCleanupFailures, BootstrapError, DeviceJoinClient,
+    SigningKeyError,
+};
 pub use code::{
     abandon_join_request, decode_invite_code_info, decode_join_request, encode,
     encode_join_request, generate_join_request, generate_join_request_for_keypair, InviteCodeInfo,

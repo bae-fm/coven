@@ -12,11 +12,17 @@ use coven_protocol::synced_schema::{GateRole, RowIdentity, SyncedTable};
 const SYNC_ROUTING_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SyncRoutingContractError {
+pub enum SyncRoutingContractError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     ForeignKey(#[from] crate::ForeignKeySchemaError),
+    #[error("parse sync-routing contract: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("unsupported sync-routing contract version {0}")]
+    UnsupportedVersion(u32),
+    #[error("sync-routing contract bytes are not canonical")]
+    Noncanonical,
     #[error("synced table {child_table:?} has a foreign key to undeclared table {parent_table:?}")]
     UndeclaredForeignKeyTarget {
         child_table: String,
@@ -193,18 +199,16 @@ impl SyncRoutingContract {
         }))
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let canonical: CanonicalContract = serde_json::from_slice(bytes)
-            .map_err(|error| format!("parse sync-routing contract: {error}"))?;
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SyncRoutingContractError> {
+        let canonical: CanonicalContract = serde_json::from_slice(bytes)?;
         if canonical.version != SYNC_ROUTING_CONTRACT_VERSION {
-            return Err(format!(
-                "unsupported sync-routing contract version {}",
-                canonical.version
+            return Err(SyncRoutingContractError::UnsupportedVersion(
+                canonical.version,
             ));
         }
         let parsed = Self::from_canonical(canonical);
         if parsed.bytes != bytes {
-            return Err("sync-routing contract bytes are not canonical".to_string());
+            return Err(SyncRoutingContractError::Noncanonical);
         }
         Ok(parsed)
     }

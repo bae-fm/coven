@@ -119,13 +119,13 @@ fn cleanup_failure_carries_the_original_bootstrap_cause() {
         custody.as_ref(),
         identity_custody.as_ref(),
     );
-    let wrapped = cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
+    let wrapped = cleanup.after_failure(BootstrapError::Provider("bootstrap boom".to_string()));
 
     match wrapped {
         BootstrapError::Cleanup { cleanup, cause } => {
             assert!(!cleanup.is_empty(), "the removal failure is recorded");
             assert!(
-                matches!(*cause, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+                matches!(*cause, BootstrapError::Provider(ref m) if m == "bootstrap boom"),
                 "the original bootstrap cause is preserved as a value, got {cause:?}",
             );
         }
@@ -151,10 +151,10 @@ fn successful_cleanup_returns_the_cause_unchanged() {
         custody.as_ref(),
         identity_custody.as_ref(),
     );
-    let returned = cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
+    let returned = cleanup.after_failure(BootstrapError::Provider("bootstrap boom".to_string()));
 
     assert!(
-        matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+        matches!(returned, BootstrapError::Provider(ref m) if m == "bootstrap boom"),
         "a clean removal returns the cause unchanged, got {returned:?}",
     );
     assert!(!store_dir.exists(), "the partial store dir was removed");
@@ -180,10 +180,10 @@ fn cleanup_tolerates_a_store_dir_that_was_never_created() {
         custody.as_ref(),
         identity_custody.as_ref(),
     );
-    let returned = cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
+    let returned = cleanup.after_failure(BootstrapError::Provider("bootstrap boom".to_string()));
 
     assert!(
-        matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+        matches!(returned, BootstrapError::Provider(ref m) if m == "bootstrap boom"),
         "a missing store dir must not itself count as a cleanup failure, got {returned:?}",
     );
 }
@@ -222,10 +222,10 @@ fn cleanup_also_removes_both_keyring_accounts() {
         custody.as_ref(),
         identity_custody.as_ref(),
     );
-    let returned = cleanup.after_failure(BootstrapError::Database("bootstrap boom".to_string()));
+    let returned = cleanup.after_failure(BootstrapError::Provider("bootstrap boom".to_string()));
 
     assert!(
-        matches!(returned, BootstrapError::Database(ref m) if m == "bootstrap boom"),
+        matches!(returned, BootstrapError::Provider(ref m) if m == "bootstrap boom"),
         "a clean removal returns the cause unchanged, got {returned:?}",
     );
     assert!(!store_dir.exists(), "the partial store dir was removed");

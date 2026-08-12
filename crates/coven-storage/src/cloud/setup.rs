@@ -59,8 +59,56 @@ fn exact_slot_capabilities_supported(
 
 /// Cloud provider setup error.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct SetupError(pub String);
+pub enum SetupError {
+    #[error("cloud setup configuration is invalid: {0}")]
+    Configuration(String),
+    #[cfg(feature = "oauth-providers")]
+    #[error("{provider} authorization failed: {source}")]
+    Authorization {
+        provider: &'static str,
+        #[source]
+        source: crate::oauth::OAuthError,
+    },
+    #[cfg(feature = "oauth-providers")]
+    #[error("{operation}: {source}")]
+    Http {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[cfg(feature = "oauth-providers")]
+    #[error("{operation} failed with HTTP {status}: {body}")]
+    ProviderResponse {
+        operation: &'static str,
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error("cloud setup key access failed: {0}")]
+    Key(#[from] coven_keys::keys::KeyError),
+}
+
+#[cfg(feature = "oauth-providers")]
+impl SetupError {
+    pub(crate) fn authorization(provider: &'static str, source: crate::oauth::OAuthError) -> Self {
+        Self::Authorization { provider, source }
+    }
+
+    pub(crate) fn http(operation: &'static str, source: reqwest::Error) -> Self {
+        Self::Http { operation, source }
+    }
+
+    pub(crate) fn provider_response(
+        operation: &'static str,
+        status: reqwest::StatusCode,
+        body: String,
+    ) -> Self {
+        Self::ProviderResponse {
+            operation,
+            status,
+            body,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

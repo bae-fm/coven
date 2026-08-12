@@ -37,13 +37,25 @@ pub enum StoreReclaimError {
     #[error(transparent)]
     Outbound(#[from] crate::sync::store::StoreError),
     #[error("Store reclaim journal: {0}")]
-    Journal(String),
+    Journal(#[from] StoreReclaimJournalError),
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("no authorized complete Store snapshot is available for reclamation")]
     NoSnapshot,
     #[error("snapshot authorization history is invalid: {0}")]
     Authorization(String),
+    #[error("snapshot authorization Store pull: {0}")]
+    StorePull(#[source] Box<crate::sync::store::pull::StorePullError>),
+    #[error("snapshot authorization Store protocol: {0}")]
+    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("snapshot authorization audience package: {0}")]
+    AudiencePackage(#[from] coven_protocol::audience_package::AudiencePackageError),
+    #[error("snapshot authorization snapshot: {0}")]
+    Snapshot(#[source] Box<crate::sync::store::SnapshotError>),
+    #[error("snapshot authorization acknowledgement: {0}")]
+    Acknowledgement(#[source] Box<crate::sync::store::StoreAckError>),
+    #[error("snapshot authorization writer: {0}")]
+    WriterAuthorization(#[source] Box<crate::sync::store::StoreWriterAuthorizationError>),
     #[error(
         "active Store device {device_id:?} for member {member:?} has no exact acknowledgement"
     )]
@@ -71,11 +83,25 @@ impl From<crate::sync::store::pull::CommitCoverageError> for StoreReclaimError {
 
 impl From<crate::sync::store::pull::StorePullError> for StoreReclaimError {
     fn from(error: crate::sync::store::pull::StorePullError) -> Self {
-        match error {
-            crate::sync::store::pull::StorePullError::Object(error) => Self::Object(error),
-            crate::sync::store::pull::StorePullError::Storage(error) => Self::Storage(error),
-            error => Self::Authorization(error.to_string()),
-        }
+        Self::StorePull(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::SnapshotError> for StoreReclaimError {
+    fn from(error: crate::sync::store::SnapshotError) -> Self {
+        Self::Snapshot(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreAckError> for StoreReclaimError {
+    fn from(error: crate::sync::store::StoreAckError) -> Self {
+        Self::Acknowledgement(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreWriterAuthorizationError> for StoreReclaimError {
+    fn from(error: crate::sync::store::StoreWriterAuthorizationError) -> Self {
+        Self::WriterAuthorization(Box::new(error))
     }
 }
 
@@ -123,7 +149,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         let registrations = database
             .activated_store_device_registration_records()
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         // A missing or unstable Store snapshot leaves Store packages uncovered but must
         // not block Circle package reclamation, which carries its own Circle coverage.
         let store_targets = match Box::pin(self.choose_snapshot(&registrations)).await {
@@ -204,7 +230,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             return Ok(());
         }
         let frontier = CommitFrontier::from_refs(database.materialized_frontier().await?)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         let epochs = database.circle_replay_epoch_index(root.clone()).await?;
         let targets = self
             .history()
@@ -217,7 +243,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             // that conflicts with the cutoff, errors rather than being reclaimed.
             if epochs
                 .permits(&commit, circle_id, &package.control)
-                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+                .map_err(StoreReclaimError::from)?
             {
                 continue;
             }
@@ -519,7 +545,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         })?;
         let evidence = plan
             .sign_reclaim_evidence(claim)
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
+            .map_err(StoreReclaimError::from)?;
         self.verify_evidence(&evidence).await?;
         let evidence_context = ProtocolObjectContext::store_encrypted(
             root.store_root_hash,

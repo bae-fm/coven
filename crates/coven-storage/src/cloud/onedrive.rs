@@ -125,7 +125,7 @@ impl OneDriveCloudHome {
             return Err(classify_write_error(status, &body, key));
         }
         let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-            CloudHomeError::Transport(format!("parse upload session {key}: {error}"))
+            CloudHomeError::transport(format!("parse upload session {key}"), error)
         })?;
         json["uploadUrl"]
             .as_str()
@@ -171,7 +171,7 @@ impl OneDriveCloudHome {
             }
         };
         let _: serde_json::Value = serde_json::from_slice(&response_body).map_err(|error| {
-            CloudHomeError::Transport(format!("commit create {key}: parse response: {error}"))
+            CloudHomeError::transport(format!("commit create {key}: parse response"), error)
         })?;
         Ok(())
     }
@@ -317,9 +317,10 @@ impl OneDriveCloudHome {
             progress(offset);
             if let Some(response) = completion {
                 response.bytes().await.map_err(|error| {
-                    CloudHomeError::Transport(format!(
-                        "append {full_logical_key}: read unexpected completion: {error}"
-                    ))
+                    CloudHomeError::transport(
+                        format!("read unexpected append completion for {full_logical_key}"),
+                        error,
+                    )
                 })?;
                 let operation = CloudHomeError::Transport(format!(
                     "append {full_logical_key}: deferred upload published before explicit commit"
@@ -470,7 +471,7 @@ impl OAuthRestHome for OneDriveCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
         let encoded_prefix = encode_key(prefix);
         let mut keys = Vec::new();
         if let Some(items) = json["value"].as_array() {

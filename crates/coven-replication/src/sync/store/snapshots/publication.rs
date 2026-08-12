@@ -148,7 +148,7 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
         {
             remove_snapshot_spool(self.store_dir, &path, false)
                 .await
-                .map_err(SnapshotError::PublicationState)?;
+                .map_err(SnapshotError::SpoolCleanup)?;
             self.database
                 .complete_snapshot_blob_spool_cleanup(&path)
                 .await

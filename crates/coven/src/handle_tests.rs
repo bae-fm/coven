@@ -1827,13 +1827,14 @@ async fn circle_write_commands_dispatch_through_their_command_arms() {
             "resolve dispatches to its arm and returns NotConflicted"
         );
 
-        // The remaining three carry the forwarded id in their message.
+        // The remaining three retain errors whose display carries the forwarded id.
         let retry = circles
             .retry_operation(crate::CircleOperationId::placeholder("dispatch-op-seed"))
             .await;
         assert!(
-            matches!(&retry, Err(crate::CircleError::Protocol(message))
-                    if message.contains("dispatch-op-seed")),
+            retry
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("dispatch-op-seed")),
             "retry_operation forwards the operation id: {retry:?}"
         );
 
@@ -1841,16 +1842,18 @@ async fn circle_write_commands_dispatch_through_their_command_arms() {
             .discard_operation(crate::CircleOperationId::placeholder("dispatch-op-seed"))
             .await;
         assert!(
-            matches!(&discard, Err(crate::CircleError::Protocol(message))
-                    if message.contains("dispatch-op-seed")),
+            discard
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("dispatch-op-seed")),
             "discard_operation forwards the operation id: {discard:?}"
         );
 
         let absent_circle = crate::CircleId::from_bytes([9u8; 16]);
         let remove = circles.remove_member(absent_circle, &member).await;
         assert!(
-            matches!(&remove, Err(crate::CircleError::Protocol(message))
-                    if message.contains(&absent_circle.to_string())),
+            remove
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains(&absent_circle.to_string())),
             "remove_member forwards the circle id: {remove:?}"
         );
 

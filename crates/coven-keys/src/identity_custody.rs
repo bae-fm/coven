@@ -67,11 +67,12 @@ impl CustodySecret for UserKeypair {
 
     fn from_bytes(bytes: Vec<u8>) -> Result<Self, KeyError> {
         let len = bytes.len();
-        let signing_key: [u8; SIGN_SECRETKEYBYTES] = bytes.try_into().map_err(|_| {
-            KeyError::Crypto(format!(
-                "decrypted device identity is {len} bytes, expected {SIGN_SECRETKEYBYTES}"
-            ))
-        })?;
+        let signing_key: [u8; SIGN_SECRETKEYBYTES] =
+            bytes.try_into().map_err(|_| KeyError::InvalidLength {
+                subject: "decrypted device identity",
+                expected: SIGN_SECRETKEYBYTES,
+                actual: len,
+            })?;
         UserKeypair::from_signing_key_bytes(&signing_key)
     }
 }
@@ -241,7 +242,10 @@ mod tests {
             &dir,
         );
         match reader.unlock() {
-            Err(error) => assert!(matches!(error, KeyError::Crypto(_)), "got {error:?}"),
+            Err(error) => assert!(
+                matches!(error, KeyError::PassphraseEnvelopeDecryption),
+                "got {error:?}"
+            ),
             Ok(_) => panic!("wrong passphrase must not unlock"),
         }
     }

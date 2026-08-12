@@ -39,9 +39,7 @@ pub fn canonical_custom_s3_origin(input: &str) -> Result<String, StorageError> {
             "custom S3 endpoint must not have a trailing slash".to_string(),
         ));
     }
-    let parsed = url::Url::parse(input).map_err(|error| {
-        StorageError::Configuration(format!("invalid custom S3 endpoint: {error}"))
-    })?;
+    let parsed = url::Url::parse(input)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()
         || parsed.password().is_some()

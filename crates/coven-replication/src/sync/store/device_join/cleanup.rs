@@ -11,7 +11,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .join_operation()
             .prepare_cleanup(cancellation, administrator_terminal, joiner_terminal)
@@ -26,7 +26,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().activate_cleanup(receipt).await
     }
 }

@@ -93,10 +93,13 @@ pub enum CircleError {
     },
     /// The local signing identity is not established.
     #[error("the local identity is not established: {0}")]
-    Identity(String),
-    /// An internal protocol or database failure with no distinct public category.
-    #[error("circle protocol error: {0}")]
-    Protocol(String),
+    Identity(#[from] coven_keys::keys::KeyError),
+    #[error("circle operation failed: {0}")]
+    Operation(#[source] Box<CircleOperationError>),
+    #[error("circle sync failed: {0}")]
+    Sync(#[source] Box<SyncError>),
+    #[error("circle database query failed: {0}")]
+    Database(#[from] coven_database::DbError),
 }
 
 impl From<CircleOperationError> for CircleError {
@@ -148,9 +151,7 @@ impl From<CircleOperationError> for CircleError {
             }
             CircleOperationError::CommandChannelClosed
             | CircleOperationError::ReplyChannelClosed => Self::LoopNotRunning,
-            // Internal protocol and database failures carry no distinct public
-            // category; surface their message under the catch-all.
-            other => Self::Protocol(other.to_string()),
+            other => Self::Operation(Box::new(other)),
         }
     }
 }
@@ -161,8 +162,8 @@ impl From<SyncError> for CircleError {
             SyncError::NotConfigured => Self::NotConfigured,
             SyncError::LoopNotRunning => Self::LoopNotRunning,
             SyncError::Circle(error) => (*error).into(),
-            SyncError::Key(error) => Self::Identity(error.to_string()),
-            other => Self::Protocol(other.to_string()),
+            SyncError::Key(error) => Self::Identity(error),
+            other => Self::Sync(Box::new(other)),
         }
     }
 }
@@ -444,11 +445,11 @@ mod tests {
         ));
 
         // The channel-closed plumbing variants collapse to LoopNotRunning; other
-        // internal failures collapse to the Protocol catch-all.
+        // internal failures retain the operation error.
         let closed: CircleError = CircleOperationError::CommandChannelClosed.into();
         assert!(matches!(closed, CircleError::LoopNotRunning));
         let internal: CircleError = CircleOperationError::InvalidState("bad".to_string()).into();
-        assert!(matches!(internal, CircleError::Protocol(_)));
+        assert!(matches!(internal, CircleError::Operation(_)));
     }
 
     /// No public Circle error's `Display` names a removed coordinated-protocol
@@ -496,8 +497,10 @@ mod tests {
                 block: authority_lost_block(),
             }
             .to_string(),
-            CircleError::Identity("locked".to_string()).to_string(),
-            CircleError::Protocol("state invalid".to_string()).to_string(),
+            CircleError::Operation(Box::new(CircleOperationError::InvalidState(
+                "state invalid".to_string(),
+            )))
+            .to_string(),
         ];
         for display in displays {
             let lowered = display.to_lowercase();

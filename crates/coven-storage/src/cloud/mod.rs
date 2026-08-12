@@ -102,10 +102,22 @@ pub enum CloudHomeError {
     /// user must fix the configuration; retrying the same operation cannot succeed.
     #[error("configuration error: {0}")]
     Configuration(String),
+    #[error("configuration failed while {operation}: {source}")]
+    ConfigurationSource {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// The cloud backend or the network to it failed: a request error, a non-2xx
     /// status, a malformed response. Transient — a later attempt may succeed.
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("transport error while {operation}: {source}")]
+    TransportSource {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("{operation}; cleanup failed: {cleanup}")]
     CleanupFailed {
         #[source]
@@ -120,6 +132,14 @@ pub enum CloudHomeError {
     },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("local file error: {0}")]
+    Local(#[from] coven_foundation::atomic_file::FileError),
+    #[error("blob source failed: {0}")]
+    BlobSource(#[source] coven_protocol::objects::StorageError),
+    #[error("storage protocol failed: {0}")]
+    Protocol(#[source] coven_protocol::objects::StorageError),
+    #[error("blob source content is invalid: {0}")]
+    InvalidBlobSource(String),
 }
 
 /// Opaque provider revision for an exact cloud object.
@@ -158,10 +178,10 @@ pub enum CloudFileReadError {
     SourceCleanup {
         #[source]
         source: CloudHomeError,
-        cleanup: String,
+        cleanup: coven_foundation::atomic_file::FileError,
     },
     #[error("local destination failed: {0}")]
-    Local(String),
+    Local(coven_foundation::atomic_file::FileError),
 }
 
 pub async fn write_cloud_object_stream(
@@ -192,6 +212,26 @@ pub async fn write_cloud_object_stream(
 }
 
 impl CloudHomeError {
+    pub fn configuration(
+        operation: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::ConfigurationSource {
+            operation: operation.into(),
+            source: Box::new(source),
+        }
+    }
+
+    pub fn transport(
+        operation: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::TransportSource {
+            operation: operation.into(),
+            source: Box::new(source),
+        }
+    }
+
     /// Whether the failure is transient — worth retrying the operation unchanged —
     /// or a fault that will not resolve until the missing object appears or the user
     /// fixes the configuration. A transport or local-I/O failure is transient
@@ -199,13 +239,21 @@ impl CloudHomeError {
     /// are not (`false`).
     pub fn is_retryable(&self) -> bool {
         match self {
-            CloudHomeError::Transport(_) | CloudHomeError::Io(_) => true,
+            CloudHomeError::Transport(_)
+            | CloudHomeError::TransportSource { .. }
+            | CloudHomeError::Io(_)
+            | CloudHomeError::Local(_) => true,
+            CloudHomeError::BlobSource(error) | CloudHomeError::Protocol(error) => {
+                error.is_transport()
+            }
             CloudHomeError::CleanupFailed { operation, .. }
             | CloudHomeError::UnresolvedOutcome { operation, .. } => operation.is_retryable(),
             CloudHomeError::NotFound(_)
             | CloudHomeError::AlreadyExists(_)
             | CloudHomeError::SlotCollision(_)
-            | CloudHomeError::Configuration(_) => false,
+            | CloudHomeError::Configuration(_)
+            | CloudHomeError::ConfigurationSource { .. }
+            | CloudHomeError::InvalidBlobSource(_) => false,
         }
     }
 
@@ -605,7 +653,15 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
             CloudHomeError::Configuration(msg) => {
                 coven_protocol::objects::StorageError::Configuration(msg)
             }
-            CloudHomeError::Transport(msg) => coven_protocol::objects::StorageError::Storage(msg),
+            error @ CloudHomeError::ConfigurationSource { .. } => {
+                coven_protocol::objects::StorageError::backend(
+                    "resolve cloud storage configuration",
+                    error,
+                )
+            }
+            error @ (CloudHomeError::Transport(_) | CloudHomeError::TransportSource { .. }) => {
+                coven_protocol::objects::StorageError::backend("access cloud storage", error)
+            }
             CloudHomeError::CleanupFailed { operation, cleanup } => {
                 coven_protocol::objects::StorageError::CleanupFailed {
                     operation: Box::new(Self::from(*operation)),
@@ -619,8 +675,14 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
                 operation: Box::new(Self::from(*operation)),
                 settlement: Box::new(Self::from(*settlement)),
             },
-            CloudHomeError::Io(io_err) => {
-                coven_protocol::objects::StorageError::Storage(format!("I/O error: {io_err}"))
+            CloudHomeError::Io(io_err) => coven_protocol::objects::StorageError::Io(io_err),
+            CloudHomeError::Local(error) => {
+                coven_protocol::objects::StorageError::LocalFilesystem(error)
+            }
+            CloudHomeError::BlobSource(error) => error,
+            CloudHomeError::Protocol(error) => error,
+            CloudHomeError::InvalidBlobSource(message) => {
+                coven_protocol::objects::StorageError::InvalidContent(message)
             }
         }
     }
@@ -631,11 +693,6 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
 /// own configuration vocabulary.
 impl From<coven_protocol::objects::StorageError> for CloudHomeError {
     fn from(error: coven_protocol::objects::StorageError) -> Self {
-        match error {
-            coven_protocol::objects::StorageError::Configuration(message) => {
-                CloudHomeError::Configuration(message)
-            }
-            other => CloudHomeError::Configuration(other.to_string()),
-        }
+        CloudHomeError::Protocol(error)
     }
 }

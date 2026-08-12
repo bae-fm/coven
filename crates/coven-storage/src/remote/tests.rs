@@ -467,7 +467,7 @@ async fn a_tampered_chunk_fails_only_the_ranges_that_touch_it() {
         let read = reader.read_at(offset, 16).await;
         if chunk == 3 {
             assert!(
-                matches!(read, Err(StorageError::Decryption(_))),
+                matches!(read, Err(StorageError::Decryption { .. })),
                 "chunk 3 must refuse, got {read:?}",
             );
         } else {
@@ -577,7 +577,7 @@ async fn a_tampered_header_fails_the_first_open() {
     assert!(
         matches!(
             reader.read_at(0, 16).await,
-            Err(StorageError::Decryption(_))
+            Err(StorageError::Decryption { .. })
         ),
         "the first chunk's tag covers the header, so a re-framed header fails the open",
     );
@@ -615,7 +615,7 @@ async fn a_spliced_chunk_refuses_to_open() {
     assert!(
         matches!(
             reader.read_at(2 * CHUNK as u64, 16).await,
-            Err(StorageError::Decryption(_))
+            Err(StorageError::Decryption { .. })
         ),
         "another blob's chunk cannot stand in for this one's",
     );
@@ -636,7 +636,7 @@ async fn a_spliced_chunk_refuses_to_open() {
     assert!(
         matches!(
             reader.read_at(2 * CHUNK as u64, 16).await,
-            Err(StorageError::Decryption(_))
+            Err(StorageError::Decryption { .. })
         ),
         "a chunk cannot open at an index it was not sealed for",
     );
@@ -1411,6 +1411,6 @@ async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_
         stale_reader
             .read_protocol_object(&package_context, package.reference(), &package_semantic,)
             .await,
-        Err(StorageError::Decryption(_))
+        Err(StorageError::Decryption { .. })
     ));
 }

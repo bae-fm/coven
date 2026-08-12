@@ -101,7 +101,6 @@ impl<'a> StoreCommitVerifier<'a> {
                         &expected_registration,
                         &expected_reference,
                     )
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
                 },
             )
             .await?;
@@ -154,8 +153,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 &prefix,
                 &object,
                 Box::new(move || {
-                    let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)
-                        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    let semantic_hash = SnapshotMeta::semantic_hash_from_bytes(&bytes)?;
                     let reference = StoreSnapshotRef {
                         generation,
                         snapshot_hash: semantic_hash,
@@ -167,8 +165,7 @@ impl<'a> StoreCommitVerifier<'a> {
                         &expected_registration_ref,
                         &expected_registration,
                         &reference,
-                    )
-                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+                    )?;
                     Ok((reference, meta))
                 }),
             )
@@ -278,7 +275,7 @@ impl<'a> StoreCommitVerifier<'a> {
             serde_json::from_slice(&bytes).map_err(|error| StoreObjectError::InvalidObject {
                 semantic_prefix: prefix.clone(),
                 key: reference.object.slot().logical_key().to_string(),
-                source: Box::new(StoreProtocolError::Malformed(error.to_string())),
+                source: Box::new(StoreProtocolError::from(error)),
             })?;
         let executor = self.load_registration(&unverified.executor).await?.value;
         let receipt = reference

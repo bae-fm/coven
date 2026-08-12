@@ -10,11 +10,10 @@
 
 use tracing::{debug, info, warn};
 
-use coven_database::DbError;
+use crate::blob::DrainOutcome;
 use coven_foundation::changeset::RowChange;
 use coven_foundation::store_dir::StoreDir;
 use coven_protocol::blob::BlobTransitionObserver;
-use coven_protocol::blob::DrainOutcome;
 
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
@@ -61,28 +60,39 @@ pub struct SyncCycleResult {
     pub rotation_pending: Option<RotationPending>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncCycleFailure {
-    Offline(String),
-    Failed(String),
+#[derive(Debug)]
+pub struct SyncCycleFailure {
+    kind: SyncCycleFailureKind,
+    operation: &'static str,
+    cause: Box<SyncCycleCause>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncCycleFailureKind {
+    Offline,
+    Failed,
 }
 
 impl SyncCycleFailure {
-    pub fn operation<E>(operation: &str, error: E) -> Self
+    pub(crate) fn operation<E>(operation: &'static str, error: E) -> Self
     where
-        E: std::error::Error + 'static,
+        E: Into<SyncCycleCause>,
     {
-        let offline = error_chain_contains_transport(&error);
-        let message = format!("{operation}: {error}");
-        if offline {
-            Self::Offline(message)
+        let cause = error.into();
+        let kind = if error_chain_contains_transport(&cause) {
+            SyncCycleFailureKind::Offline
         } else {
-            Self::Failed(message)
+            SyncCycleFailureKind::Failed
+        };
+        Self {
+            kind,
+            operation,
+            cause: Box::new(cause),
         }
     }
 
     pub(crate) fn is_offline(&self) -> bool {
-        matches!(self, Self::Offline(_))
+        self.kind == SyncCycleFailureKind::Offline
     }
 
     #[cfg(test)]
@@ -91,21 +101,63 @@ impl SyncCycleFailure {
     }
 }
 
-impl From<String> for SyncCycleFailure {
-    fn from(message: String) -> Self {
-        Self::Failed(message)
-    }
-}
-
 impl std::fmt::Display for SyncCycleFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Offline(message) | Self::Failed(message) => formatter.write_str(message),
-        }
+        write!(formatter, "{}: {}", self.operation, self.cause)
     }
 }
 
-impl std::error::Error for SyncCycleFailure {}
+impl std::error::Error for SyncCycleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SyncCycleCause {
+    #[error("{0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("{0}")]
+    Store(#[from] super::store::StoreError),
+    #[error("{0}")]
+    Registration(#[from] super::store::StoreRegistrationError),
+    #[error("{0}")]
+    Initialization(#[from] super::store::StoreInitializationError),
+    #[error("{0}")]
+    Circle(#[from] super::store::CircleOperationError),
+    #[error("{0}")]
+    DeviceExclusion(#[from] super::store::StoreDeviceExclusionError),
+    #[error("{0}")]
+    Reclaim(#[from] super::store::StoreReclaimError),
+    #[error("{0}")]
+    TombstoneDrain(#[from] crate::blob::delete::TombstoneDrainError),
+    #[error("{0}")]
+    TombstoneGc(#[from] super::store::commit_publication::operation::TombstoneGcError),
+    #[error("{0}")]
+    UploadFailures(#[from] crate::blob::UploadFailures),
+    #[error("{0}")]
+    WriterAuthorization(
+        #[from] super::store::commit_publication::operation::StoreWriterAuthorizationError,
+    ),
+    #[error("{0}")]
+    Acknowledgement(#[from] super::store::acknowledgements::StoreAckError),
+    #[error("{0}")]
+    Membership(#[from] super::store::MembershipOpsError),
+    #[error("{0}")]
+    Pull(#[from] super::store::StorePullError),
+    #[error("{0}")]
+    AuthorizationRefresh(
+        #[from] super::store::commit_publication::operation::AuthorizationRefreshError,
+    ),
+    #[error("{0}")]
+    PublishedBlobDrop(#[from] super::store::blob::PublishedBlobDropError),
+    #[error("{0}")]
+    StoreProtocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("{0}")]
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
+    #[error("{0}")]
+    Snapshot(#[from] super::store::snapshots::SnapshotError),
+}
 
 fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(error);
@@ -119,6 +171,7 @@ fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> 
                     matches!(
                         error,
                         coven_storage::cloud::CloudHomeError::Transport(_)
+                            | coven_storage::cloud::CloudHomeError::TransportSource { .. }
                             | coven_storage::cloud::CloudHomeError::Io(_)
                     )
                 })
@@ -282,7 +335,9 @@ impl AuthorizedSyncCycle<'_, '_> {
                 .authorization
                 .drain_tombstones(self.clock)
                 .await
-                .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
+                .map_err(|error| {
+                    SyncCycleFailure::operation("drain queued blob tombstones", error)
+                })?;
             if drained > 0 {
                 info!(count = drained, "Drained blob tombstones");
             }
@@ -291,7 +346,9 @@ impl AuthorizedSyncCycle<'_, '_> {
             .authorization
             .gc_tombstones(self.clock)
             .await
-            .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
+            .map_err(|error| {
+                SyncCycleFailure::operation("garbage-collect blob tombstones", error)
+            })?;
         if reclaimed > 0 {
             info!(count = reclaimed, "Reclaimed tombstoned blobs");
         }
@@ -300,11 +357,14 @@ impl AuthorizedSyncCycle<'_, '_> {
             .authorization
             .latest_local_store_position()
             .await
-            .map_err(|error| format!("read local Store position: {error}"))?
+            .map_err(|error| SyncCycleFailure::operation("read local Store position", error))?
             .map_or(0, |reference| reference.coord.sequence());
         self.local_blob_access
             .drain_published_blob_drop_intents(local_seq)
-            .await?;
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("drain published blob drop intents", error)
+            })?;
 
         // One wall-clock reading for this whole cycle. Store acknowledgements and
         // the status built at the end record the same instant. Store write commits
@@ -380,17 +440,25 @@ impl AuthorizedSyncCycle<'_, '_> {
             .authorization
             .latest_local_store_position()
             .await
-            .map_err(|error| format!("read local Store position after publish: {error}"))?
+            .map_err(|error| {
+                SyncCycleFailure::operation("read local Store position after publish", error)
+            })?
             .map_or(0, |position| position.coord.sequence());
         self.local_blob_access
             .drain_published_blob_drop_intents(local_seq)
-            .await?;
+            .await
+            .map_err(|error| {
+                SyncCycleFailure::operation("drain published blob drop intents", error)
+            })?;
         let local_blob_cleanup_pending = self
             .authorization
             .drain_local_blob_cleanup()
             .await
             .map_err(|error| {
-                format!("drain local blob cleanup after Store publication: {error}")
+                SyncCycleFailure::operation(
+                    "drain local blob cleanup after Store publication",
+                    error,
+                )
             })?
             || store_pull.local_blob_cleanup_pending;
 
@@ -401,7 +469,7 @@ impl AuthorizedSyncCycle<'_, '_> {
         self.authorization
             .persist_hlc_high_water()
             .await
-            .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
+            .map_err(|error| SyncCycleFailure::operation("persist HLC high-water mark", error))?;
 
         self.authorization
             .snapshots()
@@ -447,12 +515,10 @@ pub enum InitSyncError {
     IncoherentStorageRepresentation,
     #[error("Store row routing initialization failed: {0}")]
     RowRouting(coven_database::DbError),
-    #[error("Store protocol root failed: {0}")]
-    StoreProtocolRoot(String),
-    #[error("membership chain bootstrap/anchor failed: {0}")]
-    MembershipAnchor(String),
+    #[error("Store initialization failed: {0}")]
+    Initialization(#[from] crate::sync::store::StoreInitializationError),
     #[error("restoring the persisted pending rotation failed: {0}")]
-    PendingRotationRestore(String),
+    PendingRotationRestore(#[source] coven_database::DbError),
     #[error("prepared sync identity differs from its storage identity")]
     StorageIdentityMismatch,
 }
@@ -533,7 +599,7 @@ impl PreparedSyncComponents {
             let gate = database
                 .load_rotation_gate()
                 .await
-                .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
+                .map_err(InitSyncError::PendingRotationRestore)?;
             storage.install_durable_gate(gate);
         }
 
@@ -583,14 +649,7 @@ impl PreparedSyncComponents {
                 .await
             }
         }
-        .map_err(|error| match error {
-            crate::sync::store::StoreInitializationError::ProtocolRoot(error) => {
-                InitSyncError::StoreProtocolRoot(error)
-            }
-            crate::sync::store::StoreInitializationError::MembershipAnchor(error) => {
-                InitSyncError::MembershipAnchor(error)
-            }
-        })?;
+        .map_err(InitSyncError::Initialization)?;
 
         let (store, device_id) = initialized.into_parts();
         info!("Sync initialized (device: {})", device_id);
@@ -678,66 +737,63 @@ impl SyncComponents {
     pub(crate) async fn propose_device_exclusion(
         &self,
         device_id: coven_protocol::StoreDeviceId,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+    ) -> Result<
+        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        super::store::StoreDeviceExclusionError,
+    > {
         self.store
             .propose_device_exclusion_for_device(device_id)
             .await
-            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn cancel_device_exclusion(
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<(), String> {
-        self.store
-            .cancel_device_exclusion_proposal(proposal)
-            .await
-            .map_err(|error| error.to_string())
+    ) -> Result<(), super::store::StoreDeviceExclusionError> {
+        self.store.cancel_device_exclusion_proposal(proposal).await
     }
 
     pub(crate) async fn finalize_device_exclusion(
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<(), String> {
+    ) -> Result<(), super::store::StoreDeviceExclusionError> {
         self.store
             .finalize_device_exclusion_proposal(proposal)
             .await
-            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn begin_owner_promotion(
         &self,
         device_id: coven_protocol::StoreDeviceId,
-    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, String> {
-        self.store
-            .begin_owner_promotion_for_device(device_id)
-            .await
-            .map_err(|error| error.to_string())
+    ) -> Result<
+        coven_protocol::store_commit::OwnerPromotionRequest,
+        super::store::OwnerPromotionError,
+    > {
+        self.store.begin_owner_promotion_for_device(device_id).await
     }
 
     pub(crate) async fn accept_owner_promotion(
         &self,
         request: coven_protocol::store_commit::OwnerPromotionRequest,
-    ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, String> {
-        self.store
-            .accept_owner_promotion(request)
-            .await
-            .map_err(|error| error.to_string())
+    ) -> Result<
+        coven_protocol::store_commit::OwnerPromotionAcceptance,
+        super::store::OwnerPromotionError,
+    > {
+        self.store.accept_owner_promotion(request).await
     }
 
     pub(crate) async fn finalize_owner_promotion(
         &self,
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
-    ) -> Result<(), String> {
+    ) -> Result<(), super::store::OwnerPromotionError> {
         let encryption = self
             .routing_encryption
             .as_ref()
-            .ok_or_else(|| "owner promotion requires an encrypted cloud home".to_string())?;
+            .ok_or(super::store::OwnerPromotionError::EncryptionRequired)?;
         self.store
             .finalize_owner_promotion(encryption, acceptance)
             .await
             .map(|_| ())
-            .map_err(|error| error.to_string())
     }
 
     pub(crate) async fn begin_device_join_bundle(
@@ -899,13 +955,14 @@ impl SyncComponents {
         &self,
         clock: &dyn coven_foundation::clock::Clock,
         observer: Option<&dyn BlobTransitionObserver>,
-    ) -> Result<coven_protocol::blob::DrainOutcome, DbError> {
+    ) -> Result<crate::blob::DrainOutcome, crate::sync::store::StoreError> {
         self.store
             .authorize_writer()
             .await
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(crate::sync::store::StoreError::from)?
             .drain_uploads(clock, self.routing_encryption.as_ref(), observer)
             .await
+            .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) async fn invite_member(
@@ -1018,11 +1075,11 @@ impl SyncComponents {
             .store
             .authorize_writer()
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         authorization
             .publish_pending_store_writes()
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         let bootstrap = authorization
             .circles()
             .snapshots()
@@ -1032,7 +1089,7 @@ impl SyncComponents {
             routing_encryption,
             self.store.store_root().store_root_hash,
         )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        .map_err(CircleOperationError::from)?;
         authorization
             .circles()
             .add_circle_member(circle_id, member_pubkey, role, bootstrap, &routing_key)
@@ -1186,7 +1243,10 @@ impl SyncComponents {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<
+        (coven_keys::encryption::KeyFingerprint, Vec<u8>),
+        coven_keys::encryption::EncryptionError,
+    > {
         self.storage.open_sealed_blob_for_test(stored, aad_context)
     }
 

@@ -1898,7 +1898,7 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
         .drain_published_blob_drop_intents(sequence)
         .await
         .expect_err("a lost disposition fails the drain");
-    assert!(error.contains("missing from both"), "{error}");
+    assert!(error.to_string().contains("missing from both"), "{error}");
 
     assert!(
         db.published_blob_drop_intent_exists_for_test("cov-lost")
@@ -2219,7 +2219,7 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
     assert!(
         matches!(
             &err,
-            crate::blob::transition::MakeRemoteError::Source { blob_id, .. }
+            crate::blob::transition::MakeRemoteError::SourceFile { blob_id, .. }
                 if blob_id.as_str() == "photoaaa"
         ),
         "make_remote aborts on the source-verification check for the drifted blob: {err:?}"
@@ -2737,7 +2737,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
         .expect_err("the dest write fails");
     assert!(matches!(
         err,
-        crate::blob::transition::MakeLocalError::Write { .. }
+        crate::blob::transition::MakeLocalError::WriteFile { .. }
     ));
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the release stays Remote");

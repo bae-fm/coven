@@ -21,10 +21,8 @@ pub fn prepare_exact_object(
     object: &ExactObjectRef,
     value: &impl serde::Serialize,
 ) -> Result<PreparedExactObject, MembershipPreparationError> {
-    let bytes =
-        serde_json::to_vec(value).map_err(|error| MembershipPreparationError(error.to_string()))?;
-    PreparedExactObject::new(object.clone(), bytes)
-        .map_err(|error| MembershipPreparationError(error.to_string()))
+    let bytes = serde_json::to_vec(value).map_err(MembershipPreparationError::Json)?;
+    PreparedExactObject::new(object.clone(), bytes).map_err(MembershipPreparationError::ExactObject)
 }
 
 fn binds_exact_object(object: &ExactObjectRef, value: &impl serde::Serialize) -> bool {
@@ -33,9 +31,15 @@ fn binds_exact_object(object: &ExactObjectRef, value: &impl serde::Serialize) ->
 
 /// A prepared membership mutation whose parts do not bind one exact entry and
 /// head. Workflow errors wrap it at the operation boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid prepared membership mutation: {0}")]
-pub struct MembershipPreparationError(pub(crate) String);
+#[derive(Debug, thiserror::Error)]
+pub enum MembershipPreparationError {
+    #[error("invalid prepared membership mutation: {0}")]
+    Invariant(String),
+    #[error("serialize prepared membership mutation: {0}")]
+    Json(#[source] serde_json::Error),
+    #[error("prepared membership exact object: {0}")]
+    ExactObject(#[source] crate::objects::StorageError),
+}
 
 /// One membership entry and the head that publishes it, each named by its exact
 /// reference.
@@ -72,7 +76,7 @@ impl PreparedMembershipPublication {
             || self.head_ref.head_hash != self.head.head_hash()
             || !binds_exact_object(&self.head_ref.object, &self.head)
         {
-            return Err(MembershipPreparationError(
+            return Err(MembershipPreparationError::Invariant(
                 "prepared membership publication does not bind one exact entry and head"
                     .to_string(),
             ));
@@ -103,7 +107,7 @@ impl PreparedMembershipTransition {
     pub fn validate(&self) -> Result<(), MembershipPreparationError> {
         let coord = self.entry.coord();
         let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
-            MembershipPreparationError("membership sequence is exhausted".to_string())
+            MembershipPreparationError::Invariant("membership sequence is exhausted".to_string())
         })?;
         let entry_key = format!(
             "{}.json",
@@ -141,7 +145,7 @@ impl PreparedMembershipTransition {
             || self.transition.head_slot.logical_key() != head_key
             || self.transition.body.successor.next_slot.logical_key() != successor_key
         {
-            return Err(MembershipPreparationError(
+            return Err(MembershipPreparationError::Invariant(
                 "prepared membership transition does not bind its exact entry".to_string(),
             ));
         }
@@ -199,7 +203,7 @@ impl StoreMembershipJournalCompletion {
             .find(|remote| remote.object() == object)
             .cloned()
             .ok_or_else(|| {
-                MembershipPreparationError(
+                MembershipPreparationError::Invariant(
                     "membership completion omits an exact activated object".to_string(),
                 )
             })

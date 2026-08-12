@@ -110,18 +110,6 @@ pub enum KeyTagError {
     UnknownVersion(u8),
 }
 
-impl From<SealedBlobError> for EncryptionError {
-    fn from(error: SealedBlobError) -> Self {
-        Self::Decryption(error.to_string())
-    }
-}
-
-impl From<KeyTagError> for EncryptionError {
-    fn from(error: KeyTagError) -> Self {
-        Self::Decryption(error.to_string())
-    }
-}
-
 /// A tag naming a version this build does not read is its own answer to the
 /// host — "this payload is newer than me", not "decryption failed". Every other
 /// malformed tag is a corrupt envelope, which reads as a decryption failure.
@@ -763,10 +751,37 @@ impl SealedBlobOpener {
 
 #[derive(Error, Debug)]
 pub enum EncryptionError {
-    #[error("Decryption failed: {0}")]
-    Decryption(String),
-    #[error("Key management error: {0}")]
-    KeyManagement(String),
+    #[error("sealed blob could not be opened: {0}")]
+    SealedBlob(#[from] SealedBlobError),
+    #[error("sealed payload key tag is invalid: {0}")]
+    KeyTag(#[from] KeyTagError),
+    #[error("serialize keyring: {0}")]
+    SerializeKeyring(#[source] serde_json::Error),
+    #[error("keyring JSON is malformed: {0}")]
+    ParseKeyring(#[source] serde_json::Error),
+    #[error("keyring payload is not UTF-8: {0}")]
+    KeyringUtf8(#[source] std::string::FromUtf8Error),
+    #[error("keyring key is not valid hexadecimal: {0}")]
+    KeyHex(#[source] hex::FromHexError),
+    #[error("keyring key has length {actual}, expected 32")]
+    KeyLength { actual: usize },
+    #[error("keyring has no keys")]
+    EmptyKeyring,
+    #[error("cannot merge keys into a plaintext cloud home")]
+    PlaintextKeyring,
+    #[error("key fingerprint {fingerprint} identifies conflicting entries at generations {existing_generation} and {new_generation}")]
+    FingerprintConflict {
+        fingerprint: KeyFingerprint,
+        existing_generation: u64,
+        new_generation: u64,
+    },
+    #[error("no key with fingerprint {0}")]
+    UnknownKeyFingerprint(KeyFingerprint),
+    #[error("new generation {new_generation} must be greater than current generation {current_generation}")]
+    NonIncreasingGeneration {
+        new_generation: u64,
+        current_generation: u64,
+    },
 }
 
 /// Why sealing or opening a host's app-data failed.
@@ -850,8 +865,7 @@ fn keyring_string(keys: &BTreeMap<KeyFingerprint, KeyEntry>) -> Result<String, E
             })
             .collect(),
     };
-    serde_json::to_string(&payload)
-        .map_err(|e| EncryptionError::KeyManagement(format!("serialize keyring: {e}")))
+    serde_json::to_string(&payload).map_err(EncryptionError::SerializeKeyring)
 }
 
 /// A store's master key material: every key it holds. This is the value custody
@@ -925,10 +939,11 @@ fn insert_key_entry(
             Ok(())
         }
         Some(existing) if existing == &entry => Ok(()),
-        Some(existing) => Err(EncryptionError::KeyManagement(format!(
-            "key fingerprint {fingerprint} identifies conflicting entries at generations {} and {}",
-            existing.generation, entry.generation,
-        ))),
+        Some(existing) => Err(EncryptionError::FingerprintConflict {
+            fingerprint,
+            existing_generation: existing.generation,
+            new_generation: entry.generation,
+        }),
     }
 }
 
@@ -985,9 +1000,7 @@ impl EncryptionService {
             )?;
         }
         if keyring.is_empty() {
-            return Err(EncryptionError::KeyManagement(
-                "keyring has no keys".to_string(),
-            ));
+            return Err(EncryptionError::EmptyKeyring);
         }
         Ok(EncryptionService { keys: keyring })
     }
@@ -1041,26 +1054,20 @@ impl EncryptionService {
     }
 
     pub fn from_keyring_payload(plaintext: Vec<u8>) -> Result<Self, EncryptionError> {
-        let keyring = String::from_utf8(plaintext).map_err(|e| {
-            EncryptionError::KeyManagement(format!("keyring payload is not UTF-8: {e}"))
-        })?;
+        let keyring = String::from_utf8(plaintext).map_err(EncryptionError::KeyringUtf8)?;
         EncryptionService::from_keyring_json(&keyring)
     }
 
     fn from_keyring_json(keyring: &str) -> Result<Self, EncryptionError> {
-        let payload: StoredKeyring = serde_json::from_str(keyring).map_err(|e| {
-            EncryptionError::KeyManagement(format!("keyring JSON is malformed: {e}"))
-        })?;
+        let payload: StoredKeyring =
+            serde_json::from_str(keyring).map_err(EncryptionError::ParseKeyring)?;
         let mut keys = Vec::with_capacity(payload.keys.len());
         for entry in payload.keys {
-            let key: [u8; 32] = hex::decode(&entry.key_hex)
-                .map_err(|e| {
-                    EncryptionError::KeyManagement(format!("keyring key is not hex: {e}"))
-                })?
+            let key = hex::decode(&entry.key_hex).map_err(EncryptionError::KeyHex)?;
+            let actual = key.len();
+            let key: [u8; 32] = key
                 .try_into()
-                .map_err(|_| {
-                    EncryptionError::KeyManagement("keyring key is not 32 bytes".to_string())
-                })?;
+                .map_err(|_| EncryptionError::KeyLength { actual })?;
             keys.push((entry.generation, key));
         }
         EncryptionService::from_keyring(keys)
@@ -1074,9 +1081,10 @@ impl EncryptionService {
         fingerprint: &[u8; 32],
     ) -> Result<[u8; 32], EncryptionError> {
         let fingerprint = KeyFingerprint::from_bytes(*fingerprint);
-        self.keys.get(&fingerprint).map(|e| e.key).ok_or_else(|| {
-            EncryptionError::KeyManagement(format!("no key with fingerprint {fingerprint}"))
-        })
+        self.keys
+            .get(&fingerprint)
+            .map(|e| e.key)
+            .ok_or(EncryptionError::UnknownKeyFingerprint(fingerprint))
     }
 
     pub fn service_for_fingerprint(
@@ -1101,10 +1109,10 @@ impl EncryptionService {
         key: [u8; 32],
     ) -> Result<EncryptionService, EncryptionError> {
         if generation <= self.current_generation() {
-            return Err(EncryptionError::KeyManagement(format!(
-                "new generation {generation} must be greater than current generation {}",
-                self.current_generation()
-            )));
+            return Err(EncryptionError::NonIncreasingGeneration {
+                new_generation: generation,
+                current_generation: self.current_generation(),
+            });
         }
         let mut keys = self.keys.clone();
         insert_key_entry(

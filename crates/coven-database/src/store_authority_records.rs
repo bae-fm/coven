@@ -53,7 +53,7 @@ impl StoreOwnerAnchor {
             root.value.descriptor.founder_grant.clone(),
             &root.value.descriptor.founder_recovery,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
         Ok(Self {
             root,
             founder,
@@ -459,7 +459,7 @@ pub(crate) fn install_store_founder_state_on(
     }
     founder_reference
         .verify_registration(founder)
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
     if founder.to_bytes() != founder_bytes {
         return Err(DbError::Message(
             "Store founder registration differs from its exact bytes".to_string(),

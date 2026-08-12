@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store::error::{BlobPreparationCleanupError, BlobPreparationRollback};
 use crate::sync::store::package_preparation::{PreparedPartitionBlob, PreparedPartitionPackage};
 use coven_database::AudiencePartition;
 use coven_database::{
@@ -130,7 +131,7 @@ impl AuthorizedWriterOperation<'_> {
                     partition.changeset.clone(),
                     blob_bindings,
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
                 let bytes = package.to_bytes();
                 let prefix = package_semantic_prefix(
                     candidate_family,
@@ -170,7 +171,7 @@ impl AuthorizedWriterOperation<'_> {
                     partition.changeset.clone(),
                     blob_bindings,
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
                 let bytes = package.to_bytes();
                 let prefix = circle_package_semantic_prefix(
                     circle_id,
@@ -352,7 +353,7 @@ impl AuthorizedWriterOperation<'_> {
                 fact.column.clone(),
                 stored.clone(),
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
             return Ok((
                 binding,
                 PreparedPartitionBlob {
@@ -375,7 +376,7 @@ impl AuthorizedWriterOperation<'_> {
                     fact.column.clone(),
                     previous.stored.clone(),
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
                 return Ok((
                     binding,
                     PreparedPartitionBlob {
@@ -391,7 +392,7 @@ impl AuthorizedWriterOperation<'_> {
             coven_protocol::blob::Provenance::HostProvided => Some(
                 self.store_dir
                     .local_blob_path(&fact.blob.namespace, &fact.blob.id)
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                    .map_err(StoreError::from)?,
             ),
             coven_protocol::blob::Provenance::UserProvided => None,
         };
@@ -422,10 +423,10 @@ impl AuthorizedWriterOperation<'_> {
                     )
                 }
                 Err(error) => {
-                    return Err(StoreError::InvalidOutbound(format!(
-                        "inspect host blob source {}: {error}",
-                        path.display()
-                    )));
+                    return Err(StoreError::InspectBlobSource {
+                        path: path.clone(),
+                        source: error,
+                    });
                 }
             }
         } else {
@@ -439,7 +440,7 @@ impl AuthorizedWriterOperation<'_> {
             .store_dir
             .stage_atomic_file(&spool_path)
             .await
-            .map_err(StoreError::InvalidOutbound)?;
+            .map_err(StoreError::File)?;
         let sealed = match destination {
             PartitionBlobDestination::Store => {
                 storage
@@ -487,7 +488,7 @@ impl AuthorizedWriterOperation<'_> {
                 fact.column.clone(),
                 stored.clone(),
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
             Ok::<_, StoreError>((binding, stored))
         }
         .await;
@@ -538,9 +539,9 @@ impl AuthorizedWriterOperation<'_> {
                     id: fact.blob.id.clone(),
                     source,
                 },
-                error => StoreError::InvalidOutbound(error.to_string()),
+                error => StoreError::BlobCache(error),
             })?;
-        staged.commit().await.map_err(StoreError::InvalidOutbound)?;
+        staged.commit().await.map_err(StoreError::File)?;
         Ok(destination)
     }
 }
@@ -549,10 +550,7 @@ fn partition_blob_facts<'a>(
     changeset: &[u8],
     facts: &'a StoreWriteBlobFacts,
 ) -> Result<Vec<&'a StoreWriteBlobFact>, StoreError> {
-    let rows = coven_database::walk_changeset(changeset)
-        .map_err(|error| {
-            StoreError::InvalidOutbound(format!("read audience package blob rows: {error}"))
-        })?
+    let rows = coven_database::walk_changeset(changeset)?
         .into_iter()
         .filter(|change| {
             matches!(
@@ -613,13 +611,11 @@ impl<'store> PartitionBlobSource<'store> {
         &self.path
     }
 
-    async fn retire_temporary(&self) -> Result<(), StoreError> {
+    async fn retire_temporary(&self) -> Result<(), BlobPreparationCleanupError> {
         if !self.temporary {
             return Ok(());
         }
-        remove_durable_file(self.store_dir, &self.path, false)
-            .await
-            .map_err(StoreError::InvalidOutbound)
+        remove_durable_file(self.store_dir, &self.path, false).await
     }
 
     async fn cleanup_failure(
@@ -629,7 +625,7 @@ impl<'store> PartitionBlobSource<'store> {
     ) -> StoreError {
         let mut failures = Vec::new();
         if let Err(cleanup_error) = self.retire_temporary().await {
-            failures.push(cleanup_error.to_string());
+            failures.push(cleanup_error);
         }
         if let Some(spool) = created_spool {
             if let Err(cleanup_error) = spool.rollback().await {
@@ -639,10 +635,7 @@ impl<'store> PartitionBlobSource<'store> {
         if failures.is_empty() {
             error
         } else {
-            StoreError::InvalidOutbound(format!(
-                "blob preparation failed: {error}; cleanup failed: {}",
-                failures.join("; ")
-            ))
+            BlobPreparationRollback::new(error, failures).into()
         }
     }
 }
@@ -660,7 +653,7 @@ impl<'a> PreparedBlobSpool<'a> {
         Self { store_dir, path }
     }
 
-    async fn rollback(self) -> Result<(), String> {
+    async fn rollback(self) -> Result<(), BlobPreparationCleanupError> {
         remove_durable_file(self.store_dir, self.path, true).await
     }
 }
@@ -669,18 +662,27 @@ async fn remove_durable_file(
     store_dir: &coven_foundation::store_dir::StoreDir,
     path: &std::path::Path,
     require_present: bool,
-) -> Result<(), String> {
+) -> Result<(), BlobPreparationCleanupError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_present => {
             return Ok(());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!("prepared blob spool {} is absent", path.display()));
+            return Err(BlobPreparationCleanupError::MissingSpool {
+                path: path.to_path_buf(),
+            });
         }
-        Err(error) => return Err(format!("remove prepared blob {}: {error}", path.display())),
+        Err(source) => {
+            return Err(coven_foundation::atomic_file::FileError::at(
+                "remove prepared blob",
+                path,
+                source,
+            )
+            .into())
+        }
     }
-    store_dir.sync_parent_dir(path).await
+    store_dir.sync_parent_dir(path).await.map_err(Into::into)
 }
 
 pub(crate) fn prepare_partition_blob_locator(
@@ -721,7 +723,7 @@ pub(crate) fn prepare_partition_blob_locator(
             )
         }
     }
-    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))
+    .map_err(StoreError::from)
 }
 
 pub(crate) fn close_prepared_packages(
@@ -759,7 +761,7 @@ pub(crate) fn close_prepared_packages(
     }
     let mut remote_objects = remote_object::CandidateObjectGraph::from_commit(commit)
         .and_then(|graph| graph.close(commit, owner, materials))
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
     let (blob_remotes, indexed_blobs) = close_prepared_blobs(prepared_blobs, owner)?;
     remote_objects.extend(blob_remotes);
     Ok((
@@ -806,7 +808,7 @@ pub(super) fn close_prepared_blobs(
             owner.clone(),
             blob.uploaded_verified,
         )
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
         let prepared = PreparedAudienceBlob::from_remote(
             blob.audience,
             &locator_hash.to_string(),

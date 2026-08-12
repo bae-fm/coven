@@ -72,9 +72,7 @@ impl<'storage> StoreKeyrings<'storage> {
                 "wrapped Store-key generation must be positive".to_string(),
             ));
         }
-        let bytes = serde_json::to_vec(&value).map_err(|error| {
-            StorageError::Parse(format!("serialize wrapped Store key: {error}"))
-        })?;
+        let bytes = serde_json::to_vec(&value).map_err(StorageError::Json)?;
         let wrap_hash = coven_protocol::store_commit::ObjectHash::digest(&bytes);
         let semantic_prefix = format!(
             "keys/{}/{}/{}/{}",
@@ -128,13 +126,11 @@ impl<'storage> StoreKeyrings<'storage> {
                     reference.generation,
                     identity,
                 )
-                .map_err(|error| {
-                    InviteError::Crypto(format!("verify wrapped Store key: {error}"))
-                })?;
+                .map_err(InviteError::WrappedKeyring)?;
             merged = Some(match merged {
-                Some(existing) => existing.merged_with(&keyring).map_err(|error| {
-                    InviteError::Crypto(format!("merge wrapped keyrings: {error}"))
-                })?,
+                Some(existing) => existing
+                    .merged_with(&keyring)
+                    .map_err(InviteError::Encryption)?,
                 None => keyring,
             });
         }
@@ -169,9 +165,8 @@ pub(crate) async fn load_wrapped_store_key(
     let bytes = storage
         .read_protocol_object(&context, &reference.object, &reference.semantic_prefix())
         .await?;
-    let value: WrappedStoreKey = serde_json::from_slice(&bytes).map_err(|error| {
-        coven_protocol::objects::StorageError::Parse(format!("parse wrapped Store key: {error}"))
-    })?;
+    let value: WrappedStoreKey =
+        serde_json::from_slice(&bytes).map_err(coven_protocol::objects::StorageError::Json)?;
     reference.validate_value(&value, &bytes)?;
     Ok(value)
 }

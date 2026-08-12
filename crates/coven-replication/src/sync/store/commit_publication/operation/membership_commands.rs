@@ -183,33 +183,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .create_protocol_object(&plan.wrapped_key.object)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+                crate::sync::store::membership::InviteError::from(error)
             })?;
         storage
             .as_ref()
             .create_protocol_object(&plan.publication.prepared_entry()?)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+                crate::sync::store::membership::InviteError::from(error)
             })?;
         self.membership_objects()
             .load_entry(&plan.publication.entry_ref)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+                crate::sync::store::membership::InviteError::from(error)
             })?;
         storage
             .as_ref()
             .create_protocol_object(&plan.publication.prepared_head()?)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+                crate::sync::store::membership::InviteError::from(error)
             })?;
         self.membership_objects()
             .load_head_for_registration(&plan.publication.head_ref, &author)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(error.to_string())
+                crate::sync::store::membership::InviteError::from(error)
             })?;
         validated_chain.activate_head_ref(plan.publication.head_ref.clone())?;
         persistence.complete().await?;
@@ -343,7 +343,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let base = self
             .prepare_conflict_resolution_plan(chain.head_refs())
             .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
         let chain = base.membership().clone();
         let membership::MembershipStatus::Conflict(conflict) = chain.status() else {
             return Err(MembershipError::Conflict.into());
@@ -409,9 +409,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             membership,
             recovery,
         )?;
-        let resolution_bytes = serde_json::to_vec(&resolution).map_err(|error| {
-            InviteError::InvalidDurableMutation(format!("serialize membership resolution: {error}"))
-        })?;
+        let resolution_bytes = serde_json::to_vec(&resolution).map_err(InviteError::Json)?;
         let resolution_context = ProtocolObjectContext::signed_plaintext(
             base.root().store_root_hash,
             ProtocolObjectDomain::StoreMembershipResolution,
@@ -451,7 +449,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         let operation_plan = base
             .finish(&resolved_chain, &reference)
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
         let mut stream_activations = vec![
             store_commit::StreamActivation::grant_authorized(
                 resolution.store_root_hash,
@@ -476,7 +474,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 },
             )
             .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
         let publication = self
             .finish_membership_transition(
                 transition.clone(),
@@ -486,7 +484,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await?;
         self.attach_merge_membership_proof(&mut candidate, &publication, Some(&resolution))
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
         let plan = ResolveMutationPlan {
             resolution,
             reference,
@@ -594,11 +592,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         if let MembershipMutationProgress::ResolutionCandidateNonactivating { nonactivation } =
             &progress
         {
-            if nonactivation
-                .reference()
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?
-                != plan.candidate.reference
-            {
+            if nonactivation.reference().map_err(InviteError::from)? != plan.candidate.reference {
                 return Err(InviteError::InvalidDurableMutation(
                     "resolution nonactivation names another candidate".to_string(),
                 )
@@ -652,11 +646,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .create_protocol_object(&plan.prepared_resolution()?)
             .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            .map_err(InviteError::from)?;
         self.membership_objects()
             .load_resolution(&plan.reference)
             .await
-            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+            .map_err(InviteError::from)?;
         persistence
             .mark_remote_object_uploaded(
                 exact_owned_remote(&remotes, &plan.reference.object)?.into_record(),
@@ -671,7 +665,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         self.upload_commit(&plan.candidate)
             .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
         persistence
             .mark_remote_object_uploaded(
                 exact_owned_remote(&remotes, &plan.candidate.reference.object)?.into_record(),

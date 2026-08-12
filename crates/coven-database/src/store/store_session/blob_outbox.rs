@@ -233,20 +233,14 @@ impl StoreSession<'_> {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
                         rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("invalid published blob plaintext hash: {error}"),
-                        )),
+                        Box::new(error),
                     )
                 })?;
                 let locator_hash = row.get::<_, String>(5)?.parse().map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         5,
                         rusqlite::types::Type::Text,
-                        Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("invalid published blob locator hash: {error}"),
-                        )),
+                        Box::new(error),
                     )
                 })?;
                 let disposition_raw: String = row.get(6)?;
@@ -633,16 +627,12 @@ impl StoreDatabase {
 }
 
 fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUpload> {
-    let invalid = |index: usize, message: String| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            message.into(),
-        )
+    let invalid = |index: usize, source: Box<dyn std::error::Error + Send + Sync>| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, source)
     };
     let encoded: String = row.get(0)?;
     let reference: coven_protocol::blob::RowBlobRef =
-        serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
+        serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
     let attempt_count: i64 = row.get(4)?;
     Ok(QueuedUpload {
         namespace: reference.blob().namespace.clone(),
@@ -652,8 +642,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         root_table: row.get(1)?,
         root_id: row.get(2)?,
         retain_pinned: row.get(3)?,
-        attempt_count: u64::try_from(attempt_count)
-            .map_err(|error| invalid(4, error.to_string()))?,
+        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(4, Box::new(error)))?,
         last_error: row.get(5)?,
         created_at: row.get(6)?,
         last_attempt_at: row.get(7)?,
@@ -661,22 +650,17 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
 }
 
 fn row_to_queued_delete(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedDelete> {
-    let invalid = |index: usize, message: String| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            message.into(),
-        )
+    let invalid = |index: usize, source: Box<dyn std::error::Error + Send + Sync>| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, source)
     };
     let encoded: String = row.get(0)?;
     let stored: coven_protocol::blob::locator::StoredBlobRef =
-        serde_json::from_str(&encoded).map_err(|error| invalid(0, error.to_string()))?;
+        serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
     let attempt_count: i64 = row.get(1)?;
     Ok(QueuedDelete {
         namespace: stored.locator().namespace().to_string(),
         blob_id: stored.locator().blob_id().to_string(),
-        attempt_count: u64::try_from(attempt_count)
-            .map_err(|error| invalid(1, error.to_string()))?,
+        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(1, Box::new(error)))?,
         last_error: row.get(2)?,
         created_at: row.get(3)?,
         last_attempt_at: row.get(4)?,

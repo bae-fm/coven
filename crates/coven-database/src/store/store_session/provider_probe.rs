@@ -56,26 +56,22 @@ impl ProviderProbeJournal for StoreDatabase {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
         self.call_store(move |session| session.load_provider_probe_journal(&key))
             .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
+            .map_err(|error| StorageError::backend("load provider probe journal", error))
     }
 
     async fn begin(
         &self,
         prepared: ProviderProbeJournalRecord,
     ) -> Result<ProviderProbeJournalRecord, StorageError> {
-        prepared.validate_begin().map_err(|error| {
-            StorageError::Storage(format!("invalid provider probe journal beginning: {error}"))
-        })?;
+        prepared.validate_begin()?;
         let key = format!(
             "provider_probe/{}",
             hex::encode(prepared.probe_id().as_bytes())
         );
-        let value = serde_json::to_string(&prepared).map_err(|error| {
-            StorageError::Storage(format!("serialize provider probe journal: {error}"))
-        })?;
+        let value = serde_json::to_string(&prepared)?;
         self.call_store(move |session| session.begin_provider_probe_journal(&key, &value))
             .await
-            .map_err(|error| StorageError::Storage(error.to_string()))
+            .map_err(|error| StorageError::backend("begin provider probe journal", error))
     }
 
     async fn advance(
@@ -83,24 +79,18 @@ impl ProviderProbeJournal for StoreDatabase {
         previous: &ProviderProbeJournalRecord,
         next: ProviderProbeJournalRecord,
     ) -> Result<(), StorageError> {
-        previous.validate_transition(&next).map_err(|error| {
-            StorageError::Storage(format!("invalid provider probe journal advance: {error}"))
-        })?;
+        previous.validate_transition(&next)?;
         let key = format!(
             "provider_probe/{}",
             hex::encode(previous.probe_id().as_bytes())
         );
-        let previous = serde_json::to_string(previous).map_err(|error| {
-            StorageError::Storage(format!("serialize provider probe journal: {error}"))
-        })?;
-        let next = serde_json::to_string(&next).map_err(|error| {
-            StorageError::Storage(format!("serialize provider probe journal: {error}"))
-        })?;
+        let previous = serde_json::to_string(previous)?;
+        let next = serde_json::to_string(&next)?;
         self.call_store(move |session| {
             session.advance_provider_probe_journal(&key, &previous, &next)
         })
         .await
-        .map_err(|error| StorageError::Storage(error.to_string()))
+        .map_err(|error| StorageError::backend("advance provider probe journal", error))
     }
 }
 

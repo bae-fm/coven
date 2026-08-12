@@ -262,9 +262,7 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
                 if let Some(acknowledgements) = self
                     .stable_circle_acknowledgements(circle_id, &meta.bootstrap.coverage)
                     .await
-                    .map_err(|error| {
-                        crate::sync::store::StoreReclaimError::Authorization(error.to_string())
-                    })?
+                    .map_err(crate::sync::store::StoreReclaimError::from)?
                 {
                     stable.push(SelectedCircleSnapshot {
                         author_registration: stream.author_registration.clone(),

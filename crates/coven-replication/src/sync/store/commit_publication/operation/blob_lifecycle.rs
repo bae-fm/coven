@@ -2,11 +2,29 @@ use super::*;
 use coven_database::StoredBlobReferenceState;
 use tracing::{debug, warn};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TombstoneGcError {
+    #[error("{operation}: {source}")]
+    Database {
+        operation: &'static str,
+        #[source]
+        source: coven_database::DbError,
+    },
+    #[error("{operation}: {source}")]
+    Storage {
+        operation: String,
+        #[source]
+        source: coven_protocol::objects::StorageError,
+    },
+    #[error("{0}")]
+    Invariant(String),
+}
+
 impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn drain_tombstones(
         &self,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, crate::blob::delete::TombstoneDrainError> {
         let store_id = self.store_root().store_root_id.to_string();
         self.writer
             .drain_tombstones(&self.database, self.storage.as_ref(), &store_id, clock)
@@ -26,20 +44,26 @@ impl AuthorizedWriterOperation<'_> {
     pub(crate) async fn gc_tombstones(
         &self,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, TombstoneGcError> {
         let store_id = self.store_root().store_root_id.to_string();
         let activated_uploaders = self
             .database
             .activated_store_device_registration_records()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|source| TombstoneGcError::Database {
+                operation: "load activated blob uploaders",
+                source,
+            })?;
         let self_pubkey = self.writer.author_pubkey();
         let grace = self.database.blob_tombstone_grace();
         let tombstones = self
             .storage
             .list_blob_tombstones()
             .await
-            .map_err(|error| format!("Failed to list tombstones: {error}"))?;
+            .map_err(|source| TombstoneGcError::Storage {
+                operation: "list tombstones".to_string(),
+                source,
+            })?;
         let is_owner = self.membership.is_owner_now(&self_pubkey);
         let now = clock.now();
         let mut deleted = 0;
@@ -50,11 +74,15 @@ impl AuthorizedWriterOperation<'_> {
                     object_id,
                     plaintext,
                 } => (object_id, plaintext),
-                coven_storage::ListedBlobTombstone::Invalid {
+                coven_storage::ListedBlobTombstone::InvalidKey { provider_key } => {
+                    debug!("skipping tombstone with invalid key {provider_key}");
+                    continue;
+                }
+                coven_storage::ListedBlobTombstone::InvalidBody {
                     provider_key,
-                    reason,
+                    source,
                 } => {
-                    debug!("skipping invalid tombstone {provider_key}: {reason}");
+                    debug!("skipping invalid tombstone {provider_key}: {source}");
                     continue;
                 }
             };
@@ -111,14 +139,17 @@ impl AuthorizedWriterOperation<'_> {
                 .database
                 .stored_blob_reference_state(tombstone.stored.clone())
                 .await
-                .map_err(|error| format!("Failed to check live blob references: {error}"))?
-            {
+                .map_err(|source| TombstoneGcError::Database {
+                    operation: "check live blob references",
+                    source,
+                })? {
                 StoredBlobReferenceState::LiveRemote => {
                     self.storage
                         .delete_blob_tombstone(&tombstone.stored)
                         .await
-                        .map_err(|error| {
-                            format!("Failed to cancel stale tombstone {key}: {error}")
+                        .map_err(|source| TombstoneGcError::Storage {
+                            operation: format!("cancel stale tombstone {key}"),
+                            source,
                         })?;
                     debug!(
                         cloud_key = %tombstone_cloud_key,
@@ -127,9 +158,9 @@ impl AuthorizedWriterOperation<'_> {
                     continue;
                 }
                 StoredBlobReferenceState::Unresolved => {
-                    return Err(format!(
+                    return Err(TombstoneGcError::Invariant(format!(
                         "tombstone {key} has a live blob reference whose locality is unresolved"
-                    ));
+                    )));
                 }
                 StoredBlobReferenceState::NotLiveRemote => {}
             }
@@ -140,10 +171,10 @@ impl AuthorizedWriterOperation<'_> {
                     registration.reference() == tombstone.stored.locator().uploader()
                 })
                 .ok_or_else(|| {
-                    format!(
+                    TombstoneGcError::Invariant(format!(
                         "tombstone {key} names an unactivated blob uploader {}",
                         tombstone.stored.locator().uploader().device_id
-                    )
+                    ))
                 })?;
             if uploader.value().author_pubkey != self_pubkey && !is_owner {
                 debug!(
@@ -161,9 +192,10 @@ impl AuthorizedWriterOperation<'_> {
                     continue;
                 }
                 Err(error) => {
-                    return Err(format!(
-                        "Failed to re-check tombstone {key} before reclaim: {error}"
-                    ));
+                    return Err(TombstoneGcError::Storage {
+                        operation: format!("re-check tombstone {key} before reclaim"),
+                        source: error,
+                    });
                 }
             }
 
@@ -171,19 +203,21 @@ impl AuthorizedWriterOperation<'_> {
                 Ok(()) => true,
                 Err(coven_protocol::objects::StorageError::NotFound(_)) => false,
                 Err(error) => {
-                    return Err(format!(
-                        "Failed to check blob presence for {tombstone_cloud_key} before reclaim: {error}"
-                    ));
+                    return Err(TombstoneGcError::Storage {
+                        operation: format!(
+                            "check blob presence for {tombstone_cloud_key} before reclaim"
+                        ),
+                        source: error,
+                    });
                 }
             };
             if blob_present {
                 self.storage
                     .delete_blob_object(&tombstone.stored)
                     .await
-                    .map_err(|error| {
-                        format!(
-                            "Failed to delete blob {tombstone_cloud_key} past the grace: {error}"
-                        )
+                    .map_err(|source| TombstoneGcError::Storage {
+                        operation: format!("delete blob {tombstone_cloud_key} past the grace"),
+                        source,
                     })?;
                 deleted += 1;
                 debug!(
@@ -200,8 +234,9 @@ impl AuthorizedWriterOperation<'_> {
             self.storage
                 .delete_blob_tombstone(&tombstone.stored)
                 .await
-                .map_err(|error| {
-                    format!("Failed to delete tombstone {key} after reclaim: {error}")
+                .map_err(|source| TombstoneGcError::Storage {
+                    operation: format!("delete tombstone {key} after reclaim"),
+                    source,
                 })?;
         }
 

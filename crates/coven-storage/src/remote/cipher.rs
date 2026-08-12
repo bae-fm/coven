@@ -82,7 +82,10 @@ pub trait CloudSyncCipherStateAccess: Send + Sync {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String>;
+    ) -> Result<
+        (coven_keys::encryption::KeyFingerprint, Vec<u8>),
+        coven_keys::encryption::EncryptionError,
+    >;
     fn merged_keyring(
         &self,
         new_encryption: &EncryptionService,
@@ -102,26 +105,18 @@ pub trait CloudSyncCipherStateAccess: Send + Sync {
             Some(fingerprint) => fingerprint,
             None => self
                 .merged_keyring(new_encryption)
-                .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))
+                .map_err(coven_keys::keys::KeyError::Encryption)
                 .and_then(|status| {
                     if status.live_key_count() != status.merged_key_count() {
-                        return Err(coven_keys::keys::KeyError::Crypto(
-                            "live keyring changed without retaining an adopted rotation"
-                                .to_string(),
-                        ));
+                        return Err(coven_keys::keys::KeyError::UnretainedKeyRotation);
                     }
-                    self.current_fingerprint().ok_or_else(|| {
-                        coven_keys::keys::KeyError::Crypto(
-                            "cannot rotate the key of a plaintext cloud home".to_string(),
-                        )
-                    })
+                    self.current_fingerprint()
+                        .ok_or_else(|| coven_keys::keys::KeyError::PlaintextCloudKeyRotation)
                 })?,
         };
-        let generation = self.current_generation().ok_or_else(|| {
-            coven_keys::keys::KeyError::Crypto(
-                "cannot rotate the key of a plaintext cloud home".to_string(),
-            )
-        })?;
+        let generation = self
+            .current_generation()
+            .ok_or_else(|| coven_keys::keys::KeyError::PlaintextCloudKeyRotation)?;
         Ok(AdoptedCloudKeyRotation {
             fingerprint,
             generation,
@@ -143,7 +138,7 @@ fn merge_into(
 ) -> Result<Option<String>, coven_keys::keys::KeyError> {
     let merged = live
         .merged_with(new_encryption)
-        .map_err(|error| coven_keys::keys::KeyError::Crypto(error.to_string()))?;
+        .map_err(coven_keys::keys::KeyError::Encryption)?;
     if merged.key_count() == live.key_count() {
         return Ok(None);
     }
@@ -188,10 +183,13 @@ impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<
+        (coven_keys::encryption::KeyFingerprint, Vec<u8>),
+        coven_keys::encryption::EncryptionError,
+    > {
         let cipher = self.read().unwrap();
         let CloudCipher::Encrypted(encryption) = &*cipher else {
-            return Err("session is not encrypted".to_string());
+            return Err(coven_keys::encryption::EncryptionError::PlaintextKeyring);
         };
         super::blob_io::open_sealed_blob(stored, encryption, aad_context)
     }
@@ -202,9 +200,7 @@ impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
     ) -> Result<CloudKeyringMerge, EncryptionError> {
         let cipher = self.read().unwrap();
         let CloudCipher::Encrypted(live) = &*cipher else {
-            return Err(EncryptionError::KeyManagement(
-                "cannot merge keys into a plaintext cloud home".to_string(),
-            ));
+            return Err(EncryptionError::PlaintextKeyring);
         };
         let merged = live.merged_with(new_encryption)?;
         Ok(CloudKeyringMerge {
@@ -221,9 +217,7 @@ impl CloudSyncCipherStateAccess for RwLock<CloudCipher> {
     ) -> Result<Option<String>, coven_keys::keys::KeyError> {
         let mut cipher = self.write().unwrap();
         let CloudCipher::Encrypted(live) = &mut *cipher else {
-            return Err(coven_keys::keys::KeyError::Crypto(
-                "cannot rotate the key of a plaintext cloud home".to_string(),
-            ));
+            return Err(coven_keys::keys::KeyError::PlaintextCloudKeyRotation);
         };
         merge_into(live, new_encryption, custody)
     }
@@ -347,7 +341,7 @@ impl CloudCipher {
         file_path: &std::path::Path,
         aad_context: &[u8],
         chunk_size: std::num::NonZeroU32,
-    ) -> Result<BlobBody, String> {
+    ) -> Result<BlobBody, coven_foundation::atomic_file::FileError> {
         let plaintext_len = coven_foundation::local_file::file_len(file_path).await?;
         let header = SealedBlobHeader::new(
             chunk_size,

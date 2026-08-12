@@ -33,9 +33,10 @@ impl CloudHomeFactory {
             self.key_service
                 .get_cloud_home_oauth_tokens()
                 .map_err(|error| {
-                    CloudHomeError::Configuration(format!(
-                        "{provider_name} credentials error: {error}"
-                    ))
+                    CloudHomeError::configuration(
+                        format!("read {provider_name} credentials"),
+                        error,
+                    )
                 })?
                 .ok_or_else(|| {
                     CloudHomeError::Configuration(format!(
@@ -58,7 +59,7 @@ impl CloudHomeFactory {
                     .key_service
                     .get_cloud_home_credentials()
                     .map_err(|error| {
-                    CloudHomeError::Configuration(format!("S3 credentials error: {error}"))
+                    CloudHomeError::configuration("read S3 credentials", error)
                 })? {
                     Some(coven_keys::keys::CloudHomeCredentials::S3 {
                         access_key,
@@ -98,7 +99,12 @@ impl CloudHomeFactory {
                 let oauth_config = self
                     .oauth_clients
                     .config_for(CloudProvider::GoogleDrive)
-                    .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
+                    .map_err(|error| {
+                        CloudHomeError::configuration(
+                            "read Google Drive OAuth configuration",
+                            error,
+                        )
+                    })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
                     self.key_service.clone(),
@@ -128,7 +134,9 @@ impl CloudHomeFactory {
                 let oauth_config = self
                     .oauth_clients
                     .config_for(CloudProvider::Dropbox)
-                    .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
+                    .map_err(|error| {
+                        CloudHomeError::configuration("read Dropbox OAuth configuration", error)
+                    })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
                     self.key_service.clone(),
@@ -160,7 +168,9 @@ impl CloudHomeFactory {
                 let oauth_config = self
                     .oauth_clients
                     .config_for(CloudProvider::OneDrive)
-                    .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
+                    .map_err(|error| {
+                        CloudHomeError::configuration("read OneDrive OAuth configuration", error)
+                    })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
                     self.key_service.clone(),

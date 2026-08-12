@@ -80,8 +80,7 @@ impl RemoteObjectRecord {
         // The head names the commit it publishes; reading it out here is the
         // one parse, and the record carries the answer from then on.
         let head: crate::store_commit::StoreDeviceHead =
-            serde_json::from_slice(canonical_signed_bytes)
-                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            serde_json::from_slice(canonical_signed_bytes)?;
         Self::candidate_activated_retained_authority(
             RetainedAuthorityObjectDomain::DeviceHead {
                 reference,

@@ -78,7 +78,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             let device_id = exclusion_candidate.commit.author_registration.device_id;
             let write_id = WriteId::from_generated(stored_write_id.clone());
             if let WriteStatus::Resolved(WriteResolution::Retracted { witness }) = &current_status {
-                witness.validate().map_err(DbError::Message)?;
+                witness.validate().map_err(DbError::from)?;
                 if witness.original_position().commit() != &exclusion_candidate.reference {
                     return Err(DbError::Message(
                         "terminal write retraction names another prepared candidate".to_string(),
@@ -349,7 +349,7 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
             package
                 .package()
                 .validate_blob_uploader(&commit.author_registration)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
         }
         let mut object_ids = std::collections::BTreeSet::new();
         object_ids.insert(remote_object_id(&commit_ref.object));
@@ -673,7 +673,7 @@ impl StoreDatabase {
                 verified
                     .candidate_reference()
                     .map(|reference| (reference, verified.into_durable()))
-                    .map_err(|error| DbError::Message(error.to_string()))
+                    .map_err(DbError::from)
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let (outcome, notification) = self
@@ -698,7 +698,7 @@ impl StoreDatabase {
         let winner_commit = first
             .merge_winner_commit()
             .cloned()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         let winner_head = match first.proof() {
             coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
                 winner_head,
@@ -724,10 +724,7 @@ impl StoreDatabase {
         let nonactivations = nonactivations
             .into_iter()
             .map(|verified| {
-                if verified
-                    .merge_winner_commit()
-                    .map_err(|error| DbError::Message(error.to_string()))?
-                    != &winner_commit
+                if verified.merge_winner_commit().map_err(DbError::from)? != &winner_commit
                     || verified.proof() != &winner_proof
                 {
                     return Err(DbError::Message(
@@ -737,7 +734,7 @@ impl StoreDatabase {
                 verified
                     .candidate_reference()
                     .map(|reference| (reference, verified.into_durable()))
-                    .map_err(|error| DbError::Message(error.to_string()))
+                    .map_err(DbError::from)
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
         let notified_write_id = write_id.clone();

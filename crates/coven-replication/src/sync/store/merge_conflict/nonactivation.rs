@@ -71,7 +71,7 @@ impl MergeConflictHistory<'_, '_> {
             return Ok(Some(
                 observation
                     .verified_nonactivation(target, verified_candidate.author())
-                    .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                    .map_err(StoreError::from)?,
             ));
         }
         if let Some(nonactivation) = self
@@ -133,14 +133,8 @@ impl MergeConflictHistory<'_, '_> {
                 .history
                 .load_predecessor_membership(&witness.commit().membership_state)
                 .await
-                .map_err(|error| match error {
-                    crate::sync::store::commit_verification::merge_history::RegistrationLoadError::Object(
-                        error,
-                    ) => StoreError::Object(error),
-                    crate::sync::store::commit_verification::merge_history::RegistrationLoadError::Invalid(
-                        error,
-                    ) => StoreError::InvalidOutbound(error),
-                })?;
+                .map_err(crate::sync::store::StorePullError::from)
+                .map_err(StoreError::from)?;
             let coven_protocol::membership::MembershipStatus::Resolved(resolved) =
                 membership.status()
             else {
@@ -214,7 +208,7 @@ impl MergeConflictHistory<'_, '_> {
             }
             abandonment::ExcludedCandidateHeadObservation::MergeWinner(observation) => observation
                 .verified_nonactivation(candidate_target, candidate.author())
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                .map_err(StoreError::from)?,
         };
         Ok(Some(nonactivation))
     }

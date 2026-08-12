@@ -99,7 +99,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     })?,
                 encryption::generate_random_key(),
             )
-            .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?;
+            .map_err(InviteError::Encryption)?;
         let remaining_members = members
             .iter()
             .filter(|(pubkey, _)| pubkey != revokee_pubkey)
@@ -130,7 +130,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 .operation
                 .prepare_plan()
                 .await
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+                .map_err(InviteError::from)?;
             let entry = self.operation.sign_owner_barrier_removal(
                 &chain,
                 stream_id,
@@ -153,7 +153,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 },
             )
             .await
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+            .map_err(InviteError::from)?;
             let head = self
                 .operation
                 .finish_membership_transition(
@@ -201,9 +201,9 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 provider_account_email,
             },
             wraps,
-            keyring_payload: new_keyring.to_keyring_payload().map_err(|error| {
-                InviteError::Crypto(format!("serialize rotated keyring: {error}"))
-            })?,
+            keyring_payload: new_keyring
+                .to_keyring_payload()
+                .map_err(InviteError::Encryption)?,
         })
     }
 
@@ -292,9 +292,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                 let progress_bytes = progress.encode()?;
                 let pending_generation =
                     EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                        .map_err(|error| {
-                            InviteError::Crypto(format!("parse rotated keyring: {error}"))
-                        })?
+                        .map_err(InviteError::Encryption)?
                         .current_generation();
                 let intent_hash = self
                     .operation
@@ -317,7 +315,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
         } = self;
         let pending_generation =
             EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
+                .map_err(InviteError::Encryption)?
                 .current_generation();
         match &progress {
             MembershipMutationProgress::RevokeActivated { .. } => {
@@ -325,7 +323,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             }
             _ => pending_rotation.mark_candidate(pending_generation, intent_hash),
         }
-        .map_err(InviteError::InvalidDurableMutation)?;
+        .map_err(InviteError::RotationState)?;
         let mut persistence = operation.membership_mutation_persistence(intent_hash);
         plan.validate_closed_shape()?;
         if matches!(progress, MembershipMutationProgress::InviteGranted { .. }) {
@@ -351,7 +349,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             validated_chain.activate_head_ref(publication.head_ref.clone())?;
             *chain = validated_chain;
             return EncryptionService::from_keyring_payload(plan.keyring_payload)
-                .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")));
+                .map_err(InviteError::Encryption);
         }
         if let MembershipMutationProgress::RevokeCandidateNonactivating { nonactivation } =
             &progress
@@ -362,25 +360,19 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                     "direct removal carries Store-candidate nonactivation".to_string(),
                 ));
             };
-            nonactivation
-                .validate()
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
-            if nonactivation
-                .reference()
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?
-                != candidate.reference
-            {
+            nonactivation.validate().map_err(InviteError::from)?;
+            if nonactivation.reference().map_err(InviteError::from)? != candidate.reference {
                 return Err(InviteError::InvalidDurableMutation(
                     "membership nonactivation names another candidate".to_string(),
                 ));
             }
             persistence.finish_nonactivating_revoke(&plan).await?;
             let generation = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?
+                .map_err(InviteError::Encryption)?
                 .current_generation();
             pending_rotation
                 .remove_candidate(generation, persistence.intent_hash())
-                .map_err(InviteError::InvalidDurableMutation)?;
+                .map_err(InviteError::RotationState)?;
             return Err(InviteError::InvalidDurableMutation(
                 "membership removal candidate did not activate".to_string(),
             ));
@@ -390,7 +382,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
             .verify_membership_publication_author(&publication)
             .await?;
         let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-            .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?;
+            .map_err(InviteError::Encryption)?;
         let remaining = validated_chain.current_members();
         if remaining.len() != plan.wraps.len() {
             return Err(InviteError::InvalidDurableMutation(
@@ -507,7 +499,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                         keyring.current_generation(),
                         persistence.intent_hash(),
                     )
-                    .map_err(InviteError::InvalidDurableMutation)?;
+                    .map_err(InviteError::RotationState)?;
                 *chain = validated_chain;
                 Ok(keyring)
             }
@@ -526,13 +518,13 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                                 &publication,
                                 &prepared_wraps,
                             )
-                            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+                            .map_err(InviteError::from)
                     };
                 let initial_remotes = candidate_remotes(&candidate)?;
                 operation
                     .upload_commit(&candidate)
                     .await
-                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+                    .map_err(InviteError::from)?;
                 persistence
                     .mark_remote_object_uploaded(
                         exact_owned_remote(&initial_remotes, &candidate.reference.object)?
@@ -574,7 +566,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                                 keyring.current_generation(),
                                 persistence.intent_hash(),
                             )
-                            .map_err(InviteError::InvalidDurableMutation)?;
+                            .map_err(InviteError::RotationState)?;
                         *chain = validated_chain;
                         return Ok(keyring);
                     }
@@ -613,7 +605,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                                 previous_intent_hash,
                                 replacement_intent_hash,
                             )
-                            .map_err(InviteError::InvalidDurableMutation)?;
+                            .map_err(InviteError::RotationState)?;
                     }
                     crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {
                         candidate: returned,
@@ -634,7 +626,7 @@ impl<'operation, 'storage, 'input> AuthorizedMembershipRevocation<'operation, 's
                                 keyring.current_generation(),
                                 persistence.intent_hash(),
                             )
-                            .map_err(InviteError::InvalidDurableMutation)?;
+                            .map_err(InviteError::RotationState)?;
                         return Err(InviteError::InvalidDurableMutation(
                             "membership removal candidate did not activate".to_string(),
                         ));

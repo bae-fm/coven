@@ -237,6 +237,8 @@ pub struct ProbeExactObjectReceipt {
 pub enum ProviderProbeError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error("provider capability receipt Store protocol: {0}")]
+    Protocol(#[from] crate::store_commit::StoreProtocolError),
     #[error("provider capability receipt is invalid: {0}")]
     InvalidReceipt(String),
 }

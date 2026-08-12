@@ -236,7 +236,7 @@ fn verified_reads_reject_changed_inline_and_file_payloads() {
 
     assert!(matches!(
         store.read_verified(inline_hash),
-        Err(PayloadStoreError::Compression { hash, .. }) if hash == inline_hash
+        Err(PayloadStoreError::CompressionIo { hash, .. }) if hash == inline_hash
     ));
     assert!(matches!(
         store.read_verified(file_hash),

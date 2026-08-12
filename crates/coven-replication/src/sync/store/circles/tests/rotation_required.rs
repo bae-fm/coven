@@ -293,9 +293,7 @@ impl RotationFixture {
         self.owner_device
             .authorize_writer()
             .await
-            .map_err(|error| {
-                crate::sync::store::SnapshotError::PublicationState(error.to_string())
-            })?
+            .map_err(crate::sync::store::SnapshotError::from)?
             .circles()
             .snapshots()
             .push_circle_snapshots(
@@ -991,7 +989,6 @@ async fn close_cut_excludes_unpublished_rows_and_keeps_accepted_ones() {
             .await
             .expect("read the accepted materialized frontier"),
     )
-    .map_err(|error| DbError::Message(error.to_string()))
     .expect("shape the accepted materialized frontier");
     let loaded_store = fixture
         .store

@@ -22,9 +22,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
             .map_err(pull::StorePullError::MembershipChain)?;
         merge_conflict::validate_retained_membership_floors(&checkpoints, &membership)?;
-        prefix
-            .validate_complete_membership(&membership)
-            .map_err(pull::StorePullError::InvalidState)?;
+        prefix.validate_complete_membership(&membership)?;
         let (device_state_ref, device_state) = self.retained_merge_device_state(&frontier).await?;
         if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &device_state,
@@ -67,9 +65,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
             .map_err(pull::StorePullError::MembershipChain)?;
         merge_conflict::validate_retained_membership_floors(&checkpoints, &membership)?;
-        prefix
-            .validate_complete_membership(&membership)
-            .map_err(pull::StorePullError::InvalidState)?;
+        prefix.validate_complete_membership(&membership)?;
         let (device_state_ref, device_state) = self.retained_merge_device_state(&frontier).await?;
         if !crate::sync::store::commit_verification::merge_history::registration::device_state_has_active_registration(
             &device_state,

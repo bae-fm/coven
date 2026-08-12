@@ -252,7 +252,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             || activation_commit
                 .order
                 .predecessor_cut()
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                .map_err(StoreRegistrationError::from)?
                 != attempt.bootstrap_cut
             || activation_commit.membership_state != attempt.membership
         {
@@ -316,7 +316,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .map_err(StoreObjectError::from)?;
             let device_signer = expected_registration
                 .device_signer(identity)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
             let (device_state, _) =
                 Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
                     .await
@@ -335,14 +335,14 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                 SuccessorLink {
                     activation: expected_registration
                         .store_acknowledgement_activation(&registration_ref)
-                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                        .map_err(StoreRegistrationError::from)?
                         .activation_id(),
                     predecessor: None,
                     next_slot,
                 },
                 &device_signer,
             )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
             let ack_prepared = storage
                 .prepare_protocol_object(
                     &ack_context,
@@ -392,14 +392,14 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             &attempt.store_root,
             durable.device_id,
         )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        .map_err(StoreRegistrationError::from)?;
         let registration_ref = StoreDeviceRegistrationRef::from_registration(
             &registration,
             durable.prepared.reference().clone(),
         );
         let device_signer = registration
             .device_signer(identity)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         DeviceReadinessProof::signed(
             attempt_ref,
             registration_ref,
@@ -408,7 +408,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             &registration,
             &device_signer,
         )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))
+        .map_err(StoreRegistrationError::from)
     }
 
     pub(super) async fn create_cross_principal_response(
@@ -432,7 +432,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
 }
 
 fn registration_database_error(error: coven_database::DbError) -> StoreRegistrationError {
-    StoreRegistrationError::Database(error.to_string())
+    StoreRegistrationError::from(error)
 }
 
 /// An offer is this device's offer only when it names this member, the provider

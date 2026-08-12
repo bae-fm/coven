@@ -83,13 +83,13 @@ fn concurrent_terminal_cut_rejects_different_refs_at_the_same_coordinate() {
     let (_, right) = merge_cut_reference(1, 3, 32);
     let terminal = terminal_ref(&fixture, 1);
 
-    assert_eq!(
+    assert!(matches!(
         merge_device_status(
             inactive_status(vec![terminal.clone()], [(stream, left)]),
             inactive_status(vec![terminal], [(stream, right)]),
         ),
         Err(StoreProtocolError::DeviceStateMismatch)
-    );
+    ));
 }
 
 #[test]

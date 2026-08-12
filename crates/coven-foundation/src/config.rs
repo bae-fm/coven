@@ -150,12 +150,16 @@ impl Default for CloudHomeConfig {
 /// Configuration errors.
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-    #[error("Configuration error: {0}")]
-    Config(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("serialize configuration: {0}")]
+    Serialize(#[source] serde_yaml::Error),
+    #[error("parse configuration {}: {source}", path.display())]
+    Parse {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+    #[error("configuration file: {0}")]
+    File(#[from] crate::atomic_file::FileError),
 }
 
 /// Sync + storage configuration for one store.
@@ -183,21 +187,28 @@ impl Config {
     /// Persist the sync config to `store_dir/config.yaml`.
     pub fn save_to_config_yaml(&self, store_dir: &StoreDir) -> Result<(), ConfigError> {
         let yaml: ConfigYaml = self.into();
-        let text =
-            serde_yaml::to_string(&yaml).map_err(|e| ConfigError::Serialization(e.to_string()))?;
+        let text = serde_yaml::to_string(&yaml).map_err(ConfigError::Serialize)?;
         crate::atomic_file::AtomicFile::new(store_dir.config_path())
             .replace(text.as_bytes())
-            .map_err(ConfigError::Config)
+            .map_err(ConfigError::File)
     }
 
     /// Read `store_dir/config.yaml` back into a runtime `Config`. A missing or
     /// unparseable file is a loud [`ConfigError`] naming the path.
     pub fn load_from_config_yaml(store_dir: &StoreDir) -> Result<Config, ConfigError> {
         let path = store_dir.config_path();
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| ConfigError::Config(format!("failed to read {}: {e}", path.display())))?;
-        let yaml: ConfigYaml = serde_yaml::from_str(&text)
-            .map_err(|e| ConfigError::Config(format!("failed to parse {}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path).map_err(|source| {
+            ConfigError::File(crate::atomic_file::FileError::at(
+                "read configuration",
+                &path,
+                source,
+            ))
+        })?;
+        let yaml: ConfigYaml =
+            serde_yaml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: path.clone(),
+                source,
+            })?;
         Ok(yaml.into_config())
     }
 }
@@ -343,7 +354,7 @@ mod tests {
         .expect("write config.yaml");
 
         let err = Config::load_from_config_yaml(&store_dir).expect_err("missing device_id");
-        assert!(matches!(err, ConfigError::Config(_)));
+        assert!(matches!(err, ConfigError::Parse { .. }));
     }
 
     /// No `config.yaml` at all names the path in the error rather than

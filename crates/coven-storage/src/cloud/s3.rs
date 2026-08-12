@@ -80,7 +80,7 @@ fn checksum_put_failed(
 
 enum S3CreateOnlyPutError {
     AlreadyExists(String),
-    ChecksumRejected(String),
+    ChecksumRejected(CloudHomeError),
     Other(CloudHomeError),
 }
 
@@ -88,7 +88,7 @@ impl S3CreateOnlyPutError {
     fn into_cloud_error(self) -> CloudHomeError {
         match self {
             Self::AlreadyExists(key) => CloudHomeError::AlreadyExists(key),
-            Self::ChecksumRejected(message) => CloudHomeError::Transport(message),
+            Self::ChecksumRejected(error) => error,
             Self::Other(error) => error,
         }
     }
@@ -212,7 +212,7 @@ impl S3CloudHome {
                             .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
                     }
                     let create = request.send().await.map_err(|error| {
-                        CloudHomeError::Transport(format!("multipart create {key}: {error}"))
+                        CloudHomeError::transport(format!("multipart create {key}"), error)
                     })?;
                     create
                         .upload_id()
@@ -268,8 +268,9 @@ impl S3CloudHome {
                     if create_only_put_failed(&error) {
                         S3CreateOnlyPutError::AlreadyExists(logical_key.clone())
                     } else if checksum_put_failed(&error) {
-                        S3CreateOnlyPutError::ChecksumRejected(format!(
-                            "S3 rejected the SHA-256 request checksum for {logical_key}: {error}"
+                        S3CreateOnlyPutError::ChecksumRejected(CloudHomeError::transport(
+                            format!("S3 rejected the SHA-256 request checksum for {logical_key}"),
+                            error,
                         ))
                     } else {
                         S3CreateOnlyPutError::Other(put_object_error(&logical_key, error))
@@ -279,9 +280,7 @@ impl S3CloudHome {
             })
             .await
             .map_err(|error| {
-                S3CreateOnlyPutError::Other(CloudHomeError::Transport(format!(
-                    "S3 task aborted: {error}"
-                )))
+                S3CreateOnlyPutError::Other(CloudHomeError::transport("run S3 task", error))
             })?
     }
 
@@ -394,9 +393,7 @@ impl S3CloudHome {
                         if is_not_found_code(error.code()) || status == Some(404) {
                             CloudHomeError::NotFound(key.clone())
                         } else {
-                            CloudHomeError::Transport(format!(
-                                "head exact S3 object {key}: {error}"
-                            ))
+                            CloudHomeError::transport(format!("head exact S3 object {key}"), error)
                         }
                     })?;
                 let size = response
@@ -561,9 +558,7 @@ impl S3CloudHome {
                     .send()
                     .await
                     .map_err(|error| {
-                        CloudHomeError::Transport(format!(
-                            "create test S3 bucket {bucket}: {error}"
-                        ))
+                        CloudHomeError::transport(format!("create test S3 bucket {bucket}"), error)
                     })?;
                 Ok(())
             })
@@ -672,10 +667,10 @@ impl S3MultipartOwner {
             request = request.checksum_sha256(checksum);
         }
         let uploaded = request.send().await.map_err(|error| {
-            CloudHomeError::Transport(format!(
-                "multipart part {part_number} {}: {error}",
-                self.key
-            ))
+            CloudHomeError::transport(
+                format!("upload multipart part {part_number} for {}", self.key),
+                error,
+            )
         })?;
         let mut completed = aws_sdk_s3::types::CompletedPart::builder()
             .part_number(part_number)
@@ -696,7 +691,7 @@ impl S3MultipartOwner {
             .send()
             .await
             .map_err(|error| {
-                CloudHomeError::Transport(format!("abort multipart {}: {error}", self.key))
+                CloudHomeError::transport(format!("abort multipart {}", self.key), error)
             })?;
         Ok(())
     }
@@ -731,7 +726,7 @@ impl S3MultipartOwner {
             {
                 CloudHomeError::AlreadyExists(self.logical_key.clone())
             } else {
-                CloudHomeError::Transport(format!("multipart complete {}: {error}", self.key))
+                CloudHomeError::transport(format!("complete multipart {}", self.key), error)
             }
         });
         match operation {
@@ -762,7 +757,7 @@ impl S3PartSink {
             .take()
             .ok_or_else(|| CloudHomeError::Transport("S3 multipart owner is absent".to_string()))?;
         let result = owner.await.map_err(|error| {
-            CloudHomeError::Transport(format!("S3 multipart owner task failed: {error}"))
+            CloudHomeError::transport("S3 multipart owner task failed".to_string(), error)
         })?;
         match (send_result, result) {
             (Ok(()), result) => result,
@@ -837,8 +832,8 @@ fn aws_caller_identity(
     Ok((fields[1].to_string(), principal))
 }
 
-fn sts_request_error(error: impl std::fmt::Display) -> CloudHomeError {
-    CloudHomeError::Transport(format!("STS GetCallerIdentity failed: {error}"))
+fn sts_request_error(error: impl std::error::Error + Send + Sync + 'static) -> CloudHomeError {
+    CloudHomeError::transport("request STS caller identity", error)
 }
 
 #[async_trait]
@@ -894,15 +889,9 @@ const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
 fn body_read_error<E>(context: &str, key: &str, err: E) -> CloudHomeError
 where
-    E: std::error::Error + std::fmt::Debug,
+    E: std::error::Error + Send + Sync + 'static,
 {
-    let mut msg = format!("{context} for {key}: {err}");
-    let mut source = err.source();
-    while let Some(err) = source {
-        msg.push_str(&format!("; caused by: {err}"));
-        source = err.source();
-    }
-    CloudHomeError::Transport(msg)
+    CloudHomeError::transport(format!("{context} for {key}"), err)
 }
 
 /// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and
@@ -911,20 +900,23 @@ where
 /// non-service failures (timeouts, connection errors) fall back to their own
 /// description. Generic over the response type so it serves both `read` and
 /// `read_range` without naming the smithy HTTP type.
-fn get_object_error<R>(
+fn get_object_error<R: std::fmt::Debug + Send + Sync + 'static>(
     key: &str,
     err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError, R>,
 ) -> CloudHomeError {
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
         Some("NoSuchKey") => CloudHomeError::NotFound(key.to_string()),
-        Some(code) => CloudHomeError::Transport(match err.message() {
-            Some(msg) => format!("get {key}: S3 {code}: {msg}"),
-            None => format!("get {key}: S3 {code} (no message provided)"),
-        }),
+        Some(code) => CloudHomeError::transport(
+            match err.message() {
+                Some(msg) => format!("get {key}: S3 {code}: {msg}"),
+                None => format!("get {key}: S3 {code} (no message provided)"),
+            },
+            err,
+        ),
         // Not a service error (timeout / connection / dispatch) — its own
         // Display carries the detail.
-        None => CloudHomeError::Transport(format!("get {key}: {err}")),
+        None => CloudHomeError::transport(format!("get {key}"), err),
     }
 }
 
@@ -945,21 +937,24 @@ fn put_object_error(
 ) -> CloudHomeError {
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
-        Some("AccessDenied") => CloudHomeError::Configuration(
-            "Your S3 credentials don't have permission to write to this bucket. Check the access policy in sync settings."
-                .to_string(),
+        Some("AccessDenied") => CloudHomeError::configuration(
+            "write S3 object; credentials do not permit writing to this bucket",
+            err,
         ),
-        Some("NoSuchBucket") => CloudHomeError::Configuration(
-            "The S3 bucket no longer exists. Check the bucket name in sync settings.".to_string(),
+        Some("NoSuchBucket") => {
+            CloudHomeError::configuration("write S3 object; bucket does not exist", err)
+        }
+        Some("OverQuota" | "QuotaExceeded") => {
+            CloudHomeError::configuration("write S3 object; storage quota is exceeded", err)
+        }
+        Some(code) => CloudHomeError::transport(
+            match err.message() {
+                Some(msg) => format!("put {key}: S3 {code}: {msg}"),
+                None => format!("put {key}: S3 {code} (no message provided)"),
+            },
+            err,
         ),
-        Some("OverQuota" | "QuotaExceeded") => CloudHomeError::Configuration(
-            "Your S3 storage quota is exceeded. Free up space or expand the quota.".to_string(),
-        ),
-        Some(code) => CloudHomeError::Transport(match err.message() {
-            Some(msg) => format!("put {key}: S3 {code}: {msg}"),
-            None => format!("put {key}: S3 {code} (no message provided)"),
-        }),
-        None => CloudHomeError::Transport(format!("put {key}: {err}")),
+        None => CloudHomeError::transport(format!("put {key}"), err),
     }
 }
 
@@ -981,7 +976,7 @@ impl CloudHome for S3CloudHome {
                         // S3 backends use.
                         Err(probe_error(status, code.as_deref(), &bucket))
                     }
-                    Err(e) => Err(CloudHomeError::Transport(format!("S3 probe failed: {e}"))),
+                    Err(e) => Err(CloudHomeError::transport("probe S3", e)),
                 }
             })
             .await?;
@@ -1123,7 +1118,7 @@ impl CloudHome for S3CloudHome {
                     let resp = req
                         .send()
                         .await
-                        .map_err(|e| CloudHomeError::Transport(format!("list {prefix}: {e}")))?;
+                        .map_err(|e| CloudHomeError::transport(format!("list {prefix}"), e))?;
 
                     for obj in resp.contents() {
                         let Some(key) = obj.key() else {
@@ -1181,7 +1176,7 @@ impl CloudHome for S3CloudHome {
                     // outcomes, so deleting an already-absent object must succeed. Swallow
                     // not-found and surface only real errors.
                     if !is_not_found_code(e.code()) {
-                        return Err(CloudHomeError::Transport(format!("delete {key}: {e}")));
+                        return Err(CloudHomeError::transport(format!("delete {key}"), e));
                     }
                 }
                 Ok(())
@@ -1209,7 +1204,7 @@ impl CloudHome for S3CloudHome {
                         if is_not_found_code(e.code()) || status == Some(404) {
                             Ok(false)
                         } else {
-                            Err(CloudHomeError::Transport(format!("head {key}: {e}")))
+                            Err(CloudHomeError::transport(format!("head {key}"), e))
                         }
                     }
                 }
@@ -1296,7 +1291,9 @@ impl ExactSlotStorage for S3CloudHome {
             Some(endpoint) => (
                 S3EndpointBinding::Custom {
                     origin: coven_protocol::provider::canonical_custom_s3_origin(endpoint)
-                        .map_err(|error| CloudHomeError::Configuration(error.to_string()))?,
+                        .map_err(|error| {
+                            CloudHomeError::configuration("validate custom S3 endpoint", error)
+                        })?,
                 },
                 ProviderPrincipalId::CustomS3Credential {
                     access_key_id_hash: s3_access_key_id_hash(&self.access_key),
@@ -1312,9 +1309,9 @@ impl ExactSlotStorage for S3CloudHome {
             },
             device: ProviderDeviceBinding { principal },
         };
-        binding
-            .validate()
-            .map_err(|error| CloudHomeError::Configuration(error.to_string()))?;
+        binding.validate().map_err(|error| {
+            CloudHomeError::configuration("validate S3 provider binding", error)
+        })?;
         Ok(binding)
     }
 

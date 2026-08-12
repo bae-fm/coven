@@ -42,7 +42,7 @@ pub(crate) fn select_drive_file(files: &[DriveFileIdentity]) -> Option<&DriveFil
 
 pub(crate) fn parse_create_file_id(body: &str, key: &str) -> Result<String, CloudHomeError> {
     let json: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| CloudHomeError::Transport(format!("create {key}: parse response: {e}")))?;
+        .map_err(|e| CloudHomeError::transport(format!("create {key}: parse response"), e))?;
     match json.get("id").and_then(|id| id.as_str()) {
         Some(id) if !id.is_empty() => Ok(id.to_string()),
         _ => Err(CloudHomeError::Transport(format!(
@@ -240,7 +240,7 @@ impl OAuthRestHome for GoogleDriveCloudHome {
 
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
-            .map_err(|e| CloudHomeError::Transport(format!("parse list: {e}")))?;
+            .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
         let mut keys = Vec::new();
         if let Some(files) = json["files"].as_array() {
             for file in files {
@@ -570,7 +570,7 @@ pub(crate) fn drive_permissions_next_page_url(
         return Ok(None);
     };
     let query = serde_urlencoded::to_string([("pageToken", token)])
-        .map_err(|e| CloudHomeError::Transport(format!("encode Drive page token: {e}")))?;
+        .map_err(|e| CloudHomeError::transport("encode Drive page token".to_string(), e))?;
     let separator = if list_url.contains('?') { '&' } else { '?' };
     Ok(Some(format!("{list_url}{separator}{query}")))
 }

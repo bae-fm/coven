@@ -10,6 +10,14 @@ use coven_protocol::objects::StorageError;
 use coven_protocol::synced_schema::SyncedTable;
 use coven_storage::CloudSyncObjectStorage;
 
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotSpoolCleanupError {
+    #[error("snapshot spool is absent: {}", path.display())]
+    Missing { path: PathBuf },
+    #[error("snapshot spool file: {0}")]
+    File(#[from] coven_foundation::atomic_file::FileError),
+}
+
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
 
@@ -23,12 +31,28 @@ pub enum SnapshotError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Image(#[from] coven_database::SnapshotImageError),
+    #[error("snapshot database: {0}")]
+    Database(#[from] coven_database::DbError),
     #[error("snapshot control JSON parse failed: {0}")]
     Parse(String),
     #[error("storage error: {0}")]
     Bucket(#[from] StorageError),
     #[error("Store protocol object error: {0}")]
-    StoreObject(#[source] coven_protocol::objects::StoreObjectError),
+    StoreObject(#[from] coven_protocol::objects::StoreObjectError),
+    #[error("snapshot Store protocol: {0}")]
+    StoreProtocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    #[error("snapshot JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("snapshot audience package: {0}")]
+    AudiencePackage(#[from] coven_protocol::audience_package::AudiencePackageError),
+    #[error("snapshot remote object: {0}")]
+    RemoteObject(#[from] coven_protocol::remote_object::RemoteObjectRecordError),
+    #[error("snapshot row routing key: {0}")]
+    RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
+    #[error("snapshot Circle state: {0}")]
+    CircleState(#[from] coven_protocol::circle_activation::CircleStateError),
+    #[error("snapshot database open: {0}")]
+    DatabaseOpen(#[from] coven_database::OpenError),
     #[error("Store history: {0}")]
     StoreHistory(#[from] crate::sync::store::pull::StorePullError),
     /// The snapshot's author is not authorized to publish a catalog image: not a
@@ -60,6 +84,25 @@ pub enum SnapshotError {
     BootstrapState(String),
     #[error("snapshot publication state: {0}")]
     PublicationState(String),
+    #[error("snapshot timestamp: {0}")]
+    Timestamp(#[from] chrono::ParseError),
+    #[error("snapshot publication Store: {0}")]
+    PublicationStore(#[source] Box<crate::sync::store::StoreError>),
+    #[error("snapshot writer authorization: {0}")]
+    WriterAuthorization(#[source] Box<crate::sync::store::StoreWriterAuthorizationError>),
+    #[error("snapshot Circle operation: {0}")]
+    CircleOperation(#[source] Box<crate::sync::store::circles::CircleOperationError>),
+    #[error("snapshot membership chain: {0}")]
+    AnchoredChain(#[source] Box<crate::sync::store::AnchoredChainError>),
+    #[error("snapshot acknowledgement: {0}")]
+    Acknowledgement(#[source] Box<crate::sync::store::StoreAckError>),
+    #[error("snapshot spool cleanup: {0}")]
+    SpoolCleanup(#[from] SnapshotSpoolCleanupError),
+    #[error("snapshot operation failed: {cause}; spool cleanup also failed: {cleanup}")]
+    SpoolCleanupAfterFailure {
+        cause: Box<SnapshotError>,
+        cleanup: SnapshotSpoolCleanupError,
+    },
     #[error(
         "could not remove staged snapshot database {path}: {cleanup}",
         path = .path.display()
@@ -75,6 +118,36 @@ pub enum SnapshotError {
         cleanup: String,
         cause: Box<SnapshotError>,
     },
+}
+
+impl From<crate::sync::store::StoreError> for SnapshotError {
+    fn from(error: crate::sync::store::StoreError) -> Self {
+        Self::PublicationStore(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreWriterAuthorizationError> for SnapshotError {
+    fn from(error: crate::sync::store::StoreWriterAuthorizationError) -> Self {
+        Self::WriterAuthorization(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::circles::CircleOperationError> for SnapshotError {
+    fn from(error: crate::sync::store::circles::CircleOperationError) -> Self {
+        Self::CircleOperation(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::AnchoredChainError> for SnapshotError {
+    fn from(error: crate::sync::store::AnchoredChainError) -> Self {
+        Self::AnchoredChain(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::StoreAckError> for SnapshotError {
+    fn from(error: crate::sync::store::StoreAckError) -> Self {
+        Self::Acknowledgement(Box::new(error))
+    }
 }
 
 impl From<coven_database::SnapshotImageOperationError<SnapshotError>> for SnapshotError {
@@ -94,12 +167,6 @@ impl From<coven_database::SnapshotImageOperationError<SnapshotError>> for Snapsh
                 cause: Box::new(cause),
             },
         }
-    }
-}
-
-impl From<coven_database::DbError> for SnapshotError {
-    fn from(error: coven_database::DbError) -> Self {
-        Self::PublicationState(error.to_string())
     }
 }
 
@@ -174,12 +241,12 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             let head = history_verifier
                 .load_exact_membership_head(reference)
                 .await
-                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+                .map_err(SnapshotError::from)?;
             resolutions.extend(head.body.resolutions.iter().cloned());
             let registration = history_verifier
                 .load_registration(&head.body.author_registration)
                 .await
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?
+                .map_err(SnapshotError::from)?
                 .value;
             registrations.insert(head.body.author_registration.clone(), registration);
         }
@@ -187,7 +254,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         let membership = history_verifier
             .load_membership_at_exact_heads(heads, &resolutions)
             .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let registrations = registrations
             .into_iter()
             .filter(|(_, registration)| membership.is_owner_now(&registration.author_pubkey))
@@ -202,7 +269,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         }
         let selected = Box::pin(history_verifier.select_maximal_stable_store_snapshot(authorized))
             .await
-            .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?
+            .map_err(SnapshotError::from)?
             .ok_or_else(|| {
                 SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
                     "Store snapshot stream".to_string(),
@@ -229,7 +296,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         let founder_registration = history_verifier
             .load_founder_registration()
             .await
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let stability = selected.stability;
         let coverage = snapshot.meta.coverage.clone();
         let database_image =
@@ -317,7 +384,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 },
                 routing_encryption,
             )
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
 
             let circle_installs = match routing_encryption {
                 // Circles exist only in a scoped (Circle-routing) Store; without
@@ -327,7 +394,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                         encryption,
                         root_ref.store_root_hash,
                     )
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    .map_err(SnapshotError::from)?;
                     let query_path = bound_path.with_extension("restore-select.db");
                     let query_image = SnapshotDatabaseImage::prepare(query_path)?;
                     if let Err(error) = std::fs::copy(&bound_path, query_image.path()) {
@@ -347,7 +414,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                             clock.clone(),
                             migrations,
                         )
-                        .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+                        .map_err(SnapshotError::from)?;
                         let store_database = coven_database::StoreDatabase::from_database(query_db);
                         crate::sync::store::snapshots::CircleSnapshotReader::new(
                             &store_database,
@@ -385,7 +452,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 clock,
                 migrations,
             )
-            .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
             let database = coven_database::StoreDatabase::from_database(db);
             let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
                 database.clone(),
@@ -485,16 +552,21 @@ pub(crate) fn should_create_snapshot(
     false
 }
 
-/// The outcome of snapshot blob reconciliation: every required eager blob is
-/// local, at least one could not be downloaded, or the caller's cancel signal
-/// fired between blobs and the reconcile stopped early. A three-way result, not
-/// a `bool` plus an out-param, so the bootstrap can map each outcome to its own
-/// error (or none) at one match.
+/// The outcome of snapshot blob reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotBlobReconcile {
     Complete,
-    Incomplete,
     Cancelled,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotBlobReconcileError {
+    #[error("snapshot blob database state: {0}")]
+    Database(#[from] coven_database::DbError),
+    #[error("remote eager blob row has no exact stored reference")]
+    MissingStoredReference,
+    #[error("snapshot blob download failed: {0}")]
+    Download(#[source] crate::sync::store::pull::BlobDownloadFailures),
 }
 
 #[cfg(test)]

@@ -92,16 +92,22 @@ pub struct WriteRetractionWitness {
     nonactivation: crate::remote_object::CandidateNonactivation,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WriteRetractionError {
+    #[error("invalid candidate nonactivation: {0}")]
+    Nonactivation(#[from] crate::remote_object::RemoteObjectRecordError),
+    #[error("write retraction proof names another published commit")]
+    CommitMismatch,
+}
+
 impl WriteRetractionWitness {
     pub fn new(
         original: PublishedPosition,
         nonactivation: crate::remote_object::CandidateNonactivation,
-    ) -> Result<Self, String> {
-        let candidate = nonactivation
-            .reference()
-            .map_err(|error| error.to_string())?;
+    ) -> Result<Self, WriteRetractionError> {
+        let candidate = nonactivation.reference()?;
         if original.commit() != &candidate {
-            return Err("write retraction proof names another published commit".to_string());
+            return Err(WriteRetractionError::CommitMismatch);
         }
         let witness = Self {
             original,
@@ -115,13 +121,10 @@ impl WriteRetractionWitness {
         &self.original
     }
 
-    pub fn validate(&self) -> Result<(), String> {
-        let candidate = self
-            .nonactivation
-            .reference()
-            .map_err(|error| error.to_string())?;
+    pub fn validate(&self) -> Result<(), WriteRetractionError> {
+        let candidate = self.nonactivation.reference()?;
         if self.original.commit() != &candidate {
-            return Err("write retraction proof names another published commit".to_string());
+            return Err(WriteRetractionError::CommitMismatch);
         }
         Ok(())
     }

@@ -296,7 +296,7 @@ impl<'schema> GateModelConstruction<'schema> {
     ) -> Result<Option<(String, String, String)>, GateError> {
         let synced: HashSet<&str> = self.tables.iter().map(|t| t.name()).collect();
         let candidates: Vec<ForeignKeyEdge> = foreign_key_edges(self.conn, table)
-            .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+            .map_err(GateError::ForeignKeySchema)?
             .into_iter()
             .filter(|edge| synced.contains(edge.parent_table.as_str()))
             .collect();
@@ -381,7 +381,7 @@ impl<'schema> GateModelConstruction<'schema> {
     ) -> Result<(String, String, String), GateError> {
         let synced: HashSet<&str> = self.tables.iter().map(|table| table.name()).collect();
         let mut matches = foreign_key_edges(self.conn, table)
-            .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+            .map_err(GateError::ForeignKeySchema)?
             .into_iter()
             .filter(|edge| {
                 edge.columns
@@ -437,9 +437,7 @@ impl<'schema> GateModelConstruction<'schema> {
             .map(|declaration| (declaration.name(), declaration))
             .collect::<HashMap<_, _>>();
         let mut reaches = false;
-        for edge in foreign_key_edges(self.conn, table)
-            .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
-        {
+        for edge in foreign_key_edges(self.conn, table).map_err(GateError::ForeignKeySchema)? {
             let Some(parent) = synced.get(edge.parent_table.as_str()) else {
                 continue;
             };
@@ -1105,7 +1103,7 @@ pub(crate) fn foreign_keys(
     table: &str,
 ) -> Result<Vec<(String, String, String)>, GateError> {
     foreign_key_edges(conn, table)
-        .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+        .map_err(GateError::ForeignKeySchema)?
         .into_iter()
         .map(|edge| {
             let [column] = edge.columns.as_slice() else {

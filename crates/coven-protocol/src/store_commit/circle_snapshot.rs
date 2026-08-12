@@ -23,8 +23,7 @@ pub fn circle_snapshot_stream_activation(
     let first_slot = ObjectSlot::logical(format!(
         "{}.json",
         circle_snapshot_slot_prefix(circle_id, device_id, 0)
-    ))
-    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    ))?;
     Ok(StreamActivation::device_authorized(
         store_root_hash,
         author_registration.clone(),
@@ -167,9 +166,7 @@ fn validate_circle_snapshot_state(
     control: &CircleControlCoord,
     coverage: &CommitFrontier,
 ) -> Result<(), StoreProtocolError> {
-    control
-        .validate()
-        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    control.validate()?;
     super::validation::validate_commit_frontier(coverage)
 }
 

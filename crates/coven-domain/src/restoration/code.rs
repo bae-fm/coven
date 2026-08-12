@@ -85,7 +85,7 @@ pub enum RestoreCodeError {
     )]
     InvalidBase64,
     #[error("The restore code is corrupted. Regenerate it on the source device. ({0})")]
-    InvalidJson(String),
+    InvalidJson(#[source] serde_json::Error),
     #[error("This restore code uses unsupported format version v{0}. Generate a new restore code on the source device.")]
     UnsupportedVersion(u8),
     /// The restore code's `sid` is not a safe path component, so it cannot name a
@@ -97,19 +97,19 @@ pub enum RestoreCodeError {
     )]
     InvalidStoreId(coven_foundation::store_dir::PathTokenError),
     #[error("The encryption key in this restore code is invalid. Regenerate it on the source device. ({0})")]
-    InvalidEncryptionKey(String),
+    InvalidEncryptionKey(#[source] coven_keys::encryption::EncryptionError),
     #[error(
         "A signing key in this restore code is invalid. Regenerate it on the source device. ({0})"
     )]
-    InvalidSigningKey(String),
+    InvalidSigningKey(#[source] coven_foundation::code_envelope::FixedHexError),
     #[error("The Owner recovery authority in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidRecoveryAuthority(String),
     #[error("The founder key in this restore code is invalid. Regenerate it on the source device. ({0})")]
-    InvalidFounderKey(String),
+    InvalidFounderKey(#[source] coven_foundation::code_envelope::FixedHexError),
     #[error("The restore code has no membership floor. Regenerate it on the source device.")]
     EmptyMembershipFloor,
     #[error("The membership floor in this restore code is invalid. Regenerate it on the source device. ({0})")]
-    InvalidMembershipFloor(String),
+    InvalidMembershipFloor(#[source] coven_protocol::membership::MembershipFloorError),
     /// A CloudKit share is a zone shared *to* this device by another owner;
     /// restore recovers *your own* zone, so a restore code can never carry
     /// one. Rejected at decode rather than reaching provider setup.
@@ -122,8 +122,8 @@ pub enum RestoreCodeError {
 impl From<EnvelopeError> for RestoreCodeError {
     fn from(e: EnvelopeError) -> Self {
         match e {
-            EnvelopeError::MissingPrefix => RestoreCodeError::MissingPrefix,
-            EnvelopeError::InvalidBase64 => RestoreCodeError::InvalidBase64,
+            EnvelopeError::MissingPrefix { .. } => RestoreCodeError::MissingPrefix,
+            EnvelopeError::InvalidBase64(_) => RestoreCodeError::InvalidBase64,
             EnvelopeError::InvalidJson(s) => RestoreCodeError::InvalidJson(s),
         }
     }
@@ -156,7 +156,7 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     }
     if let Some(serialized_keyring) = &code.ek {
         coven_keys::encryption::EncryptionService::new(serialized_keyring)
-            .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
+            .map_err(RestoreCodeError::InvalidEncryptionKey)?;
     }
     match &code.authority {
         RestoreAuthority::ActivatedContinuation(continuation) => {
@@ -653,9 +653,12 @@ mod tests {
             "{invalid_b64}",
         );
 
-        let invalid_json = RestoreCodeError::InvalidJson("trailing comma".to_string()).to_string();
+        let source = serde_json::from_str::<serde_json::Value>("{\"value\":}")
+            .expect_err("invalid JSON must fail");
+        let source_message = source.to_string();
+        let invalid_json = RestoreCodeError::InvalidJson(source).to_string();
         assert!(invalid_json.contains("Regenerate"), "{invalid_json}");
-        assert!(invalid_json.contains("trailing comma"), "{invalid_json}");
+        assert!(invalid_json.contains(&source_message), "{invalid_json}");
 
         let lower_version = RestoreCodeError::UnsupportedVersion(0).to_string();
         assert!(lower_version.contains("v0"), "{lower_version}");

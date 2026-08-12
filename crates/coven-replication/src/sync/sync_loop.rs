@@ -41,6 +41,18 @@ pub enum SyncLoopError {
     ThreadPanicked,
 }
 
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SyncLoopFailure {
+    #[error("failed to create sync loop runtime: {0}")]
+    Runtime(Arc<std::io::Error>),
+    #[error("check sync storage: {0}")]
+    Storage(Arc<coven_protocol::objects::StorageError>),
+    #[error("sync cycle: {0}")]
+    Cycle(Arc<crate::sync::cycle::SyncCycleFailure>),
+    #[error("read pending writes after sync: {0}")]
+    PendingWrites(Arc<coven_database::DbError>),
+}
+
 /// A sync-loop status the host renders. The loop reports provider reachability,
 /// publication, and one terminal status. [`Blocked`](Self::Blocked) is a
 /// successful storage cycle with unresolved durable writes;
@@ -74,7 +86,7 @@ pub enum SyncLoopStatus {
         writes: Vec<coven_protocol::write::PendingWrite>,
     },
     /// The cycle failed as a whole — no outcome to report, only the fault.
-    Failed { error: String },
+    Failed { error: SyncLoopFailure },
 }
 
 /// Manages the background sync loop and provides access to sync components.
@@ -249,8 +261,8 @@ impl SyncLoopHandle {
                     .build()
                 {
                     Ok(rt) => rt,
-                    Err(e) => {
-                        let error = format!("failed to create sync loop runtime: {e}");
+                    Err(error) => {
+                        let error = SyncLoopFailure::Runtime(Arc::new(error));
                         error!("{error}");
                         status_tx.send_replace(SyncLoopStatus::Failed { error });
                         return;
@@ -293,9 +305,11 @@ impl SyncLoopHandle {
                         let reachable = inner.components.probe_storage().await;
                         let (decision, status) = match reachable {
                             Err(error) => {
-                                let status = storage_check_failure_status(&error);
+                                let error = Arc::new(error);
+                                let status = storage_check_failure_status(Arc::clone(&error));
+                                let failure = SyncLoopFailure::Storage(error);
                                 let decision = loop_policy::after_failure(
-                                    format!("check sync storage: {error}"),
+                                    failure,
                                     consecutive_failures,
                                     300,
                                 );
@@ -307,9 +321,10 @@ impl SyncLoopHandle {
                                     Ok(result) => (loop_policy::after_success(result), false),
                                     Err(error) => {
                                         let offline = error.is_offline();
+                                        let failure = SyncLoopFailure::Cycle(Arc::new(error));
                                         (
                                             loop_policy::after_failure(
-                                                error.to_string(),
+                                                failure,
                                                 consecutive_failures,
                                                 300,
                                             ),
@@ -324,8 +339,8 @@ impl SyncLoopHandle {
                                             .pending_blocked_writes()
                                             .await
                                         {
-                                            Ok(writes) => current_success_status(writes, success.clone()),
-                                            Err(error) => Err(format!("read pending writes after sync: {error}")),
+                                            Ok(writes) => Ok(current_success_status(writes, success.clone())),
+                                            Err(error) => Err(SyncLoopFailure::PendingWrites(Arc::new(error))),
                                         };
                                         match projected {
                                             Ok(status) => status,
@@ -469,7 +484,10 @@ impl SyncLoopHandle {
     pub async fn propose_device_exclusion(
         &self,
         device_id: coven_protocol::StoreDeviceId,
-    ) -> Result<coven_protocol::store_commit::StoreDeviceExclusionProposalRef, String> {
+    ) -> Result<
+        coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
+        crate::sync::store::StoreDeviceExclusionError,
+    > {
         self.inner
             .components
             .propose_device_exclusion(device_id)
@@ -479,7 +497,7 @@ impl SyncLoopHandle {
     pub async fn cancel_device_exclusion(
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::sync::store::StoreDeviceExclusionError> {
         self.inner
             .components
             .cancel_device_exclusion(proposal)
@@ -489,7 +507,7 @@ impl SyncLoopHandle {
     pub async fn finalize_device_exclusion(
         &self,
         proposal: &coven_protocol::store_commit::StoreDeviceExclusionProposalRef,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::sync::store::StoreDeviceExclusionError> {
         self.inner
             .components
             .finalize_device_exclusion(proposal)
@@ -499,21 +517,27 @@ impl SyncLoopHandle {
     pub async fn begin_owner_promotion(
         &self,
         device_id: coven_protocol::StoreDeviceId,
-    ) -> Result<coven_protocol::store_commit::OwnerPromotionRequest, String> {
+    ) -> Result<
+        coven_protocol::store_commit::OwnerPromotionRequest,
+        crate::sync::store::OwnerPromotionError,
+    > {
         self.inner.components.begin_owner_promotion(device_id).await
     }
 
     pub async fn accept_owner_promotion(
         &self,
         request: coven_protocol::store_commit::OwnerPromotionRequest,
-    ) -> Result<coven_protocol::store_commit::OwnerPromotionAcceptance, String> {
+    ) -> Result<
+        coven_protocol::store_commit::OwnerPromotionAcceptance,
+        crate::sync::store::OwnerPromotionError,
+    > {
         self.inner.components.accept_owner_promotion(request).await
     }
 
     pub async fn finalize_owner_promotion(
         &self,
         acceptance: coven_protocol::store_commit::OwnerPromotionAcceptance,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::sync::store::OwnerPromotionError> {
         self.inner
             .components
             .finalize_owner_promotion(acceptance)
@@ -738,7 +762,7 @@ impl SyncLoopHandle {
 
     pub async fn drain_uploads(
         &self,
-    ) -> Result<coven_protocol::blob::DrainOutcome, coven_database::DbError> {
+    ) -> Result<crate::blob::DrainOutcome, super::store::StoreError> {
         self.inner
             .components
             .drain_uploads(self.inner.clock.as_ref(), self.inner.observer.as_deref())
@@ -944,7 +968,10 @@ impl SyncLoopHandle {
         &self,
         stored: &[u8],
         aad_context: &[u8],
-    ) -> Result<(coven_keys::encryption::KeyFingerprint, Vec<u8>), String> {
+    ) -> Result<
+        (coven_keys::encryption::KeyFingerprint, Vec<u8>),
+        coven_keys::encryption::EncryptionError,
+    > {
         self.inner
             .components
             .open_sealed_blob_for_test(stored, aad_context)
@@ -1077,12 +1104,14 @@ fn reply_circle_command<T>(
     }
 }
 
-fn storage_check_failure_status(error: &coven_protocol::objects::StorageError) -> SyncLoopStatus {
+fn storage_check_failure_status(
+    error: Arc<coven_protocol::objects::StorageError>,
+) -> SyncLoopStatus {
     if error.is_transport() {
         SyncLoopStatus::Offline
     } else {
         SyncLoopStatus::Failed {
-            error: format!("check sync storage: {error}"),
+            error: SyncLoopFailure::Storage(error),
         }
     }
 }
@@ -1090,11 +1119,11 @@ fn storage_check_failure_status(error: &coven_protocol::objects::StorageError) -
 fn current_success_status(
     writes: Vec<coven_protocol::write::PendingWrite>,
     success: SyncLoopSuccess,
-) -> Result<SyncLoopStatus, String> {
+) -> SyncLoopStatus {
     if !writes.is_empty() {
-        return Ok(SyncLoopStatus::Blocked { success, writes });
+        return SyncLoopStatus::Blocked { success, writes };
     }
-    Ok(SyncLoopStatus::Synchronized(success))
+    SyncLoopStatus::Synchronized(success)
 }
 
 struct RunningGuard {

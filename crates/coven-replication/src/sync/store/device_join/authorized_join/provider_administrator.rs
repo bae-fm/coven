@@ -1,4 +1,4 @@
-use super::{provider_error, require_cancelled_outcome, *};
+use super::{require_cancelled_outcome, *};
 
 impl<'operation, 'storage>
     AuthorizedJoin<'operation, 'storage, ProviderAdministratorJoinAuthority>
@@ -75,7 +75,7 @@ impl<'operation, 'storage>
     ) -> Result<CrossPrincipalProbeChallenge, DeviceJoinError> {
         self.local_writer
             .verify_cross_principal_challenge(challenge, context, store)
-            .map_err(provider_error)?;
+            .map_err(DeviceJoinError::ProviderProbe)?;
         if authorization.attempt.attempt_id != context.attempt_id {
             return Err(DeviceJoinError::AttemptMismatch);
         }
@@ -116,7 +116,7 @@ impl<'operation, 'storage>
                 store,
             )
             .await
-            .map_err(provider_error)
+            .map_err(DeviceJoinError::ProviderProbe)
     }
 
     pub(super) async fn authorize_access(
@@ -191,7 +191,7 @@ impl<'operation, 'storage>
                         provider_admin.administrator.clone(),
                         &request.offer.provider,
                     )
-                    .map_err(provider_error)?;
+                    .map_err(DeviceJoinError::ProviderProbe)?;
                 let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                     request.offer.store_root.store_root_hash,
                     ProtocolObjectDomain::ProviderAccessGrant,
@@ -267,7 +267,7 @@ impl<'operation, 'storage>
                         self.local_writer.as_ref(),
                     )
                     .await
-                    .map_err(provider_error)?,
+                    .map_err(DeviceJoinError::ProviderProbe)?,
             )
         };
         let approval = self.sign_device_admission_approval(
@@ -442,7 +442,7 @@ impl<'operation, 'storage>
                             &offer.member_pubkey,
                         )
                         .await
-                        .map_err(provider_error)?,
+                        .map_err(DeviceJoinError::ProviderProbe)?,
                 )
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
@@ -537,7 +537,7 @@ impl<'operation, 'storage>
                             }
                             Ok(Some(_)) => return Err(DeviceJoinError::CleanupMismatch),
                             Err(error) => {
-                                return Err(DeviceJoinError::Provider(error.to_string()));
+                                return Err(DeviceJoinError::ProviderStorage(error));
                             }
                         }
                     }
@@ -563,7 +563,7 @@ impl<'operation, 'storage>
             self.storage
                 .delete_exact_slot_and_verify_absent(&probe.administrator_object.slot)
                 .await
-                .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
+                .map_err(DeviceJoinError::ProviderStorage)?;
         }
         let closure = self.local_writer.sign_provider_join_closure(
             cancellation.outcome,
@@ -780,7 +780,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .revoke_joiner_writes(cancellation, revocation_executor)
@@ -796,7 +796,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .authorize_access(request, access_administrator)
@@ -811,7 +811,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .publish_challenge(bootstrap)
@@ -826,7 +826,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .complete_admission(readiness)
@@ -841,7 +841,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .close(cancellation)
@@ -857,7 +857,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer
             .provider_administrator_join()?
             .revoke_writes(cancellation, revocation_executor)

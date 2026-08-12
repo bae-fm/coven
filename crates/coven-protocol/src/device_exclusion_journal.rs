@@ -137,9 +137,7 @@ impl DurableStoreDeviceExclusionObject {
         match self {
             Self::Proposal {
                 reference, value, ..
-            } => reference
-                .verify_proposal(value)
-                .map_err(|error| StoreDeviceExclusionJournalError::Invalid(error.to_string()))?,
+            } => reference.verify_proposal(value)?,
             Self::Outcome {
                 reference, value, ..
             } => {
@@ -424,10 +422,7 @@ impl DurableStoreDeviceExclusionOperation {
             }
             return Ok(());
         };
-        candidate
-            .reference
-            .verify_commit(&candidate.commit)
-            .map_err(|error| StoreDeviceExclusionJournalError::Invalid(error.to_string()))?;
+        candidate.reference.verify_commit(&candidate.commit)?;
         if !self.object().commit_names_exact_object(candidate)
             || candidate.commit.acknowledgement().is_some()
         {
@@ -481,6 +476,8 @@ impl DurableStoreDeviceExclusionOperation {
 pub enum StoreDeviceExclusionJournalError {
     #[error("invalid durable Store-device exclusion: {0}")]
     Invalid(String),
+    #[error("Store-device exclusion protocol: {0}")]
+    Protocol(#[from] crate::store_commit::StoreProtocolError),
     #[error("Store-device exclusion remote ownership: {0}")]
     RemoteObject(#[from] RemoteObjectRecordError),
     #[error("Store-device exclusion activation: {0}")]

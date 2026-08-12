@@ -98,7 +98,9 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
             .circle_operation(operation_id)
             .await?
             .ok_or_else(|| {
-                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+                CircleOperationError::JournalState(format!(
+                    "circle operation {operation_id} is absent"
+                ))
             })?;
         if !journal.is_discarding() {
             let discard_candidate = self
@@ -125,13 +127,7 @@ impl<'operation, 'storage> VerifiedCircleHistory<'operation, 'storage> {
                 .begin_circle_operation_discard(self.root().clone(), operation_id, nonactivation)
                 .await?;
         }
-        self.cleanup_operation_candidate(operation_id)
-            .await
-            .map_err(|error| {
-                CircleOperationError::InvalidState(format!(
-                    "Circle operation {operation_id} discard cleanup: {error}"
-                ))
-            })?;
+        self.cleanup_operation_candidate(operation_id).await?;
         self.database
             .finish_circle_operation_discard(operation_id)
             .await?;

@@ -38,14 +38,7 @@ pub(crate) trait CircleBootstrapBlobVerification {
                     "Circle bootstrap blob belongs to another audience".to_string(),
                 ));
             }
-            self.verify_stored_blob(&previous.stored)
-                .await
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "verify Circle bootstrap blob {}/{}: {error}",
-                        captured.fact.blob.namespace, captured.fact.blob.id
-                    ))
-                })?;
+            self.verify_stored_blob(&previous.stored).await?;
             blobs.push(
                 coven_protocol::blob::RowBlobRef::new(
                     captured.fact.table.clone(),
@@ -58,7 +51,7 @@ pub(crate) trait CircleBootstrapBlobVerification {
                     coven_protocol::blob::RowBlobAuthority::Remote(previous.authority.clone()),
                     Some(previous.stored.clone()),
                 )
-                .map_err(CircleOperationError::InvalidState)?,
+                .map_err(CircleOperationError::RowBlob)?,
             );
         }
         blobs.sort_by_cached_key(|blob| {

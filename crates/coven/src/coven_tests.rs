@@ -197,8 +197,8 @@ fn interrupted_coven_schema_without_a_marker_is_rejected() {
 
     assert!(matches!(
         error,
-        CovenError::Database(DbError::Message(reason))
-            if reason.contains("without the required initialization marker")
+        CovenError::Database(error)
+            if matches!(error.as_ref(), DbError::Message(reason) if reason.contains("without the required initialization marker"))
     ));
 }
 
@@ -734,9 +734,9 @@ async fn pending_write_drains_only_after_changeset_push() {
 
     let first = handle.publish_test_store(&storage).await;
     assert!(
-        first
-            .as_ref()
-            .is_err_and(|error| error.contains("forced failure before exact create")),
+        first.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("forced failure before exact create")),
         "the first cycle must report the append failure while preserving its outbox: {first:?}",
     );
     assert_eq!(
@@ -1748,7 +1748,7 @@ async fn sql_failure_removes_staged_blob() {
                 w.put_blob("media-files", "blobbbbb", b"staged".to_vec());
                 Ok(())
             },
-            |_sql| Err::<(), CovenError>(CovenError::Blob("sql failed".to_string())),
+            |_sql| Err::<(), CovenError>(CovenError::TestFailure("sql failed")),
         )
         .await
         .expect_err("write fails");
@@ -2504,7 +2504,7 @@ async fn write_surfaces_a_failed_installed_blob_rollback() {
                     .expect("replace installed blob with rollback obstruction");
                 std::fs::create_dir(&obstructed_path)
                     .expect("create rollback obstruction directory");
-                Err(CovenError::Blob("force rollback".to_string()))
+                Err(CovenError::TestFailure("force rollback"))
             },
         )
         .await;
@@ -2559,7 +2559,7 @@ async fn concurrent_duplicate_blob_write_does_not_delete_committed_blob() {
                     w.put_blob("media-files", "raceblob", b"rolled-back".to_vec());
                     Ok(())
                 },
-                |_sql| Err::<(), CovenError>(CovenError::Blob("force rollback".to_string())),
+                |_sql| Err::<(), CovenError>(CovenError::TestFailure("force rollback")),
             )
             .await
     });

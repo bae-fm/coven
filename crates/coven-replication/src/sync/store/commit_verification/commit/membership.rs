@@ -265,7 +265,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         if serde_json::to_vec(&head).map_err(|error| StoreObjectError::InvalidObject {
             semantic_prefix: semantic_prefix.to_string(),
             key: object.slot().logical_key().to_string(),
-            source: Box::new(StoreProtocolError::Malformed(error.to_string())),
+            source: Box::new(StoreProtocolError::from(error)),
         })? != bytes
         {
             return Err(StoreObjectError::InvalidObject {

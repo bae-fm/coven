@@ -90,7 +90,7 @@ pub(crate) fn candidate_cleanup_targets_on(
             });
         } else if !remote
             .candidate_cleanup_complete(candidate)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
         {
             return Err(DbError::Message(format!(
                 "candidate object {object_id} has no cleanup decision"
@@ -404,15 +404,13 @@ pub fn blocked_merge_candidate_nonactivation(
     ) {
         let (durable, head_nonactivation) = verified
             .into_terminal_head_nonactivation()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
         return Ok(BlockedMergeCandidateNonactivation::Terminal {
             durable,
             head_nonactivation,
         });
     }
-    verified
-        .merge_winner_commit()
-        .map_err(|error| DbError::Message(error.to_string()))?;
+    verified.merge_winner_commit().map_err(DbError::from)?;
     Ok(BlockedMergeCandidateNonactivation::Merge(
         verified.into_durable(),
     ))
@@ -425,11 +423,7 @@ pub(super) fn validate_terminal_candidate_authority_on(
     candidate: &PreparedMergeCandidate,
     durable: &coven_protocol::remote_object::CandidateNonactivation,
 ) -> Result<(), DbError> {
-    if durable
-        .reference()
-        .map_err(|error| DbError::Message(error.to_string()))?
-        != candidate.reference
-    {
+    if durable.reference().map_err(DbError::from)? != candidate.reference {
         return Err(DbError::Message(
             "terminal candidate authority names another candidate".to_string(),
         ));
@@ -455,7 +449,7 @@ pub(super) fn validate_terminal_nonactivation_authority_on(
             .map_err(|error| DbError::context("terminal candidate commit", error))?;
             let reference = durable
                 .reference()
-                .map_err(|error| DbError::Message(error.to_string()))?;
+                .map_err(DbError::from)?;
             let current = author_exclusion_activation_for_candidate_on(
                 records,
                 retained,
@@ -564,10 +558,7 @@ pub(crate) fn begin_merge_candidate_nonactivation_with_head_evidence_on(
     extra_objects: &[ExactObjectRef],
     head_evidence: MergeCandidateHeadEvidence<'_>,
 ) -> Result<(), DbError> {
-    if nonactivation
-        .reference()
-        .map_err(|error| DbError::Message(error.to_string()))?
-        != candidate.reference
+    if nonactivation.reference().map_err(DbError::from)? != candidate.reference
         || nonactivation.candidate().canonical_signed_bytes != candidate.canonical_signed_bytes
     {
         return Err(DbError::Message(
@@ -639,7 +630,7 @@ pub(super) fn terminal_candidate_verification_on(
     let remote = records.remote_object(remote_object_id(&candidate.reference.object))?;
     let Some(proof) = remote
         .candidate_nonactivation_proof(&candidate.reference)
-        .map_err(|error| DbError::Message(error.to_string()))?
+        .map_err(DbError::from)?
     else {
         return Ok(None);
     };
@@ -667,11 +658,11 @@ pub(super) fn terminal_candidate_verification_on(
                 &candidate.commit,
                 proof.clone(),
             )
-            .map_err(|error| DbError::Message(error.to_string()))?;
+            .map_err(DbError::from)?;
             validate_terminal_nonactivation_authority_on(records, retained, root, &durable)?;
             TerminalCandidateAuthority::DependencyRetraction(
                 coven_protocol::remote_object::VerifiedDependencyRetractionAuthority::after_live_authority_check(durable)
-                    .map_err(|error| DbError::Message(error.to_string()))?,
+                    .map_err(DbError::from)?,
             )
         }
         coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner { .. } => {

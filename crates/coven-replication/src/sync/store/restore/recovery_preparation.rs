@@ -79,7 +79,7 @@ impl<'storage> RestoringStore<'storage> {
             Ok((bytes, prepared)) => {
                 let registration =
                     StoreDeviceRegistration::parse_at(&bytes, root, expected.device_id)
-                        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                        .map_err(StoreRegistrationError::from)?;
                 if registration != expected {
                     return Err(StoreRegistrationError::Invalid(
                         "existing Owner recovery registration differs from its exact authority"
@@ -170,8 +170,8 @@ impl<'storage> RestoringStore<'storage> {
         {
             Ok((bytes, prepared)) => {
                 let object = prepared.reference();
-                let decoded: StoreAck = serde_json::from_slice(&bytes)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                let decoded: StoreAck =
+                    serde_json::from_slice(&bytes).map_err(StoreRegistrationError::from)?;
                 let reference = StoreAckRef {
                     registration: registration_ref.clone(),
                     sequence: decoded.sequence,
@@ -179,10 +179,10 @@ impl<'storage> RestoringStore<'storage> {
                     object: object.clone(),
                 };
                 let ack = StoreAck::parse_at(&bytes, root, &reference, registration)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                    .map_err(StoreRegistrationError::from)?;
                 let expected_activation = registration
                     .store_acknowledgement_activation(registration_ref)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                    .map_err(StoreRegistrationError::from)?
                     .activation_id();
                 if ack.sequence != 1
                     || ack.successor.predecessor.is_some()
@@ -230,14 +230,14 @@ impl<'storage> RestoringStore<'storage> {
                     SuccessorLink {
                         activation: registration
                             .store_acknowledgement_activation(registration_ref)
-                            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                            .map_err(StoreRegistrationError::from)?
                             .activation_id(),
                         predecessor: None,
                         next_slot,
                     },
                     device_signer,
                 )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
                 let bytes = ack.to_bytes();
                 let prepared = storage
                     .prepare_protocol_object(&context, first_slot, &prefix, bytes.clone())
@@ -290,8 +290,8 @@ impl<'storage> RestoringStore<'storage> {
         {
             Ok((bytes, prepared)) => {
                 let object = prepared.reference();
-                let decoded: OwnerRecoveryNode = serde_json::from_slice(&bytes)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                let decoded: OwnerRecoveryNode =
+                    serde_json::from_slice(&bytes).map_err(StoreRegistrationError::from)?;
                 let reference = OwnerRecoveryNodeRef {
                     owner_pubkey: decoded.owner_pubkey.clone(),
                     owner_grant: decoded.owner_grant.clone(),
@@ -300,7 +300,7 @@ impl<'storage> RestoringStore<'storage> {
                     object: object.clone(),
                 };
                 let node = OwnerRecoveryNode::parse_at(&bytes, root, &reference)
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                    .map_err(StoreRegistrationError::from)?;
                 if node.recovery_id != recovery_id
                     || node.owner_pubkey != owner_pubkey
                     || node.owner_grant != *owner_grant
@@ -350,7 +350,7 @@ impl<'storage> RestoringStore<'storage> {
                     next_slot,
                     identity_signer,
                 )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
                 let bytes = node.to_bytes();
                 let prepared = storage
                     .prepare_protocol_object(&context, recovery_slot, &prefix, bytes.clone())
@@ -394,7 +394,7 @@ impl<'storage> RestoringStore<'storage> {
         let Some(registration) = database
             .activated_store_device_registration_for_device(device_id)
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
+            .map_err(StoreRegistrationError::from)?
         else {
             return Ok(None);
         };
@@ -509,7 +509,7 @@ impl<'storage> RestoringStore<'storage> {
                 registration.activation().clone(),
             )
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         if !already_activated {
             return Err(StoreRegistrationError::Invalid(
                 "activated Owner recovery disappeared while installing its local journal".into(),

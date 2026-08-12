@@ -125,7 +125,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             "{}.json",
             circle_snapshot_slot_prefix(circle_id, &device_id, 0)
         ))
-        .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         let mut generation = 0_u64;
         let mut predecessor = None;
         let mut snapshots = Vec::new();
@@ -137,7 +137,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 Err(error) => return Err(SnapshotError::Bucket(error)),
             };
             let semantic_hash = CircleSnapshotMeta::semantic_hash_from_bytes(&bytes)
-                .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+                .map_err(SnapshotError::from)?;
             let reference = coven_protocol::store_commit::CircleSnapshotRef {
                 generation,
                 snapshot_hash: semantic_hash,
@@ -149,7 +149,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 &reference,
                 registration,
             )
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
             if meta.circle_id != circle_id || meta.successor.predecessor != predecessor {
                 return Err(SnapshotError::Parse(
                     "Circle snapshot stream has an invalid exact predecessor".to_string(),
@@ -180,12 +180,12 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .database
             .prepare_circle_restore_selection(root.clone())
             .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let device_registrations = self
             .database
             .activated_store_device_registration_records()
             .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
 
         let mut installs = Vec::new();
         let preserved_bootstraps = selection.preserved_bootstraps;
@@ -194,7 +194,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 .database
                 .circle_restore_head(root.clone(), circle_id, controls)
                 .await
-                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                .map_err(SnapshotError::from)?;
             let Some((head_control, head_commit)) = head else {
                 warn!(%circle_id, "restore selection: Circle has no head control");
                 continue;
@@ -264,7 +264,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                     coven_protocol::objects::ProtectedObjectDomain::CircleBootstrapImage
                         .extension(),
                 )
-                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                .map_err(SnapshotError::from)?;
                 let image_bytes = self
                     .storage
                     .read_protocol_object(
@@ -283,7 +283,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                         routing_key.cloned(),
                     )
                     .await
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    .map_err(SnapshotError::from)?;
                 let image =
                     coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
                         circle_id,
@@ -291,7 +291,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                         coverage.bootstrap.clone(),
                         image_bytes,
                     )
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    .map_err(SnapshotError::from)?;
                 candidates.push(StagedCircleImageCandidate {
                     activation_commit: coverage.activation_commit.clone(),
                     image,
@@ -343,7 +343,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             .database
             .retained_merge_materialization_by_ref(root, commit_lookup)
             .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let commit = owned.commit().clone();
         let reference = owned
             .circle_activations()
@@ -371,7 +371,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
             routing_key,
         )
         .await
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))
+        .map_err(SnapshotError::from)
     }
 
     async fn select_standalone_snapshot_candidate(
@@ -406,7 +406,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                     .database
                     .retained_circle_activation_commit_ref(circle_id, retained_control)
                     .await
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    .map_err(SnapshotError::from)?;
                 let Some(activation_commit) = activation_commit else {
                     tracing::debug!(
                         %circle_id,
@@ -428,7 +428,7 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                         snapshot_control,
                     )
                     .await
-                    .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+                    .map_err(SnapshotError::from)?;
                 if covered {
                     installable.push((snapshot, activation_commit));
                 }
@@ -475,14 +475,14 @@ impl<'operation, 'storage> CircleSnapshotReader<'operation, 'storage> {
                 routing_key.cloned(),
             )
             .await
-            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let image = coven_protocol::circle_activation::VerifiedCircleImage::from_stored_image(
             circle_id,
             selected.control.clone(),
             selected.bootstrap.clone(),
             image_bytes,
         )
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         Ok(Some(StagedCircleImageCandidate {
             activation_commit,
             image,
@@ -536,8 +536,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let routing_key = coven_protocol::circle::derive_row_routing_key(
             &routing_encryption,
             self.root.store_root_hash,
-        )
-        .map_err(|error| coven_database::DbError::Message(error.to_string()))?;
+        )?;
         let root = self.root.clone();
         let snapshot = self
             .database
@@ -684,7 +683,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             .acknowledgements()
             .stable_dominating(circle_id, snapshot_cut)
             .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?
+            .map_err(SnapshotError::from)?
             .is_some())
     }
 
@@ -708,12 +707,9 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let blobs = self
             .verify_snapshot_blobs(circle_id, snapshot.blobs())
             .await
-            .map_err(|error| SnapshotError::PublishBlobs(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let (image, _) = snapshot.into_parts();
-        let image_bytes = image
-            .read()
-            .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        let image_bytes = image.read().await.map_err(SnapshotError::from)?;
         let image_hash = ObjectHash::digest(&image_bytes);
         let image_context = input.protocol_context(
             root.store_root_hash,
@@ -751,7 +747,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             self.local_writer
                 .circle_snapshot_semantic_prefix(circle_id, 0)
         ))
-        .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         let (generation, predecessor, current_slot) = match previous {
             Some(previous) => (
                 previous
@@ -804,7 +800,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
                 predecessor,
                 next_slot,
             )
-            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let meta_prepared = storage
             .prepare_protocol_object(
                 &meta_context,
@@ -902,7 +898,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
             store_routing,
             self.root.store_root_hash,
         )
-        .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+        .map_err(SnapshotError::from)?;
         self.database
             .verify_circle_bootstrap_image(
                 image,
@@ -937,7 +933,7 @@ impl<'operation, 'storage> CircleSnapshotWriter<'operation, 'storage> {
         let cut = self
             .capture_circle_snapshot_cut(store_routing, input.circle_id())
             .await
-            .map_err(|error| SnapshotError::PublicationState(error.to_string()))?;
+            .map_err(SnapshotError::from)?;
         let (snapshot, coverage) = cut.into_parts();
         self.push_circle_snapshot(
             &input,

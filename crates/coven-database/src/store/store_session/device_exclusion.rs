@@ -18,7 +18,7 @@ use coven_protocol::store_commit::ObjectHash;
 pub(crate) fn store_device_exclusion_journal_error(
     error: StoreDeviceExclusionJournalError,
 ) -> DbError {
-    DbError::Message(error.to_string())
+    DbError::from(error)
 }
 
 pub(crate) fn parse_store_device_exclusion_operation(
@@ -499,7 +499,7 @@ impl StoreSession<'_> {
         let commit = load_remote_object_on(&tx, commit_id)?;
         if commit
             .candidate_nonactivation_proof(&losing.candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(&losing.proof)
         {
             return Err(DbError::Message(
@@ -509,7 +509,7 @@ impl StoreSession<'_> {
         let authority = load_remote_object_on(&tx, remote_object_id(object.object()))?;
         if authority
             .candidate_nonactivation_proof(&losing.candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(&losing.proof)
         {
             return Err(DbError::Message(
@@ -520,7 +520,7 @@ impl StoreSession<'_> {
         let remote = load_remote_object_on(&tx, head_id)?;
         if remote
             .candidate_nonactivation_proof(&losing.candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(&losing.proof)
         {
             return Err(DbError::Message(
@@ -562,7 +562,7 @@ impl StoreSession<'_> {
         let commit = load_remote_object_on(&tx, commit_id)?;
         if commit
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(proof)
         {
             return Err(DbError::Message(
@@ -572,7 +572,7 @@ impl StoreSession<'_> {
         let inert = load_protocol_inert_object_on(&tx, remote_object_id(object.object()))?;
         if inert
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(proof)
         {
             return Err(DbError::Message(
@@ -583,7 +583,7 @@ impl StoreSession<'_> {
         let head_remote = load_remote_object_on(&tx, head_id)?;
         if head_remote
             .candidate_nonactivation_proof(&candidate.reference)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
             != Some(proof)
         {
             return Err(DbError::Message(
@@ -795,11 +795,7 @@ impl StoreDatabase {
         let candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store-device exclusion has no losing candidate".to_string())
         })?;
-        if nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != candidate.reference
-        {
+        if nonactivation.candidate_reference().map_err(DbError::from)? != candidate.reference {
             return Err(DbError::Message(
                 "verified nonactivation names another Store-device exclusion candidate".to_string(),
             ));
@@ -834,9 +830,7 @@ impl StoreDatabase {
         let expected_candidate = expected.candidate().cloned().ok_or_else(|| {
             DbError::Message("Store-device exclusion has no losing candidate".to_string())
         })?;
-        if nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
+        if nonactivation.candidate_reference().map_err(DbError::from)?
             != expected_candidate.reference
         {
             return Err(DbError::Message(

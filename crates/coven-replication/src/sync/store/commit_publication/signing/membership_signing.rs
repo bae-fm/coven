@@ -20,18 +20,10 @@ impl LocalStoreWriter {
                 &keyring,
                 &signer,
             )
-            .map_err(|error| {
-                crate::sync::store::membership::InviteError::Crypto(format!(
-                    "serialize invited member keyring: {error}"
-                ))
-            })
+            .map_err(crate::sync::store::membership::InviteError::Encryption)
         })
         .await
-        .map_err(|error| {
-            crate::sync::store::membership::InviteError::Crypto(format!(
-                "seal invited member Store key: {error}"
-            ))
-        })?
+        .map_err(crate::sync::store::membership::InviteError::Blocking)?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -225,7 +217,7 @@ impl LocalStoreWriter {
     ) -> Result<(), crate::sync::store::StoreError> {
         candidate
             .attach_merge_membership_proof_with(publication, resolution)
-            .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+            .map_err(crate::sync::store::StoreError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -256,7 +248,7 @@ impl LocalStoreWriter {
             finalization,
             &self.identity,
         )
-        .map_err(|error| crate::sync::store::StoreError::InvalidOutbound(error.to_string()))
+        .map_err(crate::sync::store::StoreError::from)
     }
 
     pub(crate) fn sign_owner_promotion_acceptance(

@@ -220,9 +220,7 @@ pub struct CirclePackageBeyondCutoffClaim {
 
 impl CirclePackageBeyondCutoffClaim {
     fn validate(&self) -> Result<(), StoreProtocolError> {
-        self.successor_control
-            .validate()
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        self.successor_control.validate()?;
         if self.successor_control == self.target.package.control {
             return Err(StoreProtocolError::Malformed(
                 "Circle package beyond-cutoff successor is the package's own control".to_string(),
@@ -374,9 +372,7 @@ impl CircleBootstrapImageReclaimClaim {
             successor_control, ..
         } = &self.proof
         {
-            successor_control
-                .validate()
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            successor_control.validate()?;
             if *successor_control == self.target.coverage.control {
                 return Err(StoreProtocolError::Malformed(
                     "Circle bootstrap lost-authority successor is the seed control".to_string(),

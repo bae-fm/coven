@@ -8,6 +8,7 @@ use coven_foundation::changeset::RowChange;
 use super::cycle::SyncCycleResult;
 use super::status::DeviceActivity;
 use super::store::HeldStorePosition;
+use super::sync_loop::SyncLoopFailure;
 use coven_protocol::objects::RotationPending;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub struct SyncLoopSuccess {
 #[derive(Debug, Clone)]
 pub(crate) enum SyncLoopReport {
     Success(SyncLoopSuccess),
-    Failure(String),
+    Failure(SyncLoopFailure),
 }
 
 #[derive(Debug, Clone)]
@@ -119,7 +120,7 @@ pub(crate) fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
 }
 
 pub(crate) fn after_failure(
-    error: String,
+    error: SyncLoopFailure,
     previous_failures: u32,
     backoff_cap_secs: u64,
 ) -> SyncLoopDecision {
@@ -138,9 +139,9 @@ pub(crate) fn after_failure(
 mod tests {
     use super::*;
 
+    use crate::sync::store::pull::HeldStorePositionReason;
     use crate::sync::store::{HeldStoreCoordinate, HeldStorePosition};
     use coven_protocol::causal_grants::AuthorStreamId;
-    use coven_protocol::membership::HeldStorePositionReason;
     use coven_protocol::objects::ExactObjectRef;
     use coven_protocol::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
 
@@ -252,12 +253,18 @@ mod tests {
 
     #[test]
     fn failure_increments_and_backs_off() {
-        let decision = after_failure("network".to_string(), 1, 300);
+        let decision = after_failure(
+            SyncLoopFailure::Storage(std::sync::Arc::new(
+                coven_protocol::objects::StorageError::Storage("network".to_string()),
+            )),
+            1,
+            300,
+        );
 
         assert_eq!(decision.consecutive_failures, 2);
         assert_eq!(decision.wait, LoopWait::BackoffSecs(120));
         match decision.report {
-            SyncLoopReport::Failure(error) => assert_eq!(error, "network"),
+            SyncLoopReport::Failure(error) => assert!(error.to_string().contains("network")),
             SyncLoopReport::Success(_) => panic!("expected failure"),
         }
     }

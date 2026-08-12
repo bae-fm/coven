@@ -161,9 +161,7 @@ impl StoreDatabase {
                         serde_json::from_str(&value).map_err(|error| {
                             DbError::context("parse Owner-promotion journal", error)
                         })?;
-                    journal
-                        .validate_id(promotion_id)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    journal.validate_id(promotion_id).map_err(DbError::from)?;
                     Ok(journal)
                 })
                 .transpose()
@@ -185,9 +183,7 @@ impl StoreDatabase {
                 serde_json::from_str(&value).map_err(|error| {
                     DbError::context("parse Owner-promotion target journal", error)
                 })?;
-            journal
-                .validate_target_key(&key)
-                .map_err(|error| DbError::Message(error.to_string()))?;
+            journal.validate_target_key(&key).map_err(DbError::from)?;
             let journal_key = format!("owner_promotion/{}", journal.promotion_id());
             let by_id = session.protocol_state(&journal_key)?;
             if by_id.as_deref() != Some(value.as_str()) {
@@ -205,14 +201,8 @@ impl StoreDatabase {
         target_key: String,
         journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
-        journal
-            .validate_begin()
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        if journal
-            .target_state_key()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != target_key
-        {
+        journal.validate_begin().map_err(DbError::from)?;
+        if journal.target_state_key().map_err(DbError::from)? != target_key {
             return Err(DbError::Message(
                 "Owner-promotion target index differs from its journal target".to_string(),
             ));
@@ -230,9 +220,7 @@ impl StoreDatabase {
         &self,
         journal: coven_protocol::owner_promotion_journal::OwnerPromotionJournal,
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
-        journal
-            .validate_acceptance_begin()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        journal.validate_acceptance_begin().map_err(DbError::from)?;
         let journal_key = format!("owner_promotion/{}", journal.promotion_id());
         let value = serde_json::to_string(&journal).map_err(|error| {
             DbError::context("serialize Owner-promotion candidate acceptance", error)
@@ -265,11 +253,7 @@ impl StoreDatabase {
         objects: Vec<coven_protocol::objects::ExactObjectRef>,
         nonactivation: coven_protocol::remote_object::VerifiedCandidateNonactivation,
     ) -> Result<Vec<super::candidate_records::CandidateCleanupObject>, DbError> {
-        if nonactivation
-            .candidate_reference()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != candidate
-        {
+        if nonactivation.candidate_reference().map_err(DbError::from)? != candidate {
             return Err(DbError::Message(
                 "verified nonactivation names another Owner-promotion candidate".to_string(),
             ));
@@ -308,15 +292,9 @@ impl StoreDatabase {
     ) -> Result<coven_protocol::owner_promotion_journal::OwnerPromotionJournal, DbError> {
         previous
             .validate_failed_attempt_replacement(&replacement)
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        let target_key = previous
-            .target_state_key()
-            .map_err(|error| DbError::Message(error.to_string()))?;
-        if replacement
-            .target_state_key()
-            .map_err(|error| DbError::Message(error.to_string()))?
-            != target_key
-        {
+            .map_err(DbError::from)?;
+        let target_key = previous.target_state_key().map_err(DbError::from)?;
+        if replacement.target_state_key().map_err(DbError::from)? != target_key {
             return Err(DbError::Message(
                 "Owner-promotion retry target differs from its failed attempt".to_string(),
             ));

@@ -97,10 +97,11 @@ pub(crate) fn winning_store_audience(
         |record| record.get::<_, Option<String>>(0),
     )?
     .map(|circle_id| {
-        Audience::from_column(circle_id.as_deref()).map_err(|error| {
-            GateError::InvalidInboundAudiencePackage(format!(
-                "winning Store audience for {routing_id} is invalid: {error}"
-            ))
+        Audience::from_column(circle_id.as_deref()).map_err(|source| {
+            GateError::InvalidInboundAudienceEncoding {
+                context: format!("winning Store audience for {routing_id} is invalid"),
+                source,
+            }
         })
     })
     .transpose()
@@ -162,10 +163,13 @@ pub fn store_audience_transitions(changeset: &[u8]) -> Result<StoreAudienceTrans
                     "Store audience transition {routing_id} has no audience"
                 ))
             })?;
-            let audience = Audience::from_column(circle_id).map_err(|error| {
-                GateError::InvalidInboundAudiencePackage(format!(
-                    "Store audience transition {routing_id} has an invalid audience: {error}"
-                ))
+            let audience = Audience::from_column(circle_id).map_err(|source| {
+                GateError::InvalidInboundAudienceEncoding {
+                    context: format!(
+                        "Store audience transition {routing_id} has an invalid audience"
+                    ),
+                    source,
+                }
             })?;
             if audience == Audience::Local {
                 return Err(GateError::InvalidInboundAudiencePackage(format!(
@@ -216,11 +220,11 @@ pub(crate) unsafe fn filter_inbound_audience_rows_raw(
         if row.op != ffi::SQLITE_DELETE {
             if let Some(TableGate::ScopedRoot { audience_col }) = gates.tables.get(&row.table) {
                 if let Some(value) = row.new_value(audience_col.index) {
-                    let row_audience = Audience::from_column(value).map_err(|error| {
-                        GateError::InvalidInboundAudiencePackage(format!(
-                            "scoped row {} has an invalid audience: {error}",
-                            row.table
-                        ))
+                    let row_audience = Audience::from_column(value).map_err(|source| {
+                        GateError::InvalidInboundAudienceEncoding {
+                            context: format!("scoped row {} has an invalid audience", row.table),
+                            source,
+                        }
                     })?;
                     if &row_audience != package_audience {
                         return Err(GateError::InvalidInboundAudiencePackage(format!(
@@ -366,10 +370,11 @@ pub(crate) unsafe fn validate_inbound_private_routes_raw(
                 "private route names undeclared table {table}"
             ))
         })?;
-        identity.validate(table, row_id).map_err(|error| {
-            GateError::InvalidInboundAudiencePackage(format!(
-                "private route row identity is invalid: {error}"
-            ))
+        identity.validate(table, row_id).map_err(|source| {
+            GateError::InvalidInboundRowIdentity {
+                context: "private route row identity is invalid".to_string(),
+                source,
+            }
         })?;
         let expected_routing_id = row_routing_id(routing_key, table, row_id).to_string();
         if routing_id != expected_routing_id {

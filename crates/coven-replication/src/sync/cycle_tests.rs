@@ -2381,7 +2381,12 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         Ok(_) => panic!("an exact founder graph without its Store root must fail loud"),
     };
     assert!(
-        matches!(error, cycle::InitSyncError::StoreProtocolRoot(_)),
+        matches!(
+            error,
+            cycle::InitSyncError::Initialization(
+                crate::sync::store::StoreInitializationError::ProtocolRoot(_)
+            )
+        ),
         "{error}"
     );
     assert_eq!(
@@ -2455,7 +2460,12 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         Ok(_) => panic!("a foreign founder graph without its exact root must fail loud"),
     };
     assert!(
-        matches!(error, cycle::InitSyncError::StoreProtocolRoot(_)),
+        matches!(
+            error,
+            cycle::InitSyncError::Initialization(
+                crate::sync::store::StoreInitializationError::ProtocolRoot(_)
+            )
+        ),
         "{error}"
     );
     assert_eq!(
@@ -2836,7 +2846,7 @@ impl CycleStorageInterceptor {
         joining_db_store_dir: coven_foundation::store_dir::StoreDir,
         joining_identity: &UserKeypair,
         published_at: &str,
-    ) -> Result<crate::sync::test_helpers::TestDevice, String> {
+    ) -> Result<crate::sync::test_helpers::TestDevice, crate::sync::test_helpers::TestError> {
         self.inner
             .activate_joined_device(
                 observer_db,
@@ -4032,10 +4042,15 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     let error = run_cycle_in_task(Arc::clone(&cycle_storage), device.clone())
         .await
         .expect_err("the first Store package append fails");
-    assert_eq!(
-        error.to_string(),
-        "publish Store write: storage operation failed: InMemoryCloudHome: forced failure before exact create call 1",
-        "cycle surfaces the exact Store package append failure",
+    assert!(
+        error
+            .to_string()
+            .starts_with("publish Store write: storage backend failed while access cloud storage:"),
+        "cycle names the failed Store package publication: {error}",
+    );
+    assert!(
+        error.contains("InMemoryCloudHome: forced failure before exact create call 1"),
+        "cycle preserves the exact provider failure: {error}",
     );
     let prepared = coven_database::StoreDatabase::new(&db)
         .oldest_prepared_store_write()

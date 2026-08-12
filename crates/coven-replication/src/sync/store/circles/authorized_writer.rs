@@ -172,7 +172,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .history()
             .load_commit(activation_commit_ref)
             .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         if activation_commit.value().candidate_family() != current.candidate_family {
             return Err(CircleOperationError::InvalidState(format!(
                 "Circle {circle_id} current state differs from its activating Store commit"

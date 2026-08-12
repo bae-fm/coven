@@ -54,7 +54,9 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .circle_operation(operation_id)
             .await?
             .ok_or_else(|| {
-                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+                CircleOperationError::JournalState(format!(
+                    "circle operation {operation_id} is absent"
+                ))
             })?;
         let circle_id = journal.circle_id();
         if let CircleOperationState::Blocked { block } = journal.state() {
@@ -68,9 +70,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             ));
         }
         let circle_encryption =
-            EncryptionService::from(MasterKeyring::from_serialized(&creation.keyring).map_err(
-                |error| CircleOperationError::Journal(format!("circle keyring: {error}")),
-            )?);
+            EncryptionService::from(MasterKeyring::from_serialized(&creation.keyring)?);
         let verified_commit = self
             .history
             .authenticate_commit_bytes(
@@ -126,7 +126,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .prepared_objects
                 .get("store-head")
                 .ok_or_else(|| {
-                    CircleOperationError::Journal(
+                    CircleOperationError::JournalState(
                         "Merge Circle operation lacks its prepared Store head".to_string(),
                     )
                 })?;
@@ -136,13 +136,13 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 &author,
                 &journal.operation().commit_ref,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
             prepared_head
                 .verify(&head.to_bytes())
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
             history_evidence
                 .validate_for(&journal.operation().commit_ref, commit)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
         }
 
         let CircleTransitionPolicyObjects {
@@ -153,11 +153,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         if let Some(metadata_head) = metadata_head {
             let metadata_encryption = circle_encryption
                 .service_for_fingerprint(creation.metadata.key_fingerprint.as_bytes())
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle metadata key fingerprint is absent from its keyring: {error}"
-                    ))
-                })?;
+                .map_err(CircleOperationError::Encryption)?;
             self.append_step(
                 &mut journal,
                 "metadata",
@@ -190,7 +186,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         .iter()
                         .find(|head| head.coord == metadata_head.coord())
                         .ok_or_else(|| {
-                            CircleOperationError::Journal(
+                            CircleOperationError::JournalState(
                                 "prepared metadata head is absent from its signed object graph"
                                     .to_string(),
                             )
@@ -231,7 +227,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         .iter()
                         .find(|head| head.coord == roster.head.entry_coord())
                         .ok_or_else(|| {
-                            CircleOperationError::Journal(
+                            CircleOperationError::JournalState(
                                 "prepared roster head is absent from its signed object graph"
                                     .to_string(),
                             )
@@ -259,7 +255,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             .collect::<Vec<_>>();
         for (access, object, bootstrap) in bootstrap_access {
             if object.bootstrap.as_ref() != Some(&bootstrap.image) {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleOperationError::JournalState(
                     "Circle bootstrap access differs from its signed object graph".to_string(),
                 ));
             }
@@ -269,16 +265,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                         "Circle bootstrap row blob has no exact stored locator".to_string(),
                     )
                 })?;
-                self.storage
-                    .as_ref()
-                    .verify_blob_object(stored)
-                    .await
-                    .map_err(|error| {
-                        CircleOperationError::InvalidState(format!(
-                            "verify Circle bootstrap blob {}: {error}",
-                            coven_protocol::remote_object::remote_object_id(stored.object())
-                        ))
-                    })?;
+                self.storage.as_ref().verify_blob_object(stored).await?;
             }
             let mut matching_steps = journal
                 .operation()
@@ -289,12 +276,12 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                 .next()
                 .map(|(step, _)| step.clone())
                 .ok_or_else(|| {
-                    CircleOperationError::Journal(
+                    CircleOperationError::JournalState(
                         "Circle bootstrap image lacks its prepared exact object".to_string(),
                     )
                 })?;
             if matching_steps.next().is_some() {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleOperationError::JournalState(
                     "Circle bootstrap image has more than one upload step".to_string(),
                 ));
             }
@@ -344,7 +331,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleOperationError::JournalState(
                     "Circle epoch-close intent differs from its signed object graph".to_string(),
                 ));
             }
@@ -372,7 +359,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleOperationError::JournalState(
                     "Circle epoch-close outcome differs from its signed object graph".to_string(),
                 ));
             }
@@ -405,7 +392,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
             }
             (None, None) => {}
             _ => {
-                return Err(CircleOperationError::Journal(
+                return Err(CircleOperationError::JournalState(
                     "Circle epoch-close cancellation differs from its signed object graph"
                         .to_string(),
                 ));
@@ -548,7 +535,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
                     .prepared_objects
                     .get("store-head")
                     .ok_or_else(|| {
-                        CircleOperationError::Journal(
+                        CircleOperationError::JournalState(
                             "Merge Circle operation lacks its prepared Store head".to_string(),
                         )
                     })?;
@@ -705,10 +692,7 @@ impl<'operation, 'storage> CircleCandidatePublisher<'operation, 'storage> {
         let prepared = self
             .database
             .circle_operation_step(&journal.operation_id, step)
-            .await
-            .map_err(|error| {
-                CircleOperationError::Journal(format!("Circle upload step {step:?}: {error}"))
-            })?;
+            .await?;
         let opened = self
             .storage
             .open_prepared_protocol_object(context, &prepared, semantic_prefix)
@@ -768,7 +752,7 @@ fn verify_prepared_objects_are_signed(
     }
     for (step, object) in &operation.prepared_objects {
         if step != "store-head" && !signed.contains(object) {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleOperationError::JournalState(format!(
                 "Circle upload step {step:?} names an object outside its signed Store commit graph"
             )));
         }

@@ -165,7 +165,9 @@ mod write_models;
 pub use blob_declarations::{from_tables_call_count, reset_from_tables_call_count};
 pub use blob_declarations::{BlobDeclError, BlobDecls, PublicationBlob};
 pub(crate) use blob_records::{load_prepared_audience_objects_on, previous_row_blob_for_write_on};
-pub use changeset::{value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset};
+pub use changeset::{
+    value_ref_to_string, walk as walk_changeset, walk_old as walk_old_changeset, ChangesetError,
+};
 pub use changeset_identity::ChangesetIdentityError;
 pub(crate) use circle_operation_records::{
     circle_operation_ids_in_phase_on, circle_operation_phase_json,
@@ -195,7 +197,8 @@ pub use gate::{
 };
 pub use gate::{
     is_routing_table, store_audience_transitions, AudienceMove, AudiencePartition,
-    CirclePartitionControl, GateError, Gates, RoutingChanges, StoreAudienceTransitions,
+    CircleControlFailure, CirclePartitionControl, CirclePartitionControlError, GateError, Gates,
+    RoutingChanges, StoreAudienceTransitions,
 };
 pub use live_query::{CommittedChanges, QueryDependencies};
 pub(crate) use local_store_identity::local_activated_registration_ref_on;
@@ -214,9 +217,19 @@ pub use prepared_audience_objects::{
     StoredBlobReferenceState,
 };
 pub use routing_contract::SyncRoutingContract;
+pub use routing_contract::SyncRoutingContractError;
 use schema_contract::validate_host_synced_tables;
 pub use schema_contract::DurablePreparedProtocolObject;
 pub use schema_contract::{StoreBatchCompletion, StoreBatchLocalCleanup};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationHold {
+    ForeignKeyDependency,
+    ConstraintConflict(Vec<String>),
+}
+
+pub type MaterializationOutcome = coven_protocol::membership::ApplyOutcome<MaterializationHold>;
+
 pub(crate) use schema_introspection::{create_table_sql, foreign_key_edges, table_columns};
 pub use schema_introspection::{
     quote_ident, rewrite_create_into_schema, CreateTableSchemaError, ForeignKeyEdge,
@@ -411,7 +424,15 @@ pub(crate) fn authorize_host_sql(
 #[derive(Debug)]
 pub struct StagedBlobRollbackFailure {
     pub path: PathBuf,
-    pub reason: String,
+    pub reason: StagedBlobRollbackReason,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StagedBlobRollbackReason {
+    #[error("staged audience blob disappeared before rollback")]
+    Missing,
+    #[error("{0}")]
+    File(#[from] coven_foundation::atomic_file::FileError),
 }
 
 impl std::fmt::Display for StagedBlobRollbackFailure {
@@ -447,6 +468,8 @@ pub enum DbError {
     ReadOnlyWriteTransaction,
     #[error("{0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("failed to construct the expected Coven schema manifest: {0}")]
+    ExpectedSchema(#[source] &'static rusqlite::Error),
     /// A JSON column's bytes did not read back as the value they encode, or a
     /// value would not encode. Every synced-protocol column is stored as JSON,
     /// so this is the shape of every column-level decode failure.
@@ -470,6 +493,8 @@ pub enum DbError {
     #[error("{0}")]
     RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
     #[error("{0}")]
+    CirclePartitionControl(#[from] crate::CirclePartitionControlError),
+    #[error("{0}")]
     Gate(#[from] crate::gate::GateError),
     #[error("{0}")]
     Storage(#[from] coven_protocol::objects::StorageError),
@@ -477,6 +502,12 @@ pub enum DbError {
     BlobPath(#[from] coven_foundation::store_dir::PathTokenError),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    File(#[from] coven_foundation::atomic_file::FileError),
+    #[error("{0}")]
+    LocalBlobRemoval(#[from] coven_foundation::store_dir::LocalBlobRemovalError),
+    #[error("{0}")]
+    CachedLocatorRemoval(#[from] coven_foundation::store_dir::CachedLocatorRemovalError),
     /// A stored integer column did not fit the type the schema says it holds.
     #[error("stored value is out of range: {0}")]
     IntRange(#[from] std::num::TryFromIntError),
@@ -485,9 +516,21 @@ pub enum DbError {
     #[error("stored value is not UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("{0}")]
+    Utf8Slice(#[from] std::str::Utf8Error),
+    #[error("{0}")]
     BlobDecl(#[from] crate::BlobDeclError),
     #[error("{0}")]
     ChangesetIdentity(#[from] crate::ChangesetIdentityError),
+    #[error("{0}")]
+    Changeset(#[from] crate::ChangesetError),
+    #[error("{0}")]
+    AuthorStreamId(#[from] coven_protocol::causal_grants::AuthorStreamIdParseError),
+    #[error("{0}")]
+    RowBlobRef(#[from] coven_protocol::blob::RowBlobRefError),
+    #[error("{0}")]
+    WriteRetraction(#[from] coven_protocol::write::WriteRetractionError),
+    #[error("{0}")]
+    RotationGate(#[from] coven_protocol::objects::RotationGateError),
     #[error("{0}")]
     Encryption(#[from] coven_keys::encryption::EncryptionError),
     #[error("{0}")]
@@ -508,6 +551,26 @@ pub enum DbError {
     FromSql(#[from] rusqlite::types::FromSqlError),
     #[error("{0}")]
     BlobOpeningAuthority(#[from] coven_protocol::blob::BlobOpeningAuthorityError),
+    #[error("{0}")]
+    OwnerPromotionJournal(
+        #[from] coven_protocol::owner_promotion_journal::OwnerPromotionJournalError,
+    ),
+    #[error("{0}")]
+    CircleJournal(#[from] coven_protocol::circle_journal::CircleJournalError),
+    #[error("{0}")]
+    SyncRoutingContract(#[from] SyncRoutingContractError),
+    #[error("{0}")]
+    RowIdentity(#[from] coven_protocol::synced_schema::RowIdentityError),
+    #[error("{0}")]
+    PreparedCommit(#[from] coven_protocol::prepared_commit::PreparedCommitError),
+    #[error("{0}")]
+    CircleState(#[from] coven_protocol::circle_activation::CircleStateError),
+    #[error("{0}")]
+    DeviceExclusionJournal(
+        #[from] coven_protocol::device_exclusion_journal::StoreDeviceExclusionJournalError,
+    ),
+    #[error("{0}")]
+    StoreReclaimJournal(#[from] StoreReclaimJournalError),
     #[error("{0}")]
     CommitNewFile(#[from] coven_foundation::local_file::CommitNewFileError),
     /// Staging a write's audience-move blobs failed. The implementation of

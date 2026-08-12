@@ -12,13 +12,23 @@ pub enum StoreProtocolRootError {
     #[error(transparent)]
     Object(#[from] StoreObjectError),
     #[error("Store protocol root database state: {0}")]
-    Database(String),
+    Database(#[from] coven_database::DbError),
+    #[error("Store protocol root is invalid: {0}")]
+    Protocol(#[from] StoreProtocolError),
+    #[error("Store founder registration failed: {0}")]
+    Registration(#[source] Box<crate::sync::store::StoreRegistrationError>),
+    #[error("Store founder history failed: {0}")]
+    History(#[source] Box<crate::sync::store::pull::StorePullError>),
+    #[error("Store protocol root invariant failed: {0}")]
+    Invariant(String),
     #[error("Store protocol root schema version {root_schema} is newer than local schema {local}")]
     SchemaTooNew { root_schema: u32, local: u32 },
     #[error("Store protocol root is missing at {0}")]
     Missing(ObjectHash),
     #[error("Store provider check failed: {0}")]
-    Provider(String),
+    Provider(#[from] coven_protocol::objects::StorageError),
+    #[error("Store provider capability check failed: {0}")]
+    ProviderProbe(#[from] coven_protocol::provider::ProviderProbeError),
 }
 
 #[derive(Clone)]
@@ -35,19 +45,15 @@ impl VerifiedStoreRoot {
     ) -> Result<Self, StoreProtocolRootError> {
         let object =
             load_exact_store_protocol_root(storage, expected, database.sync_routing_hash()).await?;
-        let live_binding = storage
-            .provider_binding()
-            .await
-            .map_err(|error| StoreProtocolRootError::Provider(error.to_string()))?;
+        let live_binding = storage.provider_binding().await?;
         if live_binding.store != object.value.descriptor.provider {
-            return Err(StoreProtocolRootError::Database(
+            return Err(StoreProtocolRootError::Invariant(
                 "live provider namespace differs from the signed Store root".to_string(),
             ));
         }
         if let Some(local) = database
             .latest_local_store_device_registration()
-            .await
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
+            .await?
             .filter(|registration| registration.is_activated())
         {
             let registration = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
@@ -55,9 +61,9 @@ impl VerifiedStoreRoot {
                 expected,
                 local.device_id,
             )
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            .map_err(StoreProtocolRootError::Protocol)?;
             if registration.provider != live_binding.device {
-                return Err(StoreProtocolRootError::Database(
+                return Err(StoreProtocolRootError::Invariant(
                     "live provider principal differs from the active Store registration"
                         .to_string(),
                 ));
@@ -70,7 +76,7 @@ impl VerifiedStoreRoot {
             });
         }
         Self::from_verified_object(expected.clone(), object)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))
+            .map_err(StoreProtocolRootError::Protocol)
     }
 
     pub(crate) fn from_verified_object(

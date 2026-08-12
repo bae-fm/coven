@@ -18,9 +18,9 @@ fn success() -> SyncLoopSuccess {
 
 #[test]
 fn storage_configuration_failure_is_terminal() {
-    let status = storage_check_failure_status(
-        &coven_protocol::objects::StorageError::Configuration("missing bucket".to_string()),
-    );
+    let status = storage_check_failure_status(std::sync::Arc::new(
+        coven_protocol::objects::StorageError::Configuration("missing bucket".to_string()),
+    ));
 
     assert!(matches!(status, SyncLoopStatus::Failed { .. }));
 }
@@ -59,7 +59,7 @@ async fn successful_cycle_projects_durable_blocked_state() {
         .pending_writes()
         .await
         .expect("load blocked writes");
-    let blocked = current_success_status(writes, success()).expect("project blocked state");
+    let blocked = current_success_status(writes, success());
     assert!(matches!(
         blocked,
         SyncLoopStatus::Blocked { writes, .. }
@@ -85,8 +85,7 @@ async fn successful_cycle_projects_durable_blocked_state() {
                 .await
                 .expect("load synchronized writes"),
             success(),
-        )
-        .expect("project synchronized state"),
+        ),
         SyncLoopStatus::Synchronized(_)
     ));
 }

@@ -226,8 +226,7 @@ impl BlobLocator {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, BlobLocatorError> {
-        let locator: Self = serde_json::from_slice(bytes)
-            .map_err(|error| BlobLocatorError::Malformed(error.to_string()))?;
+        let locator: Self = serde_json::from_slice(bytes).map_err(BlobLocatorError::Json)?;
         locator.validate()?;
         if locator.to_bytes() != bytes {
             return Err(BlobLocatorError::NonCanonicalEncoding);
@@ -354,16 +353,16 @@ impl BlobLocator {
 }
 
 fn validate_blob_id(blob_id: &str) -> Result<(), BlobLocatorError> {
-    validate_path_token(blob_id).map_err(|error| BlobLocatorError::UnsafeBlobId {
+    validate_path_token(blob_id).map_err(|source| BlobLocatorError::UnsafeBlobId {
         value: blob_id.to_string(),
-        reason: error.to_string(),
+        source,
     })
 }
 
 fn validate_readable_path(cloud_path: &str) -> Result<(), BlobLocatorError> {
-    validate_cloud_path(cloud_path).map_err(|error| BlobLocatorError::UnsafeCloudPath {
+    validate_cloud_path(cloud_path).map_err(|source| BlobLocatorError::UnsafeCloudPath {
         value: cloud_path.to_string(),
-        reason: error.to_string(),
+        source,
     })?;
     if cloud_path
         .split('/')
@@ -377,28 +376,40 @@ fn validate_readable_path(cloud_path: &str) -> Result<(), BlobLocatorError> {
 }
 
 fn validate_namespace(namespace: &str) -> Result<(), BlobLocatorError> {
-    validate_path_token(namespace).map_err(|error| BlobLocatorError::UnsafeNamespace {
+    validate_path_token(namespace).map_err(|source| BlobLocatorError::UnsafeNamespace {
         value: namespace.to_string(),
-        reason: error.to_string(),
+        source,
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum BlobLocatorError {
     #[error("Local audience has no blob locator")]
     LocalAudience,
-    #[error("unsafe blob namespace {value:?}: {reason}")]
-    UnsafeNamespace { value: String, reason: String },
-    #[error("unsafe blob id {value:?}: {reason}")]
-    UnsafeBlobId { value: String, reason: String },
-    #[error("unsafe readable blob path {value:?}: {reason}")]
-    UnsafeCloudPath { value: String, reason: String },
+    #[error("unsafe blob namespace {value:?}: {source}")]
+    UnsafeNamespace {
+        value: String,
+        #[source]
+        source: coven_foundation::store_dir::PathTokenError,
+    },
+    #[error("unsafe blob id {value:?}: {source}")]
+    UnsafeBlobId {
+        value: String,
+        #[source]
+        source: coven_foundation::store_dir::PathTokenError,
+    },
+    #[error("unsafe readable blob path {value:?}: {source}")]
+    UnsafeCloudPath {
+        value: String,
+        #[source]
+        source: coven_foundation::store_dir::PathTokenError,
+    },
     #[error("readable blob path uses reserved segment: {value:?}")]
     ReservedCloudPath { value: String },
     #[error("stored blob object key mismatch: expected {expected:?}, found {actual:?}")]
     ObjectKeyMismatch { expected: String, actual: String },
     #[error("malformed blob locator: {0}")]
-    Malformed(String),
+    Json(#[source] serde_json::Error),
     #[error("blob locator bytes are not canonical")]
     NonCanonicalEncoding,
 }
@@ -589,7 +600,7 @@ mod tests {
         value["semantic_key"] = serde_json::json!("covers/opaque/relocated");
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&value).unwrap()),
-            Err(BlobLocatorError::Malformed(_))
+            Err(BlobLocatorError::Json(_))
         ));
     }
 
@@ -612,22 +623,22 @@ mod tests {
         unknown_field["unknown"] = serde_json::json!(true);
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&unknown_field).unwrap()),
-            Err(BlobLocatorError::Malformed(_))
+            Err(BlobLocatorError::Json(_))
         ));
 
         let mut unknown_variant: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         unknown_variant["protection"] = serde_json::json!("unknown");
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&unknown_variant).unwrap()),
-            Err(BlobLocatorError::Malformed(_))
+            Err(BlobLocatorError::Json(_))
         ));
 
         let mut noncanonical = bytes.clone();
         noncanonical.push(b'\n');
-        assert_eq!(
+        assert!(matches!(
             BlobLocator::parse(&noncanonical),
             Err(BlobLocatorError::NonCanonicalEncoding)
-        );
+        ));
     }
 
     #[test]
@@ -662,7 +673,7 @@ mod tests {
         value["uploader"]["device_id"] = serde_json::json!("AA".repeat(32));
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&value).unwrap()),
-            Err(BlobLocatorError::Malformed(_))
+            Err(BlobLocatorError::Json(_))
         ));
     }
 

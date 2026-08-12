@@ -1324,13 +1324,13 @@ fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
         ),
     };
 
-    assert_eq!(
+    assert!(matches!(
         validate_device_join_attempt_decision_refs(&[
             DeviceJoinAttemptDecisionRef::Attempt(attempt),
             DeviceJoinAttemptDecisionRef::Abandoned(abandonment),
         ]),
         Err(StoreProtocolError::JoinAttemptMismatch)
-    );
+    ));
 }
 
 #[test]
@@ -1377,8 +1377,7 @@ fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
     );
     assert!(matches!(
         fixture.sign_candidate_abandonment(vec![inexact]),
-        Err(StoreProtocolError::Malformed(reason))
-            if reason.contains("does not match stored size/hash")
+        Err(StoreProtocolError::Storage(_))
     ));
 }
 

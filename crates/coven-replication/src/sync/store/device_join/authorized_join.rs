@@ -1,5 +1,5 @@
 use super::history::DeviceJoinHistory;
-use super::journal::{database_error, provider_error};
+use super::journal::database_error;
 use super::*;
 use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcome;
 use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
@@ -639,7 +639,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                         &administrator.device_signing_pubkey,
                         &offer.member_pubkey,
                     )
-                    .map_err(provider_error)?;
+                    .map_err(DeviceJoinError::ProviderProbe)?;
                 if &receipt.transcript.challenge != challenge {
                     return Err(DeviceJoinError::AttemptMismatch);
                 }
@@ -934,7 +934,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             self.storage
                 .delete_exact_slot_and_verify_absent(slot)
                 .await
-                .map_err(|error| DeviceJoinError::Provider(error.to_string()))?;
+                .map_err(DeviceJoinError::ProviderStorage)?;
         }
         self.storage
             .create_verified_protocol_object(
@@ -1073,7 +1073,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().abandon(offer).await
     }
 
@@ -1085,7 +1085,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().accept_registration(request).await
     }
 
@@ -1097,7 +1097,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().cancel(attempt).await
     }
 
@@ -1109,7 +1109,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().finalize(completion).await
     }
 
@@ -1121,7 +1121,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| DeviceJoinError::Store(error.to_string()))?;
+            .map_err(DeviceJoinError::from)?;
         writer.join_operation().complete_cleanup(activation).await
     }
 }

@@ -24,8 +24,18 @@ pub enum DeviceJoinError {
     MemberNotEligible,
     #[error("provider operation failed: {0}")]
     Provider(String),
+    #[error("provider storage failed: {0}")]
+    ProviderStorage(#[source] coven_protocol::objects::StorageError),
+    #[error("provider capability proof failed: {0}")]
+    ProviderProbe(#[source] coven_protocol::provider::ProviderProbeError),
     #[error("Store device join state: {0}")]
     Store(String),
+    #[error("device join readiness task failed: {0}")]
+    JoinTask(#[from] tokio::task::JoinError),
+    #[error("Store device join writer authorization: {0}")]
+    WriterAuthorization(#[source] Box<crate::sync::store::StoreWriterAuthorizationError>),
+    #[error("Store device join membership chain: {0}")]
+    MembershipChain(#[source] Box<crate::sync::store::AnchoredChainError>),
     #[error("Store device join database state: {0}")]
     Database(#[from] coven_database::DbError),
     #[error("device join requires an activated local Store device")]
@@ -54,6 +64,18 @@ pub enum DeviceJoinError {
     Storage(#[from] coven_protocol::objects::StorageError),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+}
+
+impl From<crate::sync::store::StoreWriterAuthorizationError> for DeviceJoinError {
+    fn from(error: crate::sync::store::StoreWriterAuthorizationError) -> Self {
+        Self::WriterAuthorization(Box::new(error))
+    }
+}
+
+impl From<crate::sync::store::AnchoredChainError> for DeviceJoinError {
+    fn from(error: crate::sync::store::AnchoredChainError) -> Self {
+        Self::MembershipChain(Box::new(error))
+    }
 }
 
 impl DeviceJoinError {
@@ -85,9 +107,9 @@ impl From<coven_protocol::store_commit::device_join_exchange::DeviceJoinExchange
             E::AttemptMismatch => DeviceJoinError::AttemptMismatch,
             E::CleanupMismatch => DeviceJoinError::CleanupMismatch,
             E::DuplicateReservedSlot => DeviceJoinError::DuplicateReservedSlot,
-            E::Provider(message) => DeviceJoinError::Provider(message),
+            E::Provider(error) => DeviceJoinError::ProviderProbe(error),
             E::Storage(error) => DeviceJoinError::Storage(error),
-            E::Protocol(error) => DeviceJoinError::Store(error.to_string()),
+            E::Protocol(error) => DeviceJoinError::Protocol(error),
         }
     }
 }

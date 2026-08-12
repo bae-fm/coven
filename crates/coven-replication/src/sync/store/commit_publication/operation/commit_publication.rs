@@ -34,7 +34,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let (authorship, previous, frontier) = base.into_parts();
         let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map(|frontier| frontier.commits().clone())
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let seq = commit_plan::next_store_sequence(previous.as_ref())?;
         let coord = coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
@@ -49,7 +49,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .writer
             .authorize_retained_outbound(&self.history, &order, &candidate_membership_heads)
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let owner_grant = authorization.membership.active_owner_grant(&author);
         let predecessor = authorization
             .membership
@@ -98,7 +98,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let base = self.database.local_commit_base(stream_id).await?;
         let (authorship, previous, frontier) = base.into_parts();
         let dependencies = coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let seq = commit_plan::next_store_sequence(previous.as_ref())?;
         let coord = coven_protocol::store_commit::StoreCommitCoord {
             stream_id,
@@ -117,7 +117,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 candidate_membership_heads,
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         Ok(MergeConflictResolutionCommitPlan::new(
             authorship,
             Arc::clone(&self.writer),
@@ -178,7 +178,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let retained_operation_objects = candidate
             .commit
             .retained_operation_objects()
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let head = candidate.head.clone();
         let head_object = candidate.head_object.clone();
         let history_evidence = candidate.history_evidence.clone();
@@ -219,10 +219,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             self.history
                 .verify_membership_control(&verified_commit)
                 .await
-                .map_err(StoreError::InvalidOutbound)?
+                .map_err(StoreError::from)?
         } else {
             coven_protocol::circle_activation::VerifiedCircleActivations::none(&commit, &reference)
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+                .map_err(StoreError::from)?
         };
         self.upload_commit(&activation.candidate).await?;
         let membership_heads = &commit.membership_state.heads;
@@ -234,7 +234,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 &commit.author_registration,
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let device_operations = self
             .history
             .load_local_device_operations(
@@ -244,16 +244,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 authorization.device_state,
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let has_tracked_remote_objects =
             !activation.retained_operation_objects.is_empty() || membership_completion.is_some();
         if has_tracked_remote_objects {
             database
                 .mark_candidate_commit_uploaded(reference.clone())
-                .await
-                .map_err(|error| {
-                    StoreError::InvalidOutbound(format!("record uploaded Store candidate: {error}"))
-                })?;
+                .await?;
         }
         let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             commit.store_root_hash,
@@ -304,10 +301,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let operation_object_ids = if has_tracked_remote_objects {
             database
                 .mark_store_head_uploaded(activation_head.clone())
-                .await
-                .map_err(|error| {
-                    StoreError::InvalidOutbound(format!("record uploaded Store head: {error}"))
-                })?;
+                .await?;
             membership_completion.is_none().then(|| {
                 std::iter::once(coven_protocol::remote_object::remote_object_id(
                     &reference.object,
@@ -443,7 +437,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     value,
                 )
                 .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                .map_err(StoreError::from)?,
             ),
             None => None,
         };
@@ -461,12 +455,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let device_operations = match retained_device_operations {
             Some(retained) => retained
                 .verify_for(plan.root(), &common.commit)
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?,
+                .map_err(StoreError::from)?,
             None => {
                 coven_protocol::store_commit::VerifiedStoreDeviceOperations::without_exclusions(
                     &common.commit,
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?
+                .map_err(StoreError::from)?
             }
         };
         let state_after = Box::pin(self.history.derive_local_post_device_state(
@@ -476,7 +470,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             device_operations,
         ))
         .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
         let head_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
             common.commit.store_root_hash,
             coven_protocol::objects::ProtocolObjectDomain::StoreHead,
@@ -492,7 +486,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 merge_history_evidence,
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let next_prefix = coven_protocol::store_commit::head_slot_prefix(
             &device_id,
             commit_plan::successor_store_sequence(common.commit.seq())?,
@@ -587,7 +581,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 },
                 registration.value(),
             )
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
         let Some(acknowledgement) = commit.acknowledgement().cloned() else {
             return Ok(
                 commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate {

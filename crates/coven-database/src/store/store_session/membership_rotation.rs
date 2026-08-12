@@ -16,7 +16,7 @@ impl StoreSession<'_> {
             existing.as_ref().map(|(_, gate)| gate.clone()),
             generation,
         )
-        .map_err(DbError::Message)?;
+        .map_err(DbError::from)?;
         replace_rotation_gate_on(
             &tx,
             existing.as_ref(),
@@ -40,7 +40,7 @@ impl StoreSession<'_> {
             .1
             .clone()
             .complete_peer_adoption(adopted_generation)
-            .map_err(DbError::Message)?;
+            .map_err(DbError::from)?;
         replace_rotation_gate_on(&tx, Some(&existing), next.clone(), "peer rotation adoption")?;
         tx.commit().map_err(DbError::from)?;
         Ok(next)
@@ -60,7 +60,7 @@ impl StoreSession<'_> {
             .1
             .clone()
             .complete_local_adoption(generation, intent_hash)
-            .map_err(DbError::Message)?;
+            .map_err(DbError::from)?;
         if tx
             .execute(
                 "DELETE FROM outbound_membership_mutation \
@@ -130,7 +130,7 @@ pub(super) fn stage_pending_rotation_on(
         generation,
         mutation,
     )
-    .map_err(DbError::Message)?;
+    .map_err(DbError::from)?;
     replace_rotation_gate_on(tx, existing.as_ref(), Some(gate), "candidate staging")
 }
 
@@ -147,7 +147,7 @@ pub(super) fn replace_rotation_candidate_mutation_on(
         .1
         .clone()
         .replace_candidate_mutation(generation, previous, replacement)
-        .map_err(DbError::Message)?;
+        .map_err(DbError::from)?;
     replace_rotation_gate_on(tx, Some(&existing), Some(next), "candidate replacement")
 }
 
@@ -163,7 +163,7 @@ pub(super) fn remove_rotation_candidate_on(
         .1
         .clone()
         .remove_candidate(generation, intent_hash)
-        .map_err(DbError::Message)?;
+        .map_err(DbError::from)?;
     replace_rotation_gate_on(tx, Some(&existing), next, "candidate loss")
 }
 
@@ -176,7 +176,7 @@ pub(super) fn commit_rotation_candidate_on(
         DbError::Message("rotation gate is absent during candidate activation".to_string())
     })?;
     let gate = RotationGate::commit_candidate(Some(existing.1.clone()), generation, intent_hash)
-        .map_err(DbError::Message)?;
+        .map_err(DbError::from)?;
     replace_rotation_gate_on(tx, Some(&existing), Some(gate), "membership activation")
 }
 

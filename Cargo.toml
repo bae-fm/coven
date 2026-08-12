@@ -17,7 +17,7 @@ resolver = "2"
 # crate extracted from `coven` cannot drift onto a different release of a
 # dependency it shares with the crate it came from.
 [workspace.dependencies]
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
 aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
 aws-credential-types = "1.2"

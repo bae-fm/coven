@@ -35,9 +35,7 @@ pub(super) enum MembershipMutationPlan {
 
 impl MembershipMutationPlan {
     pub(super) fn encode(&self) -> Result<Vec<u8>, InviteError> {
-        serde_json::to_vec(self).map_err(|error| {
-            InviteError::InvalidDurableMutation(format!("serialize plan: {error}"))
-        })
+        serde_json::to_vec(self).map_err(InviteError::Json)
     }
 }
 
@@ -205,7 +203,7 @@ impl RevokeMutationPlan {
                 transition.validate()?;
                 candidate
                     .validate_closed_shape()
-                    .map_err(InviteError::InvalidDurableMutation)?;
+                    .map_err(InviteError::PreparedCommit)?;
                 if transition.entry != publication.entry
                     || transition.entry_ref != publication.entry_ref
                     || retirement_device_state.as_ref() != Some(&candidate.commit.device_state)
@@ -243,7 +241,7 @@ impl RevokeMutationPlan {
                             .map(|wrap| wrap.prepared.clone())
                             .collect::<Vec<_>>(),
                     )
-                    .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))?;
+                    .map_err(InviteError::from)?;
             }
         }
         Ok(())
@@ -269,7 +267,7 @@ impl RevokeMutationPlan {
                         .collect::<Vec<_>>(),
                 )
                 .map(Some)
-                .map_err(|error| InviteError::InvalidDurableMutation(error.to_string())),
+                .map_err(InviteError::from),
         }
     }
 
@@ -315,7 +313,7 @@ impl ResolveMutationPlan {
             &self.reference.object,
             &self.resolution,
         )
-        .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+        .map_err(InviteError::from)
     }
 
     pub(super) fn candidate_cleanup_objects(&self) -> (Vec<ExactObjectRef>, Vec<ExactObjectRef>) {
@@ -340,7 +338,7 @@ impl ResolveMutationPlan {
                 &self.resolution,
                 &self.reference,
             )
-            .map_err(|error| InviteError::InvalidDurableMutation(error.to_string()))
+            .map_err(InviteError::from)
     }
 
     pub(super) fn validate_closed_shape(&self) -> Result<(), InviteError> {
@@ -433,9 +431,7 @@ pub(super) enum MembershipMutationProgress {
 
 impl MembershipMutationProgress {
     pub(super) fn encode(&self) -> Result<Vec<u8>, InviteError> {
-        serde_json::to_vec(self).map_err(|error| {
-            InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
-        })
+        serde_json::to_vec(self).map_err(InviteError::Json)
     }
 }
 
@@ -462,9 +458,7 @@ impl MutationPersistence {
         &self,
         progress: &MembershipMutationProgress,
     ) -> Result<(), InviteError> {
-        let bytes = serde_json::to_vec(progress).map_err(|error| {
-            InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
-        })?;
+        let bytes = serde_json::to_vec(progress).map_err(InviteError::Json)?;
         self.database
             .update_membership_mutation_progress(self.intent_hash, bytes)
             .await?;
@@ -617,9 +611,7 @@ impl MutationPersistence {
                 retained,
                 Some(
                     EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
-                        .map_err(|error| {
-                            InviteError::Crypto(format!("parse rotated keyring: {error}"))
-                        })?
+                        .map_err(InviteError::Encryption)?
                         .current_generation(),
                 ),
             )
@@ -696,10 +688,8 @@ impl MutationPersistence {
 pub(super) fn decode_membership_mutation(
     row: DurableMembershipMutation,
 ) -> Result<(MembershipMutationPlan, MembershipMutationProgress), InviteError> {
-    let plan = serde_json::from_slice(&row.plan_bytes)
-        .map_err(|error| InviteError::InvalidDurableMutation(format!("parse plan: {error}")))?;
-    let progress = serde_json::from_slice(&row.progress_bytes)
-        .map_err(|error| InviteError::InvalidDurableMutation(format!("parse progress: {error}")))?;
+    let plan = serde_json::from_slice(&row.plan_bytes).map_err(InviteError::Json)?;
+    let progress = serde_json::from_slice(&row.progress_bytes).map_err(InviteError::Json)?;
     Ok((plan, progress))
 }
 

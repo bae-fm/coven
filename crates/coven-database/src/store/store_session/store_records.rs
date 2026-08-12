@@ -143,12 +143,7 @@ impl<'store> StoreRecords<'store> {
                     "pending write {write_id} Circle {circle_id} has no control coordinate"
                 ))
             })?;
-            let control =
-                CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
-                    DbError::Message(format!(
-                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
-                    ))
-                })?;
+            let control = CirclePartitionControl::from_stored_json(control_json)?;
             circles.push(AudiencePartition {
                 audience: coven_protocol::circle::Audience::Circle(circle_id),
                 control: Some(control),
@@ -519,7 +514,7 @@ impl<'store> StoreRecords<'store> {
         );
         let author_stream_id = author_stream_id
             .parse()
-            .map_err(|error| DbError::Message(format!("stored author stream id: {error}")))?;
+            .map_err(|error| DbError::context("stored author stream id", error))?;
         let activation = serde_json::from_slice(&activation)
             .map_err(|error| DbError::context("stored stream activation descriptor", error))?;
         let activating_commit = serde_json::from_str(&activating_commit)
@@ -531,7 +526,7 @@ impl<'store> StoreRecords<'store> {
             activating_commit,
         )
         .map(Some)
-        .map_err(|error| DbError::Message(error.to_string()))
+        .map_err(DbError::from)
     }
 
     pub(super) fn stage_owner_recovery_publication(
@@ -678,7 +673,7 @@ impl<'store> StoreRecords<'store> {
             self.store_dir,
             authority_bytes,
         )
-        .map_err(|error| DbError::Message(format!("install retained replay authority: {error}")))?;
+        .map_err(|error| DbError::context("install retained replay authority", error))?;
         transaction
             .execute(
                 "UPDATE retained_replay_baselines SET authority_hash = ?1

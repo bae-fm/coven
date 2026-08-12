@@ -117,7 +117,7 @@ impl ReclaimJourneyFixture {
         self.device
             .authorize_writer()
             .await
-            .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+            .map_err(StoreReclaimError::from)?
             .reclaim_packages()
             .await
     }

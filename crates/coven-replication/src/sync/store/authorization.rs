@@ -57,11 +57,29 @@ impl InitializedStore {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum StoreInitializationError {
+pub enum StoreInitializationError {
     #[error("Store protocol root failed: {0}")]
-    ProtocolRoot(String),
+    ProtocolRoot(#[from] crate::sync::store::protocol_root::StoreProtocolRootError),
+    #[error("Store history verification failed: {0}")]
+    History(#[from] crate::sync::store::pull::StorePullError),
+    #[error("Store initialization database state failed: {0}")]
+    Database(#[from] coven_database::DbError),
     #[error("membership chain bootstrap/anchor failed: {0}")]
-    MembershipAnchor(String),
+    MembershipAnchor(#[from] crate::sync::store::membership::AnchoredChainError),
+    #[error("Store founder device installation failed: {0}")]
+    Registration(#[from] crate::sync::store::authorization::registration::StoreRegistrationError),
+    #[error("opening a Store for a non-founder requires an installed local device")]
+    NonFounderDeviceMissing,
+    #[error("initialized Store has no local device registration id")]
+    LocalDeviceMissing,
+    #[error("Store founder state is invalid: {0}")]
+    FounderState(String),
+    #[error("Store founder rollback failed: {0}")]
+    FounderRollback(#[from] crate::sync::store::founder_creation::FounderRollbackError),
+    #[error(transparent)]
+    FounderPublicationRollback(
+        #[from] crate::sync::store::founder_creation::FounderPublicationRollback,
+    ),
 }
 
 impl Store {
@@ -137,7 +155,7 @@ impl Store {
             .database
             .local_activated_registration_ref()
             .await
-            .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?
+            .map_err(crate::sync::store::DeviceJoinError::from)?
             .ok_or(crate::sync::store::DeviceJoinError::ActiveDeviceRequired)?;
         let roles = transport::DeviceJoinRoles::admitting(
             local == offer.owner_registration,
@@ -204,13 +222,11 @@ impl Store {
             &*storage,
             expected_root,
         )
-        .await
-        .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+        .await?;
         let authority = HistoryConstructionAuthority::store();
         let history_verifier = authority
             .bind_verified(storage.as_ref(), root.clone())
-            .await
-            .map_err(|error| StoreInitializationError::ProtocolRoot(error.to_string()))?;
+            .await?;
         let blob_source = crate::sync::store::blob::RemoteBlobSource::authorized(
             database.clone(),
             storage.as_ref(),
@@ -252,7 +268,7 @@ impl Store {
             &store_root,
         )
         .await
-        .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        .map_err(StoreError::from)?;
         let device_id = database
             .get_protocol_state(coven_database::LOCAL_DEVICE_ID_STATE_KEY)
             .await?;
@@ -321,13 +337,7 @@ impl Store {
                 .await
             {
                 Ok((bytes, _)) => {
-                    match coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)
-                        .map_err(|error| {
-                            CircleOperationError::InvalidState(format!(
-                                "Circle epoch-close response slot for device {} failed to parse: {error}",
-                                participant.registration.device_id
-                            ))
-                        })?
+                    match coven_protocol::circle::CircleEpochCloseResponseSlotValue::parse(&bytes)?
                     {
                         coven_protocol::circle::CircleEpochCloseResponseSlotValue::Response(_) => {
                             coven_protocol::circle::CircleCloseSettlement::Responded
@@ -340,7 +350,9 @@ impl Store {
                 Err(coven_protocol::objects::StorageError::NotFound(_)) => {
                     coven_protocol::circle::CircleCloseSettlement::Pending
                 }
-                Err(error) => return Err(coven_protocol::objects::StoreObjectError::from(error).into()),
+                Err(error) => {
+                    return Err(coven_protocol::objects::StoreObjectError::from(error).into())
+                }
             };
             participants.push(coven_protocol::circle::CircleCloseParticipant {
                 device_id: participant.registration.device_id,
@@ -475,9 +487,10 @@ impl Store {
     async fn authorize_exclusion_writer(
         &self,
     ) -> Result<AuthorizedWriterOperation<'_>, device_exclusion::StoreDeviceExclusionError> {
-        self.authorize_writer().await.map_err(|error| {
-            device_exclusion::StoreDeviceExclusionError::InvalidState(error.to_string())
-        })
+        self.authorize_writer()
+            .await
+            .map_err(StoreError::from)
+            .map_err(device_exclusion::StoreDeviceExclusionError::from)
     }
 
     pub(crate) async fn abandon_merge_candidate(
@@ -485,10 +498,7 @@ impl Store {
         write_id: coven_protocol::write::WriteId,
     ) -> Result<crate::sync::store::merge_conflict::MergeCandidateAbandonment, StoreError> {
         if self.device_id.is_none() {
-            let mut authority = self
-                .authorize_history()
-                .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            let mut authority = self.authorize_history().await.map_err(StoreError::from)?;
             return authority
                 .abandon_excluded_merge_candidate(write_id)
                 .await?
@@ -498,10 +508,7 @@ impl Store {
                     )
                 });
         }
-        let mut writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let mut writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer.abandon_merge_candidate(write_id).await
     }
 
@@ -509,11 +516,11 @@ impl Store {
     pub async fn members(
         &self,
     ) -> Result<Vec<coven_protocol::membership::MemberInfo>, membership::MembershipOpsError> {
-        let authorization = self.authorize().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let authorization = self
+            .authorize()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         authorization.members(Some(&self.identity.public_key()))
     }
 
@@ -524,11 +531,11 @@ impl Store {
         Option<coven_protocol::membership::MembershipConflictInfo>,
         membership::MembershipOpsError,
     > {
-        let authorization = self.authorize().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let authorization = self
+            .authorize()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         Ok(authorization.membership_conflict(Some(&self.identity.public_key())))
     }
 
@@ -540,11 +547,11 @@ impl Store {
         coven_protocol::membership::StoreMembershipConflictResolutionRef,
         membership::MembershipOpsError,
     > {
-        let mut authorization = self.authorize_writer().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let mut authorization = self
+            .authorize_writer()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         authorization
             .resolve_membership_conflict(choice, created_at)
             .await
@@ -554,11 +561,11 @@ impl Store {
     pub async fn restore_membership(
         &self,
     ) -> Result<StoreRestoreMembership, membership::MembershipOpsError> {
-        let authorization = self.authorize().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let authorization = self
+            .authorize()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         authorization.restore_membership()
     }
 
@@ -624,7 +631,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?;
+            .map_err(crate::sync::store::DeviceJoinError::from)?;
         writer.join_operation().begin(member_pubkey).await
     }
 
@@ -638,7 +645,7 @@ impl Store {
         let mut writer = self
             .authorize_writer()
             .await
-            .map_err(|error| crate::sync::store::DeviceJoinError::Store(error.to_string()))?;
+            .map_err(crate::sync::store::DeviceJoinError::from)?;
         let offer = writer.join_operation().begin(member_pubkey).await?;
         self.device_join_transport().allocate_bundle(offer).await
     }
@@ -670,9 +677,10 @@ impl Store {
         coven_protocol::store_commit::OwnerPromotionRequest,
         owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(owner_role_promotion::OwnerPromotionError::from)?;
         writer.owner_promotion().begin(member_registration).await
     }
 
@@ -683,9 +691,10 @@ impl Store {
         coven_protocol::store_commit::OwnerPromotionAcceptance,
         owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(owner_role_promotion::OwnerPromotionError::from)?;
         writer.owner_promotion().accept(request).await
     }
 
@@ -697,9 +706,10 @@ impl Store {
         coven_protocol::circle_control::StoreMembershipStateRef,
         owner_role_promotion::OwnerPromotionError,
     > {
-        let mut writer = self.authorize_writer().await.map_err(|error| {
-            owner_role_promotion::OwnerPromotionError::Protocol(error.to_string())
-        })?;
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(owner_role_promotion::OwnerPromotionError::from)?;
         writer
             .owner_promotion()
             .finalize(encryption, acceptance)
@@ -719,11 +729,11 @@ impl Store {
         crate::sync::store::membership::MemberInvitation,
         crate::sync::store::membership::MembershipOpsError,
     > {
-        let mut authorization = self.authorize_writer().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let mut authorization = self
+            .authorize_writer()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         authorization
             .invite_member(
                 public_key_hex,
@@ -745,11 +755,11 @@ impl Store {
         cipher: &dyn coven_storage::CloudSyncCipherStateAccess,
         pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
     ) -> Result<String, crate::sync::store::membership::MembershipOpsError> {
-        let mut authorization = self.authorize_writer().await.map_err(|error| {
-            membership::MembershipOpsError::Chain(membership::AnchoredChainError::LoadFailed(
-                error.to_string(),
-            ))
-        })?;
+        let mut authorization = self
+            .authorize_writer()
+            .await
+            .map_err(StoreError::from)
+            .map_err(membership::MembershipOpsError::from)?;
         authorization
             .remove_member(
                 public_key_hex,
@@ -777,10 +787,7 @@ impl Store {
     pub(crate) async fn latest_local_store_position(
         &self,
     ) -> Result<Option<coven_protocol::store_commit::StoreBatchCommitRef>, StoreError> {
-        let writer = self
-            .authorize_writer()
-            .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+        let writer = self.authorize_writer().await.map_err(StoreError::from)?;
         writer
             .latest_local_store_position()
             .await
@@ -797,24 +804,20 @@ impl Store {
             coven_protocol::store_commit::StoreBatchCommitRef,
             coven_protocol::store_commit::VerifiedStoreBatchCommit,
         )>,
-        String,
+        StoreError,
     > {
         let Some(reference) = self
             .database
             .exact_materialized_ref(stream_id, sequence)
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
         else {
             return Ok(None);
         };
-        let mut history = self
-            .authorize_history()
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut history = self.authorize_history().await.map_err(StoreError::from)?;
         let commit = history
             .load_commit(&reference)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(StoreError::from)?;
         Ok(Some((reference, commit)))
     }
 }

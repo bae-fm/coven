@@ -5,7 +5,7 @@ use crate::{
     activated_merge_membership_remote_objects, ObjectHash, PreparedMergeMaterialization,
     PreparedMergeMaterializationPackage,
 };
-use coven_protocol::membership::{ApplyOutcome, HeldStorePositionReason, LocalStoreMembership};
+use coven_protocol::membership::LocalStoreMembership;
 use coven_protocol::store_commit::{CommitFrontier, StoreRootRef};
 use coven_protocol::synced_schema::SyncedTable;
 use std::collections::BTreeSet;
@@ -698,7 +698,7 @@ impl RetainedReplayCache {
                         resolution_bytes,
                         owner,
                     )
-                    .map_err(|error| DbError::Message(error.to_string()))?
+                    .map_err(DbError::from)?
                 } else {
                     Vec::new()
                 };
@@ -743,13 +743,15 @@ impl RetainedReplayCache {
                     )
                 })?;
                 match outcome {
-                    ApplyOutcome::Applied(_) => {
+                    crate::MaterializationOutcome::Applied(_) => {
                         pending.remove(&reference);
                         applied.insert(reference);
                         made_progress = true;
                     }
-                    ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency) => {}
-                    ApplyOutcome::Held(reason) => {
+                    crate::MaterializationOutcome::Held(
+                        crate::MaterializationHold::ForeignKeyDependency,
+                    ) => {}
+                    crate::MaterializationOutcome::Held(reason) => {
                         return Err(DbError::Message(format!(
                             "retained Merge replay held accepted commit {reference:?}: {reason:?}"
                         )));

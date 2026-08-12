@@ -1,13 +1,13 @@
 use crate::sync::store::blob::BlobDownloadFailureCause;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct BlobDownloadFailure {
     pub(crate) namespace: String,
     pub(crate) id: String,
     pub(crate) cause: BlobDownloadFailureCause,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct BlobDownloadFailures(Vec<BlobDownloadFailure>);
 
 impl BlobDownloadFailures {

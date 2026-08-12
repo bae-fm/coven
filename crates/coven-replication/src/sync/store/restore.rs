@@ -78,7 +78,7 @@ impl<'storage> RestoringStore<'storage> {
                     &authority.owner_grant,
                     &protocol.descriptor.founder_recovery,
                 )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
                 if activation != &expected {
                     return Err(StoreRegistrationError::Invalid(
                         "Owner recovery activation differs from the root anchor".into(),
@@ -113,7 +113,7 @@ impl<'storage> RestoringStore<'storage> {
                 &authority.owner_grant,
                 &authority.recovery,
             ))
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
+            .map_err(StoreRegistrationError::from)?,
         );
         let recovery_id = DeviceRecoveryId::from_hash(recovery_hash);
         let origin = StoreDeviceRegistrationOrigin::Recovery {
@@ -147,7 +147,7 @@ impl<'storage> RestoringStore<'storage> {
         let staged = database
             .latest_local_store_device_registration()
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
+            .map_err(StoreRegistrationError::from)?
             .filter(|durable| durable.device_id == device_id);
         let readiness = if let Some(durable) = staged {
             let registration = StoreDeviceRegistration::parse_at(
@@ -155,7 +155,7 @@ impl<'storage> RestoringStore<'storage> {
                 &root,
                 durable.device_id,
             )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
             if registration.origin != origin
                 || registration.to_bytes() != durable.registration_bytes
                 || registration.registration_hash() != durable.registration_hash
@@ -174,7 +174,7 @@ impl<'storage> RestoringStore<'storage> {
                 &durable.initial_ack_ref,
                 &registration,
             )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
             if initial_ack != durable.initial_ack.value {
                 return Err(StoreRegistrationError::Invalid(
                     "staged Owner recovery acknowledgement differs from its exact authority".into(),
@@ -270,7 +270,7 @@ impl<'storage> RestoringStore<'storage> {
                 },
                 identity_signer,
             )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
             let registration = self
                 .prepare_or_load_recovery_registration(
                     expected_registration,
@@ -281,29 +281,25 @@ impl<'storage> RestoringStore<'storage> {
             let dependencies = database
                 .materialized_frontier()
                 .await
-                .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
+                .map_err(StoreRegistrationError::from)?
                 .into_iter()
                 .map(|(stream, reference)| {
                     stream
                         .parse()
                         .map(|stream| (stream, reference))
-                        .map_err(|error| {
-                            StoreRegistrationError::Invalid(format!(
-                                "Owner recovery frontier stream {stream}: {error}"
-                            ))
-                        })
+                        .map_err(StoreRegistrationError::AuthorStreamId)
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
             let device_signer = registration
                 .exact()
                 .value
                 .device_signer(identity_signer)
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
             let bootstrap_cut = StoreHistoryCut(dependencies);
             let (device_state, _) = database
                 .store_device_state_for_history_cut(&bootstrap_cut)
                 .await
-                .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
             let initial_ack = self
                 .prepare_or_load_initial_recovery_ack(
                     &registration.exact().value,
@@ -328,7 +324,7 @@ impl<'storage> RestoringStore<'storage> {
             .exact()
             .value
             .device_signer(identity_signer)
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         let bootstrap_cut = readiness.initial_ack.exact().value.store_cut.clone();
         let coven_protocol::membership::MembershipStatus::Resolved(resolved) = membership.status()
         else {
@@ -342,7 +338,7 @@ impl<'storage> RestoringStore<'storage> {
             vec![authority.recovery.clone()],
             resolved.state_hash,
         )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        .map_err(StoreRegistrationError::from)?;
         let recovery_readiness = DeviceRecoveryReadiness {
             registration: registration_ref.clone(),
             initial_ack: initial_ack_ref.clone(),
@@ -375,7 +371,7 @@ impl<'storage> RestoringStore<'storage> {
                 registration_activation.clone(),
             )
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         if already_activated {
             return Ok(registration_ref);
         }
@@ -431,7 +427,7 @@ impl<'storage> RestoringStore<'storage> {
                 prepared_initial_ack.into_exact(),
             )
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
 
         let stream_id = coven_protocol::store_commit::StreamActivation::device_authorized_stream_id(
             root.store_root_hash,
@@ -446,7 +442,7 @@ impl<'storage> RestoringStore<'storage> {
         let (device_state, predecessor_state) = database
             .store_device_state_for_order(&order)
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         let coord = StoreCommitCoord {
             stream_id,
             sequence: 1,
@@ -486,11 +482,11 @@ impl<'storage> RestoringStore<'storage> {
             },
             &device_signer,
         )
-        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        .map_err(StoreRegistrationError::from)?;
         let publication = match database
             .owner_recovery_publication()
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
+            .map_err(StoreRegistrationError::from)?
         {
             Some(publication) => {
                 if publication.commit.value.value() != &commit {
@@ -524,7 +520,7 @@ impl<'storage> RestoringStore<'storage> {
                     coord,
                     commit_prepared.reference().clone(),
                 )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
                 let verified_commit =
                     coven_protocol::store_commit::VerifiedStoreBatchCommit::parse(
                         &commit.to_bytes(),
@@ -532,7 +528,7 @@ impl<'storage> RestoringStore<'storage> {
                         &commit_ref,
                         &registration,
                     )
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                    .map_err(StoreRegistrationError::from)?;
                 let state_after = predecessor_state
                     .activate_registration(
                         registration_ref.clone(),
@@ -543,7 +539,7 @@ impl<'storage> RestoringStore<'storage> {
                             },
                         }),
                     )
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                    .map_err(StoreRegistrationError::from)?;
                 let prepared_history = self
                     .history
                     .prepare_merge_history_successor(
@@ -557,14 +553,14 @@ impl<'storage> RestoringStore<'storage> {
                                     registration_ref.clone(),
                                     registration.clone(),
                                 )
-                                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?,
+                                .map_err(StoreRegistrationError::from)?,
                             ],
                             acknowledgement: None,
                             membership_proof: None,
                         },
                     )
                     .await
-                    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                    .map_err(StoreRegistrationError::from)?;
                 let head_context = context(ProtocolObjectDomain::StoreHead);
                 let DeviceStreamAnchor::StoreAnnouncements { first_slot: _ } =
                     &registration.store_commits
@@ -588,14 +584,14 @@ impl<'storage> RestoringStore<'storage> {
                     SuccessorLink {
                         activation: registration
                             .store_announcement_activation(&registration_ref)
-                            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?
+                            .map_err(StoreRegistrationError::from)?
                             .activation_id(),
                         predecessor: None,
                         next_slot: next_head,
                     },
                     &device_signer,
                 )
-                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+                .map_err(StoreRegistrationError::from)?;
                 let head_bytes = head.to_bytes();
                 let head_prepared = storage
                     .prepare_protocol_object(
@@ -620,7 +616,7 @@ impl<'storage> RestoringStore<'storage> {
                         history_evidence: prepared_history.history_evidence,
                     })
                     .await
-                    .map_err(|error| StoreRegistrationError::Database(error.to_string()))?
+                    .map_err(StoreRegistrationError::from)?
             }
         };
         let publication_commit = publication.commit.value.value();
@@ -670,7 +666,7 @@ impl<'storage> RestoringStore<'storage> {
                     registration_activation,
                 )
             })
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         let coven_database::OwnerRecoveryPublication {
             commit,
             head,
@@ -686,7 +682,7 @@ impl<'storage> RestoringStore<'storage> {
                 registration,
             )
             .await
-            .map_err(|error| StoreRegistrationError::Database(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
         Ok(registration_ref)
     }
 }

@@ -127,8 +127,7 @@ impl RestoreSource {
             CloudHomeJoinInfo::GoogleDrive { folder_id } => {
                 let tokens = require_oauth("Google Drive")?;
                 let oauth_config = oauth_clients
-                    .config_for(coven_foundation::config::CloudProvider::GoogleDrive)
-                    .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+                    .config_for(coven_foundation::config::CloudProvider::GoogleDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     store_keys.clone(),
@@ -146,9 +145,8 @@ impl RestoreSource {
             #[cfg(feature = "oauth-providers")]
             CloudHomeJoinInfo::Dropbox { folder_path } => {
                 let tokens = require_oauth("Dropbox")?;
-                let oauth_config = oauth_clients
-                    .config_for(coven_foundation::config::CloudProvider::Dropbox)
-                    .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+                let oauth_config =
+                    oauth_clients.config_for(coven_foundation::config::CloudProvider::Dropbox)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     store_keys.clone(),
@@ -169,9 +167,8 @@ impl RestoreSource {
                 folder_id,
             } => {
                 let tokens = require_oauth("OneDrive")?;
-                let oauth_config = oauth_clients
-                    .config_for(coven_foundation::config::CloudProvider::OneDrive)
-                    .map_err(|error| BootstrapError::Provider(error.to_string()))?;
+                let oauth_config =
+                    oauth_clients.config_for(coven_foundation::config::CloudProvider::OneDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     store_keys.clone(),
@@ -231,8 +228,7 @@ pub async fn restore_from_cloud(
 ) -> Result<Config, BootstrapError> {
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
-    coven_foundation::store_dir::validate_path_token(store_id)
-        .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
+    coven_foundation::store_dir::validate_path_token(store_id)?;
     coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &source.join_info,
         source.exact_upload_verification,
@@ -323,15 +319,11 @@ pub async fn restore_from_cloud(
                 Some(_),
             ) => Some(continuation),
             (coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(_), None) => {
-                return Err(BootstrapError::InvalidSigningKey(
-                    "activated continuation has no device signing key".to_string(),
-                ));
+                return Err(crate::joining::SigningKeyError::MissingContinuationSigner.into());
             }
             (coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_), None) => None,
             (coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
-                return Err(BootstrapError::InvalidSigningKey(
-                    "Owner recovery cannot carry an activated device signer".to_string(),
-                ));
+                return Err(crate::joining::SigningKeyError::UnexpectedOwnerRecoverySigner.into());
             }
         };
 
@@ -382,19 +374,8 @@ pub async fn restore_from_cloud(
             )
             .await?;
 
-        match store
-            .reconcile_snapshot_blobs(cancel)
-            .await
-            .map_err(|error| {
-                BootstrapError::Database(format!("failed to reconcile snapshot blobs: {error}"))
-            })? {
+        match store.reconcile_snapshot_blobs(cancel).await? {
             SnapshotBlobReconcile::Complete => {}
-            SnapshotBlobReconcile::Incomplete => {
-                return Err(BootstrapError::Database(
-                    "snapshot blob reconciliation did not land every required eager blob"
-                        .to_string(),
-                ));
-            }
             SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
         }
 
@@ -469,8 +450,7 @@ pub async fn restore_from_code(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    let parsed = super::code::decode_restore_code(code)
-        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
+    let parsed = super::code::decode_restore_code(code)?;
     coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,
         exact_upload_verification,
@@ -488,32 +468,27 @@ pub async fn restore_from_code(
             &recovery.owner_identity_secret
         }
     };
-    let signing_key: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] = hex::decode(identity_secret)
-        .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?
+    let signing_key: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] =
+        coven_foundation::code_envelope::decode_fixed_hex(
+            "identity signing key",
+            identity_secret,
+            coven_keys::keys::SIGN_SECRETKEYBYTES,
+        )
+        .map_err(crate::joining::SigningKeyError::from)?
         .try_into()
-        .map_err(|_| {
-            BootstrapError::InvalidSigningKey(format!(
-                "Signing key must be {} bytes",
-                coven_keys::keys::SIGN_SECRETKEYBYTES
-            ))
-        })?;
+        .expect("decode_fixed_hex returned the requested signing-key length");
     let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
     let continuation_device_signer = match &parsed.authority {
         coven_protocol::recovery::RestoreAuthority::ActivatedContinuation(continuation) => {
             let bytes: [u8; coven_keys::keys::SIGN_SECRETKEYBYTES] =
-                hex::decode(&continuation.device_signing_secret)
-                    .map_err(|error| {
-                        BootstrapError::InvalidSigningKey(format!(
-                            "invalid device signing key encoding: {error}"
-                        ))
-                    })?
-                    .try_into()
-                    .map_err(|_| {
-                        BootstrapError::InvalidSigningKey(format!(
-                            "Device signing key must be {} bytes",
-                            coven_keys::keys::SIGN_SECRETKEYBYTES
-                        ))
-                    })?;
+                coven_foundation::code_envelope::decode_fixed_hex(
+                    "device signing key",
+                    &continuation.device_signing_secret,
+                    coven_keys::keys::SIGN_SECRETKEYBYTES,
+                )
+                .map_err(crate::joining::SigningKeyError::from)?
+                .try_into()
+                .expect("decode_fixed_hex returned the requested signing-key length");
             Some(UserKeypair::from_signing_key_bytes(&bytes).map_err(BootstrapError::Key)?)
         }
         coven_protocol::recovery::RestoreAuthority::OwnerRecovery(_) => None,

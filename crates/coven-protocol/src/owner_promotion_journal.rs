@@ -7,18 +7,24 @@ use crate::store_commit::ObjectHash;
 /// A promotion journal whose recorded state contradicts the request, target,
 /// or acceptance it retains. Workflow errors wrap it at the operation
 /// boundary.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Owner promotion journal: {0}")]
-pub struct OwnerPromotionJournalError(pub(crate) String);
+#[derive(Debug, thiserror::Error)]
+pub enum OwnerPromotionJournalError {
+    #[error("Owner promotion journal: {0}")]
+    Invariant(String),
+    #[error("Owner promotion journal JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Owner promotion journal prepared commit: {0}")]
+    PreparedCommit(#[from] crate::prepared_commit::PreparedCommitError),
+    #[error("Owner promotion journal candidate: {0}")]
+    Candidate(#[from] crate::remote_object::RemoteObjectRecordError),
+}
 
 const TARGET_PREFIX: &str = "owner_promotion_target/";
 
 pub fn target_key(
     target: &StoreDeviceRegistrationRef,
 ) -> Result<String, OwnerPromotionJournalError> {
-    let bytes = serde_json::to_vec(target).map_err(|error| {
-        OwnerPromotionJournalError(format!("serialize promotion target: {error}"))
-    })?;
+    let bytes = serde_json::to_vec(target)?;
     Ok(format!("{TARGET_PREFIX}{}", ObjectHash::digest(&bytes)))
 }
 
@@ -170,12 +176,10 @@ fn nonactivation_matches_candidate(
 
 fn nonactivation_commit(
     nonactivation: &crate::remote_object::CandidateNonactivation,
-) -> Result<crate::store_commit::StoreBatchCommit, String> {
-    nonactivation
-        .validate()
-        .map_err(|error| error.to_string())?;
+) -> Result<crate::store_commit::StoreBatchCommit, OwnerPromotionJournalError> {
+    nonactivation.validate()?;
     serde_json::from_slice(&nonactivation.candidate().canonical_signed_bytes)
-        .map_err(|error| format!("parse nonactivated candidate commit: {error}"))
+        .map_err(OwnerPromotionJournalError::from)
 }
 
 fn nonactivation_matches_request(
@@ -446,7 +450,7 @@ impl OwnerPromotionJournal {
     ) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if self.promotion_id != expected {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal is stored under another identity".to_string(),
             ));
         }
@@ -456,7 +460,7 @@ impl OwnerPromotionJournal {
     pub fn validate_target_key(&self, expected: &str) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if self.target_state_key()? != expected {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal is stored under another target".to_string(),
             ));
         }
@@ -470,9 +474,7 @@ impl OwnerPromotionJournal {
         OwnerPromotionJournalError,
     > {
         self.validate_contents()?;
-        let previous_value = serde_json::to_string(&self).map_err(|error| {
-            OwnerPromotionJournalError(format!("serialize Owner-promotion predecessor: {error}"))
-        })?;
+        let previous_value = serde_json::to_string(&self)?;
         let Self {
             promotion_id,
             target,
@@ -582,7 +584,7 @@ impl OwnerPromotionJournal {
             }
         };
         if !valid {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal state violates its closed protocol invariants".to_string(),
             ));
         }
@@ -592,7 +594,7 @@ impl OwnerPromotionJournal {
     pub fn validate_begin(&self) -> Result<(), OwnerPromotionJournalError> {
         self.validate_contents()?;
         if !matches!(self.state, OwnerPromotionJournalState::Allocated) {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal begins in a non-initial state".to_string(),
             ));
         }
@@ -605,7 +607,7 @@ impl OwnerPromotionJournal {
             self.state,
             OwnerPromotionJournalState::AcceptanceReady { .. }
         ) {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "candidate promotion journal must begin with its signed acceptance".to_string(),
             ));
         }
@@ -619,7 +621,7 @@ impl OwnerPromotionJournal {
         self.validate_contents()?;
         next.validate_contents()?;
         if self.promotion_id != next.promotion_id || self.target != next.target {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal transition changes its identity".to_string(),
             ));
         }
@@ -817,7 +819,7 @@ impl OwnerPromotionJournal {
             _ => false,
         };
         if !valid {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion journal transition skips or reverses protocol state".to_string(),
             ));
         }
@@ -831,7 +833,7 @@ impl OwnerPromotionJournal {
         self.validate_contents()?;
         replacement.validate_begin()?;
         if self.target != replacement.target || self.promotion_id == replacement.promotion_id {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "promotion retry must retain its target and use a fresh identity".to_string(),
             ));
         }
@@ -840,7 +842,7 @@ impl OwnerPromotionJournal {
             OwnerPromotionJournalState::Nonactivated { .. }
                 | OwnerPromotionJournalState::Stale { .. }
         ) {
-            return Err(OwnerPromotionJournalError(
+            return Err(OwnerPromotionJournalError::Invariant(
                 "only a failed promotion attempt can be replaced".to_string(),
             ));
         }
@@ -860,16 +862,9 @@ impl OwnerPromotionJournalPredecessor {
         next: &OwnerPromotionJournal,
         remote_objects: Vec<crate::remote_object::ClosedRemoteObject>,
     ) -> Result<OwnerPromotionJournalTransition, OwnerPromotionJournalError> {
-        let previous: OwnerPromotionJournal =
-            serde_json::from_str(&self.previous_value).map_err(|error| {
-                OwnerPromotionJournalError(format!(
-                    "parse exact Owner-promotion predecessor: {error}"
-                ))
-            })?;
+        let previous: OwnerPromotionJournal = serde_json::from_str(&self.previous_value)?;
         previous.validate_transition(next)?;
-        let next_value = serde_json::to_string(next).map_err(|error| {
-            OwnerPromotionJournalError(format!("serialize Owner-promotion successor: {error}"))
-        })?;
+        let next_value = serde_json::to_string(next)?;
         Ok(OwnerPromotionJournalTransition {
             journal_key: format!("owner_promotion/{}", self.promotion_id),
             target_key: target_key(&self.target)?,
@@ -905,11 +900,5 @@ impl OwnerPromotionJournalTransition {
             self.next_value,
             self.remote_objects,
         )
-    }
-}
-
-impl From<crate::prepared_commit::PreparedCommitError> for OwnerPromotionJournalError {
-    fn from(error: crate::prepared_commit::PreparedCommitError) -> Self {
-        OwnerPromotionJournalError(error.to_string())
     }
 }

@@ -40,7 +40,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
         )
         .await?
         .try_resolved()
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+        .map_err(CircleOperationError::from)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -122,7 +122,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 entries.clone(),
                 loaded_heads,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+            .map_err(CircleOperationError::from)?
         } else {
             self.replay_circle_roster_resolutions(
                 verified_prefix,
@@ -148,9 +148,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 "Circle roster signed heads do not name its raw frontier".to_string(),
             ));
         }
-        let resolved = chain
-            .try_resolved()
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        let resolved = chain.try_resolved().map_err(CircleOperationError::from)?;
         if resolved.state_hash != state.state_hash {
             return Err(CircleOperationError::InvalidState(
                 "Circle roster state hash differs from its effective assignments".to_string(),
@@ -191,10 +189,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(context, object, &prefix)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let entry: coven_protocol::circle::CircleRosterEntry = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                CircleOperationError::InvalidState(format!("parse Circle roster entry: {error}"))
-            })?;
+            let entry: coven_protocol::circle::CircleRosterEntry = serde_json::from_slice(&bytes)?;
             let declared_coord = entry.coord();
             if declared_coord.entry_hash != coord.entry_hash {
                 return Err(CircleOperationError::InvalidState(
@@ -261,11 +256,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
             let resolution: coven_protocol::circle::CircleRosterConflictResolution =
-                serde_json::from_slice(&bytes).map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "parse Circle roster resolution: {error}"
-                    ))
-                })?;
+                serde_json::from_slice(&bytes)?;
             if resolution.resolution_hash() != reference.resolution_hash {
                 return Err(CircleOperationError::InvalidState(
                     "Circle roster resolution identifies itself as another resolution".to_string(),
@@ -309,10 +300,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 .read_protocol_object(context, &object.object, &prefix)
                 .await
                 .map_err(coven_protocol::objects::StoreObjectError::from)?;
-            let head: coven_protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!("parse Circle roster head: {error}"))
-                })?;
+            let head: coven_protocol::circle::CircleRosterHead = serde_json::from_slice(&bytes)?;
             let declared_ref = CircleRosterHeadRef::from_stored_head(&head, object.object.clone());
             let authority = self
                 .resolve_circle_stream_authority(
@@ -376,7 +364,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             }
             loaded_heads.push(
                 coven_protocol::circle::ExactCircleRosterHead::bind(head, reference.clone())
-                    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?,
+                    .map_err(CircleOperationError::from)?,
             );
         }
         Ok(loaded_heads)
@@ -402,7 +390,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             .collect::<BTreeSet<_>>();
         let current_head_refs =
             coven_protocol::circle::CircleRosterChain::validate_exact_heads(entries, current_heads)
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
         let current_by_coord = entries
             .iter()
             .cloned()
@@ -464,7 +452,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 &conflict_entries,
                 &heads,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
             let dependencies = heads
                 .iter()
                 .flat_map(|head| head.head().resolutions.iter())
@@ -543,7 +531,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     prefix.into_values().collect(),
                     conflict_heads,
                 )
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                .map_err(CircleOperationError::from)?
             } else {
                 let conflict_head_refs = conflict_heads
                     .iter()
@@ -554,11 +542,11 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                 prefix.into_values().collect(),
                 conflict_head_refs,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+            .map_err(CircleOperationError::from)?
             };
             conflict_chain
                 .apply_resolutions(std::slice::from_ref(&resolution))
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
             resolved_by_ref.insert(next.clone(), conflict_chain);
             applied.insert(next);
         }
@@ -646,18 +634,18 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
                     branch_history.into_values().collect(),
                     branch_exact_heads,
                 )
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+                .map_err(CircleOperationError::from)?
             } else {
                 coven_protocol::circle::CircleRosterChain::replay_merged_resolved_histories_to_heads(
                 &dependencies,
                 branch_history.into_values().collect(),
                 branch_heads,
             )
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?
+            .map_err(CircleOperationError::from)?
             };
             branch
                 .checkpoint_current_resolved_state()
-                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                .map_err(CircleOperationError::from)?;
             branch_chains.push(branch);
         }
         let branch_refs = resolved_by_ref
@@ -679,7 +667,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
             history.into_values().collect(),
             current_head_refs,
         )
-        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
+        .map_err(CircleOperationError::from)
     }
 
     pub(super) async fn load_circle_authority_roster(
@@ -695,7 +683,7 @@ impl<'operation, 'storage> CircleActivationVerifier<'operation, 'storage> {
     ) -> Result<CircleMaterializedRoster, CircleOperationError> {
         commit_ref
             .verify_commit(commit)
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         let roster = match &control.value.value.author_authority {
             MergeCircleOwnerAuthorityRef::Roster { roster, .. } => roster,
             MergeCircleOwnerAuthorityRef::ConflictResolution { .. } => {

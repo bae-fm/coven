@@ -154,9 +154,7 @@ impl StoreSession<'_> {
         else {
             return Ok(None);
         };
-        activation
-            .epoch_access()
-            .map_err(|error| DbError::Message(error.to_string()))
+        activation.epoch_access().map_err(DbError::from)
     }
 
     fn circle_historical_package_keyring(
@@ -714,7 +712,7 @@ pub(crate) fn circle_blob_opening_protection_on(
         })?;
         let Some((generation, key)) = activation
             .retained_key_entry(expected_key_fingerprint)
-            .map_err(|error| DbError::Message(error.to_string()))?
+            .map_err(DbError::from)?
         else {
             continue;
         };

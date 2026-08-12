@@ -180,8 +180,7 @@ impl StoreSession<'_> {
         &self,
         circle_id: coven_protocol::circle::CircleId,
     ) -> Result<crate::CirclePartitionControl, DbError> {
-        crate::active_circle_control(self.conn, circle_id)
-            .map_err(|error| DbError::Message(error.to_string()))
+        crate::active_circle_control(self.conn, circle_id).map_err(DbError::from)
     }
 
     fn circle_publication_rotation_block(
@@ -649,7 +648,7 @@ pub(crate) fn circle_publication_context_on(
     }
     let access = state
         .epoch_access(expected_control)
-        .map_err(|error| DbError::Message(error.to_string()))?
+        .map_err(DbError::from)?
         .ok_or_else(|| {
             DbError::Message(format!("Circle {circle_id} has no active publication key"))
         })?;

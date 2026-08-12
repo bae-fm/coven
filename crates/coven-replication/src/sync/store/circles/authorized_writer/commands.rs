@@ -206,7 +206,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         let member_pubkey = match &journal.intent {
             CircleOperationIntent::RemoveMember { member_pubkey } => member_pubkey.clone(),
             _ => {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleOperationError::JournalState(format!(
                     "Circle operation {} waits for close responses without a removal intent",
                     journal.operation_id
                 )));
@@ -230,7 +230,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                     ));
                 };
                 if close.close_id != close_id {
-                    return Err(CircleOperationError::Journal(format!(
+                    return Err(CircleOperationError::JournalState(format!(
                         "Circle operation {} differs from its close id",
                         journal.operation_id
                     )));
@@ -300,7 +300,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         if close.close_id
             != coven_protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
         {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleOperationError::JournalState(format!(
                 "Circle operation {} differs from its close id",
                 journal.operation_id
             )));
@@ -321,7 +321,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             || prepared.journal.circle_id != circle_id
             || prepared.journal.intent != journal.intent
         {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleOperationError::JournalState(format!(
                 "Circle operation {} cancellation changed its durable identity",
                 journal.operation_id
             )));
@@ -358,7 +358,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         if close.close_id
             != coven_protocol::circle::CircleEpochCloseId::from_operation_id(&journal.operation_id)
         {
-            return Err(CircleOperationError::Journal(format!(
+            return Err(CircleOperationError::JournalState(format!(
                 "Circle operation {} differs from its close id",
                 journal.operation_id
             )));
@@ -442,7 +442,9 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
             .circle_operation(operation_id)
             .await?
             .ok_or_else(|| {
-                CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+                CircleOperationError::JournalState(format!(
+                    "circle operation {operation_id} is absent"
+                ))
             })?;
         if !matches!(
             journal.state(),
@@ -461,7 +463,7 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
                 )
             })
             .transpose()
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            .map_err(CircleOperationError::from)?;
         self.publisher()
             .publish(operation_id, routing_key.as_ref())
             .await
@@ -585,19 +587,14 @@ impl<'writer, 'storage> AuthorizedCircleWriter<'writer, 'storage> {
         for operation_id in database.discarding_circle_operations().await? {
             self.history()
                 .cleanup_operation_candidate(&operation_id)
-                .await
-                .map_err(|error| {
-                    CircleOperationError::InvalidState(format!(
-                        "Circle operation {operation_id} discard cleanup: {error}"
-                    ))
-                })?;
+                .await?;
             database
                 .finish_circle_operation_discard(&operation_id)
                 .await?;
         }
         while let Some(journal) = database.oldest_pending_circle_operation().await? {
             if !journal.is_publishable() {
-                return Err(CircleOperationError::Journal(format!(
+                return Err(CircleOperationError::JournalState(format!(
                     "pending circle operation {} contains a blocked payload",
                     journal.circle_id()
                 )));

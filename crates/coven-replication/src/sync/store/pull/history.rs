@@ -69,24 +69,31 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             match coven_database::ValidatedChangeset::new(package.changeset().to_vec(), schema) {
                 Ok(changeset) => changeset,
                 Err(coven_database::ChangesetIdentityError::Row(error)) => {
-                    return Ok(Err(HeldStorePositionReason::InvalidRowIdentity {
-                        table: error.table().to_string(),
-                        reason: error.to_string(),
-                    }))
+                    return Ok(Err(HeldStorePositionReason::InvalidRowIdentity(
+                        error.into(),
+                    )))
                 }
                 Err(error) => {
-                    return Ok(Err(HeldStorePositionReason::InvalidChangeset(
-                        error.to_string(),
+                    return Ok(Err(HeldStorePositionReason::InvalidChangesetIdentity(
+                        error.into(),
                     )))
                 }
             };
         let changes = match coven_database::walk_changeset(changeset.bytes()) {
             Ok(changes) => changes,
-            Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
+            Err(error) => {
+                return Ok(Err(HeldStorePositionReason::ChangesetUnreadable(
+                    error.into(),
+                )))
+            }
         };
         let old_changes = match coven_database::walk_old_changeset(changeset.bytes()) {
             Ok(changes) => changes,
-            Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
+            Err(error) => {
+                return Ok(Err(HeldStorePositionReason::ChangesetUnreadable(
+                    error.into(),
+                )))
+            }
         };
         let mut eager = Vec::new();
         for change in &changes {
@@ -96,8 +103,8 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             let blob = match self.database.blob_ref_from_change(change) {
                 Ok(blob) => blob,
                 Err(error) => {
-                    return Ok(Err(HeldStorePositionReason::InvalidChangeset(
-                        error.to_string(),
+                    return Ok(Err(HeldStorePositionReason::InvalidChangesetBlobDecl(
+                        error.into(),
                     )))
                 }
             };
@@ -170,8 +177,8 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             .database
             .validate_local_blob_cleanup_changes(&old_changes, &changes)
         {
-            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
-                error.to_string(),
+            return Ok(Err(HeldStorePositionReason::InvalidChangesetBlobDecl(
+                error.into(),
             )));
         }
         Ok(Ok(PreparedMergeMaterializationPackage {
@@ -252,7 +259,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         local_store_membership: LocalStoreMembership,
         routing_key: Option<coven_protocol::circle::RowRoutingKey>,
         receiver_wall_ms: u64,
-    ) -> Result<coven_protocol::membership::ApplyOutcome, coven_database::DbError> {
+    ) -> Result<coven_database::MaterializationOutcome, coven_database::DbError> {
         self.database
             .apply_received_merge_materialization(
                 materialization,
@@ -618,10 +625,7 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             .history
             .validate_commit_acknowledgement(commit, author)
             .await
-            .map_err(|error| match error {
-                RegistrationLoadError::Object(error) => StorePullError::Object(error),
-                RegistrationLoadError::Invalid(error) => StorePullError::InvalidState(error),
-            })?;
+            .map_err(StorePullError::from)?;
         match acknowledgement {
             Some((reference, value)) => self
                 .history

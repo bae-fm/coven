@@ -2,7 +2,6 @@
 
 use super::*;
 use coven_database::{PreparedMergeMaterialization, PreparedMergeMaterializationPackage};
-use coven_protocol::membership::ApplyOutcome;
 use coven_protocol::membership::MembershipChain;
 use coven_protocol::store_commit::{CommitFrontier, StoreDeviceStatus, StoreHistoryCut};
 use std::collections::BTreeMap;
@@ -178,7 +177,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                 if let Err(error) = self.history.verify_refs([commit_ref.clone()]).await {
                     let reason = match error {
                         StorePullError::Object(error) => held_object_error(error),
-                        error => HeldStorePositionReason::InvalidObject(error.to_string()),
+                        error => HeldStorePositionReason::InvalidObjectPull(error.into()),
                     };
                     held.push(HeldStorePosition::commit(&commit_ref, reason));
                     continue;
@@ -476,15 +475,15 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
                     &merge_candidate.membership_prefix,
                 )
                 .await
-                .map_err(|error| super::CirclePackageReadError::Invalid(error.to_string()))
+                .map_err(super::CirclePackageReadError::from)
         };
         let verified_circle_activations = match circle_activations {
             Ok(activations) => activations,
             Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
-            Err(super::CirclePackageReadError::Invalid(error)) => {
-                return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
-                    error,
-                )))
+            Err(error) => {
+                return Ok(ApplyOutcome::Held(
+                    HeldStorePositionReason::CirclePackageRead(error.into()),
+                ))
             }
         };
         // An excluded device that cannot yet read its successor bootstrap records the
@@ -517,10 +516,10 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         {
             Ok(packages) => packages,
             Err(super::CirclePackageReadError::Database(error)) => return Err(error.into()),
-            Err(super::CirclePackageReadError::Invalid(error)) => {
-                return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
-                    error,
-                )))
+            Err(error) => {
+                return Ok(ApplyOutcome::Held(
+                    HeldStorePositionReason::CirclePackageRead(error.into()),
+                ))
             }
         };
         let mut packages =
@@ -528,11 +527,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         if let Some(bytes) = candidate.package.as_ref() {
             let package = match candidate.parse_store_package(bytes) {
                 Ok(package) => package,
-                Err(error) => {
-                    return Ok(ApplyOutcome::Held(
-                        HeldStorePositionReason::InvalidChangeset(error),
-                    ))
-                }
+                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
             };
             match self
                 .history
@@ -546,11 +541,7 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
         for loaded in &circle_packages {
             let package = match candidate.parse_circle_package(loaded) {
                 Ok(package) => package,
-                Err(error) => {
-                    return Ok(ApplyOutcome::Held(
-                        HeldStorePositionReason::InvalidChangeset(error),
-                    ))
-                }
+                Err(reason) => return Ok(ApplyOutcome::Held(reason)),
             };
             match self
                 .history
@@ -749,6 +740,16 @@ impl<'operation, 'storage> AuthorizedPull<'operation, 'storage> {
             )
             .await?;
         self.history.resume_merge_retraction_cleanups().await?;
-        Ok(outcome)
+        Ok(match outcome {
+            coven_database::MaterializationOutcome::Applied(changes) => {
+                ApplyOutcome::Applied(changes)
+            }
+            coven_database::MaterializationOutcome::Held(
+                coven_database::MaterializationHold::ForeignKeyDependency,
+            ) => ApplyOutcome::Held(HeldStorePositionReason::ForeignKeyDependency),
+            coven_database::MaterializationOutcome::Held(
+                coven_database::MaterializationHold::ConstraintConflict(tables),
+            ) => ApplyOutcome::Held(HeldStorePositionReason::ConstraintConflict(tables)),
+        })
     }
 }

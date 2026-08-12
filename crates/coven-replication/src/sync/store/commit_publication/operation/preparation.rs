@@ -40,7 +40,7 @@ impl AuthorizedWriterOperation<'_> {
         let dependencies =
             coven_protocol::store_commit::CommitFrontier::from_refs(base.dependencies)
                 .map(|frontier| frontier.commits().clone())
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
         let preparation = async {
             let root = self.store_root().clone();
             let store_root_hash = root.store_root_hash;
@@ -58,7 +58,7 @@ impl AuthorizedWriterOperation<'_> {
             let authorization = self
                 .authorize_retained_outbound(&order, membership.head_refs())
                 .await
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
             let membership_authority = self.membership_authority(&authorization.membership)?;
             let mut local_cleanup_by_blob = std::collections::BTreeMap::new();
             for fact in &blob_facts.blobs {
@@ -79,7 +79,7 @@ impl AuthorizedWriterOperation<'_> {
                     .await
                     .map_err(|error| {
                         StoreError::Preparation(
-                            crate::sync::store::StorePreparationError::AssetScan(error.to_string()),
+                            crate::sync::store::StorePreparationError::AssetScanFile(error),
                         )
                     })?;
                 if present.is_none() {
@@ -224,7 +224,7 @@ impl AuthorizedWriterOperation<'_> {
                         ..StoreCommitOperationsInput::empty()
                     },
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
             let commit_prefix = commit_semantic_prefix(
                 commit.candidate_family(),
                 &stream_id.to_string(),
@@ -251,7 +251,7 @@ impl AuthorizedWriterOperation<'_> {
                     coord,
                     commit_prepared.reference().clone(),
                 )
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
             let commit_ref = commit.reference().clone();
             let successor = self
             .prepare_merge_history_successor(
@@ -262,12 +262,12 @@ impl AuthorizedWriterOperation<'_> {
                 crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
             )
             .await
-            .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+            .map_err(StoreError::from)?;
             let storage = self.storage.as_ref();
             let activation = self
                 .writer
                 .announcement_activation_id()
-                .map_err(|error| StoreError::InvalidOutbound(error.to_string()))?;
+                .map_err(StoreError::from)?;
             let head = self.writer.sign_device_head(
                 store_root_hash,
                 commit_ref.clone(),

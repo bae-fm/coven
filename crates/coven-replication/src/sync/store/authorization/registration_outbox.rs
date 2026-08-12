@@ -40,7 +40,7 @@ impl<'storage> RegistrationOutbox<'storage> {
                 &store_root,
                 outbound.device_id,
             )
-            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            .map_err(StoreRegistrationError::from)?;
             if registration.registration_hash() != outbound.registration_hash {
                 return Err(StoreRegistrationError::Invalid(
                     "durable registration columns differ from its exact signed bytes".to_string(),
@@ -85,18 +85,16 @@ impl<'storage> RegistrationOutbox<'storage> {
                 )
                 .await
                 .map_err(database_error)?;
-            published = published.checked_add(1).ok_or_else(|| {
-                StoreRegistrationError::Database(
-                    "registration publish count exceeded u64".to_string(),
-                )
-            })?;
+            published = published
+                .checked_add(1)
+                .ok_or(StoreRegistrationError::PublishCountExhausted)?;
         }
         Ok(published)
     }
 }
 
 fn database_error(error: coven_database::DbError) -> StoreRegistrationError {
-    StoreRegistrationError::Database(error.to_string())
+    StoreRegistrationError::from(error)
 }
 
 /// An exact object that opened to bytes other than the durable ones is invalid

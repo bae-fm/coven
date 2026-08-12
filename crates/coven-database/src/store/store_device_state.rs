@@ -41,9 +41,7 @@ pub(crate) fn load_store_device_snapshot_on(
         })?;
     let state: ResolvedStoreDeviceState = serde_json::from_str(&raw)
         .map_err(|error| DbError::context("parse Store device state snapshot", error))?;
-    state
-        .validate_canonical()
-        .map_err(|error| DbError::Message(error.to_string()))?;
+    state.validate_canonical().map_err(DbError::from)?;
     Ok(state)
 }
 
@@ -62,10 +60,10 @@ pub(crate) fn store_device_state_for_history_cut_on(
                 .map(|reference| load_store_device_snapshot_on(conn, reference))
                 .collect::<Result<Vec<_>, _>>()?,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?
+        .map_err(DbError::from)?
     };
     let reference = StoreDeviceStateRef::from_resolved(CommitFrontier(frontier.clone()), &state)
-        .map_err(|error| DbError::Message(error.to_string()))?;
+        .map_err(DbError::from)?;
     Ok((reference, state))
 }
 
@@ -84,7 +82,7 @@ pub(crate) fn load_declared_store_device_state_on(
                 .map(|commit| load_store_device_snapshot_on(conn, commit))
                 .collect::<Result<Vec<_>, _>>()?,
         )
-        .map_err(|error| DbError::Message(error.to_string()))?
+        .map_err(DbError::from)?
     };
     if state.state_hash != reference.state_hash() || state.recovery != reference.recovery() {
         return Err(DbError::Message(
@@ -119,9 +117,7 @@ pub(crate) fn load_store_device_exclusion_freezes_on(
         let proposal: coven_protocol::store_commit::StoreDeviceExclusionProposalRef =
             serde_json::from_str(&proposal_ref)
                 .map_err(|error| DbError::context("stored device exclusion proposal ref", error))?;
-        proposal
-            .validate_path()
-            .map_err(|error| DbError::Message(error.to_string()))?;
+        proposal.validate_path().map_err(DbError::from)?;
         if proposal.proposal_id.to_string() != proposal_id {
             return Err(DbError::Message(
                 "stored device exclusion freeze uses another proposal id".to_string(),

@@ -165,10 +165,7 @@ async fn applicable_circle_packages(
         .await
     {
         Ok(packages) => packages,
-        Err(crate::sync::store::circles::CirclePackageReadError::Database(error)) => {
-            panic!("{purpose}: {error}")
-        }
-        Err(crate::sync::store::circles::CirclePackageReadError::Invalid(error)) => {
+        Err(error) => {
             panic!("{purpose}: {error}")
         }
     }
@@ -1547,10 +1544,12 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
         )
         .await
         .expect_err("malformed occupied response must prevent finalization");
-    assert!(
-        error.to_string().contains("Circle epoch-close response"),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        CircleOperationError::EpochCloseResponse(
+            coven_protocol::circle::CircleTransitionError::InvalidCurrentState
+        )
+    ));
     _home.replace_exact_object(&participant.response_slot, correct_stored);
 
     components
@@ -2366,21 +2365,19 @@ impl ClosingFounderCircle {
     /// Publish the member device's oldest pending durable write, returning the
     /// number of Store packages published. Errors while old-epoch publication is
     /// frozen — the closing Circle has no active control to resolve.
-    async fn member_push(&self) -> Result<u64, String> {
-        self.store
+    async fn member_push(&self) -> Result<u64, crate::sync::test_helpers::TestError> {
+        Ok(self
+            .store
             .bind_device(
                 &self.member_db,
                 self.member_db_store_dir.clone(),
                 &self.member,
             )
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
             .authorize_writer()
-            .await
-            .map_err(|error| error.to_string())?
+            .await?
             .publish_pending_store_writes()
-            .await
-            .map_err(|error| error.to_string())
+            .await?)
     }
 
     /// Publish one scoped Circle row as the owner and drive the cycle that

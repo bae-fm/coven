@@ -318,13 +318,9 @@ impl RetainedStoreDeviceExclusionProposal {
         &self,
         root: &StoreRootRef,
     ) -> Result<VerifiedDeviceExclusionProposal, StoreProtocolError> {
-        self.reference
-            .object
-            .verify(&self.canonical_proposal)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        self.reference.object.verify(&self.canonical_proposal)?;
         let unverified: StoreDeviceExclusionProposal =
-            serde_json::from_slice(&self.canonical_proposal)
-                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            serde_json::from_slice(&self.canonical_proposal)?;
         if unverified.to_bytes() != self.canonical_proposal {
             return Err(StoreProtocolError::Malformed(
                 "retained Store device exclusion proposal is not canonically encoded".to_string(),
@@ -373,10 +369,7 @@ impl RetainedStoreDeviceExclusionOutcome {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         let canonical_outcome = outcome.to_bytes();
-        reference
-            .object()
-            .verify(&canonical_outcome)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        reference.object().verify(&canonical_outcome)?;
         Ok(match (reference, outcome) {
             (
                 StoreDeviceExclusionOutcomeRef::Excluded(reference),
@@ -482,13 +475,9 @@ impl RetainedStoreDeviceExclusionOutcome {
                     canonical_owner_registration,
                 ),
             };
-        reference
-            .object()
-            .verify(canonical_outcome)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        reference.object().verify(canonical_outcome)?;
         let proposal = proposal_source.verify_with_registrations(root)?;
-        let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(canonical_outcome)
-            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let unverified: StoreDeviceExclusionOutcome = serde_json::from_slice(canonical_outcome)?;
         if unverified.to_bytes() != *canonical_outcome {
             return Err(StoreProtocolError::Malformed(
                 "retained Store device exclusion outcome is not canonically encoded".to_string(),
@@ -533,10 +522,7 @@ fn verify_retained_registration(
     reference: &StoreDeviceRegistrationRef,
     canonical_registration: &[u8],
 ) -> Result<StoreDeviceRegistration, StoreProtocolError> {
-    reference
-        .object
-        .verify(canonical_registration)
-        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    reference.object.verify(canonical_registration)?;
     let registration =
         StoreDeviceRegistration::parse_at(canonical_registration, root, reference.device_id)?;
     if registration.to_bytes() != canonical_registration {

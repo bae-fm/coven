@@ -105,7 +105,7 @@ pub(crate) async fn response_to_file(
 ) -> Result<(), CloudFileReadError> {
     let context = context.to_string();
     let stream = response.bytes_stream().map_err(move |error| {
-        CloudHomeError::Transport(format!("{context}: stream response: {error}"))
+        CloudHomeError::transport(format!("{context}: stream response"), error)
     });
     super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
     Ok(())
@@ -157,7 +157,7 @@ pub(crate) async fn validated_range_bytes(
         })?
         .to_str()
         .map_err(|error| {
-            CloudHomeError::Transport(format!("{context}: invalid Content-Range header: {error}"))
+            CloudHomeError::transport(format!("{context}: invalid Content-Range header"), error)
         })?;
     let expected_last = end - 1;
     let expected_prefix = format!("bytes {start}-{expected_last}/");
