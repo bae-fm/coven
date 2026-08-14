@@ -473,17 +473,12 @@ mod tests {
     }
 
     fn fail_next_cloud_credentials_write(key_service: &StoreKeys) {
-        let entry = key_service
-            .cloud_home_credentials_entry_for_test()
-            .expect("create mock keyring entry");
-        let credential = entry
-            .as_any()
-            .downcast_ref::<keyring_core::mock::Cred>()
-            .expect("mock keyring credential");
-        credential.set_error(keyring_core::Error::Invalid(
-            "keyring unavailable".to_string(),
-            "test failure".to_string(),
-        ));
+        key_service
+            .fail_next_cloud_home_credentials_operation_for_test(keyring_core::Error::Invalid(
+                "keyring unavailable".to_string(),
+                "test failure".to_string(),
+            ))
+            .expect("configure mock keyring failure");
     }
 
     #[tokio::test]

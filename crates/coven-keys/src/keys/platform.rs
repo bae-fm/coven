@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{error, info};
 
 use super::core::{
     public_key_hex, CloudHomeCredentials, DeviceIdentityCustody, KeyError, UserKeypair,
@@ -33,10 +33,106 @@ pub enum IdentityError {
     Key(#[from] KeyError),
 }
 
-#[derive(Clone)]
 struct KeyringService {
     name: String,
+    worker: KeyringWorker,
+}
+
+/// Serializes platform credential-store calls on a stack Coven controls.
+/// Hosts can enter the synchronous key API from foreign runtimes whose worker
+/// stacks are smaller than Security.framework's call chain requires.
+struct KeyringWorker {
+    operations: Option<std::sync::mpsc::Sender<KeyringOperation>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+enum KeyringOperation {
+    Read {
+        account: String,
+        reply: std::sync::mpsc::SyncSender<Result<Option<String>, KeyError>>,
+    },
+    Write {
+        account: String,
+        value: String,
+        reply: std::sync::mpsc::SyncSender<Result<(), KeyError>>,
+    },
+    Delete {
+        account: String,
+        reply: std::sync::mpsc::SyncSender<Result<bool, KeyError>>,
+    },
+    #[cfg(all(
+        any(test, feature = "test-utils"),
+        any(target_os = "macos", target_os = "ios")
+    ))]
+    AppleEntryFacts {
+        account: String,
+        reply: std::sync::mpsc::SyncSender<Result<AppleKeyringEntryFacts, KeyError>>,
+    },
+    #[cfg(any(test, feature = "test-utils"))]
+    SetNextError {
+        account: String,
+        error: keyring_core::Error,
+        reply: std::sync::mpsc::SyncSender<Result<(), KeyError>>,
+    },
+}
+
+struct KeyringBackend {
+    name: String,
     store: std::sync::Arc<keyring_core::CredentialStore>,
+}
+
+impl KeyringWorker {
+    /// Matches Coven's provider runtimes: enough stack for platform SDK call
+    /// chains without depending on the host thread's stack allocation.
+    const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+    fn start(backend: KeyringBackend) -> Result<Self, KeyError> {
+        let (operations, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("coven-keyring".to_string())
+            .stack_size(Self::STACK_SIZE)
+            .spawn(move || {
+                while let Ok(operation) = receiver.recv() {
+                    backend.execute(operation);
+                }
+            })
+            .map_err(KeyError::KeyringWorkerStart)?;
+        Ok(Self {
+            operations: Some(operations),
+            thread: Some(thread),
+        })
+    }
+
+    fn execute<T: Send + 'static>(
+        &self,
+        operation_name: &'static str,
+        operation: impl FnOnce(std::sync::mpsc::SyncSender<Result<T, KeyError>>) -> KeyringOperation,
+    ) -> Result<T, KeyError> {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        self.operations
+            .as_ref()
+            .expect("the keyring worker sender exists until drop")
+            .send(operation(reply))
+            .map_err(|_| KeyError::KeyringWorkerStopped {
+                operation: operation_name,
+            })?;
+        receiver
+            .recv()
+            .map_err(|_| KeyError::KeyringWorkerStopped {
+                operation: operation_name,
+            })?
+    }
+}
+
+impl Drop for KeyringWorker {
+    fn drop(&mut self) {
+        self.operations.take();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                error!("Keyring worker terminated with a panic");
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -67,10 +163,7 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
     crate::keyring_backend::install_platform_store()?;
     let name = name.into();
     let store = keyring_core::get_default_store().ok_or(KeyError::StoreNotInstalled)?;
-    let service = KeyringService {
-        name: name.clone(),
-        store,
-    };
+    let service = KeyringService::new(name.clone(), store)?;
     if KEYRING_SERVICE.set(service).is_err() {
         let registered = KEYRING_SERVICE
             .get()
@@ -268,7 +361,40 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
 /// The access policy an item is created under is fixed for its lifetime;
 /// every Coven-created Apple keyring item therefore enters the device-only
 /// class at its first write.
-impl KeyringService {
+impl KeyringBackend {
+    fn execute(&self, operation: KeyringOperation) {
+        match operation {
+            KeyringOperation::Read { account, reply } => {
+                drop(reply.send(self.read(account)));
+            }
+            KeyringOperation::Write {
+                account,
+                value,
+                reply,
+            } => {
+                drop(reply.send(self.write(account, value)));
+            }
+            KeyringOperation::Delete { account, reply } => {
+                drop(reply.send(self.delete(account)));
+            }
+            #[cfg(all(
+                any(test, feature = "test-utils"),
+                any(target_os = "macos", target_os = "ios")
+            ))]
+            KeyringOperation::AppleEntryFacts { account, reply } => {
+                drop(reply.send(self.apple_entry_facts(account)));
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            KeyringOperation::SetNextError {
+                account,
+                error,
+                reply,
+            } => {
+                drop(reply.send(self.set_next_error(account, error)));
+            }
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn entry(&self, account: &str) -> Result<keyring_core::Entry, KeyError> {
         match self
@@ -298,8 +424,7 @@ impl KeyringService {
             .map_err(map_keyring_error)
     }
 
-    fn read(&self, slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
-        let account = slot.account();
+    fn read(&self, account: String) -> Result<Option<String>, KeyError> {
         let entry = self.entry(&account)?;
         match entry.get_password() {
             Ok(password) if password.is_empty() => Err(KeyError::EmptyKeyringEntry { account }),
@@ -309,18 +434,113 @@ impl KeyringService {
         }
     }
 
-    fn write(&self, slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
-        self.entry(&slot.account())?
-            .set_password(value)
+    fn write(&self, account: String, value: String) -> Result<(), KeyError> {
+        self.entry(&account)?
+            .set_password(&value)
             .map_err(map_keyring_error)
     }
 
-    fn delete(&self, slot: &KeyringSlot) -> Result<bool, KeyError> {
-        match self.entry(&slot.account())?.delete_credential() {
+    fn delete(&self, account: String) -> Result<bool, KeyError> {
+        match self.entry(&account)?.delete_credential() {
             Ok(()) => Ok(true),
             Err(keyring_core::Error::NoEntry) => Ok(false),
             Err(error) => Err(map_keyring_error(error)),
         }
+    }
+
+    #[cfg(all(
+        any(test, feature = "test-utils"),
+        any(target_os = "macos", target_os = "ios")
+    ))]
+    fn apple_entry_facts(&self, account: String) -> Result<AppleKeyringEntryFacts, KeyError> {
+        let entry = self.entry(&account)?;
+        let credential = entry
+            .as_any()
+            .downcast_ref::<apple_native_keyring_store::protected::Cred>()
+            .ok_or(KeyError::UnexpectedAppleKeyringEntry)?;
+        Ok(AppleKeyringEntryFacts {
+            access_policy: credential.access_policy.clone(),
+            cloud_synchronize: credential.cloud_synchronize,
+            service: credential.service.clone(),
+            account: credential.account.clone(),
+        })
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn set_next_error(&self, account: String, error: keyring_core::Error) -> Result<(), KeyError> {
+        let entry = self.entry(&account)?;
+        let credential = entry
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .ok_or(KeyError::UnexpectedTestKeyringEntry)?;
+        credential.set_error(error);
+        Ok(())
+    }
+}
+
+impl KeyringService {
+    fn new(
+        name: String,
+        store: std::sync::Arc<keyring_core::CredentialStore>,
+    ) -> Result<Self, KeyError> {
+        Ok(Self {
+            name: name.clone(),
+            worker: KeyringWorker::start(KeyringBackend { name, store })?,
+        })
+    }
+
+    fn read(&self, slot: &KeyringSlot) -> Result<Option<String>, KeyError> {
+        let account = slot.account();
+        self.worker.execute("read a keyring entry", move |reply| {
+            KeyringOperation::Read { account, reply }
+        })
+    }
+
+    fn write(&self, slot: &KeyringSlot, value: &str) -> Result<(), KeyError> {
+        let account = slot.account();
+        let value = value.to_string();
+        self.worker.execute("write a keyring entry", move |reply| {
+            KeyringOperation::Write {
+                account,
+                value,
+                reply,
+            }
+        })
+    }
+
+    fn delete(&self, slot: &KeyringSlot) -> Result<bool, KeyError> {
+        let account = slot.account();
+        self.worker.execute("delete a keyring entry", move |reply| {
+            KeyringOperation::Delete { account, reply }
+        })
+    }
+
+    #[cfg(all(
+        any(test, feature = "test-utils"),
+        any(target_os = "macos", target_os = "ios")
+    ))]
+    fn apple_entry_facts(&self, account: String) -> Result<AppleKeyringEntryFacts, KeyError> {
+        self.worker
+            .execute("inspect an Apple keyring entry", move |reply| {
+                KeyringOperation::AppleEntryFacts { account, reply }
+            })
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    fn set_next_error(
+        &self,
+        slot: &KeyringSlot,
+        error: keyring_core::Error,
+    ) -> Result<(), KeyError> {
+        let account = slot.account();
+        self.worker
+            .execute("configure a test keyring entry", move |reply| {
+                KeyringOperation::SetNextError {
+                    account,
+                    error,
+                    reply,
+                }
+            })
     }
 }
 
@@ -344,17 +564,7 @@ pub struct AppleKeyringEntryFacts {
 pub fn apple_keyring_entry_facts_for_test(
     account: &str,
 ) -> Result<AppleKeyringEntryFacts, KeyError> {
-    let entry = registered_keyring()?.entry(account)?;
-    let credential = entry
-        .as_any()
-        .downcast_ref::<apple_native_keyring_store::protected::Cred>()
-        .ok_or(KeyError::UnexpectedAppleKeyringEntry)?;
-    Ok(AppleKeyringEntryFacts {
-        access_policy: credential.access_policy.clone(),
-        cloud_synchronize: credential.cloud_synchronize,
-        service: credential.service.clone(),
-        account: credential.account.clone(),
-    })
+    registered_keyring()?.apple_entry_facts(account.to_string())
 }
 
 /// This store's established signing identity through `custody`, or
@@ -591,16 +801,26 @@ impl StoreKeys {
     pub(crate) fn write_empty_encryption_key_for_test(&self) -> Result<(), KeyError> {
         self.keyring
             .service()?
-            .entry(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()).account())?
-            .set_password("")
-            .map_err(map_keyring_error)
+            .write(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()), "")
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn cloud_home_credentials_entry_for_test(&self) -> Result<keyring_core::Entry, KeyError> {
-        self.keyring
-            .service()?
-            .entry(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()).account())
+    pub fn write_cloud_home_credentials_json_for_test(&self, json: &str) -> Result<(), KeyError> {
+        self.keyring.service()?.write(
+            &KeyringSlot::CloudHomeCredentials(self.store_id.clone()),
+            json,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_next_cloud_home_credentials_operation_for_test(
+        &self,
+        error: keyring_core::Error,
+    ) -> Result<(), KeyError> {
+        self.keyring.service()?.set_next_error(
+            &KeyringSlot::CloudHomeCredentials(self.store_id.clone()),
+            error,
+        )
     }
 }
 

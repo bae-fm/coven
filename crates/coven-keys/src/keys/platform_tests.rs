@@ -1,5 +1,112 @@
 use super::*;
 
+#[derive(Debug)]
+struct ThreadRecordingCredential {
+    execution_threads: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ThreadRecordingCredential {
+    fn record_execution_thread(&self) {
+        self.execution_threads
+            .lock()
+            .expect("record keyring execution thread")
+            .push(
+                std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .to_string(),
+            );
+    }
+}
+
+impl keyring_core::api::CredentialApi for ThreadRecordingCredential {
+    fn set_secret(&self, _secret: &[u8]) -> keyring_core::Result<()> {
+        self.record_execution_thread();
+        Ok(())
+    }
+
+    fn get_secret(&self) -> keyring_core::Result<Vec<u8>> {
+        self.record_execution_thread();
+        Err(keyring_core::Error::NoEntry)
+    }
+
+    fn delete_credential(&self) -> keyring_core::Result<()> {
+        self.record_execution_thread();
+        Err(keyring_core::Error::NoEntry)
+    }
+
+    fn get_credential(
+        &self,
+    ) -> keyring_core::Result<Option<std::sync::Arc<keyring_core::Credential>>> {
+        Err(keyring_core::Error::NoEntry)
+    }
+
+    fn get_specifiers(&self) -> Option<(String, String)> {
+        Some(("coven-test".to_string(), "account".to_string()))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+struct ThreadRecordingStore {
+    execution_threads: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl keyring_core::api::CredentialStoreApi for ThreadRecordingStore {
+    fn vendor(&self) -> String {
+        "coven test keyring".to_string()
+    }
+
+    fn id(&self) -> String {
+        "thread recording store".to_string()
+    }
+
+    fn build(
+        &self,
+        _service: &str,
+        _user: &str,
+        _modifiers: Option<&std::collections::HashMap<&str, &str>>,
+    ) -> keyring_core::Result<keyring_core::Entry> {
+        Ok(keyring_core::Entry::new_with_credential(
+            std::sync::Arc::new(ThreadRecordingCredential {
+                execution_threads: self.execution_threads.clone(),
+            }),
+        ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn keyring_operations_execute_on_the_keyring_worker() {
+    let execution_threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = KeyringService::new(
+        "coven-test".to_string(),
+        std::sync::Arc::new(ThreadRecordingStore {
+            execution_threads: execution_threads.clone(),
+        }),
+    )
+    .expect("start keyring worker");
+
+    let slot = KeyringSlot::CloudHomeCredentials("store".to_string());
+    service
+        .write(&slot, "credential")
+        .expect("write credential");
+    assert_eq!(service.read(&slot).expect("read credential"), None);
+    assert!(!service.delete(&slot).expect("delete credential"));
+    assert_eq!(
+        *execution_threads
+            .lock()
+            .expect("read keyring execution threads"),
+        ["coven-keyring", "coven-keyring", "coven-keyring"],
+    );
+}
+
 /// Proves `map_keyring_error` — the real chokepoint every keyring
 /// read/write/delete funnels through — recognizes `errSecMissingEntitlement`
 /// (OSStatus -34018) when it arrives the way the real protected store
@@ -59,9 +166,7 @@ fn empty_keyring_entry_is_an_error_not_absence() {
     let account = slot.account();
     registered_keyring()
         .expect("registered test keyring")
-        .entry(&account)
-        .expect("create keyring entry")
-        .set_password("")
+        .write(&slot, "")
         .expect("write empty keyring entry");
 
     let error = registered_keyring()
@@ -196,12 +301,9 @@ fn host_secret_present_but_empty_is_an_error_not_absence() {
         name: "discogs_api_key".to_string(),
         store_id: "host-secret-empty-entry-store".to_string(),
     };
-    let account = slot.account();
     registered_keyring()
         .expect("registered test keyring")
-        .entry(&account)
-        .expect("create keyring entry")
-        .set_password("")
+        .write(&slot, "")
         .expect("write empty keyring entry");
 
     let keys = StoreKeys::bind("host-secret-empty-entry-store".to_string());

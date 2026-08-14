@@ -17,6 +17,10 @@ pub enum KeyError {
     File(#[from] coven_foundation::atomic_file::FileError),
     #[error("keyring operation failed: {0}")]
     Keyring(#[source] keyring_core::Error),
+    #[error("failed to start the keyring worker: {0}")]
+    KeyringWorkerStart(#[source] std::io::Error),
+    #[error("the keyring worker stopped while attempting to {operation}")]
+    KeyringWorkerStopped { operation: &'static str },
     #[error("key custody {operation} failed: {source}")]
     Custody {
         operation: &'static str,
@@ -93,6 +97,9 @@ pub enum KeyError {
     EmptyKeyringEntry { account: String },
     #[error("Apple keyring entry was not constructed by the protected-data store")]
     UnexpectedAppleKeyringEntry,
+    #[cfg(any(test, feature = "test-utils"))]
+    #[error("test keyring entry was not constructed by the mock store")]
+    UnexpectedTestKeyringEntry,
     #[error(
         "no keyring store is installed; the host must install the platform keyring store at startup (set_keyring_service) before any key operation"
     )]

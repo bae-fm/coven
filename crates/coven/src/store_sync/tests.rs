@@ -146,9 +146,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let store_dir = StoreDir::new_ephemeral(tmp.path());
     let store_id = "sync-enabled-malformed-credentials";
     let keys = StoreKeys::bind(store_id.to_string());
-    keys.cloud_home_credentials_entry_for_test()
-        .expect("create credentials entry")
-        .set_password("{")
+    keys.write_cloud_home_credentials_json_for_test("{")
         .expect("write malformed credentials");
     let join_info = CloudHomeJoinInfo::S3 {
         bucket: "bucket".to_string(),
