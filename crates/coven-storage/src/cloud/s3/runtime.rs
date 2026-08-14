@@ -33,11 +33,12 @@ impl S3Runtime {
         })
     }
 
-    /// Spawn a task that keeps this runtime alive until the task completes.
-    /// Multipart upload owners use this after the home that opened them drops.
-    pub(crate) fn spawn<T: Send + 'static>(
+    /// Construct and run an operation on the S3 runtime, keeping the runtime
+    /// alive until the task completes. Multipart upload owners use this after
+    /// the home that opened them drops.
+    pub(crate) fn spawn<T: Send + 'static, F: std::future::Future<Output = T> + Send + 'static>(
         &self,
-        future: impl std::future::Future<Output = T> + Send + 'static,
+        operation: impl FnOnce() -> F + Send + 'static,
     ) -> tokio::task::JoinHandle<T> {
         let runtime = self.clone();
         self.inner
@@ -45,38 +46,48 @@ impl S3Runtime {
             .as_ref()
             .expect("S3 runtime is present while its owner is alive")
             .spawn(async move {
-                let result = future.await;
+                let result = operation().await;
                 drop(runtime);
                 result
             })
     }
 
-    pub(crate) async fn run<T: Send + 'static>(
+    pub(crate) async fn run<
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,
+    >(
         &self,
-        future: impl std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,
+        operation: impl FnOnce() -> F + Send + 'static,
     ) -> Result<T, CloudHomeError> {
-        self.run_with(future, |error| {
+        self.run_with(operation, |error| {
             CloudHomeError::transport("S3 task aborted".to_string(), error)
         })
         .await
     }
 
-    pub(crate) async fn run_file_read<T: Send + 'static>(
+    pub(crate) async fn run_file_read<
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, CloudFileReadError>> + Send + 'static,
+    >(
         &self,
-        future: impl std::future::Future<Output = Result<T, CloudFileReadError>> + Send + 'static,
+        operation: impl FnOnce() -> F + Send + 'static,
     ) -> Result<T, CloudFileReadError> {
-        self.run_with(future, |error| {
+        self.run_with(operation, |error| {
             CloudFileReadError::Source(CloudHomeError::transport("run S3 file-read task", error))
         })
         .await
     }
 
-    async fn run_with<T: Send + 'static, E: Send + 'static>(
+    async fn run_with<
+        T: Send + 'static,
+        E: Send + 'static,
+        F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    >(
         &self,
-        future: impl std::future::Future<Output = Result<T, E>> + Send + 'static,
+        operation: impl FnOnce() -> F + Send + 'static,
         task_error: impl FnOnce(tokio::task::JoinError) -> E,
     ) -> Result<T, E> {
-        match AbortOnDropTask::new(self.spawn(future)).wait().await {
+        match AbortOnDropTask::new(self.spawn(operation)).wait().await {
             Ok(result) => result,
             Err(error) => Err(task_error(error)),
         }
