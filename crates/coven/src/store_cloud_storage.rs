@@ -116,6 +116,13 @@ impl StoreCloudStorage {
         })
     }
 
+    pub(crate) fn forget_credentials(&self) -> Result<(), coven_keys::keys::KeyError> {
+        let staged = self.prepare_credentials(None);
+        staged.commit()?;
+        staged.finish();
+        Ok(())
+    }
+
     #[cfg(feature = "oauth-providers")]
     pub(crate) async fn prepare_oauth_cloud_home(
         &self,

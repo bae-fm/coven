@@ -177,6 +177,21 @@ impl StoreSync {
         self.security.import_master_key(serialized)
     }
 
+    pub(crate) async fn forget_master_key(&self) -> Result<(), coven_keys::keys::KeyError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.security.forget_master_key()?;
+        self.stop_current();
+        Ok(())
+    }
+
+    pub(crate) async fn disconnect_cloud_home(&self) -> Result<(), coven_keys::keys::KeyError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.cloud_storage.forget_credentials()?;
+        self.stop_current();
+        info!("cloud home disconnected and its credentials forgotten");
+        Ok(())
+    }
+
     pub(crate) async fn connect_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,

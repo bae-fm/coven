@@ -550,6 +550,12 @@ impl CovenHandle {
         self.sync.disconnect()
     }
 
+    /// Disconnect the configured cloud home and remove its provider credentials.
+    /// If credential removal fails, the installed connection is preserved.
+    pub async fn disconnect_cloud_home(&self) -> Result<(), KeyError> {
+        self.sync.disconnect_cloud_home().await
+    }
+
     /// Wake the sync loop to run a cycle now rather than at the next idle tick. A
     /// no-op when no provider is connected.
     pub fn sync_now(&self) {
@@ -577,6 +583,13 @@ impl CovenHandle {
     /// under the handle's custody, replacing whatever custody already holds.
     pub async fn import_master_key(&self, serialized: &str) -> Result<(), MasterKeyError> {
         self.sync.import_master_key(serialized).await
+    }
+
+    /// Remove the master key from custody and disconnect any operation retaining
+    /// its unlocked value. If custody cannot remove the key, the connection is
+    /// preserved and the error is returned.
+    pub async fn forget_master_key(&self) -> Result<(), KeyError> {
+        self.sync.forget_master_key().await
     }
 
     // =========================================================================

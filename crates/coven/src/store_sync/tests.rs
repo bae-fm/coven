@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
+#[path = "tests/custody_lifecycle.rs"]
+mod custody_lifecycle;
 #[path = "tests/setup_failure.rs"]
 mod setup_failure;
 
@@ -454,48 +456,6 @@ async fn browsable_home_setup_never_accesses_master_key_custody() {
         crate::store_security::CloudHomeKeyState::NotRequired
     );
     sync.disconnect();
-}
-
-#[tokio::test]
-async fn credentialless_provider_setup_removes_previous_provider_credentials() {
-    test_keyring::install();
-    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
-    let store_id = "atomic-credentialless-cloud-home";
-    let mut config = Config::with_defaults(
-        store_id.to_string(),
-        "test-device".to_string(),
-        "Test Store".to_string(),
-    );
-    config.cloud_home.storage = HomeStorage::Browsable;
-    let store_keys = StoreKeys::bind(store_id.to_string());
-    store_keys
-        .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
-            access_key: "old-access".to_string(),
-            secret_key: "old-secret".to_string(),
-        })
-        .expect("seed previous credentials");
-    let sync = store_sync(
-        Arc::new(move || config.clone()),
-        store_keys.clone(),
-        Arc::new(NoKeyCustody),
-        established_identity_custody(),
-        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
-        &store_dir,
-    );
-    let proposed = coven_foundation::config::CloudHomeConfig {
-        provider: Some(CloudProvider::CloudKit),
-        storage: HomeStorage::Browsable,
-        ..Default::default()
-    };
-
-    sync.setup_with_test_home(proposed, Arc::new(InMemoryCloudHome::new()), None)
-        .await
-        .expect("credentialless setup succeeds");
-
-    assert!(store_keys
-        .get_cloud_home_credentials()
-        .expect("read removed credentials")
-        .is_none());
 }
 
 #[cfg(feature = "oauth-providers")]

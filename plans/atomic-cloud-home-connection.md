@@ -45,6 +45,13 @@ an opaque home whose custody cannot supply its established key is locked and
 connection fails loudly. A new-home setup may generate a key because that
 operation owns its creation and rollback.
 
+Disconnect and lock also run under the connection lifecycle owner. Disconnect
+removes provider credentials before dropping the installed connection; a
+credential failure preserves that connection. Forgetting the master key removes
+it before dropping every operation that retained its unlocked value; a custody
+failure likewise preserves the connection. Neither operation returns while an
+installed sync path still retains material it reported as removed.
+
 The public key state is exactly:
 
 - `NotRequired` for browsable homes;

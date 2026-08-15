@@ -183,6 +183,10 @@ impl StoreSecurity {
         })
     }
 
+    pub(crate) fn forget_master_key(&self) -> Result<(), KeyError> {
+        self.master_keys.forget()
+    }
+
     pub(crate) fn prepare_cloud_home_key(
         &self,
         storage: coven_foundation::config::HomeStorage,
