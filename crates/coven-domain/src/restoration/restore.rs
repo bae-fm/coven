@@ -104,6 +104,7 @@ impl RestoreSource {
                         secret_key.clone(),
                         key_prefix.clone(),
                         *exact_upload_verification,
+                        clock.clone(),
                     )
                     .await?,
             ),

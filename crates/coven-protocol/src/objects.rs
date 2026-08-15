@@ -307,12 +307,25 @@ impl PreparedExactObject {
 }
 
 /// Error type for storage operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageBackendFailure {
+    Authentication,
+    PermissionDenied,
+    ContainerNotFound,
+    RegionMismatch,
+    QuotaExceeded,
+    Configuration,
+    Transport,
+    Internal,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("storage operation failed: {0}")]
     Storage(String),
-    #[error("storage backend failed while {operation}: {source}")]
+    #[error("storage backend {kind:?} failure while {operation}: {source}")]
     Backend {
+        kind: StorageBackendFailure,
         operation: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -385,10 +398,12 @@ pub enum StorageError {
 
 impl StorageError {
     pub fn backend(
+        kind: StorageBackendFailure,
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
         Self::Backend {
+            kind,
             operation: operation.into(),
             source: Box::new(source),
         }
@@ -396,11 +411,27 @@ impl StorageError {
 
     pub fn is_transport(&self) -> bool {
         match self {
-            Self::Storage(_) | Self::Backend { .. } => true,
+            Self::Storage(_)
+            | Self::Backend {
+                kind: StorageBackendFailure::Transport,
+                ..
+            } => true,
             Self::CleanupFailed { operation, .. } | Self::UnresolvedOutcome { operation, .. } => {
                 operation.is_transport()
             }
             _ => false,
+        }
+    }
+
+    pub fn backend_failure(&self) -> Option<StorageBackendFailure> {
+        match self {
+            Self::Storage(_) => Some(StorageBackendFailure::Transport),
+            Self::Backend { kind, .. } => Some(*kind),
+            Self::CleanupFailed { operation, .. } | Self::UnresolvedOutcome { operation, .. } => {
+                operation.backend_failure()
+            }
+            Self::Configuration(_) => Some(StorageBackendFailure::Configuration),
+            _ => None,
         }
     }
 

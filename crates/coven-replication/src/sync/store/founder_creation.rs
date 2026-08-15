@@ -175,7 +175,6 @@ impl<'operation> FounderStoreCreation<'operation> {
         let authority = creation_authority(&attempt);
         if authority.binding != binding
             || authority.founder_pubkey != coven_keys::keys::public_key_hex(signer)
-            || authority.founder_timestamp != founder_timestamp
             || authority.schema_version != db.schema_version()
             || authority.sync_routing_hash != db.sync_routing_hash()
         {
@@ -475,10 +474,10 @@ impl<'operation> FounderStoreCreation<'operation> {
     ) -> Result<Box<coven_database::DurableFounderGraph>, StoreProtocolRootError> {
         let db = &self.database;
         let storage = self.storage.as_ref();
-        let founder_timestamp = self.founder_timestamp;
         let signer = self.identity;
         let reservation = self.durable_descriptor_reservation().await?;
         let authority = &reservation.membership.founder.root.authority;
+        let founder_timestamp = authority.founder_timestamp.as_str();
         let exact_slots = storage
             .probe_exact_slots(db, authority.probes.exact_slots(), &authority.binding)
             .await
@@ -819,18 +818,12 @@ impl<'operation> FounderStoreCreation<'operation> {
         let database = &self.database;
         let storage = &self.storage;
         let storage_access = storage.as_ref();
-        let founder_timestamp = self.founder_timestamp;
         let identity = self.identity;
         let root = StoreRootRef {
             store_root_id: graph.root.value.descriptor.store_root_id(),
             store_root_hash: graph.root.value.object_hash(),
             object: graph.root.prepared.reference().clone(),
         };
-        if graph.initial_ack.value.last_sync != founder_timestamp {
-            return Err(StoreProtocolRootError::Invariant(
-                "durable Store founder timestamp differs from this creation request".to_string(),
-            ));
-        }
         let protocol_root = StoreProtocolRoot::parse_expected(
             &graph.root.bytes,
             &root,

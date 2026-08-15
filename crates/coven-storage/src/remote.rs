@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use super::provider_probe::ProviderProbeStorage;
 use super::CloudSyncObjectStorage;
-use crate::cloud::{BlobBody, CloudFileReadError, ExactCloudHome};
+use crate::cloud::{BlobBody, CloudFileReadError, CloudHomeError, ExactCloudHome};
 use coven_keys::encryption::{
     EncryptionError, EncryptionService, KeyTag, NoncePolicy, SealedBlobHeader,
     SEALED_BLOB_HEADER_LEN,
@@ -115,6 +115,10 @@ impl CloudSyncConnection {
 
     pub fn store_id(&self) -> &str {
         &self.store_id
+    }
+
+    pub async fn probe(&self) -> Result<(), CloudHomeError> {
+        self.home.probe().await
     }
 
     fn validate_blob_locator_home(

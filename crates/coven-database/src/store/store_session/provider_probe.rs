@@ -2,7 +2,7 @@ use super::*;
 
 use async_trait::async_trait;
 
-use coven_protocol::objects::StorageError;
+use coven_protocol::objects::{StorageBackendFailure, StorageError};
 use coven_protocol::provider::{ProviderProbeId, ProviderProbeJournal, ProviderProbeJournalRecord};
 
 impl StoreSession<'_> {
@@ -56,7 +56,13 @@ impl ProviderProbeJournal for StoreDatabase {
         let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
         self.call_store(move |session| session.load_provider_probe_journal(&key))
             .await
-            .map_err(|error| StorageError::backend("load provider probe journal", error))
+            .map_err(|error| {
+                StorageError::backend(
+                    StorageBackendFailure::Internal,
+                    "load provider probe journal",
+                    error,
+                )
+            })
     }
 
     async fn begin(
@@ -71,7 +77,13 @@ impl ProviderProbeJournal for StoreDatabase {
         let value = serde_json::to_string(&prepared)?;
         self.call_store(move |session| session.begin_provider_probe_journal(&key, &value))
             .await
-            .map_err(|error| StorageError::backend("begin provider probe journal", error))
+            .map_err(|error| {
+                StorageError::backend(
+                    StorageBackendFailure::Internal,
+                    "begin provider probe journal",
+                    error,
+                )
+            })
     }
 
     async fn advance(
@@ -90,7 +102,13 @@ impl ProviderProbeJournal for StoreDatabase {
             session.advance_provider_probe_journal(&key, &previous, &next)
         })
         .await
-        .map_err(|error| StorageError::backend("advance provider probe journal", error))
+        .map_err(|error| {
+            StorageError::backend(
+                StorageBackendFailure::Internal,
+                "advance provider probe journal",
+                error,
+            )
+        })
     }
 }
 

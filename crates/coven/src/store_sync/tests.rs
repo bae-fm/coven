@@ -300,7 +300,12 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
     let SyncError::CloudHome(cloud_home_error) = &error else {
         panic!("expected CloudHome(_), got {error:?}");
     };
-    let CloudHomeError::ConfigurationSource { operation, source } = cloud_home_error else {
+    let CloudHomeError::Backend {
+        kind: coven_protocol::objects::StorageBackendFailure::Configuration,
+        operation,
+        source,
+    } = cloud_home_error
+    else {
         panic!("expected source-bearing configuration error, got {cloud_home_error:?}");
     };
     assert_eq!(operation, "read S3 credentials");

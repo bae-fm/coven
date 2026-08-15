@@ -2225,13 +2225,13 @@ async fn sync_now_interrupts_the_startup_delay() {
                 test_keyring::install();
 
                 let (_tmp, handle) = status_test_handle("lib-sync-now-startup");
-                let home = InMemoryCloudHome::new();
-                let (probe_reached, release_probe) = home.pause_next_probe();
+                let home = Arc::new(InMemoryCloudHome::new());
                 handle
-                    .connect_sync_with_test_home(Arc::new(home), CloudCipher::Plaintext)
+                    .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
                     .await
                     .expect("connect over injected home");
 
+                let (probe_reached, release_probe) = home.pause_next_probe();
                 handle.sync_now();
                 let reached =
                     tokio::time::timeout(Duration::from_secs(1), probe_reached.notified()).await;
@@ -2262,11 +2262,11 @@ async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
                 assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
 
                 let home = InMemoryCloudHome::new();
-                let (probe_reached, release_probe) = home.pause_next_probe();
                 handle
                     .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
                     .await
                     .expect("connect over injected home");
+                let (probe_reached, release_probe) = home.pause_next_probe();
 
                 tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
                     .await
@@ -2316,11 +2316,11 @@ async fn transport_failure_after_reachability_probe_returns_to_offline() {
                 let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
                 let mut rx = handle.subscribe_sync_status();
                 let home = InMemoryCloudHome::new();
-                let (probe_reached, release_probe) = home.pause_next_probe();
                 handle
                     .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
                     .await
                     .expect("connect over injected home");
+                let (probe_reached, release_probe) = home.pause_next_probe();
 
                 tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
                     .await

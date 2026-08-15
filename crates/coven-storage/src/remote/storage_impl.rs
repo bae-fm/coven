@@ -32,7 +32,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
     }
 
     async fn probe_provider(&self) -> Result<(), StorageError> {
-        self.home.probe().await.map_err(Into::into)
+        self.probe().await.map_err(Into::into)
     }
 
     async fn set_member_access(

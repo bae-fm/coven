@@ -124,6 +124,9 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         allowed: &[
             "crates/coven-protocol/src/circle.rs",
             "crates/coven-protocol/src/circle_control.rs",
+            // Google XML API authentication is provider wire signing, owned by
+            // the storage adapter that retains the provider credentials.
+            "crates/coven-storage/src/cloud/s3/google_cloud_storage.rs",
         ],
     },
 ];

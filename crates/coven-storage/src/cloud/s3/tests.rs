@@ -8,7 +8,12 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::config::ExactUploadVerification;
+
+fn test_clock() -> ClockRef {
+    Arc::new(SystemClock)
+}
 
 struct FailingBodyReader {
     emitted: bool,
@@ -111,6 +116,7 @@ async fn test_home(
         "secret-key".to_string(),
         prefix,
         exact_upload_verification,
+        test_clock(),
     )
     .await
     .expect("construct test S3CloudHome")
@@ -143,7 +149,30 @@ struct FakeChecksumProbeState {
     bucket: String,
     enforce_checksum: bool,
     stored_positive: Arc<std::sync::atomic::AtomicBool>,
+    stored_bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    stored_key: Arc<std::sync::Mutex<String>>,
+    reads: Arc<AtomicUsize>,
+    lists: Arc<AtomicUsize>,
     rejected_mismatches: Arc<AtomicUsize>,
+    denied: Option<DeniedProbeCapability>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DeniedProbeCapability {
+    Write,
+    Read,
+    List,
+    Delete,
+}
+
+fn access_denied_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/xml")
+        .body(Body::from(
+            "<Error><Code>AccessDenied</Code><Message>capability denied</Message></Error>",
+        ))
+        .expect("build access-denied response")
 }
 
 async fn fake_s3_checksum_probe_endpoint(
@@ -161,6 +190,9 @@ async fn fake_s3_checksum_probe_endpoint(
             .expect("build bucket metadata denial");
     }
     if method == Method::PUT && uri.path().starts_with(&format!("{bucket_path}/")) {
+        if matches!(state.denied, Some(DeniedProbeCapability::Write)) {
+            return access_denied_response();
+        }
         let supplied = headers
             .get("x-amz-checksum-sha256")
             .and_then(|value| value.to_str().ok());
@@ -186,13 +218,59 @@ async fn fake_s3_checksum_probe_endpoint(
                 ))
                 .expect("build create-only rejection");
         }
+        if !uri.path().contains("bad-checksum") {
+            *state.stored_bytes.lock().expect("lock stored probe bytes") = body.to_vec();
+            *state.stored_key.lock().expect("lock stored probe key") = uri
+                .path()
+                .trim_start_matches(&format!("{bucket_path}/"))
+                .to_string();
+        }
         return Response::builder()
             .status(StatusCode::OK)
             .header("etag", "\"probe-etag\"")
             .body(Body::empty())
             .expect("build probe upload response");
     }
+    if method == Method::GET && uri.path().trim_end_matches('/') == bucket_path {
+        if matches!(state.denied, Some(DeniedProbeCapability::List)) {
+            return access_denied_response();
+        }
+        state.lists.fetch_add(1, Ordering::SeqCst);
+        let key = state
+            .stored_key
+            .lock()
+            .expect("lock stored probe key")
+            .clone();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/xml")
+            .body(Body::from(format!(
+                "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>{}</Name><Prefix>__coven_probe__/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated><Contents><Key>{key}</Key><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents></ListBucketResult>",
+                state.bucket,
+                state.stored_bytes.lock().expect("lock stored probe bytes").len()
+            )))
+            .expect("build probe list response");
+    }
+    if method == Method::GET && uri.path().starts_with(&format!("{bucket_path}/")) {
+        if matches!(state.denied, Some(DeniedProbeCapability::Read)) {
+            return access_denied_response();
+        }
+        state.reads.fetch_add(1, Ordering::SeqCst);
+        let bytes = state
+            .stored_bytes
+            .lock()
+            .expect("lock stored probe bytes")
+            .clone();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, bytes.len().to_string())
+            .body(Body::from(bytes))
+            .expect("build probe read response");
+    }
     if method == Method::DELETE && uri.path().starts_with(&format!("{bucket_path}/")) {
+        if matches!(state.denied, Some(DeniedProbeCapability::Delete)) {
+            return access_denied_response();
+        }
         return Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
@@ -211,10 +289,27 @@ async fn checksum_probe_home(
 ) -> (
     S3CloudHome,
     Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    checksum_probe_home_with_denial(enforce_checksum, None).await
+}
+
+async fn checksum_probe_home_with_denial(
+    enforce_checksum: bool,
+    denied: Option<DeniedProbeCapability>,
+) -> (
+    S3CloudHome,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
     tokio::sync::oneshot::Sender<()>,
 ) {
     let bucket = "checksum-probe-test".to_string();
     let rejected_mismatches = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let lists = Arc::new(AtomicUsize::new(0));
     let (endpoint, shutdown) = spawn_fake_s3(
         Router::new()
             .fallback(fake_s3_checksum_probe_endpoint)
@@ -222,7 +317,12 @@ async fn checksum_probe_home(
                 bucket: bucket.clone(),
                 enforce_checksum,
                 stored_positive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stored_bytes: Arc::new(std::sync::Mutex::new(Vec::new())),
+                stored_key: Arc::new(std::sync::Mutex::new(String::new())),
+                reads: reads.clone(),
+                lists: lists.clone(),
                 rejected_mismatches: rejected_mismatches.clone(),
+                denied,
             }),
     )
     .await;
@@ -236,13 +336,15 @@ async fn checksum_probe_home(
         )
         .await,
         rejected_mismatches,
+        reads,
+        lists,
         shutdown,
     )
 }
 
 #[tokio::test]
 async fn upload_checksum_probe_does_not_require_bucket_metadata_access() {
-    let (home, rejected_mismatches, shutdown) = checksum_probe_home(true).await;
+    let (home, rejected_mismatches, _, _, shutdown) = checksum_probe_home(true).await;
 
     home.probe().await.expect("checksum capability probe");
 
@@ -254,7 +356,7 @@ async fn upload_checksum_probe_does_not_require_bucket_metadata_access() {
 
 #[tokio::test]
 async fn upload_checksum_probe_rejects_an_endpoint_that_ignores_a_bad_digest() {
-    let (home, rejected_mismatches, shutdown) = checksum_probe_home(false).await;
+    let (home, rejected_mismatches, _, _, shutdown) = checksum_probe_home(false).await;
 
     let error = home
         .probe()
@@ -268,6 +370,43 @@ async fn upload_checksum_probe_rejects_an_endpoint_that_ignores_a_bad_digest() {
         .expect("shut down checksum probe endpoint");
 }
 
+#[tokio::test]
+async fn setup_probe_exercises_every_required_s3_object_capability() {
+    let (home, _, reads, lists, shutdown) = checksum_probe_home(true).await;
+
+    home.probe().await.expect("complete S3 capability probe");
+
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "probe must verify reads");
+    assert_eq!(lists.load(Ordering::SeqCst), 1, "probe must verify listing");
+    shutdown.send(()).expect("shut down probe endpoint");
+}
+
+#[tokio::test]
+async fn setup_probe_rejects_missing_write_read_list_or_delete_permission() {
+    use coven_protocol::objects::StorageBackendFailure;
+
+    for denied in [
+        DeniedProbeCapability::Write,
+        DeniedProbeCapability::Read,
+        DeniedProbeCapability::List,
+        DeniedProbeCapability::Delete,
+    ] {
+        let (home, _, _, _, shutdown) = checksum_probe_home_with_denial(true, Some(denied)).await;
+
+        let error = home
+            .probe()
+            .await
+            .expect_err("missing object permission must reject setup");
+
+        assert_eq!(
+            error.backend_failure(),
+            Some(StorageBackendFailure::PermissionDenied),
+            "denying {denied:?} produced {error:?}"
+        );
+        shutdown.send(()).expect("shut down probe endpoint");
+    }
+}
+
 async fn spawn_fake_s3_endpoint(
     object: FakeRangeObject,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
@@ -277,6 +416,170 @@ async fn spawn_fake_s3_endpoint(
             .with_state(Arc::new(object)),
     )
     .await
+}
+
+#[derive(Clone)]
+struct FakeS3ServiceFailure {
+    code: &'static str,
+    message: &'static str,
+    status: StatusCode,
+}
+
+async fn fake_s3_service_failure_endpoint(
+    State(failure): State<FakeS3ServiceFailure>,
+) -> Response<Body> {
+    Response::builder()
+        .status(failure.status)
+        .header("content-type", "application/xml")
+        .body(Body::from(format!(
+            "<Error><Code>{}</Code><Message>{}</Message></Error>",
+            failure.code, failure.message
+        )))
+        .expect("build S3 service failure")
+}
+
+#[tokio::test]
+async fn probe_preserves_actionable_s3_service_failures() {
+    use coven_protocol::objects::StorageBackendFailure;
+
+    let cases = [
+        (
+            "InvalidAccessKeyId",
+            "the access key does not exist",
+            StatusCode::UNAUTHORIZED,
+            StorageBackendFailure::Authentication,
+            false,
+        ),
+        (
+            "SignatureDoesNotMatch",
+            "the secret key is incorrect",
+            StatusCode::FORBIDDEN,
+            StorageBackendFailure::Authentication,
+            false,
+        ),
+        (
+            "AccessDenied",
+            "the caller cannot write this bucket",
+            StatusCode::FORBIDDEN,
+            StorageBackendFailure::PermissionDenied,
+            false,
+        ),
+        (
+            "NoSuchBucket",
+            "the bucket does not exist",
+            StatusCode::NOT_FOUND,
+            StorageBackendFailure::ContainerNotFound,
+            false,
+        ),
+        (
+            "PermanentRedirect",
+            "use the bucket's region endpoint",
+            StatusCode::MOVED_PERMANENTLY,
+            StorageBackendFailure::RegionMismatch,
+            false,
+        ),
+        (
+            "QuotaExceeded",
+            "the project is over quota",
+            StatusCode::FORBIDDEN,
+            StorageBackendFailure::QuotaExceeded,
+            false,
+        ),
+        (
+            "ServiceUnavailable",
+            "the provider is temporarily unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            StorageBackendFailure::Transport,
+            true,
+        ),
+        (
+            "ProviderInternalFailure",
+            "an unrecognized provider failure arrived with a server status",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StorageBackendFailure::Transport,
+            true,
+        ),
+        (
+            "BucketUnknown",
+            "an unrecognized provider failure arrived with a not-found status",
+            StatusCode::NOT_FOUND,
+            StorageBackendFailure::ContainerNotFound,
+            false,
+        ),
+        (
+            "InvalidProviderRequest",
+            "an unrecognized provider failure arrived with a client status",
+            StatusCode::BAD_REQUEST,
+            StorageBackendFailure::Configuration,
+            false,
+        ),
+    ];
+
+    for (code, message, status, expected, retryable) in cases {
+        let (endpoint, shutdown) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_service_failure_endpoint)
+                .with_state(FakeS3ServiceFailure {
+                    code,
+                    message,
+                    status,
+                }),
+        )
+        .await;
+        let home = standard_test_home("failure-bucket".to_string(), endpoint).await;
+
+        let error = home
+            .probe()
+            .await
+            .expect_err("the configured S3 failure must reject the capability probe");
+
+        assert_eq!(
+            error.backend_failure(),
+            Some(expected),
+            "S3 {code} classified as {error:?}"
+        );
+        assert_eq!(
+            error.is_retryable(),
+            retryable,
+            "S3 {code} retryability for {error:?}"
+        );
+        shutdown.send(()).expect("shut down failure endpoint");
+    }
+}
+
+#[tokio::test]
+async fn every_s3_operation_preserves_bucket_permission_denial() {
+    use coven_protocol::objects::StorageBackendFailure;
+
+    let (endpoint, shutdown) = spawn_fake_s3(
+        Router::new()
+            .fallback(fake_s3_service_failure_endpoint)
+            .with_state(FakeS3ServiceFailure {
+                code: "AccessDenied",
+                message: "the credential lacks object permissions",
+                status: StatusCode::FORBIDDEN,
+            }),
+    )
+    .await;
+    let home = standard_test_home("permission-bucket".to_string(), endpoint).await;
+
+    let errors = [
+        home.put_object("object", vec![1]).await.expect_err("put"),
+        home.read("object").await.expect_err("read"),
+        home.list("").await.expect_err("list"),
+        home.delete("object").await.expect_err("delete"),
+        home.exists("object").await.expect_err("head"),
+    ];
+    for error in errors {
+        assert_eq!(
+            error.backend_failure(),
+            Some(StorageBackendFailure::PermissionDenied),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable(), "{error:?}");
+    }
+
+    shutdown.send(()).expect("shut down failure endpoint");
 }
 
 #[derive(Clone)]
@@ -1002,24 +1305,101 @@ async fn provider_binding_canonicalizes_the_custom_origin_and_hashes_the_access_
 }
 
 #[tokio::test]
-async fn provider_binding_rejects_a_custom_endpoint_with_a_base_path() {
-    let home = standard_test_home(
+async fn constructor_rejects_a_custom_endpoint_with_a_base_path() {
+    let result = open_cloud_home(
+        CloudRuntime::new(),
         "bucket-a".to_string(),
-        "https://objects.example/s3".to_string(),
+        "us-east-1".to_string(),
+        Some("https://objects.example/s3".to_string()),
+        "access".to_string(),
+        "secret".to_string(),
+        None,
+        ExactUploadVerification::MetadataHash,
+        test_clock(),
     )
     .await;
-
-    let error = ExactSlotStorage::provider_binding(&home)
-        .await
-        .expect_err("a non-origin custom endpoint cannot be signed as an origin");
+    let error = match result {
+        Ok(_) => panic!("a non-origin custom endpoint must be rejected at construction"),
+        Err(error) => error,
+    };
 
     assert!(error.to_string().contains("origin"), "{error}");
 }
 
+#[tokio::test]
+async fn malformed_endpoint_is_an_actionable_configuration_failure() {
+    let result = open_cloud_home(
+        CloudRuntime::new(),
+        "bucket-a".to_string(),
+        "us-east-1".to_string(),
+        Some("not a URL".to_string()),
+        "access".to_string(),
+        "secret".to_string(),
+        None,
+        ExactUploadVerification::MetadataHash,
+        test_clock(),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("a malformed endpoint must be rejected before any request"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::Configuration)
+    );
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
+async fn missing_s3_setup_fields_are_actionable_configuration_failures() {
+    use coven_protocol::objects::StorageBackendFailure;
+
+    let cases = [
+        ("", "us-east-1", "access", "secret"),
+        ("bucket", "", "access", "secret"),
+        ("bucket", "us-east-1", "", "secret"),
+        ("bucket", "us-east-1", "access", ""),
+    ];
+    for (bucket, region, access_key, secret_key) in cases {
+        let result = open_cloud_home(
+            CloudRuntime::new(),
+            bucket.to_string(),
+            region.to_string(),
+            Some("https://objects.example".to_string()),
+            access_key.to_string(),
+            secret_key.to_string(),
+            None,
+            ExactUploadVerification::MetadataHash,
+            test_clock(),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("missing S3 setup fields must be rejected before any request"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.backend_failure(),
+            Some(StorageBackendFailure::Configuration),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+    }
+}
+
 #[test]
 fn sts_transport_failure_remains_retryable_transport() {
-    let error = sts_request_error(std::io::Error::other("offline"));
-    assert!(matches!(error, CloudHomeError::TransportSource { .. }));
+    let error = sts_request_error(aws_sdk_sts::error::SdkError::construction_failure(
+        std::io::Error::other("offline"),
+    ));
+    assert!(matches!(
+        error,
+        CloudHomeError::Backend {
+            kind: coven_protocol::objects::StorageBackendFailure::Transport,
+            ..
+        }
+    ));
     assert!(error.is_retryable());
 }
 
@@ -1407,6 +1787,47 @@ struct ExistingS3ObjectEnv {
     secret_key: String,
 }
 
+struct ExistingS3BucketEnv {
+    bucket: String,
+    region: String,
+    endpoint: String,
+    key_prefix: Option<String>,
+    access_key: String,
+    secret_key: String,
+}
+
+impl ExistingS3BucketEnv {
+    fn from_env() -> Self {
+        Self {
+            bucket: required_test_env("COVEN_TEST_S3_BUCKET"),
+            region: test_env("COVEN_TEST_S3_REGION", "us-east-1"),
+            endpoint: required_test_env("COVEN_TEST_S3_URL"),
+            key_prefix: optional_test_env("COVEN_TEST_S3_PREFIX"),
+            access_key: required_test_env("COVEN_TEST_S3_KEY"),
+            secret_key: required_test_env("COVEN_TEST_S3_SECRET"),
+        }
+    }
+
+    async fn open(
+        &self,
+        access_key: String,
+        secret_key: String,
+    ) -> Result<S3CloudHome, CloudHomeError> {
+        open_cloud_home(
+            CloudRuntime::new(),
+            self.bucket.clone(),
+            self.region.clone(),
+            Some(self.endpoint.clone()),
+            access_key,
+            secret_key,
+            self.key_prefix.clone(),
+            ExactUploadVerification::MetadataHash,
+            test_clock(),
+        )
+        .await
+    }
+}
+
 impl ExistingS3ObjectEnv {
     fn from_env() -> Option<Self> {
         let names = [
@@ -1468,6 +1889,7 @@ async fn read_range_succeeds_against_existing_s3_object() {
         creds.secret_key,
         None,
         ExactUploadVerification::Unchecked,
+        test_clock(),
     )
     .await
     .expect("construct S3CloudHome");
@@ -1506,6 +1928,7 @@ async fn s3_big_stack_reads_real_bytes_from_existing_object() {
         env.secret_key,
         None,
         ExactUploadVerification::Unchecked,
+        test_clock(),
     )
     .await
     .expect("construct S3CloudHome");
@@ -1548,6 +1971,7 @@ async fn probe_succeeds_against_existing_bucket() {
         creds.secret_key,
         None,
         ExactUploadVerification::UploadChecksum,
+        test_clock(),
     )
     .await
     .expect("construct S3CloudHome");
@@ -1569,6 +1993,7 @@ async fn probe_fails_for_missing_bucket() {
         creds.secret_key,
         None,
         ExactUploadVerification::UploadChecksum,
+        test_clock(),
     )
     .await
     .expect("construct S3CloudHome");
@@ -1577,10 +2002,10 @@ async fn probe_fails_for_missing_bucket() {
         .probe()
         .await
         .expect_err("probe should fail for a missing bucket");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("does not exist") || msg.contains("NoSuchBucket") || msg.contains("404"),
-        "expected missing-bucket error, got: {msg}",
+    assert_eq!(
+        err.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::ContainerNotFound),
+        "{err:?}"
     );
 }
 
@@ -1599,6 +2024,7 @@ async fn probe_fails_for_bad_secret_key() {
         creds.secret_key,
         None,
         ExactUploadVerification::UploadChecksum,
+        test_clock(),
     )
     .await
     .expect("construct good S3CloudHome");
@@ -1613,6 +2039,7 @@ async fn probe_fails_for_bad_secret_key() {
         "wrong-secret".to_string(),
         None,
         ExactUploadVerification::UploadChecksum,
+        test_clock(),
     )
     .await
     .expect("construct bad S3CloudHome");
@@ -1620,9 +2047,95 @@ async fn probe_fails_for_bad_secret_key() {
         .probe()
         .await
         .expect_err("probe should fail for bad credentials");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("rejected") || msg.contains("403") || msg.contains("SignatureDoesNotMatch"),
-        "expected credentials error, got: {msg}",
+    assert_eq!(
+        err.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::Authentication),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn configured_bucket_and_prefix_pass_the_complete_s3_capability_probe() {
+    let env = ExistingS3BucketEnv::from_env();
+    let home = env
+        .open(env.access_key.clone(), env.secret_key.clone())
+        .await
+        .expect("construct configured S3 home");
+
+    home.probe().await.expect("probe configured S3 home");
+}
+
+#[tokio::test]
+#[ignore]
+async fn configured_bucket_rejects_an_incorrect_secret_as_authentication() {
+    let env = ExistingS3BucketEnv::from_env();
+    let home = env
+        .open(env.access_key.clone(), "incorrect-secret".to_string())
+        .await
+        .expect("construct S3 home with incorrect secret");
+
+    let error = home
+        .probe()
+        .await
+        .expect_err("incorrect secret must reject the probe");
+
+    assert_eq!(
+        error.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::Authentication),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn configured_credentials_report_a_missing_bucket() {
+    let env = ExistingS3BucketEnv::from_env();
+    let home = open_cloud_home(
+        CloudRuntime::new(),
+        format!("coven-missing-{}", uuid::Uuid::new_v4()),
+        env.region,
+        Some(env.endpoint),
+        env.access_key,
+        env.secret_key,
+        None,
+        ExactUploadVerification::MetadataHash,
+        test_clock(),
+    )
+    .await
+    .expect("construct missing-bucket S3 home");
+
+    let error = home
+        .probe()
+        .await
+        .expect_err("missing bucket must reject the probe");
+
+    assert_eq!(
+        error.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::ContainerNotFound),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn configured_bucket_reports_credentials_without_object_permissions() {
+    let env = ExistingS3BucketEnv::from_env();
+    let access_key = required_test_env("COVEN_TEST_S3_DENIED_KEY");
+    let secret_key = required_test_env("COVEN_TEST_S3_DENIED_SECRET");
+    let home = env
+        .open(access_key, secret_key)
+        .await
+        .expect("construct permission-denied S3 home");
+
+    let error = home
+        .probe()
+        .await
+        .expect_err("credentials without object permissions must reject the probe");
+
+    assert_eq!(
+        error.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::PermissionDenied),
+        "{error:?}"
     );
 }

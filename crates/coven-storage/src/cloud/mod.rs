@@ -39,7 +39,7 @@ mod sharing;
 #[cfg(test)]
 mod test_server;
 
-use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ObjectSlot, StorageBackendFailure};
 pub use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
 pub use factory::PreparedOAuthCloudHome;
@@ -106,18 +106,13 @@ pub enum CloudHomeError {
     /// user must fix the configuration; retrying the same operation cannot succeed.
     #[error("configuration error: {0}")]
     Configuration(String),
-    #[error("configuration failed while {operation}: {source}")]
-    ConfigurationSource {
-        operation: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
     /// The cloud backend or the network to it failed: a request error, a non-2xx
     /// status, a malformed response. Transient — a later attempt may succeed.
     #[error("transport error: {0}")]
     Transport(String),
-    #[error("transport error while {operation}: {source}")]
-    TransportSource {
+    #[error("cloud backend {kind:?} failure while {operation}: {source}")]
+    Backend {
+        kind: StorageBackendFailure,
         operation: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -216,24 +211,30 @@ pub async fn write_cloud_object_stream(
 }
 
 impl CloudHomeError {
+    pub fn backend(
+        kind: StorageBackendFailure,
+        operation: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Backend {
+            kind,
+            operation: operation.into(),
+            source: Box::new(source),
+        }
+    }
+
     pub fn configuration(
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::ConfigurationSource {
-            operation: operation.into(),
-            source: Box::new(source),
-        }
+        Self::backend(StorageBackendFailure::Configuration, operation, source)
     }
 
     pub fn transport(
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::TransportSource {
-            operation: operation.into(),
-            source: Box::new(source),
-        }
+        Self::backend(StorageBackendFailure::Transport, operation, source)
     }
 
     /// Whether the failure is transient — worth retrying the operation unchanged —
@@ -244,7 +245,10 @@ impl CloudHomeError {
     pub fn is_retryable(&self) -> bool {
         match self {
             CloudHomeError::Transport(_)
-            | CloudHomeError::TransportSource { .. }
+            | CloudHomeError::Backend {
+                kind: StorageBackendFailure::Transport,
+                ..
+            }
             | CloudHomeError::Io(_)
             | CloudHomeError::Local(_) => true,
             CloudHomeError::BlobSource(error) | CloudHomeError::Protocol(error) => {
@@ -256,8 +260,21 @@ impl CloudHomeError {
             | CloudHomeError::AlreadyExists(_)
             | CloudHomeError::SlotCollision(_)
             | CloudHomeError::Configuration(_)
-            | CloudHomeError::ConfigurationSource { .. }
+            | CloudHomeError::Backend { .. }
             | CloudHomeError::InvalidBlobSource(_) => false,
+        }
+    }
+
+    pub fn backend_failure(&self) -> Option<StorageBackendFailure> {
+        match self {
+            Self::Backend { kind, .. } => Some(*kind),
+            Self::Transport(_) => Some(StorageBackendFailure::Transport),
+            Self::Configuration(_) => Some(StorageBackendFailure::Configuration),
+            Self::CleanupFailed { operation, .. } | Self::UnresolvedOutcome { operation, .. } => {
+                operation.backend_failure()
+            }
+            Self::BlobSource(error) | Self::Protocol(error) => error.backend_failure(),
+            _ => None,
         }
     }
 
@@ -657,15 +674,20 @@ impl From<CloudHomeError> for coven_protocol::objects::StorageError {
             CloudHomeError::Configuration(msg) => {
                 coven_protocol::objects::StorageError::Configuration(msg)
             }
-            error @ CloudHomeError::ConfigurationSource { .. } => {
-                coven_protocol::objects::StorageError::backend(
-                    "resolve cloud storage configuration",
-                    error,
-                )
-            }
-            error @ (CloudHomeError::Transport(_) | CloudHomeError::TransportSource { .. }) => {
-                coven_protocol::objects::StorageError::backend("access cloud storage", error)
-            }
+            CloudHomeError::Backend {
+                kind,
+                operation,
+                source,
+            } => coven_protocol::objects::StorageError::Backend {
+                kind,
+                operation,
+                source,
+            },
+            error @ CloudHomeError::Transport(_) => coven_protocol::objects::StorageError::backend(
+                StorageBackendFailure::Transport,
+                "access cloud storage",
+                error,
+            ),
             CloudHomeError::CleanupFailed { operation, cleanup } => {
                 coven_protocol::objects::StorageError::CleanupFailed {
                     operation: Box::new(Self::from(*operation)),

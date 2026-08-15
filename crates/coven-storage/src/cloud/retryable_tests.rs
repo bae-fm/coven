@@ -18,15 +18,15 @@ fn transport_source_survives_the_protocol_storage_boundary() {
     );
 
     let storage_error = coven_protocol::objects::StorageError::from(cloud_error);
-    let cloud_source = storage_error
-        .source()
-        .and_then(|source| source.downcast_ref::<CloudHomeError>())
-        .expect("storage error should retain the cloud error");
-    let io_source = cloud_source
+    let io_source = storage_error
         .source()
         .and_then(|source| source.downcast_ref::<std::io::Error>())
-        .expect("cloud error should retain the provider source");
+        .expect("storage error should retain the provider source");
 
     assert_eq!(io_source.kind(), std::io::ErrorKind::ConnectionReset);
+    assert_eq!(
+        storage_error.backend_failure(),
+        Some(coven_protocol::objects::StorageBackendFailure::Transport)
+    );
     assert!(storage_error.is_transport());
 }

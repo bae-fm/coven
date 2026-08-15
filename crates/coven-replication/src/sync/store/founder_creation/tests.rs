@@ -112,6 +112,46 @@ async fn merge_store_creation_failure_removes_every_founder_object_before_return
 }
 
 #[tokio::test]
+async fn failed_store_creation_retries_with_its_durable_founder_timestamp() {
+    let home = InMemoryCloudHome::new();
+    let founder = UserKeypair::generate();
+    let storage = Arc::new(CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "founder-retry-timestamp",
+        founder.clone(),
+    ));
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    let (_store_dir_temp, store_dir) = temp_store_dir();
+    home.fail_exact_create_before_call(1);
+
+    let first = crate::sync::store::Store::create(
+        store_database(&db),
+        storage.clone(),
+        store_dir.clone(),
+        "0000000000001-0000-founder",
+        &founder,
+    )
+    .await;
+    assert!(
+        first.is_err(),
+        "injected cloud publication failure must fail Store creation"
+    );
+
+    crate::sync::store::Store::create(
+        store_database(&db),
+        storage,
+        store_dir,
+        "0000000000002-0000-founder",
+        &founder,
+    )
+    .await
+    .expect("retry resumes the durable Store creation attempt");
+}
+
+#[tokio::test]
 async fn failed_founder_rollback_is_resumed_before_publication_retry() {
     let home = InMemoryCloudHome::new();
     let founder = UserKeypair::generate();

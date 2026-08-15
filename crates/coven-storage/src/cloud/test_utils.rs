@@ -67,6 +67,7 @@ pub struct InMemoryCloudHome {
     fail_exact_create_after: Arc<AtomicUsize>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
     probe_pause: Arc<Mutex<Option<ProbePause>>>,
+    probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
     exact_full_read_count: Arc<AtomicUsize>,
     exact_stream_read_count: Arc<AtomicUsize>,
     exact_reads: Arc<Mutex<Vec<ObjectSlot>>>,
@@ -122,6 +123,7 @@ impl InMemoryCloudHome {
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
+            probe_failure: Arc::new(Mutex::new(None)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_count: Arc::new(AtomicUsize::new(0)),
             exact_reads: Arc::new(Mutex::new(Vec::new())),
@@ -211,6 +213,10 @@ impl InMemoryCloudHome {
             release: release.clone(),
         });
         (reached, release)
+    }
+
+    pub fn fail_next_probe_with(&self, failure: coven_protocol::objects::StorageBackendFailure) {
+        *self.probe_failure.lock().unwrap() = Some(failure);
     }
 
     pub fn exact_create_count(&self) -> usize {
@@ -702,6 +708,13 @@ impl CloudHome for InMemoryCloudHome {
         if let Some(pause) = pause {
             pause.reached.notify_one();
             pause.release.notified().await;
+        }
+        if let Some(kind) = self.probe_failure.lock().unwrap().take() {
+            return Err(CloudHomeError::backend(
+                kind,
+                "probe in-memory cloud home",
+                std::io::Error::other("injected provider probe failure"),
+            ));
         }
         Ok(())
     }

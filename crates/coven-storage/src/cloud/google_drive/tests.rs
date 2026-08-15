@@ -261,7 +261,11 @@ async fn resumable_create_rejects_a_non_utf8_location_header() {
 
     assert!(matches!(
         error,
-        CloudHomeError::TransportSource { operation, source }
+        CloudHomeError::Backend {
+            kind: coven_protocol::objects::StorageBackendFailure::Transport,
+            operation,
+            source,
+        }
             if operation == "read append resumable create Location header for protocol/copy"
                 && source.is::<reqwest::header::ToStrError>()
     ));

@@ -35,7 +35,8 @@ pub use coven_database::rusqlite;
 
 pub use circles::{CircleError, Circles};
 pub use cloud_home_setup::{
-    CloudHomeRollbackError, CloudHomeSetupError, CloudHomeUnlockError, ConnectedCloudHome,
+    CloudHomeRollbackError, CloudHomeSetupError, CloudHomeSetupFailure, CloudHomeUnlockError,
+    ConnectedCloudHome,
 };
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{

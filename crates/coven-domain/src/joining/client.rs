@@ -290,6 +290,7 @@ async fn build_cloud_home_for_join(
                     secret_key.clone(),
                     key_prefix.clone(),
                     exact_upload_verification,
+                    clock.clone(),
                 )
                 .await?;
             Ok(Arc::new(s3))

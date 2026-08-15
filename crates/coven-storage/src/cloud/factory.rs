@@ -47,6 +47,7 @@ impl CloudHomeFactory {
         secret_key: String,
         key_prefix: Option<String>,
         exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Result<super::s3::S3CloudHome, CloudHomeError> {
         super::s3::open_cloud_home(
             self.runtime.clone(),
@@ -57,6 +58,7 @@ impl CloudHomeFactory {
             secret_key,
             key_prefix,
             exact_upload_verification,
+            clock,
         )
         .await
     }
@@ -195,6 +197,7 @@ impl CloudHomeFactory {
                         secret_key,
                         config.cloud_home.s3_key_prefix.clone(),
                         config.cloud_home.exact_upload_verification,
+                        clock.clone(),
                     )
                     .await?;
                 Ok(Box::new(s3))

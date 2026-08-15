@@ -78,7 +78,10 @@ pub(crate) fn error_chain_contains_transport(error: &(dyn std::error::Error + 's
                     matches!(
                         error,
                         CloudHomeError::Transport(_)
-                            | CloudHomeError::TransportSource { .. }
+                            | CloudHomeError::Backend {
+                                kind: coven_protocol::objects::StorageBackendFailure::Transport,
+                                ..
+                            }
                             | CloudHomeError::Io(_)
                     )
                 })

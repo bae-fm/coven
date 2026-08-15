@@ -4050,9 +4050,9 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .await
         .expect_err("the first Store package append fails");
     assert!(
-        error
-            .to_string()
-            .starts_with("publish Store write: storage backend failed while access cloud storage:"),
+        error.to_string().starts_with(
+            "publish Store write: storage backend Transport failure while access cloud storage:"
+        ),
         "cycle names the failed Store package publication: {error}",
     );
     assert!(

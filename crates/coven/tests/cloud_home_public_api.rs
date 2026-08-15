@@ -93,6 +93,12 @@ fn external_host_can_read_cloud_home_key_state(
     handle.cloud_home_key_state(storage)
 }
 
+fn external_host_can_classify_cloud_home_setup(
+    error: &coven::CloudHomeSetupError,
+) -> coven::CloudHomeSetupFailure {
+    error.failure()
+}
+
 #[test]
 fn external_host_can_name_device_join_revocation_surface() {
     fn assert_executor<T: DeviceJoinWriteRevocationExecutor>() {}
@@ -108,6 +114,7 @@ fn external_host_can_name_cloud_home_probe_surface() {
     #[cfg(feature = "oauth-providers")]
     let _ = external_host_can_setup_oauth;
     let _ = external_host_can_read_cloud_home_key_state;
+    let _ = external_host_can_classify_cloud_home_setup;
 }
 
 impl CloudKitOps for ExternalCloudKitBridge {

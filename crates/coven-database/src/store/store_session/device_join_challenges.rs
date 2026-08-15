@@ -129,6 +129,7 @@ impl coven_protocol::provider::DeviceJoinChallengePublicationJournal for StoreDa
             .await
             .map_err(|error| {
                 coven_protocol::objects::StorageError::backend(
+                    coven_protocol::objects::StorageBackendFailure::Internal,
                     "prepare device join challenge publication",
                     error,
                 )
@@ -144,6 +145,7 @@ impl coven_protocol::provider::DeviceJoinChallengePublicationJournal for StoreDa
             .await
             .map_err(|error| {
                 coven_protocol::objects::StorageError::backend(
+                    coven_protocol::objects::StorageBackendFailure::Internal,
                     "publish device join challenge",
                     error,
                 )

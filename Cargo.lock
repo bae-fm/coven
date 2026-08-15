@@ -1122,6 +1122,7 @@ dependencies = [
  "coven-protocol",
  "futures-util",
  "hex",
+ "hmac 0.13.0",
  "keyring-core",
  "md-5",
  "open",
@@ -1136,6 +1137,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

@@ -7,9 +7,14 @@ use async_trait::async_trait;
 use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
-use aws_sdk_s3::config::ResponseChecksumValidation;
+use aws_sdk_s3::config::{RequestChecksumCalculation, ResponseChecksumValidation};
+use aws_sdk_s3::error::ProvideErrorMetadata as _;
 use aws_sdk_s3::Client;
 use tracing::warn;
+
+mod google_cloud_storage;
+
+use google_cloud_storage::{GoogleCloudStorageXml, GoogleUploadSource};
 
 use super::runtime::CloudRuntime;
 use super::s3_common::{
@@ -21,7 +26,7 @@ use super::{
     UploadProgress,
 };
 use coven_foundation::id_provider::{IdRef, UuidProvider};
-use coven_protocol::objects::ObjectSlot;
+use coven_protocol::objects::{ObjectSlot, StorageBackendFailure};
 
 /// S3-backed cloud home.
 #[derive(Clone)]
@@ -35,6 +40,8 @@ pub struct S3CloudHome {
     access_key: String,
     secret_key: String,
     key_prefix: Option<String>,
+    google_xml: Option<GoogleCloudStorageXml>,
+    clock: coven_foundation::clock::ClockRef,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
     ids: IdRef,
 }
@@ -60,10 +67,15 @@ fn create_only_put_failed(
     error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
 ) -> bool {
     use aws_sdk_s3::error::ProvideErrorMetadata;
-    matches!(
-        error.code(),
-        Some("PreconditionFailed" | "ConditionalRequestConflict")
-    )
+    let status = match error {
+        aws_sdk_s3::error::SdkError::ServiceError(service) => Some(service.raw().status().as_u16()),
+        _ => None,
+    };
+    status == Some(412)
+        || matches!(
+            error.code(),
+            Some("PreconditionFailed" | "ConditionalRequestConflict")
+        )
 }
 
 fn checksum_put_failed(
@@ -103,7 +115,28 @@ impl S3CloudHome {
         secret_key: String,
         key_prefix: Option<String>,
         exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, CloudHomeError> {
+        for (name, value) in [
+            ("bucket", bucket.as_str()),
+            ("region", region.as_str()),
+            ("access key", access_key.as_str()),
+            ("secret key", secret_key.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(CloudHomeError::Configuration(format!(
+                    "S3 {name} must not be empty"
+                )));
+            }
+        }
+        let endpoint = endpoint
+            .map(|endpoint| {
+                coven_protocol::provider::canonical_custom_s3_origin(&endpoint).map_err(|error| {
+                    CloudHomeError::configuration("validate custom S3 endpoint", error)
+                })
+            })
+            .transpose()?;
+        let google_xml = GoogleCloudStorageXml::for_endpoint(endpoint.as_deref())?;
         let credentials =
             Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
@@ -134,11 +167,11 @@ impl S3CloudHome {
             );
 
         if let Some(ref ep) = endpoint {
-            builder = builder.endpoint_url(ep.trim_end_matches('/'));
+            builder = builder.endpoint_url(ep);
         }
 
         let aws_config = builder.load().await;
-        let s3_config = aws_sdk_s3::config::Builder::from(&aws_config)
+        let s3_builder = aws_sdk_s3::config::Builder::from(&aws_config)
             .force_path_style(true)
             // Coven's S3 backend is intentionally S3-compatible, not AWS-only.
             //
@@ -159,8 +192,9 @@ impl S3CloudHome {
             // contract. Managed encrypted blobs are authenticated by their AEAD tags
             // during decrypt; plaintext cloud integrity needs coven-owned metadata or
             // chunk hashes, not provider-specific response-header semantics.
-            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-            .build();
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
+        let s3_config = s3_builder.build();
         let client = Client::from_conf(s3_config);
         let sts_client = endpoint
             .is_none()
@@ -178,6 +212,8 @@ impl S3CloudHome {
             // Normalize once here (trim trailing slash, drop empty), so neither
             // full_key nor list re-trims it.
             key_prefix: normalize_prefix(key_prefix),
+            google_xml,
+            clock,
             exact_upload_verification,
             ids: std::sync::Arc::new(UuidProvider),
         })
@@ -210,7 +246,7 @@ impl S3CloudHome {
                             .checksum_type(aws_sdk_s3::types::ChecksumType::FullObject);
                     }
                     let create = request.send().await.map_err(|error| {
-                        CloudHomeError::transport(format!("multipart create {key}"), error)
+                        s3_operation_error(format!("multipart create {key}"), error)
                     })?;
                     create
                         .upload_id()
@@ -257,18 +293,55 @@ impl S3CloudHome {
         let logical_key = key.to_string();
         let client = self.client.clone();
         let bucket = self.bucket.clone();
+        let google_xml = self.google_xml.clone();
+        let endpoint = self.endpoint.clone();
+        let region = self.region.clone();
+        let access_key = self.access_key.clone();
+        let secret_key = self.secret_key.clone();
+        let now = self.clock.now();
         self.runtime
             .run(move || async move {
+                if let Some(google_xml) = google_xml {
+                    let endpoint = endpoint.ok_or_else(|| {
+                        S3CreateOnlyPutError::Other(CloudHomeError::Configuration(
+                            "Google Cloud Storage XML endpoint is absent".to_string(),
+                        ))
+                    })?;
+                    let size = data.len() as u64;
+                    let payload_hash = hex::encode(
+                        coven_protocol::store_commit::ObjectHash::digest(&data).as_bytes(),
+                    );
+                    return google_xml
+                        .create_only(
+                            &endpoint,
+                            &bucket,
+                            &region,
+                            &access_key,
+                            &secret_key,
+                            &full,
+                            GoogleUploadSource::Bytes(data),
+                            size,
+                            &payload_hash,
+                            now,
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            CloudHomeError::AlreadyExists(_) => {
+                                S3CreateOnlyPutError::AlreadyExists(logical_key)
+                            }
+                            error => S3CreateOnlyPutError::Other(error),
+                        });
+                }
                 let mut request = client
                     .put_object()
                     .bucket(&bucket)
                     .key(&full)
-                    .if_none_match("*")
                     .body(data.into());
                 if let Some(checksum) = checksum_sha256 {
                     request = request.checksum_sha256(checksum);
                 }
-                request.send().await.map_err(|error| {
+                let result = request.if_none_match("*").send().await;
+                result.map_err(|error| {
                     if create_only_put_failed(&error) {
                         S3CreateOnlyPutError::AlreadyExists(logical_key.clone())
                     } else if checksum_put_failed(&error) {
@@ -289,6 +362,48 @@ impl S3CloudHome {
                     error,
                 ))
             })?
+    }
+
+    async fn put_google_exact_create_only(
+        &self,
+        key: &str,
+        source: GoogleUploadSource,
+        size: u64,
+        payload_hash: String,
+    ) -> Result<(), CloudHomeError> {
+        let full = self.full_key(key);
+        let google_xml = self.google_xml.clone().ok_or_else(|| {
+            CloudHomeError::Configuration(
+                "Google Cloud Storage exact creator is absent".to_string(),
+            )
+        })?;
+        let endpoint = self.endpoint.clone().ok_or_else(|| {
+            CloudHomeError::Configuration("Google Cloud Storage endpoint is absent".to_string())
+        })?;
+        let bucket = self.bucket.clone();
+        let region = self.region.clone();
+        let access_key = self.access_key.clone();
+        let secret_key = self.secret_key.clone();
+        let now = self.clock.now();
+        self.runtime
+            .run(move || async move {
+                google_xml
+                    .create_only(
+                        &endpoint,
+                        &bucket,
+                        &region,
+                        &access_key,
+                        &secret_key,
+                        &full,
+                        source,
+                        size,
+                        &payload_hash,
+                        now,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|error| CloudHomeError::transport("run S3 create-only operation", error))?
     }
 
     async fn put_create_only(
@@ -399,7 +514,7 @@ impl S3CloudHome {
                         if is_not_found_code(error.code()) || status == Some(404) {
                             CloudHomeError::NotFound(key.clone())
                         } else {
-                            CloudHomeError::transport(format!("head exact S3 object {key}"), error)
+                            s3_operation_error(format!("head exact S3 object {key}"), error)
                         }
                     })?;
                 let size = response
@@ -430,6 +545,14 @@ impl S3CloudHome {
         created_response_was_observed: bool,
     ) -> Result<(), CloudHomeError> {
         use coven_foundation::config::ExactUploadVerification;
+
+        if self.google_xml.is_some() {
+            if created_response_was_observed {
+                return Ok(());
+            }
+            let bytes = self.read_at(upload.object().slot()).await?;
+            return upload.verify_stored_bytes(&bytes);
+        }
 
         match self.exact_upload_verification {
             ExactUploadVerification::UploadChecksum if created_response_was_observed => Ok(()),
@@ -468,10 +591,11 @@ impl S3CloudHome {
         let bad_key = format!("__coven_probe__/bad-checksum-{suffix}");
         let bytes = b"coven exact-slot checksum probe".to_vec();
         let checksum = sha256_bytes_base64(&bytes);
-        let sends_checksum = matches!(
-            self.exact_upload_verification,
-            ExactUploadVerification::UploadChecksum | ExactUploadVerification::MetadataHash
-        );
+        let sends_checksum = self.google_xml.is_none()
+            && matches!(
+                self.exact_upload_verification,
+                ExactUploadVerification::UploadChecksum | ExactUploadVerification::MetadataHash
+            );
         let operation = async {
             self.put_create_only(
                 &key,
@@ -491,15 +615,27 @@ impl S3CloudHome {
                 Err(CloudHomeError::AlreadyExists(_)) => {}
                 Ok(()) => {
                     return Err(CloudHomeError::Configuration(
-                        "S3 endpoint did not enforce If-None-Match on exact-slot creation"
-                            .to_string(),
+                        "S3 endpoint did not enforce atomic exact-slot creation".to_string(),
                     ));
                 }
                 Err(error) => return Err(error),
             }
 
-            match self.exact_upload_verification {
-                ExactUploadVerification::UploadChecksum => {
+            if self.read(&key).await? != bytes {
+                return Err(CloudHomeError::Configuration(
+                    "S3 exact-slot readback returned different bytes".to_string(),
+                ));
+            }
+            let listed = self.list("__coven_probe__/").await?;
+            if !listed.iter().any(|listed_key| listed_key == &key) {
+                return Err(CloudHomeError::Configuration(
+                    "S3 listing did not return the exact-slot probe object".to_string(),
+                ));
+            }
+
+            if self.google_xml.is_none() {
+                match self.exact_upload_verification {
+                    ExactUploadVerification::UploadChecksum => {
                     let wrong = sha256_bytes_base64(b"different bytes");
                     match self
                         .put_create_only_raw(&bad_key, bytes.clone(), Some(wrong))
@@ -515,7 +651,7 @@ impl S3CloudHome {
                         Err(error) => return Err(error.into_cloud_error()),
                     }
                 }
-                ExactUploadVerification::MetadataHash => {
+                    ExactUploadVerification::MetadataHash => {
                     let slot = ObjectSlot::logical(key.clone())?;
                     let metadata = self.exact_metadata(&slot).await?;
                     if metadata.size != bytes.len() as u64 || metadata.sha256 != checksum {
@@ -525,14 +661,8 @@ impl S3CloudHome {
                         ));
                     }
                 }
-                ExactUploadVerification::Readback => {
-                    if self.read(&key).await? != bytes {
-                        return Err(CloudHomeError::Configuration(
-                            "S3 exact-slot readback returned different bytes".to_string(),
-                        ));
-                    }
+                    ExactUploadVerification::Readback | ExactUploadVerification::Unchecked => {}
                 }
-                ExactUploadVerification::Unchecked => {}
             }
             Ok(())
         }
@@ -586,6 +716,7 @@ pub(crate) async fn open_cloud_home(
     secret_key: String,
     key_prefix: Option<String>,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    clock: coven_foundation::clock::ClockRef,
 ) -> Result<S3CloudHome, CloudHomeError> {
     let home_runtime = runtime.clone();
     runtime
@@ -599,6 +730,7 @@ pub(crate) async fn open_cloud_home(
                 secret_key,
                 key_prefix,
                 exact_upload_verification,
+                clock,
             )
         })
         .await
@@ -681,7 +813,7 @@ impl S3MultipartOwner {
             request = request.checksum_sha256(checksum);
         }
         let uploaded = request.send().await.map_err(|error| {
-            CloudHomeError::transport(
+            s3_operation_error(
                 format!("upload multipart part {part_number} for {}", self.key),
                 error,
             )
@@ -704,9 +836,7 @@ impl S3MultipartOwner {
             .upload_id(&self.upload_id)
             .send()
             .await
-            .map_err(|error| {
-                CloudHomeError::transport(format!("abort multipart {}", self.key), error)
-            })?;
+            .map_err(|error| s3_operation_error(format!("abort multipart {}", self.key), error))?;
         Ok(())
     }
 
@@ -740,7 +870,7 @@ impl S3MultipartOwner {
             {
                 CloudHomeError::AlreadyExists(self.logical_key.clone())
             } else {
-                CloudHomeError::transport(format!("complete multipart {}", self.key), error)
+                s3_operation_error(format!("complete multipart {}", self.key), error)
             }
         });
         match operation {
@@ -846,8 +976,12 @@ fn aws_caller_identity(
     Ok((fields[1].to_string(), principal))
 }
 
-fn sts_request_error(error: impl std::error::Error + Send + Sync + 'static) -> CloudHomeError {
-    CloudHomeError::transport("request STS caller identity", error)
+fn sts_request_error(
+    error: aws_sdk_sts::error::SdkError<
+        aws_sdk_sts::operation::get_caller_identity::GetCallerIdentityError,
+    >,
+) -> CloudHomeError {
+    s3_operation_error("request STS caller identity", error)
 }
 
 #[async_trait]
@@ -908,20 +1042,86 @@ where
     CloudHomeError::transport(format!("{context} for {key}"), err)
 }
 
+fn s3_backend_failure(code: Option<&str>, status: Option<u16>) -> StorageBackendFailure {
+    fn from_status(status: Option<u16>) -> StorageBackendFailure {
+        match status {
+            Some(401) => StorageBackendFailure::Authentication,
+            Some(403) => StorageBackendFailure::PermissionDenied,
+            Some(404) => StorageBackendFailure::ContainerNotFound,
+            Some(429 | 500..=599) | None => StorageBackendFailure::Transport,
+            Some(_) => StorageBackendFailure::Configuration,
+        }
+    }
+
+    match code {
+        Some(
+            "InvalidAccessKeyId"
+            | "InvalidAccessKey"
+            | "InvalidClientTokenId"
+            | "SignatureDoesNotMatch"
+            | "IncompleteSignature"
+            | "MissingAuthenticationToken"
+            | "UnrecognizedClientException"
+            | "InvalidToken"
+            | "ExpiredToken"
+            | "TokenRefreshRequired",
+        ) => StorageBackendFailure::Authentication,
+        Some("AccessDenied" | "AllAccessDisabled" | "AccountProblem") => {
+            StorageBackendFailure::PermissionDenied
+        }
+        Some("NoSuchBucket") => StorageBackendFailure::ContainerNotFound,
+        Some(
+            "PermanentRedirect"
+            | "AuthorizationHeaderMalformed"
+            | "IncorrectEndpoint"
+            | "IllegalLocationConstraintException",
+        ) => StorageBackendFailure::RegionMismatch,
+        Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage") => {
+            StorageBackendFailure::QuotaExceeded
+        }
+        Some(
+            "InternalError"
+            | "RequestTimeout"
+            | "RequestTimeoutException"
+            | "ServiceUnavailable"
+            | "SlowDown"
+            | "Throttling"
+            | "ThrottlingException"
+            | "RequestLimitExceeded",
+        ) => StorageBackendFailure::Transport,
+        Some(_) | None => from_status(status),
+    }
+}
+
+fn s3_operation_error<E>(
+    operation: impl Into<String>,
+    error: aws_sdk_s3::error::SdkError<E>,
+) -> CloudHomeError
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
+{
+    let status = match &error {
+        aws_sdk_s3::error::SdkError::ServiceError(service) => Some(service.raw().status().as_u16()),
+        _ => None,
+    };
+    let kind = s3_backend_failure(error.code(), status);
+    CloudHomeError::backend(kind, operation, error)
+}
+
 /// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and
 /// message (e.g. `AccessDenied`, `PermanentRedirect`, `SignatureDoesNotMatch`)
 /// rather than the opaque "service error". `NoSuchKey` becomes `NotFound`;
 /// non-service failures (timeouts, connection errors) fall back to their own
 /// description. Generic over the response type so it serves both `read` and
 /// `read_range` without naming the smithy HTTP type.
-fn get_object_error<R: std::fmt::Debug + Send + Sync + 'static>(
+fn get_object_error(
     key: &str,
-    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError, R>,
+    err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
 ) -> CloudHomeError {
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
         Some("NoSuchKey") => CloudHomeError::NotFound(key.to_string()),
-        Some(code) => CloudHomeError::transport(
+        Some(code) => s3_operation_error(
             match err.message() {
                 Some(msg) => format!("get {key}: S3 {code}: {msg}"),
                 None => format!("get {key}: S3 {code} (no message provided)"),
@@ -930,7 +1130,7 @@ fn get_object_error<R: std::fmt::Debug + Send + Sync + 'static>(
         ),
         // Not a service error (timeout / connection / dispatch) — its own
         // Display carries the detail.
-        None => CloudHomeError::transport(format!("get {key}"), err),
+        None => s3_operation_error(format!("get {key}"), err),
     }
 }
 
@@ -951,24 +1151,14 @@ fn put_object_error(
 ) -> CloudHomeError {
     use aws_sdk_s3::error::ProvideErrorMetadata;
     match err.code() {
-        Some("AccessDenied") => CloudHomeError::configuration(
-            "write S3 object; credentials do not permit writing to this bucket",
-            err,
-        ),
-        Some("NoSuchBucket") => {
-            CloudHomeError::configuration("write S3 object; bucket does not exist", err)
-        }
-        Some("OverQuota" | "QuotaExceeded") => {
-            CloudHomeError::configuration("write S3 object; storage quota is exceeded", err)
-        }
-        Some(code) => CloudHomeError::transport(
+        Some(code) => s3_operation_error(
             match err.message() {
                 Some(msg) => format!("put {key}: S3 {code}: {msg}"),
                 None => format!("put {key}: S3 {code} (no message provided)"),
             },
             err,
         ),
-        None => CloudHomeError::transport(format!("put {key}"), err),
+        None => s3_operation_error(format!("put {key}"), err),
     }
 }
 
@@ -1113,7 +1303,7 @@ impl CloudHome for S3CloudHome {
                     let resp = req
                         .send()
                         .await
-                        .map_err(|e| CloudHomeError::transport(format!("list {prefix}"), e))?;
+                        .map_err(|error| s3_operation_error(format!("list {prefix}"), error))?;
 
                     for obj in resp.contents() {
                         let Some(key) = obj.key() else {
@@ -1171,7 +1361,7 @@ impl CloudHome for S3CloudHome {
                     // outcomes, so deleting an already-absent object must succeed. Swallow
                     // not-found and surface only real errors.
                     if !is_not_found_code(e.code()) {
-                        return Err(CloudHomeError::transport(format!("delete {key}"), e));
+                        return Err(s3_operation_error(format!("delete {key}"), e));
                     }
                 }
                 Ok(())
@@ -1199,7 +1389,7 @@ impl CloudHome for S3CloudHome {
                         if is_not_found_code(e.code()) || status == Some(404) {
                             Ok(false)
                         } else {
-                            Err(CloudHomeError::transport(format!("head {key}"), e))
+                            Err(s3_operation_error(format!("head {key}"), e))
                         }
                     }
                 }
@@ -1321,14 +1511,41 @@ impl ExactSlotStorage for S3CloudHome {
                 | coven_foundation::config::ExactUploadVerification::MetadataHash
         )
         .then(|| sha256_base64(upload.object().stored_hash()));
-        let operation = S3CloudHome::create_at_slot(
-            self,
-            upload.object().slot(),
-            upload.body().await?,
-            checksum,
-            progress,
-        )
-        .await;
+        let operation = match self.google_xml.is_none() {
+            true => {
+                S3CloudHome::create_at_slot(
+                    self,
+                    upload.object().slot(),
+                    upload.body().await?,
+                    checksum,
+                    progress,
+                )
+                .await
+            }
+            false => {
+                upload.object().slot().require_logical_key_for("S3")?;
+                let source = match upload.source() {
+                    super::ExactUploadSource::Bytes(bytes) => {
+                        GoogleUploadSource::Bytes(bytes.to_vec())
+                    }
+                    super::ExactUploadSource::File(path) => {
+                        GoogleUploadSource::File(path.to_path_buf())
+                    }
+                };
+                let result = self
+                    .put_google_exact_create_only(
+                        upload.object().slot().logical_key(),
+                        source,
+                        upload.object().stored_size(),
+                        hex::encode(upload.object().stored_hash().as_bytes()),
+                    )
+                    .await;
+                if result.is_ok() {
+                    progress(upload.object().stored_size());
+                }
+                result
+            }
+        };
         super::exact_upload::settle_exact_create(operation, |observed| {
             self.verify_exact_upload(upload, observed)
         })

@@ -241,6 +241,10 @@ impl StoreSync {
         credentials: &Arc<PreparedCloudHomeCredentials>,
         driver: SyncDriver,
     ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        if let Err(error) = storage.probe().await {
+            let failure = CloudHomeSetupError::Connection(Box::new(error.into()));
+            return Err(failure.with_rollback(rollback(key, credentials)));
+        }
         let initialization = match self
             .prepare_storage_initialization(
                 config,
