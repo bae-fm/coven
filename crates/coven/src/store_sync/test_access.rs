@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use coven_keys::encryption::EncryptionService;
 
 impl StoreSync {
     #[cfg(test)]
@@ -19,7 +21,10 @@ impl StoreSync {
     pub(super) fn stop_loop(&self) -> Result<(), SyncError> {
         let connection = self.state.read().expect("read Store sync connection");
         match &*connection {
-            SyncConnection::WithCloud { sync, .. } => sync.stop().map_err(SyncError::Loop),
+            SyncConnection::WithCloud { sync, .. } => {
+                sync.stop();
+                Ok(())
+            }
             _ => Err(SyncError::LoopNotRunning),
         }
     }

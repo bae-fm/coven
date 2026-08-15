@@ -524,10 +524,15 @@ impl EffectiveAccessFixture {
             Some(coven_keys::encryption::EncryptionService::from_key(
                 [42; 32],
             )),
+            {
+                let custody = crate::sync::test_helpers::TestCustody::default();
+                custody.set_initial_key([42; 32]);
+                std::sync::Arc::new(custody)
+            },
         )
         .await
         .expect("prepare effective-access owner sync")
-        .initialize()
+        .initialize(None)
         .await
         .expect("initialize effective-access owner sync");
         components

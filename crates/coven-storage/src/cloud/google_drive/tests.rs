@@ -19,7 +19,8 @@ fn home() -> GoogleDriveCloudHome {
             refresh_token: None,
             expires_at: None,
         },
-        StoreKeys::bind("test".to_string()),
+        coven_keys::keys::CloudHomeCredentialsOwner::new(StoreKeys::bind("test".to_string()))
+            .current(),
         Arc::new(coven_foundation::clock::SystemClock),
         config,
         "Google Drive",

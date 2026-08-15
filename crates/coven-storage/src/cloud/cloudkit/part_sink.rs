@@ -72,7 +72,6 @@ impl Drop for CloudKitPartSink {
                     upload_id = %self.upload_id,
                     "CloudKit cancellation failed to discard multipart part"
                 );
-                std::process::abort();
             }
         }
     }

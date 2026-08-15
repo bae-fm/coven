@@ -77,8 +77,8 @@ impl CovenReadHandle {
         blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
-        let cloud_homes =
-            coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
+        let cloud_homes = coven_storage::cloud::CloudHomeFactory::new(oauth_clients);
+        let credentials = coven_keys::keys::CloudHomeCredentialsOwner::new(key_service.clone());
         let security = StoreSecurity::new(
             key_service,
             key_custody,
@@ -88,6 +88,7 @@ impl CovenReadHandle {
         let cloud_storage = StoreCloudStorage::new(
             security.clone(),
             cloud_homes,
+            credentials,
             clock,
             cloudkit_ops,
             blob_chunking,

@@ -268,6 +268,9 @@ async fn build_cloud_home_for_join(
 
     #[cfg(not(feature = "oauth-providers"))]
     let _ = (&lib_ks, oauth_clients, &oauth_tokens, &clock);
+    #[cfg(feature = "oauth-providers")]
+    let credential_custody =
+        coven_keys::keys::CloudHomeCredentialsOwner::new(lib_ks.clone()).current();
 
     match join_info {
         CloudHomeJoinInfo::S3 {
@@ -298,7 +301,7 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients.config_for(CloudProvider::GoogleDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
-                lib_ks.clone(),
+                credential_custody.clone(),
                 clock,
                 oauth_config,
                 "Google Drive",
@@ -317,7 +320,7 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients.config_for(CloudProvider::Dropbox)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
-                lib_ks.clone(),
+                credential_custody.clone(),
                 clock,
                 oauth_config,
                 "Dropbox",
@@ -339,7 +342,7 @@ async fn build_cloud_home_for_join(
             let oauth_config = oauth_clients.config_for(CloudProvider::OneDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
-                lib_ks.clone(),
+                credential_custody,
                 clock,
                 oauth_config,
                 "OneDrive",

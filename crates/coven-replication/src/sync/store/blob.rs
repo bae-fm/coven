@@ -718,10 +718,8 @@ impl RemoteBlobSourceInner<'_> {
     }
 }
 
-/// The connected blob access the host composes resolves to this one, so the
-/// transitions' staging port is satisfied here directly when a fixture wires a
-/// connected Store without the host's resolver.
-#[cfg(any(test, feature = "test-utils"))]
+/// A connected sync session uses this exact remote source for verified local
+/// copies, so a locality transition cannot resolve against a different cloud.
 #[async_trait::async_trait]
 impl crate::blob::transition::VerifiedLocalCopyStaging for RemoteStoreBlobAccess {
     async fn stage_verified_local_copy(

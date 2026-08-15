@@ -74,6 +74,7 @@ pub(crate) enum Region {
 /// check so new modules are classified when they are introduced.
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("circles", Region::Host),
+    ("cloud_home_setup", Region::Host),
     ("coven", Region::Host),
     ("handle", Region::Host),
     ("live_query", Region::Host),

@@ -163,6 +163,11 @@ fn cloudkit_config(owner_zone: Option<(&str, &str)>) -> Config {
     config
 }
 
+fn credentials(config: &Config) -> Arc<dyn CloudHomeCredentialCustody> {
+    coven_keys::keys::CloudHomeCredentialsOwner::new(StoreKeys::bind(config.store_id.clone()))
+        .current()
+}
+
 #[tokio::test]
 async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     let mut config = Config::with_defaults(
@@ -172,14 +177,14 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
     );
     config.cloud_home.provider = Some(CloudProvider::S3);
     config.cloud_home.s3_bucket = None;
-    let factory = CloudHomeFactory::new(
-        StoreKeys::bind(config.store_id.clone()),
-        crate::oauth::OAuthClients::empty(),
-    );
+    let factory = CloudHomeFactory::new(crate::oauth::OAuthClients::empty());
     let clock: coven_foundation::clock::ClockRef =
         std::sync::Arc::new(FixedClock(chrono::Utc::now()));
 
-    let error = match factory.create(&config, clock, None).await {
+    let error = match factory
+        .create(&config, clock, None, credentials(&config))
+        .await
+    {
         Ok(_) => panic!("a provider with no bucket must not build a cloud home"),
         Err(error) => error,
     };
@@ -191,14 +196,13 @@ async fn s3_without_a_bucket_is_a_non_retryable_configuration_error() {
 #[tokio::test]
 async fn neither_owner_nor_zone_builds_a_private_home() {
     let config = cloudkit_config(None);
-    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: coven_foundation::clock::ClockRef =
         std::sync::Arc::new(FixedClock(chrono::Utc::now()));
-    let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
+    let factory = CloudHomeFactory::new(crate::oauth::OAuthClients::empty());
 
     let home = factory
-        .create(&config, clock, Some(ops.clone()))
+        .create(&config, clock, Some(ops.clone()), credentials(&config))
         .await
         .expect("private CloudKit config builds a home");
     home.list("").await.expect("list against the built home");
@@ -212,14 +216,13 @@ async fn neither_owner_nor_zone_builds_a_private_home() {
 #[tokio::test]
 async fn both_owner_and_zone_build_a_shared_home() {
     let config = cloudkit_config(Some(("owner-name", "zone-name")));
-    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: coven_foundation::clock::ClockRef =
         std::sync::Arc::new(FixedClock(chrono::Utc::now()));
-    let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
+    let factory = CloudHomeFactory::new(crate::oauth::OAuthClients::empty());
 
     let home = factory
-        .create(&config, clock, Some(ops.clone()))
+        .create(&config, clock, Some(ops.clone()), credentials(&config))
         .await
         .expect("shared CloudKit config builds a home");
     home.list("").await.expect("list against the built home");
@@ -237,13 +240,14 @@ async fn both_owner_and_zone_build_a_shared_home() {
 async fn mixed_owner_zone_is_a_configuration_error() {
     let mut config = cloudkit_config(None);
     config.cloud_home.cloudkit_owner_name = Some("owner-name".to_string());
-    let key_service = StoreKeys::bind(config.store_id.clone());
     let ops = std::sync::Arc::new(ScopeRecordingOps::new());
     let clock: coven_foundation::clock::ClockRef =
         std::sync::Arc::new(FixedClock(chrono::Utc::now()));
-    let factory = CloudHomeFactory::new(key_service, crate::oauth::OAuthClients::empty());
+    let factory = CloudHomeFactory::new(crate::oauth::OAuthClients::empty());
 
-    let result = factory.create(&config, clock, Some(ops)).await;
+    let result = factory
+        .create(&config, clock, Some(ops), credentials(&config))
+        .await;
     match result {
         Ok(_) => panic!("mixed owner/zone must not build a home"),
         Err(CloudHomeError::Configuration(message)) => {

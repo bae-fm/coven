@@ -587,10 +587,11 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
             expected_store_root: store.root().clone(),
         },
         Some(routing()),
+        circle_test_custody(),
     )
     .await
     .expect("prepare Circle owner sync")
-    .initialize()
+    .initialize(None)
     .await
     .expect("initialize Circle owner sync");
     components

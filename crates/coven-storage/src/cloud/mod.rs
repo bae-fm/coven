@@ -41,6 +41,8 @@ mod test_server;
 use coven_protocol::objects::ObjectSlot;
 pub use factory::CloudHomeFactory;
 #[cfg(feature = "oauth-providers")]
+pub use factory::PreparedOAuthCloudHome;
+#[cfg(feature = "oauth-providers")]
 pub(crate) use google_drive::{folder_search_query, supports_all_drives};
 #[cfg(feature = "oauth-providers")]
 pub use setup::SetupError;

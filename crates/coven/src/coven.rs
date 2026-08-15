@@ -296,7 +296,7 @@ impl CovenBuilder {
     /// identity) can `open()` a store and use it fully for rows and Local
     /// blobs. The first read of any key happens lazily, at the specific call
     /// that needs it ([`CovenHandle::connect_sync`],
-    /// [`CovenHandle::master_key_fingerprint`], and similar).
+    /// [`CovenHandle::cloud_home_key_state`], and similar).
     pub fn open(self) -> CovenResult<CovenHandle> {
         let config = self.config.current();
         let tables = validated_synced_tables(&config, self.synced_tables)?;

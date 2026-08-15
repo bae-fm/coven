@@ -160,12 +160,12 @@ preset and what each one protects against.
 coven::set_keyring_service("todos")?;
 ```
 
-A fresh store has no master key yet:
-[`initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
-generates one and establishes it under whatever custody the builder
-selected; coven refuses to run it again once one is established, so a
-corrupt entry is never silently overwritten. This store also needs its own
-signing identity — coven never mints one implicitly (see
+A fresh store has no master key yet. The atomic cloud-home setup generates one
+for an opaque home, prepares the provider connection under that proposed key,
+then commits the key, provider credentials, and replacement connection as one
+operation. A failed setup restores the previous custody state and leaves the
+previous connection installed. This store also needs its own signing identity —
+coven never mints one implicitly (see
 [Keys](/docs/keys#no-silent-identity-minting)) —
 [`initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
 establishes it explicitly, the same way, for a store created fresh (joining
@@ -173,17 +173,17 @@ or restoring an existing store establishes its identity as part of that
 instead).
 
 ```rust
-handle.initialize_master_key()?;
 handle.initialize_identity()?;
+let connected = handle
+    .setup_s3_cloud_home(cloud_home, access_key, secret_key)
+    .await?;
+// Persist `connected.cloud_home` through the host's ConfigProvider source.
 ```
 
-Once a provider is connected, start sync through the handle. Which rows carry
-blobs is declared on the synced tables passed to `open` (see
+Persist the returned cloud-home config only after setup succeeds. Existing
+stores reconnect their already-committed config with `connect_sync`. Which rows
+carry blobs is declared on the synced tables passed to `open` (see
 [Attachments](#attachments)), not here.
-
-```rust
-handle.connect_sync().await?;
-```
 
 After a write, nudge the loop with `sync_now` so the local edit goes out
 promptly; the loop also runs on its own timer, so a missed trigger still syncs.

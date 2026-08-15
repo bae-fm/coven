@@ -232,6 +232,12 @@ fn circle_test_cloud_storage(
     )
 }
 
+fn circle_test_custody() -> Arc<crate::sync::test_helpers::TestCustody> {
+    let custody = Arc::new(crate::sync::test_helpers::TestCustody::default());
+    custody.set_initial_key([42; 32]);
+    custody
+}
+
 /// The initialized production sync components a Circle test's owner drives.
 async fn prepare_owner_sync_components(
     db: &Database,
@@ -240,6 +246,7 @@ async fn prepare_owner_sync_components(
     store_dir: &coven_foundation::store_dir::StoreDir,
     signer: &UserKeypair,
     store_id: &str,
+    master_keys: Arc<crate::sync::test_helpers::TestCustody>,
 ) -> crate::sync::cycle::SyncComponents {
     crate::sync::cycle::PreparedSyncComponents::prepare(
         coven_database::StoreDatabase::new(db),
@@ -250,10 +257,11 @@ async fn prepare_owner_sync_components(
             expected_store_root: store.root().clone(),
         },
         Some(EncryptionService::from_key([42; 32])),
+        master_keys,
     )
     .await
     .expect("prepare Circle owner sync")
-    .initialize()
+    .initialize(None)
     .await
     .expect("initialize Circle owner sync")
 }
@@ -276,7 +284,7 @@ async fn finalize_circle_epoch_close(
         .await
         .expect("publish local Circle epoch-close response");
     components
-        .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+        .run_cycle(&coven_foundation::clock::SystemClock, None)
         .await
         .expect("activate the Circle epoch-close outcome");
 }

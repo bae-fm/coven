@@ -1855,7 +1855,7 @@ mod test_device {
         pub async fn run_cycle_with(
             &self,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
+            master_keys: Option<std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>>,
             observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         {
@@ -1872,7 +1872,7 @@ mod test_device {
         pub async fn run_cycle_with_interceptor<I>(
             &self,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
+            master_keys: Option<std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>>,
             observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
             interceptor: I,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
@@ -1895,7 +1895,7 @@ mod test_device {
             store: std::sync::Arc<crate::sync::store::Store>,
             storage: std::sync::Arc<S>,
             clock: &dyn coven_foundation::clock::Clock,
-            master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
+            master_keys: Option<std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>>,
             observer: Option<&dyn coven_protocol::blob::BlobTransitionObserver>,
         ) -> Result<crate::sync::cycle::SyncCycleResult, crate::sync::cycle::SyncCycleFailure>
         where
@@ -1908,8 +1908,9 @@ mod test_device {
                 storage,
                 self.storage.store_id().to_string(),
                 self.device_id.clone(),
+                master_keys.unwrap_or_else(|| std::sync::Arc::new(super::TestCustody::default())),
             );
-            components.run_cycle(clock, master_keys, observer).await
+            components.run_cycle(clock, observer).await
         }
 
         pub fn current_keyring_for_test(&self) -> Option<coven_storage::CloudKeyringFacts> {

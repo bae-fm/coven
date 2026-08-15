@@ -9,6 +9,7 @@
 //! ```
 
 pub(crate) mod circles;
+mod cloud_home_setup;
 pub(crate) mod coven;
 mod handle;
 mod live_query;
@@ -31,6 +32,7 @@ mod blob_facade_tests;
 pub use coven_database::rusqlite;
 
 pub use circles::{CircleError, Circles};
+pub use cloud_home_setup::{CloudHomeRollbackError, CloudHomeSetupError, ConnectedCloudHome};
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
@@ -149,3 +151,4 @@ pub use live_query::{
     ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,
 };
 pub use read_handle::CovenReadHandle;
+pub use store_security::CloudHomeKeyState;

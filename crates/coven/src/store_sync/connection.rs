@@ -14,7 +14,6 @@ impl StoreSync {
     pub(crate) fn new(
         config_provider: ConfigProvider,
         security: StoreSecurity,
-        master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
         database: StoreDatabase,
         #[cfg(test)] store_dir: coven_foundation::store_dir::StoreDir,
         clock: ClockRef,
@@ -22,12 +21,11 @@ impl StoreSync {
         open_guard: Arc<StoreOpenGuard>,
         cloud_storage: StoreCloudStorage,
         blob_access: crate::store_blobs::StoreBlobAccess,
-        local_blob_transitions: coven_replication::blob::transition::LocalBlobTransitions,
+        runtime_factory: Arc<dyn coven_replication::sync::sync_loop::SyncLoopRuntimeFactory>,
     ) -> Self {
         Self {
             config_provider,
             security,
-            master_keys,
             database,
             #[cfg(test)]
             store_dir,
@@ -36,10 +34,10 @@ impl StoreSync {
             open_guard,
             cloud_storage,
             blob_access,
-            local_blob_transitions,
             state: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            runtime_factory,
             #[cfg(test)]
             stopped_loops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -65,7 +63,7 @@ impl StoreSync {
         *self.state.write().expect("write Store sync connection") = SyncConnection::WithoutCloud;
     }
 
-    pub(super) fn stop_current(&self) -> Result<bool, SyncError> {
+    pub(super) fn stop_current(&self) -> bool {
         let previous = std::mem::replace(
             &mut *self.state.write().expect("write Store sync connection"),
             SyncConnection::Disconnected,
@@ -73,12 +71,12 @@ impl StoreSync {
         let was_connected = !matches!(previous, SyncConnection::Disconnected);
         self.blob_access.clear_connection();
         if let SyncConnection::WithCloud { sync, .. } = previous {
-            sync.stop().map_err(SyncError::Loop)?;
+            sync.stop();
             #[cfg(test)]
             self.stopped_loops
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        Ok(was_connected)
+        was_connected
     }
 
     pub(crate) fn is_connected(&self) -> bool {
@@ -116,13 +114,18 @@ impl StoreSync {
         storage: Option<Arc<CloudSyncConnection>>,
     ) -> Result<(), SyncError> {
         let Some(storage) = storage else {
+            self.stop_current();
             self.install_without_cloud();
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
         };
 
-        self.install_storage_connection(config, storage, SyncDriver::Loop)
-            .await
+        let prepared = self
+            .prepare_storage_connection(config, storage, SyncDriver::Loop)
+            .await?;
+        self.stop_current();
+        prepared.install(self);
+        Ok(())
     }
 
     pub(super) async fn replace_connection(
@@ -135,15 +138,14 @@ impl StoreSync {
                 .cloud_storage
                 .admit(&config, cloudkit_ops)
                 .map_err(Self::map_storage_setup_error)?;
-            self.stop_current()?;
-            Some(Arc::new(
+            let storage = Arc::new(
                 admitted
                     .open(None)
                     .await
                     .map_err(Self::map_storage_setup_error)?,
-            ))
+            );
+            Some(storage)
         } else {
-            self.stop_current()?;
             None
         };
         self.build_connection(config, storage).await
@@ -162,6 +164,17 @@ impl StoreSync {
             .probe(config)
             .await
             .map_err(Self::map_storage_setup_error)
+    }
+
+    pub(crate) async fn import_master_key(
+        &self,
+        serialized: &str,
+    ) -> Result<(), coven_keys::keys::MasterKeyError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.is_connected() {
+            return Err(coven_keys::keys::MasterKeyError::CloudHomeConnected);
+        }
+        self.security.import_master_key(serialized)
     }
 
     pub(crate) async fn connect_with_cloudkit(
@@ -189,14 +202,17 @@ impl StoreSync {
             .cloud_storage
             .admit_home(&config, home)
             .map_err(Self::map_storage_setup_error)?;
-        self.stop_current()?;
         let storage = Arc::new(
             admitted
                 .open(Some(cipher))
                 .map_err(Self::map_storage_setup_error)?,
         );
-        self.install_storage_connection(config, storage, driver)
-            .await
+        let prepared = self
+            .prepare_storage_connection(config, storage, driver)
+            .await?;
+        self.stop_current();
+        prepared.install(self);
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -238,7 +254,6 @@ impl StoreSync {
             .cloud_storage
             .admit_home(&config, home)
             .map_err(Self::map_storage_setup_error)?;
-        self.stop_current()?;
         let storage = Arc::new(admitted.open(None).map_err(Self::map_storage_setup_error)?);
         self.build_connection(config, Some(storage)).await?;
         info!("store sync connected over an injected test cloud home");
@@ -255,13 +270,7 @@ impl StoreSync {
     }
 
     pub(crate) fn stop(&self) {
-        let was_connected = match self.stop_current() {
-            Ok(was_connected) => was_connected,
-            Err(stop_error) => {
-                error!("stop_sync failed: {stop_error}");
-                false
-            }
-        };
+        let was_connected = self.stop_current();
         if was_connected {
             self.install_without_cloud();
         } else {
@@ -270,9 +279,7 @@ impl StoreSync {
     }
 
     pub(crate) fn disconnect(&self) {
-        if let Err(stop_error) = self.stop_current() {
-            error!("disconnect_sync failed to stop sync: {stop_error}");
-        }
+        self.stop_current();
         info!("store sync disconnected");
     }
 

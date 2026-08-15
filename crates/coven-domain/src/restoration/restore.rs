@@ -82,6 +82,10 @@ impl RestoreSource {
             Ok::<_, BootstrapError>(tokens)
         };
 
+        #[cfg(feature = "oauth-providers")]
+        let credential_custody =
+            coven_keys::keys::CloudHomeCredentialsOwner::new(store_keys.clone()).current();
+
         let home: Arc<dyn ExactCloudHome> = match join_info {
             CloudHomeJoinInfo::S3 {
                 bucket,
@@ -130,7 +134,7 @@ impl RestoreSource {
                     .config_for(coven_foundation::config::CloudProvider::GoogleDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
-                    store_keys.clone(),
+                    credential_custody.clone(),
                     clock,
                     oauth_config,
                     "Google Drive",
@@ -149,7 +153,7 @@ impl RestoreSource {
                     oauth_clients.config_for(coven_foundation::config::CloudProvider::Dropbox)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
-                    store_keys.clone(),
+                    credential_custody.clone(),
                     clock,
                     oauth_config,
                     "Dropbox",
@@ -171,7 +175,7 @@ impl RestoreSource {
                     oauth_clients.config_for(coven_foundation::config::CloudProvider::OneDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
-                    store_keys.clone(),
+                    credential_custody,
                     clock,
                     oauth_config,
                     "OneDrive",

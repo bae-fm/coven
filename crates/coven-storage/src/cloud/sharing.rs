@@ -348,7 +348,10 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            StoreKeys::bind(format!("sharing-pagination-{label}")),
+            coven_keys::keys::CloudHomeCredentialsOwner::new(StoreKeys::bind(format!(
+                "sharing-pagination-{label}"
+            )))
+            .current(),
             Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_000, 0).unwrap())),
             oauth_config("http://127.0.0.1/token".to_string()),
             "Provider",

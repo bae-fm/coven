@@ -142,21 +142,6 @@ impl StoreBlobAccess {
     pub(crate) async fn all_pinned(&self, blobs: &[RowBlobRef]) -> Result<bool, BlobCacheError> {
         self.local.all_pinned(blobs).await
     }
-
-    pub(crate) async fn stage_verified_local_copy(
-        &self,
-        reference: &RowBlobRef,
-        destination: &std::path::Path,
-    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
-        match self.resolve().await? {
-            ResolvedBlobAccess::Remote(access) => {
-                access
-                    .stage_verified_local_copy(reference, destination)
-                    .await
-            }
-            ResolvedBlobAccess::Local(_) => Err(BlobCacheError::NoCloudHome),
-        }
-    }
 }
 
 struct ResolvedBlobConnection {
@@ -187,8 +172,7 @@ enum ResolvedBlobAccess {
 impl ResolvedBlobAccess {
     /// Whichever access this connection resolved to, as the operations both
     /// answer the same way. Naming the variant is only needed for what a
-    /// cloud-backed store alone can do — see
-    /// [`StoreBlobAccess::stage_verified_local_copy`].
+    /// cloud-backed store alone can do.
     fn access(&self) -> &dyn BlobAccess {
         match self {
             Self::Local(access) => access,
@@ -316,16 +300,5 @@ impl StoreBlobs {
         max_bytes: u64,
     ) -> Result<(), coven_database::DbError> {
         self.database.set_cache_budget(namespace, max_bytes).await
-    }
-}
-
-#[async_trait::async_trait]
-impl coven_replication::blob::transition::VerifiedLocalCopyStaging for StoreBlobAccess {
-    async fn stage_verified_local_copy(
-        &self,
-        reference: &RowBlobRef,
-        destination: &std::path::Path,
-    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
-        StoreBlobAccess::stage_verified_local_copy(self, reference, destination).await
     }
 }

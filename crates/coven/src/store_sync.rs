@@ -3,19 +3,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use tokio::sync::watch;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::store_cloud_storage::StoreCloudStorage;
-use crate::store_security::StoreSecurity;
+use crate::store_security::{StoreSecurity, SyncKeyCustody};
 use coven_database::StoreDatabase;
 use coven_foundation::clock::ClockRef;
 use coven_foundation::config::Config;
 use coven_foundation::store_dir::StoreOpenGuard;
-use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::{BlobRef, BlobTransitionObserver};
 use coven_protocol::objects::StorageError;
 use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
-use coven_replication::sync::sync_loop::{SyncLoopHandle, SyncLoopStatus};
+use coven_replication::sync::sync_loop::{
+    PreparedSyncLoopRuntime, SyncLoopHandle, SyncLoopRuntimeFactory, SyncLoopStatus,
+};
 use coven_replication::sync::Store;
 use coven_storage::cloud::setup::StorageSetupError;
 #[cfg(test)]
@@ -37,6 +38,84 @@ enum SyncDriver {
     Loop,
     #[cfg(any(test, feature = "test-utils"))]
     Caller,
+}
+
+struct PreparedSyncConnection {
+    sync: Option<Arc<SyncLoopHandle>>,
+    storage: Option<Arc<dyn CloudSyncObjectStorage>>,
+    driver: Option<SyncDriver>,
+}
+
+struct PreparedStorageInitialization {
+    components: coven_replication::sync::cycle::PreparedSyncComponents,
+    storage: Arc<dyn CloudSyncObjectStorage>,
+    driver: SyncDriver,
+    config: Config,
+    runtime: Option<PreparedSyncLoopRuntime>,
+}
+
+impl StoreSync {
+    async fn initialize_storage(
+        &self,
+        initialization: PreparedStorageInitialization,
+    ) -> Result<PreparedSyncConnection, SyncError> {
+        let components = initialization
+            .components
+            .initialize(self.observer.clone())
+            .await?;
+        let sync = Arc::new(SyncLoopHandle::new(
+            components,
+            self.clock.clone(),
+            initialization.config,
+            self.observer.clone(),
+            self.open_guard.clone(),
+            self.status_tx.clone(),
+            initialization.runtime,
+        ));
+        if matches!(&initialization.driver, SyncDriver::Loop) {
+            info!("Sync loop prepared");
+        }
+        Ok(PreparedSyncConnection {
+            sync: Some(sync),
+            storage: Some(initialization.storage),
+            driver: Some(initialization.driver),
+        })
+    }
+}
+
+impl PreparedSyncConnection {
+    fn install(mut self, owner: &StoreSync) {
+        if matches!(&self.driver, Some(SyncDriver::Loop)) {
+            self.sync
+                .as_ref()
+                .expect("prepared sync exists until install")
+                .activate();
+            info!("Sync loop activated");
+        }
+        let sync = self
+            .sync
+            .take()
+            .expect("prepared sync exists until install");
+        let storage = self
+            .storage
+            .take()
+            .expect("prepared storage exists until install");
+        let driver = self
+            .driver
+            .take()
+            .expect("prepared driver exists until install");
+        owner.install_cloud(sync, storage, driver);
+    }
+}
+
+impl Drop for PreparedSyncConnection {
+    fn drop(&mut self) {
+        if matches!(&self.driver, Some(SyncDriver::Loop))
+            && self.sync.as_ref().is_some_and(|sync| sync.is_running())
+        {
+            self.sync.as_ref().expect("checked sync").stop();
+        }
+    }
 }
 
 /// The store's sync connection.
@@ -132,13 +211,13 @@ macro_rules! installed_command_authority {
 mod blobs;
 mod commands;
 mod connection;
+mod setup;
 mod test_access;
 
 #[derive(Clone)]
 pub(crate) struct StoreSync {
     config_provider: ConfigProvider,
     security: StoreSecurity,
-    master_keys: Arc<dyn coven_keys::keys::MasterKeyCustody>,
     database: StoreDatabase,
     #[cfg(test)]
     store_dir: coven_foundation::store_dir::StoreDir,
@@ -147,30 +226,22 @@ pub(crate) struct StoreSync {
     open_guard: Arc<StoreOpenGuard>,
     cloud_storage: StoreCloudStorage,
     blob_access: crate::store_blobs::StoreBlobAccess,
-    local_blob_transitions: coven_replication::blob::transition::LocalBlobTransitions,
     state: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+    runtime_factory: Arc<dyn SyncLoopRuntimeFactory>,
     #[cfg(test)]
     stopped_loops: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl StoreSync {
-    async fn install_storage_connection(
+    async fn prepare_storage_initialization(
         &self,
         config: Config,
         storage: Arc<CloudSyncConnection>,
         driver: SyncDriver,
-    ) -> Result<(), SyncError> {
-        let routing_encryption = if storage.is_plaintext() {
-            None
-        } else {
-            let keyring = self
-                .master_keys
-                .unlock()?
-                .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
-            Some(EncryptionService::from(keyring))
-        };
+        key_custody: SyncKeyCustody,
+    ) -> Result<PreparedStorageInitialization, SyncError> {
         let initialization = match self.database.local_store_root_ref().await? {
             Some(expected_store_root) => {
                 coven_replication::sync::cycle::StoreInitialization::OpenStore {
@@ -181,39 +252,38 @@ impl StoreSync {
         };
         let components = self
             .security
-            .initialize_sync_components(
+            .prepare_sync_components(
                 self.database.clone(),
                 Arc::clone(&storage),
                 initialization,
-                routing_encryption.clone(),
+                key_custody,
             )
             .await?;
-        let blob_transitions = coven_replication::blob::transition::ConnectedBlobTransitions::new(
-            self.local_blob_transitions.clone(),
-            Arc::new(self.blob_access.clone()),
-            routing_encryption,
-            self.observer.clone(),
-        );
-        let sync = Arc::new(SyncLoopHandle::new(
-            components,
-            blob_transitions,
-            self.master_keys.clone(),
-            self.clock.clone(),
-            config,
-            self.observer.clone(),
-            self.open_guard.clone(),
-            self.status_tx.clone(),
-        ));
-        if matches!(&driver, SyncDriver::Loop) {
-            if let Err(error) = sync.start() {
-                self.blob_access.clear_connection();
-                return Err(SyncError::Loop(error));
-            }
-            info!("Sync loop started");
-        }
+        let runtime = match driver {
+            SyncDriver::Loop => Some(self.runtime_factory.prepare().map_err(SyncError::Loop)?),
+            #[cfg(any(test, feature = "test-utils"))]
+            SyncDriver::Caller => None,
+        };
         let storage: Arc<dyn CloudSyncObjectStorage> = storage;
-        self.install_cloud(sync, storage, driver);
-        Ok(())
+        Ok(PreparedStorageInitialization {
+            components,
+            config,
+            storage,
+            driver,
+            runtime,
+        })
+    }
+
+    async fn prepare_storage_connection(
+        &self,
+        config: Config,
+        storage: Arc<CloudSyncConnection>,
+        driver: SyncDriver,
+    ) -> Result<PreparedSyncConnection, SyncError> {
+        let initialization = self
+            .prepare_storage_initialization(config, storage, driver, SyncKeyCustody::Current)
+            .await?;
+        self.initialize_storage(initialization).await
     }
 
     /// Who carries out a command that needs no running sync loop, installing

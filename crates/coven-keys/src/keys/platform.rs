@@ -5,15 +5,15 @@ use super::core::{
     SIGN_SECRETKEYBYTES,
 };
 
-/// Why a host's master-key lifecycle call (`initialize_master_key`,
-/// `import_master_key`) failed.
+/// Why importing or staging a master key failed.
 #[derive(Debug, thiserror::Error)]
 pub enum MasterKeyError {
-    /// `initialize_master_key` found a master key already established —
-    /// custody `unlock()` returned `Some`. coven never generates over an
-    /// existing key; the host imports or forgets it first.
+    /// Cloud-home setup found a master key already established while staging
+    /// a fresh one. coven never generates over an existing key.
     #[error("a master key is already established for this store")]
     AlreadyEstablished,
+    #[error("cannot import a master key while a cloud home is connected")]
+    CloudHomeConnected,
     #[error("key error: {0}")]
     Key(#[from] KeyError),
     #[error("invalid master key material: {0}")]

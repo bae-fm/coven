@@ -342,7 +342,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("pre-rotation cycle");
     assert_eq!(
@@ -375,7 +375,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("post-rotation cycle");
 
@@ -578,7 +578,7 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("an unreferenced wrapped key does not affect the cycle");
 
@@ -673,7 +673,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .expect("revoke rotates key");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("adopt generation 2");
     assert_eq!(
@@ -693,7 +693,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     .expect("the retained pre-rotation object remains readable");
 
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("replayed old wrapped key is ignored");
 
@@ -775,7 +775,7 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("replacement same-generation wrapped key is merged");
 
@@ -898,7 +898,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     .await
     .expect("second owner can revoke");
 
-    Box::pin(running_b.run_cycle_with(&SystemClock, Some(&ks_b), None))
+    Box::pin(running_b.run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None))
         .await
         .expect("existing member adopts a current owner's rotation");
 
@@ -1165,7 +1165,7 @@ async fn removed_owner_key_is_not_adopted() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
@@ -1235,7 +1235,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
     running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await
         .expect("an unreferenced attacker object does not affect refresh");
 
@@ -1322,7 +1322,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let result = running_b
-        .run_cycle_with(&SystemClock, Some(&ks_b), None)
+        .run_cycle_with(&SystemClock, Some(Arc::new(ks_b.clone())), None)
         .await;
     assert!(
         result.is_err(),
@@ -1395,7 +1395,12 @@ async fn one_cycle_loads_exact_membership_once() {
         .len();
     let counter = MembershipReadCounter::new();
     running_b
-        .run_cycle_with_interceptor(&SystemClock, Some(&ks_b), None, counter.clone())
+        .run_cycle_with_interceptor(
+            &SystemClock,
+            Some(Arc::new(ks_b.clone())),
+            None,
+            counter.clone(),
+        )
         .await
         .expect("B's cycle");
     assert_eq!(
@@ -1521,9 +1526,13 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
             .bind_device(&db, db_store_dir.clone(), &owner)
             .await
             .expect("bind removal owner to its retained sync storage");
-        Box::pin(running_owner.run_cycle_with(&SystemClock, Some(&ks_refresh), None))
-            .await
-            .expect("refresh cycle");
+        Box::pin(running_owner.run_cycle_with(
+            &SystemClock,
+            Some(Arc::new(ks_refresh.clone())),
+            None,
+        ))
+        .await
+        .expect("refresh cycle");
         assert_eq!(
             running_owner
                 .current_keyring_for_test()

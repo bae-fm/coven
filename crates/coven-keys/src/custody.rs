@@ -168,8 +168,8 @@ mod tests {
     /// The corrupt-empty-entry discipline lives once, in `StoreKeys::read`
     /// (`empty_keyring_entry_is_an_error_not_absence` pins it there), and
     /// `KeyringCustody::unlock` inherits it by construction: a present-but-empty
-    /// entry surfaces as `Err`, never `Ok(None)` — so `initialize_master_key`
-    /// (which generates only on `unlock() == Ok(None)`) cannot clobber it.
+    /// entry surfaces as `Err`, never `Ok(None)` — so cloud-home setup cannot
+    /// mistake corruption for an absent key and generate over it.
     #[test]
     fn keyring_preset_unlock_does_not_read_a_corrupt_empty_entry_as_absent() {
         crate::keys::test_keyring::install();

@@ -11,6 +11,78 @@ use coven_keys::keys::{
 use coven_storage::cloud::ExactCloudHome;
 use coven_storage::{BlobChunking, BlobPathScheme, CloudCipher, CloudSyncConnection};
 
+/// Whether the selected cloud-home storage needs an available master key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudHomeKeyState {
+    NotRequired,
+    Available,
+    Locked,
+}
+
+pub(crate) struct PreparedCloudHomeKey {
+    state: CloudHomeKeyState,
+    custody: Arc<dyn MasterKeyCustody>,
+    staged: std::sync::Mutex<Option<Arc<coven_keys::keys::StagedMasterKeyCustody>>>,
+}
+
+pub(crate) enum SyncKeyCustody {
+    Current,
+    Prepared(Arc<PreparedCloudHomeKey>),
+}
+
+impl PreparedCloudHomeKey {
+    pub(crate) fn state(&self) -> CloudHomeKeyState {
+        self.state
+    }
+
+    pub(crate) fn commit(&self) -> Result<(), KeyError> {
+        match &*self.staged.lock().expect("lock prepared master key") {
+            Some(staged) => staged.commit(),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn rollback(&self) -> Result<(), KeyError> {
+        match &*self.staged.lock().expect("lock prepared master key") {
+            Some(staged) => staged.rollback(),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn finish(&self) {
+        self.staged.lock().expect("lock prepared master key").take();
+    }
+}
+
+impl MasterKeyCustody for PreparedCloudHomeKey {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        self.custody.unlock()
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
+        self.custody.persist(keyring)
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        self.custody.forget()
+    }
+}
+
+impl Drop for PreparedCloudHomeKey {
+    fn drop(&mut self) {
+        if let Some(staged) = self
+            .staged
+            .get_mut()
+            .expect("lock prepared master key")
+            .take()
+        {
+            if let Err(error) = staged.rollback() {
+                tracing::error!("failed to roll back uncompleted cloud-home master key: {error}");
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct StoreSecurity {
     keys: StoreKeys,
@@ -34,13 +106,26 @@ impl StoreSecurity {
         }
     }
 
-    pub(crate) async fn initialize_sync_components(
+    pub(crate) async fn prepare_sync_components(
         &self,
         database: coven_database::StoreDatabase,
         storage: Arc<CloudSyncConnection>,
         initialization: coven_replication::sync::cycle::StoreInitialization,
-        routing_encryption: Option<EncryptionService>,
-    ) -> Result<coven_replication::sync::cycle::SyncComponents, crate::store_sync::SyncError> {
+        key_custody: SyncKeyCustody,
+    ) -> Result<coven_replication::sync::cycle::PreparedSyncComponents, crate::store_sync::SyncError>
+    {
+        let master_keys: Arc<dyn MasterKeyCustody> = match key_custody {
+            SyncKeyCustody::Current => self.master_keys.clone(),
+            SyncKeyCustody::Prepared(master_keys) => master_keys,
+        };
+        let routing_encryption = if storage.is_plaintext() {
+            None
+        } else {
+            let keyring = master_keys
+                .unlock()?
+                .ok_or(coven_keys::keys::RoutingEncryptionError::NotEstablished)?;
+            Some(EncryptionService::from(keyring))
+        };
         coven_replication::sync::cycle::PreparedSyncComponents::prepare(
             database,
             self.store_dir.clone(),
@@ -48,10 +133,8 @@ impl StoreSecurity {
             self.required_identity()?,
             initialization,
             routing_encryption,
+            master_keys,
         )
-        .await
-        .map_err(crate::store_sync::SyncError::from)?
-        .initialize()
         .await
         .map_err(crate::store_sync::SyncError::from)
     }
@@ -81,26 +164,52 @@ impl StoreSecurity {
             .await?)
     }
 
-    pub(crate) fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
-        if self.master_keys.unlock()?.is_some() {
-            return Err(MasterKeyError::AlreadyEstablished);
-        }
-        let keyring = MasterKeyring::generate();
-        self.master_keys.persist(&keyring)?;
-        Ok(keyring.fingerprint())
-    }
-
-    pub(crate) fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
+    pub(crate) fn import_master_key(&self, serialized: &str) -> Result<(), MasterKeyError> {
         let keyring = MasterKeyring::from_serialized(serialized)?;
         self.master_keys.persist(&keyring)?;
-        Ok(keyring.fingerprint())
+        Ok(())
     }
 
-    pub(crate) fn master_key_fingerprint(&self) -> Result<Option<String>, KeyError> {
-        Ok(self
-            .master_keys
-            .unlock()?
-            .map(|keyring| keyring.fingerprint()))
+    pub(crate) fn cloud_home_key_state(
+        &self,
+        storage: coven_foundation::config::HomeStorage,
+    ) -> Result<CloudHomeKeyState, KeyError> {
+        if storage.is_browsable() {
+            return Ok(CloudHomeKeyState::NotRequired);
+        }
+        Ok(match self.master_keys.unlock()? {
+            Some(_) => CloudHomeKeyState::Available,
+            None => CloudHomeKeyState::Locked,
+        })
+    }
+
+    pub(crate) fn prepare_cloud_home_key(
+        &self,
+        storage: coven_foundation::config::HomeStorage,
+    ) -> Result<Arc<PreparedCloudHomeKey>, MasterKeyError> {
+        if storage.is_browsable() {
+            return Ok(Arc::new(PreparedCloudHomeKey {
+                state: CloudHomeKeyState::NotRequired,
+                custody: self.master_keys.clone(),
+                staged: std::sync::Mutex::new(None),
+            }));
+        }
+        if self.master_keys.unlock()?.is_some() {
+            return Ok(Arc::new(PreparedCloudHomeKey {
+                state: CloudHomeKeyState::Available,
+                custody: self.master_keys.clone(),
+                staged: std::sync::Mutex::new(None),
+            }));
+        }
+        let staged = coven_keys::keys::StagedMasterKeyCustody::new(
+            self.master_keys.clone(),
+            MasterKeyring::generate(),
+        )?;
+        Ok(Arc::new(PreparedCloudHomeKey {
+            state: CloudHomeKeyState::Available,
+            custody: staged.clone(),
+            staged: std::sync::Mutex::new(Some(staged)),
+        }))
     }
 
     pub(crate) fn initialize_identity(&self) -> Result<String, IdentityError> {
@@ -156,12 +265,28 @@ impl StoreSecurity {
         cipher: Option<CloudCipher>,
         blob_chunking: BlobChunking,
     ) -> Result<CloudSyncConnection, coven_storage::cloud::setup::StorageSetupError> {
+        self.open_cloud_storage_with_master_keys(
+            config,
+            home,
+            cipher,
+            blob_chunking,
+            self.master_keys.clone(),
+        )
+    }
+
+    pub(crate) fn open_cloud_storage_with_master_keys(
+        &self,
+        config: &Config,
+        home: Arc<dyn ExactCloudHome>,
+        cipher: Option<CloudCipher>,
+        blob_chunking: BlobChunking,
+        master_keys: Arc<dyn MasterKeyCustody>,
+    ) -> Result<CloudSyncConnection, coven_storage::cloud::setup::StorageSetupError> {
         let cipher = match cipher {
             Some(cipher) => cipher,
             None if config.cloud_home.storage.is_browsable() => CloudCipher::Plaintext,
             None => {
-                let keyring = self
-                    .master_keys
+                let keyring = master_keys
                     .unlock()?
                     .ok_or(coven_storage::cloud::setup::StorageSetupError::NoEncryptionKey)?;
                 CloudCipher::Encrypted(keyring.into())

@@ -143,9 +143,8 @@ of these three acts brought the store into existence on this device:
   [`CovenHandle::initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
   generates and establishes it, refusing with
   [`IdentityError::AlreadyEstablished`](rustdoc:enum:coven::IdentityError) on
-  a second call, the same discipline
-  [`initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
-  keeps for the master key.
+  a second call. The master key is established separately by the atomic
+  cloud-home setup that needs it.
 - **Joining a shared store** —
   [`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request)
   mints the keypair before the joiner even knows which store the invite

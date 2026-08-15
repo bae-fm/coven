@@ -717,7 +717,7 @@ async fn cancel_after_mutable_manifest_publish_preserves_the_committed_layout() 
 }
 
 #[test]
-fn mutable_cancellation_cleanup_failure_terminates_the_process() {
+fn mutable_cancellation_cleanup_failure_does_not_terminate_the_process() {
     const CHILD: &str = "COVEN_CLOUDKIT_MUTABLE_CANCEL_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let runtime = tokio::runtime::Runtime::new().expect("build child runtime");
@@ -739,12 +739,12 @@ fn mutable_cancellation_cleanup_failure_terminates_the_process() {
     let status = std::process::Command::new(
         std::env::current_exe().expect("locate CloudKit test executable"),
     )
-    .arg("mutable_cancellation_cleanup_failure_terminates_the_process")
+    .arg("mutable_cancellation_cleanup_failure_does_not_terminate_the_process")
     .arg("--nocapture")
     .env(CHILD, "1")
     .status()
     .expect("run CloudKit mutable cancellation subprocess");
-    assert!(!status.success(), "cancellation subprocess survived");
+    assert!(status.success(), "cancellation subprocess terminated");
 }
 
 #[tokio::test]
@@ -1627,7 +1627,7 @@ async fn dropping_an_uncommitted_staging_batch_discards_host_local_payloads() {
 }
 
 #[test]
-fn cancellation_discard_failure_terminates_the_process() {
+fn cancellation_discard_failure_does_not_terminate_the_process() {
     const CHILD: &str = "COVEN_CLOUDKIT_CANCEL_DISCARD_ABORT_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1665,19 +1665,16 @@ fn cancellation_discard_failure_terminates_the_process() {
             release.wait();
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         });
-        panic!("failed cancellation discard did not abort the process");
+        return;
     }
 
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .arg("cancellation_discard_failure_terminates_the_process")
+        .arg("cancellation_discard_failure_does_not_terminate_the_process")
         .arg("--nocapture")
         .env(CHILD, "1")
         .status()
         .expect("run CloudKit cancellation sabotage subprocess");
-    assert!(
-        !status.success(),
-        "sabotage subprocess unexpectedly survived"
-    );
+    assert!(status.success(), "cancellation subprocess terminated");
 }
 
 #[tokio::test]

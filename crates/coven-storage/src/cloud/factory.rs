@@ -1,20 +1,82 @@
 use super::{cloudkit, CloudHomeError, ExactCloudHome};
 
+use std::sync::Arc;
+
+use coven_keys::keys::{CloudHomeCredentialCustody, CloudHomeCredentials};
+
 #[derive(Clone)]
 pub struct CloudHomeFactory {
-    key_service: coven_keys::keys::StoreKeys,
     oauth_clients: crate::oauth::OAuthClients,
 }
 
+#[cfg(feature = "oauth-providers")]
+pub struct PreparedOAuthCloudHome {
+    pub cloud_home: coven_foundation::config::CloudHomeConfig,
+    pub credentials: CloudHomeCredentials,
+}
+
 impl CloudHomeFactory {
-    pub fn new(
-        key_service: coven_keys::keys::StoreKeys,
-        oauth_clients: crate::oauth::OAuthClients,
-    ) -> Self {
-        Self {
-            key_service,
-            oauth_clients,
+    pub fn new(oauth_clients: crate::oauth::OAuthClients) -> Self {
+        Self { oauth_clients }
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    pub async fn prepare_oauth_cloud_home(
+        &self,
+        mut cloud_home: coven_foundation::config::CloudHomeConfig,
+        store_name: &str,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        clock: &dyn coven_foundation::clock::Clock,
+    ) -> Result<PreparedOAuthCloudHome, crate::cloud::SetupError> {
+        use crate::oauth::OAuthCloudHomeLocation;
+        use coven_foundation::config::CloudProvider;
+
+        let prepared = match cloud_home.provider {
+            Some(CloudProvider::GoogleDrive) => {
+                self.oauth_clients
+                    .prepare_google_drive(store_name, cancel, clock)
+                    .await?
+            }
+            Some(CloudProvider::Dropbox) => {
+                self.oauth_clients
+                    .prepare_dropbox(store_name, cancel, clock)
+                    .await?
+            }
+            Some(CloudProvider::OneDrive) => {
+                self.oauth_clients.prepare_onedrive(cancel, clock).await?
+            }
+            Some(provider) => {
+                return Err(crate::cloud::SetupError::Configuration(format!(
+                    "provider {provider:?} does not use OAuth"
+                )))
+            }
+            None => {
+                return Err(crate::cloud::SetupError::Configuration(
+                    "OAuth cloud-home setup requires a provider".to_string(),
+                ))
+            }
+        };
+        match prepared.location {
+            OAuthCloudHomeLocation::GoogleDrive { folder_id } => {
+                cloud_home.google_drive_folder_id = Some(folder_id);
+            }
+            OAuthCloudHomeLocation::Dropbox { folder_path } => {
+                cloud_home.dropbox_folder_path = Some(folder_path);
+            }
+            OAuthCloudHomeLocation::OneDrive {
+                drive_id,
+                folder_id,
+            } => {
+                cloud_home.onedrive_drive_id = Some(drive_id);
+                cloud_home.onedrive_folder_id = Some(folder_id);
+            }
         }
+        Ok(PreparedOAuthCloudHome {
+            cloud_home,
+            credentials: CloudHomeCredentials::OAuth {
+                tokens: prepared.tokens,
+            },
+        })
     }
 
     pub async fn create(
@@ -22,6 +84,7 @@ impl CloudHomeFactory {
         config: &coven_foundation::config::Config,
         clock: coven_foundation::clock::ClockRef,
         cloudkit_ops: Option<std::sync::Arc<dyn cloudkit::CloudKitOps>>,
+        credential_custody: Arc<dyn CloudHomeCredentialCustody>,
     ) -> Result<Box<dyn ExactCloudHome>, CloudHomeError> {
         use coven_foundation::config::CloudProvider;
 
@@ -30,14 +93,18 @@ impl CloudHomeFactory {
 
         #[cfg(feature = "oauth-providers")]
         let oauth_tokens = |provider_name: &str| {
-            self.key_service
-                .get_cloud_home_oauth_tokens()
+            credential_custody
+                .unlock()
                 .map_err(|error| {
                     CloudHomeError::configuration(
                         format!("read {provider_name} credentials"),
                         error,
                     )
                 })?
+                .and_then(|credentials| match credentials {
+                    CloudHomeCredentials::OAuth { tokens } => Some(tokens),
+                    CloudHomeCredentials::S3 { .. } => None,
+                })
                 .ok_or_else(|| {
                     CloudHomeError::Configuration(format!(
                         "{provider_name} OAuth token not in keyring"
@@ -55,13 +122,11 @@ impl CloudHomeFactory {
                 })?;
                 let endpoint = config.cloud_home.s3_endpoint.clone();
 
-                let (access_key, secret_key) = match self
-                    .key_service
-                    .get_cloud_home_credentials()
-                    .map_err(|error| {
-                    CloudHomeError::configuration("read S3 credentials", error)
-                })? {
-                    Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                let (access_key, secret_key) = match credential_custody
+                    .unlock()
+                    .map_err(|error| CloudHomeError::configuration("read S3 credentials", error))?
+                {
+                    Some(CloudHomeCredentials::S3 {
                         access_key,
                         secret_key,
                     }) => (access_key, secret_key),
@@ -107,7 +172,7 @@ impl CloudHomeFactory {
                     })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
-                    self.key_service.clone(),
+                    credential_custody.clone(),
                     clock,
                     oauth_config,
                     "Google Drive",
@@ -139,7 +204,7 @@ impl CloudHomeFactory {
                     })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
-                    self.key_service.clone(),
+                    credential_custody.clone(),
                     clock,
                     oauth_config,
                     "Dropbox",
@@ -173,7 +238,7 @@ impl CloudHomeFactory {
                     })?;
                 let session = super::oauth_session::OAuthSession::new(
                     tokens,
-                    self.key_service.clone(),
+                    credential_custody.clone(),
                     clock,
                     oauth_config,
                     "OneDrive",
@@ -196,26 +261,26 @@ impl CloudHomeFactory {
                     CloudHomeError::Configuration("CloudKit driver not provided".to_string())
                 })?;
                 match (
-                config.cloud_home.cloudkit_owner_name.as_ref(),
-                config.cloud_home.cloudkit_zone_name.as_ref(),
-            ) {
-                (None, None) => Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(
-                    ops,
-                    config.cloud_home.exact_upload_verification,
-                ))),
-                (Some(owner_name), Some(zone_name)) => {
-                    Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
+                    config.cloud_home.cloudkit_owner_name.as_ref(),
+                    config.cloud_home.cloudkit_zone_name.as_ref(),
+                ) {
+                    (None, None) => Ok(Box::new(cloudkit::CloudKitCloudHome::new_private(
                         ops,
-                        owner_name.clone(),
-                        zone_name.clone(),
                         config.cloud_home.exact_upload_verification,
-                    )))
+                    ))),
+                    (Some(owner_name), Some(zone_name)) => {
+                        Ok(Box::new(cloudkit::CloudKitCloudHome::new_shared(
+                            ops,
+                            owner_name.clone(),
+                            zone_name.clone(),
+                            config.cloud_home.exact_upload_verification,
+                        )))
+                    }
+                    _ => Err(CloudHomeError::Configuration(
+                        "CloudKit share config requires both cloudkit_owner_name and cloudkit_zone_name"
+                            .to_string(),
+                    )),
                 }
-                _ => Err(CloudHomeError::Configuration(
-                    "CloudKit share config requires both cloudkit_owner_name and cloudkit_zone_name"
-                        .to_string(),
-                )),
-            }
             }
         }
     }

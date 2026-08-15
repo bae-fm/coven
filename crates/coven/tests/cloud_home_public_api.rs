@@ -59,6 +59,40 @@ async fn external_host_can_probe_a_proposed_cloud_home(
     handle.probe_cloud_home(config).await
 }
 
+async fn external_host_can_setup_s3(
+    handle: &CovenHandle,
+    cloud_home: coven::CloudHomeConfig,
+) -> Result<coven::ConnectedCloudHome, coven::CloudHomeSetupError> {
+    handle
+        .setup_s3_cloud_home(cloud_home, "access".to_string(), "secret".to_string())
+        .await
+}
+
+async fn external_host_can_setup_cloudkit(
+    handle: &CovenHandle,
+    cloud_home: coven::CloudHomeConfig,
+) -> Result<coven::ConnectedCloudHome, coven::CloudHomeSetupError> {
+    handle
+        .setup_cloudkit_cloud_home(cloud_home, Arc::new(ExternalCloudKitBridge))
+        .await
+}
+
+#[cfg(feature = "oauth-providers")]
+async fn external_host_can_setup_oauth(
+    handle: &CovenHandle,
+    cloud_home: coven::CloudHomeConfig,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<coven::ConnectedCloudHome, coven::CloudHomeSetupError> {
+    handle.setup_oauth_cloud_home(cloud_home, cancel).await
+}
+
+fn external_host_can_read_cloud_home_key_state(
+    handle: &CovenHandle,
+    storage: coven::HomeStorage,
+) -> Result<coven::CloudHomeKeyState, coven::KeyError> {
+    handle.cloud_home_key_state(storage)
+}
+
 #[test]
 fn external_host_can_name_device_join_revocation_surface() {
     fn assert_executor<T: DeviceJoinWriteRevocationExecutor>() {}
@@ -69,6 +103,11 @@ fn external_host_can_name_device_join_revocation_surface() {
 #[test]
 fn external_host_can_name_cloud_home_probe_surface() {
     let _ = external_host_can_probe_a_proposed_cloud_home;
+    let _ = external_host_can_setup_s3;
+    let _ = external_host_can_setup_cloudkit;
+    #[cfg(feature = "oauth-providers")]
+    let _ = external_host_can_setup_oauth;
+    let _ = external_host_can_read_cloud_home_key_state;
 }
 
 impl CloudKitOps for ExternalCloudKitBridge {

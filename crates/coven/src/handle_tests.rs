@@ -3,7 +3,7 @@ use super::*;
 use crate::store_sync::{ConfigProvider, SyncError};
 use coven_foundation::clock::SystemClock;
 use coven_foundation::config::{CloudProvider, Config, HomeStorage};
-use coven_keys::encryption::EncryptionService;
+use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::keys::{test_keyring, StoreKeys};
 use coven_protocol::blob::{CacheFill, Provenance};
 use coven_replication::sync::test_helpers::{
@@ -1029,6 +1029,99 @@ async fn connected_sync_reuses_connection_storage_for_loop() {
     );
 }
 
+#[tokio::test]
+async fn cloudkit_setup_commits_the_generated_key_with_the_connection() {
+    test_keyring::install();
+
+    let store_id = "lib-atomic-cloudkit-setup";
+    let (_tmp, store_dir) = temp_store_dir();
+    let db = read_test_db(store_dir.clone(), "images");
+    let store_keys = test_store_keys(store_id);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let handle = test_handle_with_custody_and_storage(
+        store_id,
+        store_dir,
+        db,
+        custody.clone(),
+        HomeStorage::Browsable,
+    );
+    let cloud_home = coven_foundation::config::CloudHomeConfig {
+        storage: HomeStorage::Opaque,
+        ..Default::default()
+    };
+    let mut expected_cloud_home = cloud_home.clone();
+    expected_cloud_home.provider = Some(CloudProvider::CloudKit);
+
+    let connected = handle
+        .setup_cloudkit_cloud_home(cloud_home.clone(), Arc::new(TestCloudKitOps::new()))
+        .await
+        .expect("atomic CloudKit setup succeeds");
+
+    assert_eq!(connected.cloud_home, expected_cloud_home);
+    assert_eq!(connected.key_state, crate::CloudHomeKeyState::Available);
+    assert!(custody.unlock().expect("unlock committed key").is_some());
+    assert!(handle.sync.is_connected());
+    assert!(handle.sync.is_syncing());
+}
+
+#[tokio::test]
+async fn importing_a_master_key_during_cloud_setup_cannot_report_a_lost_write() {
+    test_keyring::install();
+
+    let store_id = "lib-import-during-cloud-setup";
+    let (_tmp, store_dir) = temp_store_dir();
+    let db = read_test_db(store_dir.clone(), "images");
+    let store_keys = test_store_keys(store_id);
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let handle = test_handle_with_custody_and_storage(
+        store_id,
+        store_dir,
+        db,
+        custody,
+        HomeStorage::Browsable,
+    );
+    let home = Arc::new(InMemoryCloudHome::new());
+    let (setup_reached_provider, release_setup) = home.pause_after_exact_create_call(1);
+    let cloud_home = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Opaque,
+        ..Default::default()
+    };
+    let setup = tokio::spawn({
+        let handle = handle.clone();
+        let home = home.clone();
+        async move {
+            handle
+                .setup_cloud_home_with_test_home(
+                    cloud_home,
+                    home,
+                    Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                        access_key: "access".to_string(),
+                        secret_key: "secret".to_string(),
+                    }),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), setup_reached_provider.notified())
+        .await
+        .expect("cloud setup reaches provider initialization");
+
+    let imported = MasterKeyring::generate();
+    let import = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.import_master_key(&imported.to_serialized()).await }
+    });
+    release_setup.notify_one();
+    setup
+        .await
+        .expect("join cloud setup task")
+        .expect("cloud setup succeeds");
+
+    let import = import.await.expect("join master-key import task");
+    assert!(matches!(import, Err(MasterKeyError::CloudHomeConnected)));
+}
+
 /// A read-only handle holds no sync loop, so every cloud-miss read builds
 /// storage fresh from config via the `cipher: None` path. The writer publishes
 /// a host-provided row and exact encrypted blob through the normal Store path;
@@ -1137,51 +1230,11 @@ async fn sync_not_configured_is_typed() {
     assert!(matches!(result, Err(SyncError::NotConfigured)));
 }
 
-/// `initialize_master_key` is the only place coven ever generates a
-/// master key, and it refuses to run again once one is established —
-/// coven never generates over an existing key.
+/// Atomic cloud-home setup generates and commits the key that actually seals
+/// cloud traffic. No cipher is injected: setup prepares the opaque connection,
+/// commits custody only once that connection is ready, and starts its loop.
 #[tokio::test]
-async fn initialize_master_key_refuses_a_second_call() {
-    test_keyring::install();
-    let (_tmp, store_dir) = temp_store_dir();
-    let db = read_test_db(store_dir.clone(), "images");
-    let handle = test_handle_with_custody(
-        "lib-init-master-key-twice",
-        store_dir,
-        db,
-        coven_keys::custody::KeyCustody::Keyring,
-    );
-
-    let fingerprint = handle
-        .initialize_master_key()
-        .expect("the first call establishes a master key");
-    assert!(!fingerprint.is_empty());
-    assert_eq!(
-        handle.master_key_fingerprint().unwrap(),
-        Some(fingerprint),
-        "master_key_fingerprint reflects what initialize_master_key just established",
-    );
-
-    let error = handle
-        .initialize_master_key()
-        .expect_err("a second call must refuse rather than generate over an existing key");
-    assert!(matches!(
-        error,
-        coven_keys::keys::MasterKeyError::AlreadyEstablished
-    ));
-}
-
-/// The end-to-end proof that `initialize_master_key` establishes the key
-/// that actually seals cloud traffic. A keyring-custody store initializes a
-/// master key, connects over an injected opaque `InMemoryCloudHome` through
-/// the custody-resolving connect path — no cipher is injected; StoreSync
-/// unlocks the key exactly as production `start_sync` does — then enqueues
-/// and drains a blob. The bytes at rest in the home are ciphertext, never
-/// the plaintext (the assertion a browsable/plaintext home would fail),
-/// while `read_blob` decrypts them back. Only the established key sealing the
-/// upload makes both hold.
-#[tokio::test]
-async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
+async fn cloud_home_setup_seals_cloud_traffic_with_its_committed_key() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1226,27 +1279,26 @@ async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back()
             );
 
             handle
-                .initialize_master_key()
-                .expect("establish the master key before connecting");
-            handle
                 .initialize_identity()
                 .expect("establish this store's identity before connecting");
 
-            // Connect over the injected home through the custody path: StoreSync
-            // resolves the cipher from the just-established key, never an injected
-            // one. An opaque home with no key would fail here with
-            // `MasterKeyNotEstablished`.
             let home = Arc::new(InMemoryCloudHome::new());
-            let connect_handle = handle.clone();
-            let connect_home = home.clone();
-            tokio::task::spawn_local(async move {
-                connect_handle
-                    .connect_sync_with_test_home_custody(connect_home)
-                    .await
-            })
-            .await
-            .expect("join custody-resolved connection")
-            .expect("connect over the injected opaque home, resolving the cipher from custody");
+            let cloud_home = coven_foundation::config::CloudHomeConfig {
+                provider: Some(CloudProvider::S3),
+                storage: HomeStorage::Opaque,
+                ..Default::default()
+            };
+            handle
+                .setup_cloud_home_with_test_home(
+                    cloud_home,
+                    home.clone(),
+                    Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                        access_key: "access".to_string(),
+                        secret_key: "secret".to_string(),
+                    }),
+                )
+                .await
+                .expect("prepare, commit, and connect the opaque cloud home");
 
             // Publish a host-provided row and exact blob under the opaque home. The
             // resulting row reference carries its uploader authority and stored slot.
@@ -1296,7 +1348,7 @@ async fn import_master_key_rejects_raw_hex() {
     let handle = test_handle("lib-import-master-key", store_dir, db);
 
     let raw_hex = hex::encode([0x22u8; 32]);
-    assert!(handle.import_master_key(&raw_hex).is_err());
+    assert!(handle.import_master_key(&raw_hex).await.is_err());
 }
 
 #[tokio::test]
@@ -1306,13 +1358,15 @@ async fn import_master_key_accepts_the_current_serialized_keyring() {
     let handle = test_handle("lib-import-master-key", store_dir, db);
 
     let keyring = coven_keys::encryption::MasterKeyring::generate();
-    let imported_fingerprint = handle
+    handle
         .import_master_key(&keyring.to_serialized())
+        .await
         .expect("import the serialized keyring");
-    assert_eq!(imported_fingerprint, keyring.fingerprint());
     assert_eq!(
-        handle.master_key_fingerprint().unwrap(),
-        Some(imported_fingerprint),
+        handle
+            .cloud_home_key_state(HomeStorage::Opaque)
+            .expect("read key availability"),
+        crate::CloudHomeKeyState::Available,
     );
 }
 
@@ -1358,7 +1412,7 @@ fn test_handle_with_real_identity(
 /// `initialize_identity` is the only place coven ever generates a
 /// store's signing identity, and it refuses to run again once one is
 /// established — coven never generates over an existing identity. The
-/// identity sibling of `initialize_master_key_refuses_a_second_call`.
+/// identity lifecycle refusal through the public handle.
 #[tokio::test]
 async fn initialize_identity_refuses_a_second_call() {
     test_keyring::install();
@@ -1467,8 +1521,10 @@ async fn seal_and_open_app_data_round_trip_through_the_handle() {
         db,
         coven_keys::custody::KeyCustody::Keyring,
     );
+    let keyring = coven_keys::encryption::MasterKeyring::generate();
     handle
-        .initialize_master_key()
+        .import_master_key(&keyring.to_serialized())
+        .await
         .expect("establish the store's master key");
 
     let sealed = handle
@@ -1508,8 +1564,10 @@ async fn open_app_data_round_trips_through_the_read_handle() {
         db.clone(),
         coven_keys::custody::KeyCustody::Keyring,
     );
+    let keyring = coven_keys::encryption::MasterKeyring::generate();
     writer
-        .initialize_master_key()
+        .import_master_key(&keyring.to_serialized())
+        .await
         .expect("establish the store's master key");
     let sealed = writer
         .seal_app_data(b"read-me-back", b"ctx")
@@ -1562,9 +1620,12 @@ async fn app_data_is_locked_when_no_master_key_is_established() {
         db,
         coven_keys::custody::KeyCustody::Keyring,
     );
-    assert!(
-        handle.master_key_fingerprint().unwrap().is_none(),
-        "the store starts with no established master key",
+    assert_eq!(
+        handle
+            .cloud_home_key_state(HomeStorage::Opaque)
+            .expect("read key availability"),
+        crate::CloudHomeKeyState::Locked,
+        "the store starts with locked master-key custody",
     );
 
     let seal_error = handle

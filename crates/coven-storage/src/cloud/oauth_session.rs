@@ -1,8 +1,8 @@
 //! Shared OAuth token lifecycle for the consumer-cloud backends.
 //!
 //! Google Drive, Dropbox, and OneDrive all cache an access token, refresh it on
-//! expiry (persisting the new tokens to the keyring), and retry a request once
-//! on a 401. This holds that logic in one place; each backend owns an
+//! expiry (persisting the new tokens through its credential custody), and retry
+//! a request once on a 401. This holds that logic in one place; each backend owns an
 //! `OAuthSession` and routes its requests through `api_call`.
 
 use std::future::Future;
@@ -18,7 +18,9 @@ use tracing::{info, warn};
 use super::CloudHomeError;
 use crate::oauth::{self, OAuthConfig, OAuthTokens};
 use coven_foundation::clock::ClockRef;
+#[cfg(test)]
 use coven_keys::keys::StoreKeys;
+use coven_keys::keys::{CloudHomeCredentialCustody, CloudHomeCredentials};
 
 /// Waits out one retry delay. A field so tests exercise the retry schedule
 /// (attempt count, honored `Retry-After`) without sleeping real seconds.
@@ -64,7 +66,7 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
 pub struct OAuthSession {
     client: reqwest::Client,
     tokens: RwLock<OAuthTokens>,
-    key_service: StoreKeys,
+    credential_custody: Arc<dyn CloudHomeCredentialCustody>,
     clock: ClockRef,
     config: OAuthConfig,
     /// Human-readable provider name, used only in log lines.
@@ -105,7 +107,7 @@ impl OAuthRequest<'_> {
 impl OAuthSession {
     pub fn new(
         tokens: OAuthTokens,
-        key_service: StoreKeys,
+        credential_custody: Arc<dyn CloudHomeCredentialCustody>,
         clock: ClockRef,
         config: OAuthConfig,
         provider_label: &'static str,
@@ -113,7 +115,7 @@ impl OAuthSession {
         Self {
             client: reqwest::Client::new(),
             tokens: RwLock::new(tokens),
-            key_service,
+            credential_custody,
             clock,
             config,
             provider_label,
@@ -136,7 +138,7 @@ impl OAuthSession {
         self.refresh().await
     }
 
-    /// Refresh the tokens and persist them to the keyring.
+    /// Refresh the tokens and persist them through this provider's custody.
     async fn refresh(&self) -> Result<String, CloudHomeError> {
         let mut tokens = self.tokens.write().await;
 
@@ -169,8 +171,10 @@ impl OAuthSession {
             other => CloudHomeError::Transport(format!("OAuth refresh failed: {other}")),
         })?;
 
-        self.key_service
-            .set_cloud_home_oauth_tokens(&new_tokens)
+        self.credential_custody
+            .persist(&CloudHomeCredentials::OAuth {
+                tokens: new_tokens.clone(),
+            })
             .map_err(|e| {
                 CloudHomeError::transport("persist refreshed OAuth tokens".to_string(), e)
             })?;
@@ -365,7 +369,10 @@ mod tests {
                 refresh_token: None,
                 expires_at: None,
             },
-            StoreKeys::bind("oauth-retry".to_string()),
+            coven_keys::keys::CloudHomeCredentialsOwner::new(StoreKeys::bind(
+                "oauth-retry".to_string(),
+            ))
+            .current(),
             Arc::new(SystemClock),
             oauth_config("http://token.invalid/token".to_string()),
             "Provider",
@@ -496,7 +503,7 @@ mod tests {
                 refresh_token: Some("old-refresh".to_string()),
                 expires_at: Some(1_700_000_000),
             },
-            key_service,
+            coven_keys::keys::CloudHomeCredentialsOwner::new(key_service).current(),
             Arc::new(FixedClock(Utc.timestamp_opt(1_700_000_120, 0).unwrap())),
             oauth_config(token_url),
             "Provider",

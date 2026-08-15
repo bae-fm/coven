@@ -11,7 +11,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 #[cfg(feature = "oauth-providers")]
 use rand::RngCore;
 #[cfg(any(test, feature = "oauth-providers"))]
-#[cfg(any(test, feature = "oauth-providers"))]
 use serde::Deserialize;
 #[cfg(any(test, feature = "oauth-providers"))]
 use sha2::{Digest, Sha256};
@@ -57,6 +56,19 @@ pub struct OAuthClients {
     credentials: HashMap<coven_foundation::config::CloudProvider, OAuthClientCreds>,
     #[cfg(feature = "oauth-providers")]
     client: reqwest::Client,
+}
+
+#[cfg(feature = "oauth-providers")]
+pub(crate) struct AuthorizedOAuthCloudHome {
+    pub(crate) tokens: OAuthTokens,
+    pub(crate) location: OAuthCloudHomeLocation,
+}
+
+#[cfg(feature = "oauth-providers")]
+pub(crate) enum OAuthCloudHomeLocation {
+    GoogleDrive { folder_id: String },
+    Dropbox { folder_path: String },
+    OneDrive { drive_id: String, folder_id: String },
 }
 
 /// An OAuth client set is missing a provider or names a provider that does not
@@ -330,15 +342,13 @@ impl OAuthClients {
     }
 
     #[cfg(feature = "oauth-providers")]
-    /// Authorize Google Drive, prepare this store's folder, and retain the
-    /// resulting tokens in the store key service.
-    pub async fn sign_in_google_drive(
+    /// Authorize Google Drive and prepare this store's folder.
+    pub(crate) async fn prepare_google_drive(
         &self,
-        key_service: &coven_keys::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<String, crate::cloud::SetupError> {
+    ) -> Result<AuthorizedOAuthCloudHome, crate::cloud::SetupError> {
         let tokens = self
             .authorize(
                 coven_foundation::config::CloudProvider::GoogleDrive,
@@ -422,23 +432,21 @@ impl OAuthClients {
                 })?
                 .to_string()
         };
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized Google Drive; folder ready");
-        Ok(folder_id)
+        Ok(AuthorizedOAuthCloudHome {
+            tokens,
+            location: OAuthCloudHomeLocation::GoogleDrive { folder_id },
+        })
     }
 
     #[cfg(feature = "oauth-providers")]
-    /// Authorize Dropbox, prepare this store's folder, and retain the resulting
-    /// tokens in the store key service.
-    pub async fn sign_in_dropbox(
+    /// Authorize Dropbox and prepare this store's folder.
+    pub(crate) async fn prepare_dropbox(
         &self,
-        key_service: &coven_keys::keys::StoreKeys,
         store_name: &str,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<String, crate::cloud::SetupError> {
+    ) -> Result<AuthorizedOAuthCloudHome, crate::cloud::SetupError> {
         let tokens = self
             .authorize(
                 coven_foundation::config::CloudProvider::Dropbox,
@@ -472,22 +480,20 @@ impl OAuthClients {
                 ));
             }
         }
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized Dropbox; folder ready");
-        Ok(folder_path)
+        Ok(AuthorizedOAuthCloudHome {
+            tokens,
+            location: OAuthCloudHomeLocation::Dropbox { folder_path },
+        })
     }
 
     #[cfg(feature = "oauth-providers")]
-    /// Authorize OneDrive, prepare this store's folder, and retain the
-    /// resulting tokens in the store key service.
-    pub async fn sign_in_onedrive(
+    /// Authorize OneDrive and prepare this store's folder.
+    pub(crate) async fn prepare_onedrive(
         &self,
-        key_service: &coven_keys::keys::StoreKeys,
         cancel: tokio::sync::watch::Receiver<bool>,
         clock: &dyn coven_foundation::clock::Clock,
-    ) -> Result<(String, String), crate::cloud::SetupError> {
+    ) -> Result<AuthorizedOAuthCloudHome, crate::cloud::SetupError> {
         let tokens = self
             .authorize(
                 coven_foundation::config::CloudProvider::OneDrive,
@@ -562,11 +568,14 @@ impl OAuthClients {
                 )
             })?
             .to_string();
-        key_service
-            .set_cloud_home_oauth_tokens(&tokens)
-            .map_err(crate::cloud::SetupError::Key)?;
         info!("Authorized OneDrive; folder ready");
-        Ok((drive_id, folder_id))
+        Ok(AuthorizedOAuthCloudHome {
+            tokens,
+            location: OAuthCloudHomeLocation::OneDrive {
+                drive_id,
+                folder_id,
+            },
+        })
     }
 }
 
@@ -918,77 +927,8 @@ pub async fn refresh(
 }
 
 #[cfg(all(test, feature = "oauth-providers"))]
-pub(crate) mod test_support {
-    use super::OAuthConfig;
-    use axum::{extract::Form, routing::post, Router};
-    use std::{collections::HashMap, sync::Arc};
-    use tokio::sync::{oneshot, Mutex};
-
-    pub(crate) async fn serve_token_response(
-        response_body: &'static str,
-    ) -> (
-        String,
-        oneshot::Receiver<HashMap<String, String>>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind token server");
-        let url = format!(
-            "http://{}/token",
-            listener.local_addr().expect("local addr")
-        );
-
-        let (request_tx, request_rx) = oneshot::channel();
-        let request_tx = Arc::new(Mutex::new(Some(request_tx)));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
-
-        let app = Router::new().route(
-            "/token",
-            post(move |Form(params): Form<HashMap<String, String>>| {
-                let request_tx = request_tx.clone();
-                let shutdown_tx = shutdown_tx.clone();
-                async move {
-                    let request_tx = request_tx
-                        .lock()
-                        .await
-                        .take()
-                        .expect("token request sender available");
-                    request_tx.send(params).expect("send token request to test");
-                    let shutdown_tx = shutdown_tx
-                        .lock()
-                        .await
-                        .take()
-                        .expect("token server shutdown sender available");
-                    shutdown_tx.send(()).expect("send token server shutdown");
-                    ([("content-type", "application/json")], response_body)
-                }
-            }),
-        );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive token server shutdown");
-                })
-                .await
-                .expect("serve token response");
-        });
-        (url, request_rx, server)
-    }
-
-    pub(crate) fn oauth_config(token_url: String) -> OAuthConfig {
-        OAuthConfig {
-            client_id: "client-id".to_string(),
-            client_secret: Some("client-secret".to_string()),
-            auth_url: "http://auth.example/authorize".to_string(),
-            token_url,
-            scopes: vec![],
-            redirect_port: 19284,
-            extra_auth_params: vec![],
-        }
-    }
-}
+#[path = "oauth/test_support.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "oauth_tests.rs"]

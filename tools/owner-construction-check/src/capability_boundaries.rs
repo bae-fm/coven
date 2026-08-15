@@ -30,6 +30,7 @@ pub(crate) struct GatedCapability {
 
 const NETWORK_HOMES: &[&str] = &[
     "crates/coven-storage/src/cloud/",
+    "crates/coven-storage/src/oauth/",
     "crates/coven-storage/src/oauth.rs",
 ];
 
@@ -165,6 +166,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         ],
         allowed: &[
             "crates/coven-replication/src/sync/sync_loop.rs",
+            "crates/coven-replication/src/sync/sync_loop/",
             "crates/coven-storage/src/cloud/s3/runtime.rs",
             "crates/coven-storage/src/cloud/resumable.rs",
         ],

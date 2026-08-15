@@ -2305,10 +2305,11 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         owner,
         cycle::StoreInitialization::CreateStore,
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await
     .expect("prepare plaintext storage")
-    .initialize()
+    .initialize(None)
     .await
     .expect("initialize plaintext storage");
 
@@ -2373,10 +2374,11 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
             expected_store_root: root,
         },
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await
     .expect("prepare Store opening");
-    let error = match prepared.initialize().await {
+    let error = match prepared.initialize(None).await {
         Err(error) => error,
         Ok(_) => panic!("an exact founder graph without its Store root must fail loud"),
     };
@@ -2452,10 +2454,11 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
             expected_store_root: root,
         },
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await
     .expect("prepare foreign Store opening");
-    let error = match prepared.initialize().await {
+    let error = match prepared.initialize(None).await {
         Err(error) => error,
         Ok(_) => panic!("a foreign founder graph without its exact root must fail loud"),
     };
@@ -2521,10 +2524,11 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
             expected_store_root: root,
         },
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await
     .expect("prepare committed founder opening")
-    .initialize()
+    .initialize(None)
     .await
     .expect("accept the identity's committed founder");
 
@@ -2590,10 +2594,11 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
                 expected_store_root: root,
             },
             None,
+            std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
         )
         .await
         .expect("prepare foreign founder opening")
-        .initialize()
+        .initialize(None)
         .await
         .is_err(),
         "a committed foreign founder prevents initialization",
@@ -2640,6 +2645,7 @@ async fn initialization_rejects_an_identity_other_than_the_storage_identity() {
         other,
         cycle::StoreInitialization::CreateStore,
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await;
 
@@ -2684,6 +2690,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
                 owner,
                 cycle::StoreInitialization::CreateStore,
                 None,
+                std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
             )
             .await
             .is_err(),
@@ -6309,10 +6316,11 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
         signer.clone(),
         crate::sync::cycle::StoreInitialization::CreateStore,
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await
     .expect("prepare pending-rotation Store")
-    .initialize()
+    .initialize(None)
     .await
     .expect("initialize pending-rotation Store");
     let root = store_database
@@ -6346,6 +6354,7 @@ async fn malformed_durable_pending_rotation_blocks_session_reopen() {
             expected_store_root: root,
         },
         None,
+        std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
     )
     .await;
 

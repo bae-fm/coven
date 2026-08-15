@@ -47,7 +47,7 @@ use coven_protocol::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use coven_protocol::membership::MemberInfo;
 use coven_protocol::membership::MemberRole;
 use coven_protocol::objects::StorageError;
-use coven_replication::blob::transition::{LocalBlobTransitions, MakeLocalError, MakeRemoteError};
+use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
 use coven_replication::blob::DrainOutcome;
 use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use coven_replication::sync::sync_loop::SyncLoopStatus;
@@ -145,8 +145,8 @@ impl CovenHandle {
         blob_chunking: coven_storage::BlobChunking,
     ) -> Self {
         let database = StoreDatabase::from_database(db);
-        let cloud_homes =
-            coven_storage::cloud::CloudHomeFactory::new(key_service.clone(), oauth_clients);
+        let cloud_homes = coven_storage::cloud::CloudHomeFactory::new(oauth_clients);
+        let credentials = coven_keys::keys::CloudHomeCredentialsOwner::new(key_service.clone());
         let security = StoreSecurity::new(
             key_service,
             key_custody.clone(),
@@ -156,6 +156,7 @@ impl CovenHandle {
         let cloud_storage = StoreCloudStorage::new(
             security.clone(),
             cloud_homes,
+            credentials,
             clock.clone(),
             cloudkit_ops,
             blob_chunking,
@@ -170,11 +171,9 @@ impl CovenHandle {
             local_blob_access.clone(),
         );
         let read_database = StoreDatabase::from_database(read_db);
-        let local_blob_transitions = LocalBlobTransitions::new(database.clone(), store_dir.clone());
         let sync = StoreSync::new(
             config_provider,
             security.clone(),
-            key_custody.clone(),
             database.clone(),
             #[cfg(test)]
             store_dir.clone(),
@@ -183,7 +182,7 @@ impl CovenHandle {
             open_guard,
             cloud_storage,
             blob_access.clone(),
-            local_blob_transitions,
+            Arc::new(coven_replication::sync::sync_loop::SystemSyncLoopRuntimeFactory),
         );
         let rows = StoreRows::new(
             coven_database::StoreRowWrites::new(database.clone()),
@@ -385,6 +384,46 @@ impl CovenHandle {
         self.sync.probe_cloud_home(config).await
     }
 
+    /// Connect a new S3 cloud home and commit its credentials and any generated
+    /// opaque-home master key only after the replacement connection is ready.
+    pub async fn setup_s3_cloud_home(
+        &self,
+        cloud_home: crate::CloudHomeConfig,
+        access_key: String,
+        secret_key: String,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
+        self.sync.setup_s3(cloud_home, access_key, secret_key).await
+    }
+
+    /// Connect a new CloudKit cloud home and commit any generated opaque-home
+    /// master key only after the replacement connection is ready.
+    pub async fn setup_cloudkit_cloud_home(
+        &self,
+        cloud_home: crate::CloudHomeConfig,
+        cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
+        self.sync.setup_cloudkit(cloud_home, cloudkit_ops).await
+    }
+
+    /// Authorize and connect a new Google Drive, Dropbox, or OneDrive home.
+    /// Tokens remain proposed until the replacement connection is ready.
+    #[cfg(feature = "oauth-providers")]
+    pub async fn setup_oauth_cloud_home(
+        &self,
+        cloud_home: crate::CloudHomeConfig,
+        cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
+        self.sync.setup_oauth(cloud_home, cancel).await
+    }
+
+    /// Whether a home with this storage policy needs and can unlock its key.
+    pub fn cloud_home_key_state(
+        &self,
+        storage: crate::HomeStorage,
+    ) -> Result<crate::CloudHomeKeyState, KeyError> {
+        self.security.cloud_home_key_state(storage)
+    }
+
     pub async fn connect_sync_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
@@ -414,6 +453,20 @@ impl CovenHandle {
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
         self.sync.connect_with_test_home(home, cipher).await
+    }
+
+    /// Test-only: atomically set up a proposed cloud home over an injected
+    /// provider while exercising the production key and connection transaction.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn setup_cloud_home_with_test_home(
+        &self,
+        cloud_home: crate::CloudHomeConfig,
+        home: Arc<dyn ExactCloudHome>,
+        credentials: Option<crate::CloudHomeCredentials>,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
+        self.sync
+            .setup_with_test_home(cloud_home, home, credentials)
+            .await
     }
 
     /// Test-only: connect over an injected [`ExactCloudHome`] exactly as
@@ -520,29 +573,10 @@ impl CovenHandle {
     // Master-key lifecycle
     // =========================================================================
 
-    /// Generate this store's master key and establish it under the handle's
-    /// custody. Errors with [`MasterKeyError::AlreadyEstablished`] if custody
-    /// already unlocks one — coven never generates over an existing key, so a
-    /// corrupt (present-but-unreadable) entry is never silently overwritten
-    /// either, since custody's `unlock` surfaces that as `Err`, not `None`.
-    /// The only place coven ever generates a master key. Returns its
-    /// fingerprint for the host to record in its own config.
-    pub fn initialize_master_key(&self) -> Result<String, MasterKeyError> {
-        self.security.initialize_master_key()
-    }
-
     /// Import a serialized master keyring a host already holds and establish it
     /// under the handle's custody, replacing whatever custody already holds.
-    /// Returns its fingerprint for the host to record in its own config.
-    pub fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
-        self.security.import_master_key(serialized)
-    }
-
-    /// The established master key's fingerprint, or `None` if custody has
-    /// never had one established (or is locked, for a policy where that's
-    /// representable).
-    pub fn master_key_fingerprint(&self) -> Result<Option<String>, KeyError> {
-        self.security.master_key_fingerprint()
+    pub async fn import_master_key(&self, serialized: &str) -> Result<(), MasterKeyError> {
+        self.sync.import_master_key(serialized).await
     }
 
     // =========================================================================
@@ -552,8 +586,8 @@ impl CovenHandle {
     /// Generate this store's signing identity and establish it under the
     /// handle's identity custody. Errors with
     /// [`IdentityError::AlreadyEstablished`] if custody already unlocks one —
-    /// coven never generates over an existing identity. The counterpart of
-    /// [`initialize_master_key`](Self::initialize_master_key) for a store a
+    /// coven never generates over an existing identity. This is the identity
+    /// counterpart of cloud-home setup's master-key transaction for a store a
     /// host is creating fresh (not joining or restoring, which each establish
     /// their own identity as part of what they do). Returns the established
     /// public key, hex-encoded.

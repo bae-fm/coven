@@ -199,18 +199,16 @@ impl Drop for RangePutUploader {
             Ok(worker) => worker,
             Err(error) => {
                 tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation thread failed to start");
-                std::process::abort();
+                return;
             }
         };
         match worker.join() {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation failed");
-                std::process::abort();
             }
             Err(_) => {
                 tracing::error!(key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation thread panicked");
-                std::process::abort();
             }
         }
     }
@@ -595,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_failure_terminates_the_process() {
+    fn cancellation_failure_does_not_terminate_the_process() {
         const CHILD: &str = "COVEN_RANGE_PUT_CANCEL_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -627,11 +625,11 @@ mod tests {
         let status = std::process::Command::new(
             std::env::current_exe().expect("locate resumable test executable"),
         )
-        .arg("cancellation_failure_terminates_the_process")
+        .arg("cancellation_failure_does_not_terminate_the_process")
         .arg("--nocapture")
         .env(CHILD, "1")
         .status()
         .expect("run resumable cancellation subprocess");
-        assert!(!status.success(), "cancellation subprocess survived");
+        assert!(status.success(), "cancellation subprocess terminated");
     }
 }

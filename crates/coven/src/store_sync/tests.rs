@@ -1,4 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+#[path = "tests/setup_failure.rs"]
+mod setup_failure;
 
 use super::*;
 use crate::store_membership::StoreMembership;
@@ -32,6 +35,44 @@ impl MasterKeyCustody for NoKeyCustody {
     }
 }
 
+struct FailCredentialsAfterMasterCommit {
+    keyring: Mutex<Option<MasterKeyring>>,
+    credentials: StoreKeys,
+}
+
+impl FailCredentialsAfterMasterCommit {
+    fn new(credentials: StoreKeys) -> Self {
+        Self {
+            keyring: Mutex::new(None),
+            credentials,
+        }
+    }
+}
+
+impl MasterKeyCustody for FailCredentialsAfterMasterCommit {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        Ok(self.keyring.lock().expect("lock test master key").clone())
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
+        *self.keyring.lock().expect("lock test master key") = Some(keyring.clone());
+        self.credentials
+            .fail_next_cloud_home_credentials_operation_for_test(keyring_unavailable())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        *self.keyring.lock().expect("lock test master key") = None;
+        Ok(())
+    }
+}
+
+fn keyring_unavailable() -> keyring_core::Error {
+    keyring_core::Error::Invalid(
+        "keyring unavailable".to_string(),
+        "test failure".to_string(),
+    )
+}
+
 struct NoIdentityCustody;
 
 impl DeviceIdentityCustody for NoIdentityCustody {
@@ -45,6 +86,38 @@ impl DeviceIdentityCustody for NoIdentityCustody {
 
     fn forget(&self) -> Result<(), KeyError> {
         Ok(())
+    }
+}
+
+struct UnexpectedMasterKeyAccess;
+
+impl MasterKeyCustody for UnexpectedMasterKeyAccess {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        panic!("browsable cloud setup must not unlock master-key custody")
+    }
+
+    fn persist(&self, _keyring: &MasterKeyring) -> Result<(), KeyError> {
+        panic!("browsable cloud setup must not persist a master key")
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        panic!("browsable cloud setup must not delete a master key")
+    }
+}
+
+struct LockedMasterKeyCustody;
+
+impl MasterKeyCustody for LockedMasterKeyCustody {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        Ok(None)
+    }
+
+    fn persist(&self, _keyring: &MasterKeyring) -> Result<(), KeyError> {
+        panic!("returning cloud connect must not generate a master key")
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        panic!("returning cloud connect must not delete a master key")
     }
 }
 
@@ -73,10 +146,8 @@ fn store_cloud_storage(
 ) -> StoreCloudStorage {
     StoreCloudStorage::new(
         security.clone(),
-        coven_storage::cloud::CloudHomeFactory::new(
-            keys.clone(),
-            coven_storage::oauth::OAuthClients::empty(),
-        ),
+        coven_storage::cloud::CloudHomeFactory::new(coven_storage::oauth::OAuthClients::empty()),
+        coven_keys::keys::CloudHomeCredentialsOwner::new(keys.clone()),
         clock,
         None,
         BlobChunking::DEFAULT,
@@ -90,6 +161,26 @@ fn store_sync(
     identity: Arc<dyn DeviceIdentityCustody>,
     database: coven_database::Database,
     store_dir: &StoreDir,
+) -> StoreSync {
+    store_sync_with_runtime_factory(
+        config_provider,
+        keys,
+        master_keys,
+        identity,
+        database,
+        store_dir,
+        Arc::new(coven_replication::sync::sync_loop::SystemSyncLoopRuntimeFactory),
+    )
+}
+
+fn store_sync_with_runtime_factory(
+    config_provider: ConfigProvider,
+    keys: StoreKeys,
+    master_keys: Arc<dyn MasterKeyCustody>,
+    identity: Arc<dyn DeviceIdentityCustody>,
+    database: coven_database::Database,
+    store_dir: &StoreDir,
+    runtime_factory: Arc<dyn coven_replication::sync::sync_loop::SyncLoopRuntimeFactory>,
 ) -> StoreSync {
     let database = StoreDatabase::from_database(database.clone());
     let local_blob_access = LocalStoreBlobAccess::new(
@@ -110,14 +201,9 @@ fn store_sync(
         cloud_storage.clone(),
         local_blob_access.clone(),
     );
-    let local_blob_transitions = coven_replication::blob::transition::LocalBlobTransitions::new(
-        database.clone(),
-        store_dir.clone(),
-    );
     StoreSync::new(
         config_provider,
         security,
-        master_keys,
         database,
         store_dir.clone(),
         clock,
@@ -125,7 +211,7 @@ fn store_sync(
         StoreOpenGuard::acquire_for_test(store_dir),
         cloud_storage,
         blob_storage,
-        local_blob_transitions,
+        runtime_factory,
     )
 }
 
@@ -191,14 +277,9 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         cloud_storage.clone(),
         local_blob_access.clone(),
     );
-    let local_blob_transitions = coven_replication::blob::transition::LocalBlobTransitions::new(
-        database.clone(),
-        store_dir.clone(),
-    );
     let sync = StoreSync::new(
         config_provider,
         security.clone(),
-        master_keys,
         database,
         store_dir.clone(),
         clock,
@@ -206,7 +287,7 @@ async fn membership_read_surfaces_malformed_cloud_credentials() {
         StoreOpenGuard::acquire_for_test(&store_dir),
         cloud_storage,
         blob_storage,
-        local_blob_transitions,
+        Arc::new(coven_replication::sync::sync_loop::SystemSyncLoopRuntimeFactory),
     );
     let membership = StoreMembership::new(sync);
 
@@ -253,7 +334,7 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
     let sync = store_sync(
         Arc::new(move || config.clone()),
         store_keys,
-        Arc::new(NoKeyCustody),
+        Arc::new(LockedMasterKeyCustody),
         established_identity_custody(),
         coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
         &store_dir,
@@ -267,6 +348,356 @@ async fn connect_rejects_an_opaque_home_without_a_master_key() {
         matches!(error, SyncError::MasterKeyNotEstablished),
         "expected MasterKeyNotEstablished, got {error:?}"
     );
+    assert_eq!(
+        sync.security
+            .cloud_home_key_state(HomeStorage::Opaque)
+            .expect("read locked key state"),
+        crate::store_security::CloudHomeKeyState::Locked
+    );
+}
+
+#[tokio::test]
+async fn new_opaque_home_commits_its_key_and_credentials_with_the_connection() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-new-cloud-home";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Browsable;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let custody = coven_keys::custody::KeyCustody::Keyring.resolve(&store_keys, &store_dir);
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys.clone(),
+        custody.clone(),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
+        &store_dir,
+    );
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Opaque,
+        ..Default::default()
+    };
+
+    let connected = sync
+        .setup_with_test_home(
+            proposed.clone(),
+            Arc::new(InMemoryCloudHome::new()),
+            Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                access_key: "access".to_string(),
+                secret_key: "secret".to_string(),
+            }),
+        )
+        .await
+        .expect("atomic setup succeeds");
+
+    assert_eq!(connected.cloud_home, proposed);
+    assert_eq!(
+        connected.key_state,
+        crate::store_security::CloudHomeKeyState::Available
+    );
+    assert!(custody.unlock().expect("unlock master key").is_some());
+    assert!(matches!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read committed credentials"),
+        Some(coven_keys::keys::CloudHomeCredentials::S3 { access_key, secret_key })
+            if access_key == "access" && secret_key == "secret"
+    ));
+    assert!(sync.is_syncing());
+}
+
+#[tokio::test]
+async fn browsable_home_setup_never_accesses_master_key_custody() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-browsable-cloud-home";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Browsable;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys,
+        Arc::new(UnexpectedMasterKeyAccess),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
+        &store_dir,
+    );
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Browsable,
+        ..Default::default()
+    };
+
+    let connected = sync
+        .setup_with_test_home(
+            proposed,
+            Arc::new(InMemoryCloudHome::new()),
+            Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                access_key: "access".to_string(),
+                secret_key: "secret".to_string(),
+            }),
+        )
+        .await
+        .expect("browsable setup succeeds without master-key custody");
+
+    assert_eq!(
+        connected.key_state,
+        crate::store_security::CloudHomeKeyState::NotRequired
+    );
+    sync.disconnect();
+}
+
+#[tokio::test]
+async fn credentialless_provider_setup_removes_previous_provider_credentials() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-credentialless-cloud-home";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Browsable;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    store_keys
+        .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
+            access_key: "old-access".to_string(),
+            secret_key: "old-secret".to_string(),
+        })
+        .expect("seed previous credentials");
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys.clone(),
+        Arc::new(NoKeyCustody),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
+        &store_dir,
+    );
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::CloudKit),
+        storage: HomeStorage::Browsable,
+        ..Default::default()
+    };
+
+    sync.setup_with_test_home(proposed, Arc::new(InMemoryCloudHome::new()), None)
+        .await
+        .expect("credentialless setup succeeds");
+
+    assert!(store_keys
+        .get_cloud_home_credentials()
+        .expect("read removed credentials")
+        .is_none());
+}
+
+#[cfg(feature = "oauth-providers")]
+#[tokio::test]
+async fn authorized_oauth_tokens_remain_absent_when_connection_preparation_fails() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-oauth-connection-failure";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Browsable;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys.clone(),
+        Arc::new(UnexpectedMasterKeyAccess),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
+        &store_dir,
+    );
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::Dropbox),
+        storage: HomeStorage::Browsable,
+        dropbox_folder_path: Some("/Apps/coven/Test Store".to_string()),
+        ..Default::default()
+    };
+    let prepared = coven_storage::cloud::PreparedOAuthCloudHome {
+        cloud_home: proposed,
+        credentials: coven_keys::keys::CloudHomeCredentials::OAuth {
+            tokens: coven_keys::keys::OAuthTokens {
+                access_token: "authorized-access-token".to_string(),
+                refresh_token: Some("authorized-refresh-token".to_string()),
+                expires_at: None,
+            },
+        },
+    };
+
+    let error = sync
+        .setup_prepared_oauth_cloud_home_for_test(prepared)
+        .await
+        .expect_err("missing provider client configuration must reject the connection");
+
+    assert!(matches!(error, crate::CloudHomeSetupError::Connection(_)));
+    assert!(store_keys
+        .get_cloud_home_credentials()
+        .expect("read durable OAuth credentials")
+        .is_none());
+    assert!(!sync.is_connected());
+}
+
+#[tokio::test]
+async fn credential_commit_failure_restores_the_previous_credentials_and_master_key() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-cloud-home-credential-failure";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Opaque;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    let previous = coven_keys::keys::CloudHomeCredentials::S3 {
+        access_key: "old-access".to_string(),
+        secret_key: "old-secret".to_string(),
+    };
+    store_keys
+        .set_cloud_home_credentials(&previous)
+        .expect("seed previous credentials");
+    let custody = Arc::new(FailCredentialsAfterMasterCommit::new(store_keys.clone()));
+    let database = coven_replication::sync::test_helpers::open_test_db(store_dir.clone());
+    let store_database = coven_database::StoreDatabase::from_database(database.clone());
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys.clone(),
+        custody.clone(),
+        established_identity_custody(),
+        database.clone(),
+        &store_dir,
+    );
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Opaque,
+        ..Default::default()
+    };
+
+    let error = sync
+        .setup_with_test_home(
+            proposed,
+            Arc::new(InMemoryCloudHome::new()),
+            Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                access_key: "new-access".to_string(),
+                secret_key: "new-secret".to_string(),
+            }),
+        )
+        .await
+        .expect_err("credential commit must fail");
+
+    assert!(
+        matches!(
+            &error,
+            crate::CloudHomeSetupError::Commit {
+                subject: "credentials",
+                ..
+            }
+        ),
+        "expected credential commit failure, got {error:?}"
+    );
+    assert!(custody
+        .unlock()
+        .expect("read rolled-back master key")
+        .is_none());
+    assert!(matches!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read preserved credentials"),
+        Some(coven_keys::keys::CloudHomeCredentials::S3 { access_key, secret_key })
+            if access_key == "old-access" && secret_key == "old-secret"
+    ));
+    assert!(!sync.is_connected());
+    assert!(
+        store_database
+            .local_store_root_ref()
+            .await
+            .expect("read local Store root")
+            .is_none(),
+        "failed setup must not leave an initialized Store behind",
+    );
+}
+
+#[tokio::test]
+async fn credential_commit_failure_preserves_the_active_connection() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "atomic-cloud-home-active-connection";
+    let mut config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    config.cloud_home.storage = HomeStorage::Browsable;
+    let store_keys = StoreKeys::bind(store_id.to_string());
+    store_keys
+        .set_cloud_home_credentials(&coven_keys::keys::CloudHomeCredentials::S3 {
+            access_key: "old-access".to_string(),
+            secret_key: "old-secret".to_string(),
+        })
+        .expect("seed previous credentials");
+    let sync = store_sync(
+        Arc::new(move || config.clone()),
+        store_keys.clone(),
+        Arc::new(NoKeyCustody),
+        established_identity_custody(),
+        coven_replication::sync::test_helpers::open_test_db(store_dir.clone()),
+        &store_dir,
+    );
+    let home = Arc::new(InMemoryCloudHome::new());
+    connect_test_home(sync.clone(), home.clone(), CloudCipher::Plaintext)
+        .await
+        .expect("install the active connection");
+    let stopped_before = sync.stopped_loop_count_for_test();
+    store_keys
+        .fail_next_cloud_home_credentials_operation_for_test(keyring_unavailable())
+        .expect("fail the credential commit");
+    let proposed = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Browsable,
+        ..Default::default()
+    };
+
+    let error = sync
+        .setup_with_test_home(
+            proposed,
+            home,
+            Some(coven_keys::keys::CloudHomeCredentials::S3 {
+                access_key: "new-access".to_string(),
+                secret_key: "new-secret".to_string(),
+            }),
+        )
+        .await
+        .expect_err("credential commit must fail");
+
+    assert!(matches!(
+        error,
+        crate::CloudHomeSetupError::Commit {
+            subject: "credentials",
+            ..
+        }
+    ));
+    assert!(sync.is_syncing());
+    assert!(sync.has_remote_storage_for_test());
+    assert_eq!(sync.stopped_loop_count_for_test(), stopped_before);
+    assert!(matches!(
+        store_keys
+            .get_cloud_home_credentials()
+            .expect("read preserved credentials"),
+        Some(coven_keys::keys::CloudHomeCredentials::S3 { access_key, secret_key })
+            if access_key == "old-access" && secret_key == "old-secret"
+    ));
 }
 
 #[tokio::test]
@@ -390,7 +821,7 @@ async fn test_home_replacement_stops_the_previous_loop() {
 }
 
 #[tokio::test]
-async fn failed_restart_leaves_no_stale_connection() {
+async fn failed_restart_preserves_the_active_connection() {
     test_keyring::install();
     let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let mut initial_config = Config::with_defaults(
@@ -428,8 +859,8 @@ async fn failed_restart_leaves_no_stale_connection() {
         .await
         .expect_err("invalid configured provider fails restart");
     assert!(error.to_string().contains("failed to build cloud home"));
-    assert!(!sync.is_connected());
-    assert!(!sync.has_remote_storage_for_test());
+    assert!(sync.is_syncing());
+    assert!(sync.has_remote_storage_for_test());
 }
 
 #[tokio::test]

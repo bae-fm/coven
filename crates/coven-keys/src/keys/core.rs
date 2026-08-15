@@ -95,6 +95,12 @@ pub enum KeyError {
     },
     #[error("keyring entry {account} is present but empty (corrupt)")]
     EmptyKeyringEntry { account: String },
+    #[error("cannot {operation} cloud-home credentials after their setup was rolled back")]
+    CloudCredentialsRolledBack { operation: &'static str },
+    #[error("cloud-home credentials belong to a replaced provider connection")]
+    CloudCredentialsSuperseded,
+    #[error("cannot {operation} a master key after its setup was rolled back")]
+    MasterKeySetupRolledBack { operation: &'static str },
     #[error("Apple keyring entry was not constructed by the protected-data store")]
     UnexpectedAppleKeyringEntry,
     #[cfg(any(test, feature = "test-utils"))]
@@ -165,8 +171,6 @@ pub enum CloudHomeCredentials {
     },
     /// Consumer cloud providers (Google Drive, Dropbox, OneDrive).
     OAuth { tokens: crate::keys::OAuthTokens },
-    /// iCloud: no credentials needed (macOS handles auth).
-    None,
 }
 
 impl std::fmt::Debug for CloudHomeCredentials {
@@ -184,7 +188,6 @@ impl std::fmt::Debug for CloudHomeCredentials {
                 .debug_struct("OAuth")
                 .field("tokens", &"<redacted>")
                 .finish(),
-            CloudHomeCredentials::None => f.write_str("None"),
         }
     }
 }

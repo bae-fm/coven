@@ -288,11 +288,12 @@ impl TestOwnerGraph {
                 expected_store_root,
             },
             None,
+            std::sync::Arc::new(crate::sync::test_helpers::TestCustody::default()),
         ))
         .await?;
-        let components = Box::pin(components.initialize()).await?;
+        let components = Box::pin(components.initialize(None)).await?;
         Ok(components
-            .run_cycle(&coven_foundation::clock::SystemClock, None, None)
+            .run_cycle(&coven_foundation::clock::SystemClock, None)
             .await?)
     }
 }

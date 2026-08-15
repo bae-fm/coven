@@ -88,12 +88,20 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "CircleEpochAccess",
     "HostWriteBlobStaging",
     "LiveQuery",
+    "PreparedCloudHomeCredentials",
+    "PreparedCloudHomeKey",
+    "PreparedSyncLoopRuntime",
     "ReconfigurableLiveQuery",
+    "RuntimeSlot",
+    "RuntimeSlotState",
+    "StagedCloudHomeCredentials",
+    "StagedMasterKeyCustody",
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
-    ("ConnectedBlobTransitions", "StoreSync"),
+    ("ConnectedBlobTransitions", "SyncComponents"),
     ("CurrentRemoteBlobSource", "StoreBlobAccess"),
+    ("LocalBlobTransitions", "SyncComponents"),
     ("RemoteStoreBlobAccess", "StoreBlobAccess"),
     ("Store", "StoreSync"),
     ("SyncComponents", "StoreSync"),
@@ -156,6 +164,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "AuthorizedStoreHistory",
         "authorize_writer",
     ),
+    (
+        "crates/coven-replication/src/sync/sync_loop.rs",
+        "SyncLoopHandle",
+        "new",
+    ),
     ("crates/coven-replication/src/sync/store/authorization.rs", "Store", "new"),
     ("crates/coven/src/handle.rs", "CovenHandle", "new"),
     (
@@ -168,7 +181,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven/src/store_security.rs",
         "StoreSecurity",
-        "initialize_sync_components",
+        "prepare_sync_components",
     ),
     (
         "crates/coven/src/store_security.rs",
@@ -197,6 +210,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "crates/coven-replication/src/sync/cycle.rs",
         "PreparedSyncComponents",
         "prepare",
+    ),
+    (
+        "crates/coven-replication/src/sync/cycle.rs",
+        "PreparedSyncComponents",
+        "initialize",
     ),
     (
         "crates/coven-replication/src/sync/cycle.rs",
@@ -2667,7 +2685,14 @@ mod tests {
                 "CircleEpochAccess",
                 "HostWriteBlobStaging",
                 "LiveQuery",
+                "PreparedCloudHomeCredentials",
+                "PreparedCloudHomeKey",
+                "PreparedSyncLoopRuntime",
                 "ReconfigurableLiveQuery",
+                "RuntimeSlot",
+                "RuntimeSlotState",
+                "StagedCloudHomeCredentials",
+                "StagedMasterKeyCustody",
             ]
         );
         assert!(CAPABILITY_TYPES.contains(&"CircleEpochAccess"));

@@ -142,11 +142,12 @@ so two coven-based apps on one machine never read or overwrite each other's keys
 It is required, not defaulted: a key operation attempted before the host calls
 it fails with a typed error rather than falling back to a shared name.
 
-[`CovenHandle::initialize_master_key`](rustdoc:method:coven::CovenHandle::initialize_master_key)
-is the only place coven ever generates a master key; it refuses to run again
-once one is established, so a corrupt entry is never silently overwritten.
-Lose both the established key and every member's wrapped copy of it and the
-encrypted data is unrecoverable.
+Atomic setup of an opaque cloud home is the only fresh-store path that generates
+a master key. It prepares the provider connection using a proposed key, then
+commits custody, provider credentials, and the replacement connection together.
+Joining and restoration import the existing store key instead. Lose both the
+established key and every member's wrapped copy of it and the encrypted data is
+unrecoverable.
 
 **The local SQLite database is not encrypted.** coven's encryption is at
 rest *in the cloud* — every object a device pushes is sealed before it
@@ -263,17 +264,3 @@ it seals a `Derived`-scoped blob (see [Encryption scope](/docs/blobs#encryption-
 so a blob encrypted under a scoped key cannot be read with the store key,
 only with the same derivation. None of this cipher machinery — chunks,
 nonces, derivation — is public API; a host never touches it directly.
-
-## The key fingerprint
-
-[`MasterKeyring::fingerprint`](rustdoc:method:coven::MasterKeyring::fingerprint)
-returns the first 8 bytes of SHA-256 over the current generation's key as 16
-hex characters — the same value
-[`CovenHandle::master_key_fingerprint`](rustdoc:method:coven::CovenHandle::master_key_fingerprint)
-returns for an open store. It is a
-display hint, short enough to show in a UI so a user can spot that two devices
-hold different keys, long enough that two real keys are very unlikely to collide.
-It is not a cryptographic commitment: it does not bind a ciphertext to a key and
-must not be used to authenticate one. Tamper detection is the cipher's job, not
-the fingerprint's: a changed byte makes XChaCha20-Poly1305 decryption fail
-outright.

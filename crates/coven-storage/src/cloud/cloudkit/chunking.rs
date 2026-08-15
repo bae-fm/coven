@@ -202,7 +202,6 @@ impl Drop for CloudKitStagingCleanup {
                 %error,
                 "CloudKit cancellation failed to discard atomic-create batch"
             );
-            std::process::abort();
         }
     }
 }

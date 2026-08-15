@@ -555,6 +555,7 @@ pub struct PreparedSyncComponents {
     initialization: StoreInitialization,
     store_id: String,
     routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+    master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
 }
 
 impl PreparedSyncComponents {
@@ -565,6 +566,7 @@ impl PreparedSyncComponents {
         identity: coven_keys::keys::UserKeypair,
         initialization: StoreInitialization,
         routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+        master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Result<Self, InitSyncError> {
         #[cfg(any(test, feature = "test-utils"))]
         database.assert_owns_payload_directory_for_test(&store_dir);
@@ -618,10 +620,14 @@ impl PreparedSyncComponents {
             initialization,
             store_id,
             routing_encryption,
+            master_keys,
         })
     }
 
-    pub async fn initialize(self) -> Result<SyncComponents, InitSyncError> {
+    pub async fn initialize(
+        self,
+        observer: Option<std::sync::Arc<dyn BlobTransitionObserver>>,
+    ) -> Result<SyncComponents, InitSyncError> {
         let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = self.storage;
         let store_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
             storage.clone();
@@ -652,6 +658,21 @@ impl PreparedSyncComponents {
         .map_err(InitSyncError::Initialization)?;
 
         let (store, device_id) = initialized.into_parts();
+        let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
+            crate::blob::transition::LocalBlobTransitions::new(
+                self.database.clone(),
+                self.store_dir.clone(),
+            ),
+            std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
+                self.local_blob_access.clone(),
+                super::store::blob::CurrentRemoteBlobSource::current(
+                    self.database.clone(),
+                    store_storage,
+                ),
+            )),
+            self.routing_encryption.clone(),
+            observer,
+        );
         info!("Sync initialized (device: {})", device_id);
         Ok(SyncComponents {
             store: std::sync::Arc::new(store),
@@ -661,6 +682,8 @@ impl PreparedSyncComponents {
             store_id: self.store_id,
             device_id,
             routing_encryption: self.routing_encryption,
+            master_keys: self.master_keys,
+            blob_transitions,
         })
     }
 }
@@ -681,6 +704,8 @@ pub struct SyncComponents {
     store_id: String,
     device_id: String,
     routing_encryption: Option<coven_keys::encryption::EncryptionService>,
+    master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
+    blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
 }
 
 impl SyncComponents {
@@ -965,6 +990,39 @@ impl SyncComponents {
             .map_err(crate::sync::store::StoreError::from)
     }
 
+    pub(crate) async fn make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        pin: bool,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.blob_transitions
+            .make_remote(root_table, root_id, pin)
+            .await
+    }
+
+    pub(crate) async fn cancel_make_remote(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), crate::blob::transition::MakeRemoteError> {
+        self.blob_transitions
+            .cancel_make_remote(root_table, root_id)
+            .await
+    }
+
+    pub(crate) async fn make_local(
+        &self,
+        root_table: &str,
+        root_id: &str,
+        dest: &std::collections::HashMap<String, std::path::PathBuf>,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), crate::blob::transition::MakeLocalError> {
+        self.blob_transitions
+            .make_local(root_table, root_id, dest, cancel)
+            .await
+    }
+
     pub(crate) async fn invite_member(
         &self,
         public_key_hex: &str,
@@ -991,7 +1049,6 @@ impl SyncComponents {
     pub(crate) async fn remove_member(
         &self,
         public_key_hex: &str,
-        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, super::store::MembershipOpsError> {
         let encryption = self
             .routing_encryption
@@ -1001,7 +1058,7 @@ impl SyncComponents {
             .remove_member(
                 public_key_hex,
                 encryption,
-                master_keys,
+                self.master_keys.as_ref(),
                 self.storage.as_ref(),
                 self.storage.as_ref(),
             )
@@ -1158,7 +1215,6 @@ impl SyncComponents {
     pub async fn run_cycle(
         &self,
         clock: &dyn coven_foundation::clock::Clock,
-        master_keys: Option<&dyn coven_keys::keys::MasterKeyCustody>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<SyncCycleResult, SyncCycleFailure> {
         let authorization =
@@ -1170,7 +1226,7 @@ impl SyncComponents {
             clock,
             cipher: self.storage.as_ref(),
             pending_rotation: self.storage.as_ref(),
-            master_keys,
+            master_keys: Some(self.master_keys.as_ref()),
             routing_encryption: self.routing_encryption.as_ref(),
             local_blob_access: &self.local_blob_access,
             observer,
@@ -1188,16 +1244,31 @@ impl SyncComponents {
         storage: std::sync::Arc<S>,
         store_id: String,
         device_id: String,
+        master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     ) -> Self
     where
         S: CloudSyncCycleConnection + 'static,
     {
         database.assert_owns_payload_directory_for_test(&store_dir);
         let storage: std::sync::Arc<dyn CloudSyncCycleConnection> = storage;
+        let store_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
+            storage.clone();
         let local_blob_access = super::store::blob::LocalStoreBlobAccess::new(
             database.clone(),
             store_dir.clone(),
-            super::store::blob::StoreBlobCache::new(database.clone(), store_dir),
+            super::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone()),
+        );
+        let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
+            crate::blob::transition::LocalBlobTransitions::new(database.clone(), store_dir),
+            std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
+                local_blob_access.clone(),
+                super::store::blob::CurrentRemoteBlobSource::current(
+                    database.clone(),
+                    store_storage,
+                ),
+            )),
+            None,
+            None,
         );
         Self {
             store,
@@ -1207,6 +1278,8 @@ impl SyncComponents {
             storage,
             device_id,
             routing_encryption: None,
+            master_keys,
+            blob_transitions,
         }
     }
 
@@ -1254,12 +1327,11 @@ impl SyncComponents {
     pub fn adopt_key_rotation(
         &self,
         encryption: coven_keys::encryption::EncryptionService,
-        master_keys: &dyn coven_keys::keys::MasterKeyCustody,
     ) -> Result<String, coven_keys::keys::KeyError> {
         CloudSyncCipherStateAccess::adopt_key_rotation(
             self.storage.as_ref(),
             &encryption,
-            master_keys,
+            self.master_keys.as_ref(),
         )
         .map(|adopted| adopted.fingerprint().to_string())
     }
