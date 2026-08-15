@@ -35,13 +35,16 @@ async fn caller_driven_test_home_establishes_the_master_key_it_needs() {
     .expect("open store");
     handle.initialize_identity().expect("establish identity");
 
-    handle
-        .connect_sync_with_test_home_caller_driven(
-            Arc::new(crate::InMemoryCloudHome::new()),
-            coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([7; 32])),
-        )
-        .await
-        .expect("set up caller-driven cloud home");
+    let connection = handle.connect_sync_with_test_home_caller_driven(
+        Arc::new(crate::InMemoryCloudHome::new()),
+        coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([7; 32])),
+    );
+    assert!(
+        std::mem::size_of_val(&connection) <= 128,
+        "the public connection future embeds {} bytes of Coven internals in its host",
+        std::mem::size_of_val(&connection)
+    );
+    connection.await.expect("set up caller-driven cloud home");
 
     assert_eq!(
         handle

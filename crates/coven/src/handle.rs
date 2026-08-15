@@ -374,14 +374,14 @@ impl CovenHandle {
     /// browsable one never consults custody. Reconnecting a provider replaces
     /// the cloud home and loop while retaining the Store database and clock.
     pub async fn connect_sync(&self) -> Result<(), SyncError> {
-        self.sync.connect().await
+        Box::pin(async { self.sync.connect().await }).await
     }
 
     /// Build and probe the cloud home described by `config` without installing
     /// it as this handle's sync connection. Hosts use this to validate proposed
     /// provider settings before committing them to their config source.
     pub async fn probe_cloud_home(&self, config: &crate::Config) -> Result<(), SyncError> {
-        self.sync.probe_cloud_home(config).await
+        Box::pin(async { self.sync.probe_cloud_home(config).await }).await
     }
 
     /// Connect a new S3 cloud home and commit its credentials and any generated
@@ -392,7 +392,7 @@ impl CovenHandle {
         access_key: String,
         secret_key: String,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
-        self.sync.setup_s3(cloud_home, access_key, secret_key).await
+        Box::pin(async move { self.sync.setup_s3(cloud_home, access_key, secret_key).await }).await
     }
 
     /// Connect a new CloudKit cloud home and commit any generated opaque-home
@@ -402,7 +402,7 @@ impl CovenHandle {
         cloud_home: crate::CloudHomeConfig,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
-        self.sync.setup_cloudkit(cloud_home, cloudkit_ops).await
+        Box::pin(async move { self.sync.setup_cloudkit(cloud_home, cloudkit_ops).await }).await
     }
 
     /// Authorize and connect a new Google Drive, Dropbox, or OneDrive home.
@@ -413,7 +413,7 @@ impl CovenHandle {
         cloud_home: crate::CloudHomeConfig,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
-        self.sync.setup_oauth(cloud_home, cancel).await
+        Box::pin(async move { self.sync.setup_oauth(cloud_home, cancel).await }).await
     }
 
     /// Whether a home with this storage policy needs and can unlock its key.
@@ -430,14 +430,14 @@ impl CovenHandle {
         &self,
         serialized_master_key: &str,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeUnlockError> {
-        self.sync.unlock(serialized_master_key).await
+        Box::pin(async { self.sync.unlock(serialized_master_key).await }).await
     }
 
     pub async fn connect_sync_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
-        self.sync.connect_with_cloudkit(cloudkit_ops).await
+        Box::pin(async move { self.sync.connect_with_cloudkit(cloudkit_ops).await }).await
     }
 
     /// Test-only: connect a started sync loop over an injected [`ExactCloudHome`]
@@ -462,7 +462,7 @@ impl CovenHandle {
         home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), crate::CloudHomeSetupError> {
-        self.sync.connect_with_test_home(home, cipher).await
+        Box::pin(async move { self.sync.connect_with_test_home(home, cipher).await }).await
     }
 
     /// Test-only: atomically set up a proposed cloud home over an injected
@@ -474,9 +474,12 @@ impl CovenHandle {
         home: Arc<dyn ExactCloudHome>,
         credentials: Option<crate::CloudHomeCredentials>,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
-        self.sync
-            .setup_with_test_home(cloud_home, home, credentials)
-            .await
+        Box::pin(async move {
+            self.sync
+                .setup_with_test_home(cloud_home, home, credentials)
+                .await
+        })
+        .await
     }
 
     /// Test-only: unlock a returning opaque home over an injected provider
@@ -487,9 +490,12 @@ impl CovenHandle {
         serialized_master_key: &str,
         home: Arc<dyn ExactCloudHome>,
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeUnlockError> {
-        self.sync
-            .unlock_with_test_home(serialized_master_key, home)
-            .await
+        Box::pin(async move {
+            self.sync
+                .unlock_with_test_home(serialized_master_key, home)
+                .await
+        })
+        .await
     }
 
     /// Test-only: connect over an injected [`ExactCloudHome`] exactly as
@@ -516,9 +522,12 @@ impl CovenHandle {
         home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), crate::CloudHomeSetupError> {
-        self.sync
-            .connect_with_test_home_caller_driven(home, cipher)
-            .await
+        Box::pin(async move {
+            self.sync
+                .connect_with_test_home_caller_driven(home, cipher)
+                .await
+        })
+        .await
     }
 
     /// Test-only: connect over an injected [`ExactCloudHome`] while resolving the
@@ -538,14 +547,14 @@ impl CovenHandle {
         &self,
         home: Arc<dyn ExactCloudHome>,
     ) -> Result<(), SyncError> {
-        self.sync.connect_with_test_home_custody(home).await
+        Box::pin(async move { self.sync.connect_with_test_home_custody(home).await }).await
     }
 
     /// Start (or restart) the sync loop of the installed connection. A no-op
     /// when no provider is connected — a home-less store has nothing to start.
     /// Errors if the connected cloud home fails to build.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
-        self.sync.start().await
+        Box::pin(async { self.sync.start().await }).await
     }
 
     /// Stop the sync loop after the in-flight cycle while keeping the provider
@@ -577,7 +586,7 @@ impl CovenHandle {
     /// Disconnect the configured cloud home and remove its provider credentials.
     /// If credential removal fails, the installed connection is preserved.
     pub async fn disconnect_cloud_home(&self) -> Result<(), KeyError> {
-        self.sync.disconnect_cloud_home().await
+        Box::pin(async { self.sync.disconnect_cloud_home().await }).await
     }
 
     /// Wake the sync loop to run a cycle now rather than at the next idle tick. A
@@ -613,7 +622,7 @@ impl CovenHandle {
     /// its unlocked value. If custody cannot remove the key, the connection is
     /// preserved and the error is returned.
     pub async fn forget_master_key(&self) -> Result<(), KeyError> {
-        self.sync.forget_master_key().await
+        Box::pin(async { self.sync.forget_master_key().await }).await
     }
 
     // =========================================================================
