@@ -158,7 +158,7 @@ impl StoreSync {
         .await
     }
 
-    async fn install_prepared_cloud_home(
+    pub(super) async fn install_prepared_cloud_home(
         &self,
         config: Config,
         storage: Arc<CloudSyncConnection>,
@@ -274,17 +274,6 @@ impl StoreSync {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn setup_with_test_home_caller_driven(
-        &self,
-        cloud_home: CloudHomeConfig,
-        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
-    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.setup_with_test_home_driver(cloud_home, home, None, SyncDriver::Caller)
-            .await
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
     async fn setup_with_test_home_driver(
         &self,
         cloud_home: CloudHomeConfig,
@@ -352,7 +341,7 @@ impl StoreSync {
     }
 }
 
-fn rollback(
+pub(super) fn rollback(
     key: &PreparedCloudHomeKey,
     credentials: &PreparedCloudHomeCredentials,
 ) -> Result<(), CloudHomeRollbackError> {

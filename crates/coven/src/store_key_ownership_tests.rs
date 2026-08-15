@@ -35,15 +35,20 @@ async fn caller_driven_test_home_establishes_the_master_key_it_needs() {
     .expect("open store");
     handle.initialize_identity().expect("establish identity");
 
-    let connected = handle
-        .setup_cloud_home_with_test_home_caller_driven(
-            config.cloud_home,
+    handle
+        .connect_sync_with_test_home_caller_driven(
             Arc::new(crate::InMemoryCloudHome::new()),
+            coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([7; 32])),
         )
         .await
         .expect("set up caller-driven cloud home");
 
-    assert_eq!(connected.key_state, crate::CloudHomeKeyState::Available);
+    assert_eq!(
+        handle
+            .cloud_home_key_state(crate::HomeStorage::Opaque)
+            .expect("read key state"),
+        crate::CloudHomeKeyState::Available
+    );
     assert!(handle.is_connected());
     assert!(!handle.is_syncing());
 }

@@ -221,7 +221,7 @@ async fn connect_test_home(
     sync: StoreSync,
     home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
     cipher: CloudCipher,
-) -> Result<(), SyncError> {
+) -> Result<(), crate::CloudHomeSetupError> {
     tokio::spawn(async move { sync.connect_with_test_home(home, cipher).await })
         .await
         .expect("join injected-home startup task")
@@ -913,10 +913,13 @@ async fn foreign_founder_installs_no_connection() {
 
     assert!(matches!(
         error,
-        SyncError::Init(source) if matches!(
-            *source,
-            coven_replication::sync::cycle::InitSyncError::Initialization(
-                coven_replication::sync::store::StoreInitializationError::ProtocolRoot(_)
+        crate::CloudHomeSetupError::Connection(source) if matches!(
+            source.as_ref(),
+            SyncError::Init(source) if matches!(
+                source.as_ref(),
+                coven_replication::sync::cycle::InitSyncError::Initialization(
+                    coven_replication::sync::store::StoreInitializationError::ProtocolRoot(_)
+                )
             )
         )
     ));

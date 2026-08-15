@@ -116,6 +116,14 @@ impl StoreCloudStorage {
         })
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn current_credentials(&self) -> Arc<PreparedCloudHomeCredentials> {
+        Arc::new(PreparedCloudHomeCredentials {
+            custody: self.credentials.current(),
+            staged: std::sync::Mutex::new(None),
+        })
+    }
+
     pub(crate) fn forget_credentials(&self) -> Result<(), coven_keys::keys::KeyError> {
         let staged = self.prepare_credentials(None);
         staged.commit()?;

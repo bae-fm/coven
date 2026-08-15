@@ -211,22 +211,31 @@ impl StoreSync {
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
         driver: SyncDriver,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), crate::CloudHomeSetupError> {
         let config = self.config();
+        let cloud_home = config.cloud_home.clone();
+        let key = self
+            .security
+            .prepare_cloud_home_key(cloud_home.storage)
+            .map_err(|error| crate::CloudHomeSetupError::MasterKey(Box::new(error)))?;
+        let credentials = self.cloud_storage.current_credentials();
         let admitted = self
             .cloud_storage
             .admit_home(&config, home)
-            .map_err(Self::map_storage_setup_error)?;
-        let storage = Arc::new(
-            admitted
-                .open(Some(cipher))
-                .map_err(Self::map_storage_setup_error)?,
-        );
-        let prepared = self
-            .prepare_storage_connection(config, storage, driver)
+            .map_err(Self::map_storage_setup_error)
+            .map_err(|error| crate::CloudHomeSetupError::Connection(Box::new(error)))?;
+        let storage = match admitted
+            .open(Some(cipher))
+            .map_err(Self::map_storage_setup_error)
+        {
+            Ok(storage) => Arc::new(storage),
+            Err(error) => {
+                let failure = crate::CloudHomeSetupError::Connection(Box::new(error));
+                return Err(failure.with_rollback(super::setup::rollback(&key, &credentials)));
+            }
+        };
+        self.install_prepared_cloud_home(config, storage, cloud_home, &key, &credentials, driver)
             .await?;
-        self.stop_current();
-        prepared.install(self);
         Ok(())
     }
 
@@ -235,7 +244,7 @@ impl StoreSync {
         &self,
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), crate::CloudHomeSetupError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher, SyncDriver::Loop)
             .await?;
@@ -248,7 +257,7 @@ impl StoreSync {
         &self,
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), crate::CloudHomeSetupError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher, SyncDriver::Caller)
             .await?;

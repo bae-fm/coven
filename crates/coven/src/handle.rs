@@ -446,9 +446,10 @@ impl CovenHandle {
     /// cloud with no live provider.
     ///
     /// The test counterpart of [`connect_sync`](Self::connect_sync): it builds
-    /// storage over `home`/`cipher`, starts the loop, and installs the connection
-    /// only after startup succeeds. The injected `cipher` is the at-rest
-    /// protection directly; custody is never consulted on this path.
+    /// storage over `home`/`cipher`, prepares the configured home's master key,
+    /// starts the loop, and commits a newly generated key and the connection
+    /// together only after startup succeeds. The explicit cipher protects the
+    /// injected storage; the master key separately protects Store routing data.
     ///
     /// The read path needs no separate hook: `blob_storage`
     /// serves reads from the connected loop's own `CloudSyncConnection`, which here
@@ -460,7 +461,7 @@ impl CovenHandle {
         &self,
         home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), crate::CloudHomeSetupError> {
         self.sync.connect_with_test_home(home, cipher).await
     }
 
@@ -475,19 +476,6 @@ impl CovenHandle {
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
         self.sync
             .setup_with_test_home(cloud_home, home, credentials)
-            .await
-    }
-
-    /// Test-only: atomically establish the master key needed by an injected
-    /// cloud home and install a connection whose cycles the caller drives.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn setup_cloud_home_with_test_home_caller_driven(
-        &self,
-        cloud_home: crate::CloudHomeConfig,
-        home: Arc<dyn ExactCloudHome>,
-    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
-        self.sync
-            .setup_with_test_home_caller_driven(cloud_home, home)
             .await
     }
 
@@ -527,7 +515,7 @@ impl CovenHandle {
         &self,
         home: Arc<dyn ExactCloudHome>,
         cipher: CloudCipher,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), crate::CloudHomeSetupError> {
         self.sync
             .connect_with_test_home_caller_driven(home, cipher)
             .await
@@ -538,9 +526,10 @@ impl CovenHandle {
     /// [`connect_sync`](Self::connect_sync) does, instead of taking an explicit
     /// cipher like [`connect_sync_with_test_home`](Self::connect_sync_with_test_home).
     ///
-    /// Where that method injects the cipher and never touches custody, this drives
-    /// the same connection path as production, which unlocks the master keyring
-    /// through the store's custody exactly as `start_sync` would — so a
+    /// Where that method prepares a missing master key as part of its connection
+    /// transaction, this requires an existing key and drives the connection path
+    /// used by production, which unlocks the master keyring through the store's
+    /// custody exactly as `start_sync` would — so a
     /// test can establish a key, connect over a mock home, and prove the traffic
     /// is sealed under that key. An opaque home with no key established fails
     /// [`SyncError::MasterKeyNotEstablished`] before the loop starts.
