@@ -813,7 +813,7 @@ impl DeviceIdentityCustody for StoreKeys {
 /// against it, once per process. Every crate that tests against the key
 /// service uses this rather than mirroring the mock, so no test reaches the
 /// real OS keychain.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", debug_assertions))]
 pub mod test_keyring {
     use std::sync::Once;
 
