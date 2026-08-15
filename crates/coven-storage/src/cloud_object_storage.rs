@@ -181,6 +181,19 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         &self,
     ) -> Result<Option<coven_keys::encryption::KeyFingerprint>, StorageError>;
 
+    /// Create the signed root's proof that this storage owns the Store key.
+    fn create_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+    ) -> Result<coven_protocol::store_commit::StoreKeyConfirmation, StorageError>;
+
+    /// Verify the signed root's Store-key proof with this storage's retained key.
+    fn verify_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+        confirmation: &coven_protocol::store_commit::StoreKeyConfirmation,
+    ) -> Result<(), StorageError>;
+
     /// Resolve the provider corpus and authenticated principal used by this
     /// adapter. Registrations bind the principal before allocating descendants.
     async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError>;

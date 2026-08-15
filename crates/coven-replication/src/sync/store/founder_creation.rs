@@ -495,8 +495,12 @@ impl<'operation> FounderStoreCreation<'operation> {
         let founder_recovery = GrantStreamAnchor::OwnerRecovery {
             first_slot: reservation.recovery_slot.clone(),
         };
+        let key_confirmation = storage
+            .create_store_key_confirmation(authority.creation_id)
+            .map_err(StoreProtocolRootError::Provider)?;
         let descriptor = coven_protocol::store_commit::StoreCreationDescriptor {
             creation_id: authority.creation_id,
+            key_confirmation,
             provider: authority.binding.store.clone(),
             schema_version: authority.schema_version,
             sync_routing_hash: authority.sync_routing_hash,

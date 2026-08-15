@@ -54,3 +54,34 @@ impl CloudHomeSetupError {
         }
     }
 }
+
+/// Why a returning opaque cloud home could not be unlocked and connected.
+#[derive(Debug, thiserror::Error)]
+pub enum CloudHomeUnlockError {
+    #[error("this cloud home does not require a master key")]
+    KeyNotRequired,
+    #[error("prepare imported cloud-home master key: {0}")]
+    MasterKey(#[source] Box<coven_keys::keys::MasterKeyError>),
+    #[error("prepare cloud-home connection: {0}")]
+    Connection(#[source] Box<SyncError>),
+    #[error("commit cloud-home master key: {0}")]
+    Commit(#[source] Box<coven_keys::keys::KeyError>),
+    #[error("{failure}; rollback also failed: {rollback}")]
+    Rollback {
+        failure: Box<CloudHomeUnlockError>,
+        #[source]
+        rollback: Box<coven_keys::keys::KeyError>,
+    },
+}
+
+impl CloudHomeUnlockError {
+    pub(crate) fn with_rollback(self, rollback: Result<(), coven_keys::keys::KeyError>) -> Self {
+        match rollback {
+            Ok(()) => self,
+            Err(rollback) => Self::Rollback {
+                failure: Box::new(self),
+                rollback: Box::new(rollback),
+            },
+        }
+    }
+}

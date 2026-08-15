@@ -4,6 +4,27 @@ struct FailingForgetMasterKeyCustody {
     keyring: MasterKeyring,
 }
 
+#[derive(Default)]
+struct MemoryMasterKeyCustody {
+    keyring: Mutex<Option<MasterKeyring>>,
+}
+
+impl MasterKeyCustody for MemoryMasterKeyCustody {
+    fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
+        Ok(self.keyring.lock().expect("lock master key").clone())
+    }
+
+    fn persist(&self, keyring: &MasterKeyring) -> Result<(), KeyError> {
+        *self.keyring.lock().expect("lock master key") = Some(keyring.clone());
+        Ok(())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        *self.keyring.lock().expect("lock master key") = None;
+        Ok(())
+    }
+}
+
 impl MasterKeyCustody for FailingForgetMasterKeyCustody {
     fn unlock(&self) -> Result<Option<MasterKeyring>, KeyError> {
         Ok(Some(self.keyring.clone()))
@@ -227,4 +248,79 @@ async fn failed_master_key_removal_preserves_the_cloud_connection() {
             .expect("read key state"),
         crate::store_security::CloudHomeKeyState::Available,
     );
+}
+
+#[tokio::test]
+async fn unlocking_connects_before_committing_the_imported_master_key() {
+    test_keyring::install();
+    let (_tmp, store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
+    let store_id = "unlock-cloud-home-custody";
+    let mut initial_config = Config::with_defaults(
+        store_id.to_string(),
+        "test-device".to_string(),
+        "Test Store".to_string(),
+    );
+    initial_config.cloud_home = coven_foundation::config::CloudHomeConfig {
+        provider: Some(CloudProvider::S3),
+        storage: HomeStorage::Opaque,
+        ..Default::default()
+    };
+    let config = Arc::new(RwLock::new(initial_config));
+    let config_provider: ConfigProvider = {
+        let config = config.clone();
+        Arc::new(move || config.read().expect("read config").clone())
+    };
+    let keys = StoreKeys::bind(store_id.to_string());
+    let custody = Arc::new(MemoryMasterKeyCustody::default());
+    let identity = established_identity_custody();
+    let database = coven_replication::sync::test_helpers::open_test_db(store_dir.clone());
+    let home = Arc::new(InMemoryCloudHome::new());
+    let creator = store_sync(
+        config_provider.clone(),
+        keys.clone(),
+        custody.clone(),
+        identity.clone(),
+        database.clone(),
+        &store_dir,
+    );
+    let cloud_home = config.read().expect("read config").cloud_home.clone();
+    creator
+        .setup_with_test_home(cloud_home, home.clone(), None)
+        .await
+        .expect("create encrypted cloud home");
+    let correct_key = custody
+        .unlock()
+        .expect("read generated key")
+        .expect("generated key exists")
+        .to_serialized();
+    creator.disconnect();
+    drop(creator);
+    custody.forget().expect("remove generated key");
+
+    let returning = store_sync(
+        config_provider,
+        keys,
+        custody.clone(),
+        identity,
+        database,
+        &store_dir,
+    );
+    let wrong_key = MasterKeyring::generate().to_serialized();
+
+    returning
+        .unlock_with_test_home(&wrong_key, home.clone())
+        .await
+        .expect_err("wrong key must not connect");
+    assert!(custody
+        .unlock()
+        .expect("read custody after rejected key")
+        .is_none());
+    assert!(!returning.is_connected());
+
+    returning
+        .unlock_with_test_home(&correct_key, home)
+        .await
+        .expect("correct key connects");
+    assert!(custody.unlock().expect("read committed key").is_some());
+    assert!(returning.is_connected());
 }

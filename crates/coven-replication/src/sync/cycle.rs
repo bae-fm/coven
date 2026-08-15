@@ -521,6 +521,8 @@ pub enum InitSyncError {
     PendingRotationRestore(#[source] coven_database::DbError),
     #[error("prepared sync identity differs from its storage identity")]
     StorageIdentityMismatch,
+    #[error("unlock requires an existing Store root")]
+    ExistingStoreRequired,
 }
 
 /// Establish the storage representation and signed owner anchor over an
@@ -685,6 +687,23 @@ impl PreparedSyncComponents {
             master_keys: self.master_keys,
             blob_transitions,
         })
+    }
+
+    pub async fn verify_open_store_key(&self) -> Result<(), InitSyncError> {
+        let StoreInitialization::OpenStore {
+            expected_store_root,
+        } = &self.initialization
+        else {
+            return Err(InitSyncError::ExistingStoreRequired);
+        };
+        super::store::protocol_root::verify_store_key_confirmation(
+            &self.database,
+            self.storage.as_ref(),
+            expected_store_root,
+        )
+        .await
+        .map_err(crate::sync::store::StoreInitializationError::from)
+        .map_err(InitSyncError::Initialization)
     }
 }
 

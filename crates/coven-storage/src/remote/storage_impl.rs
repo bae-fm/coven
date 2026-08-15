@@ -2,6 +2,14 @@ use super::blob_io::*;
 use super::cipher::*;
 use super::*;
 
+const STORE_KEY_CONFIRMATION_PLAINTEXT: &[u8] = b"coven store key confirmation v1";
+
+fn store_key_confirmation_aad(
+    creation_id: coven_protocol::store_commit::StoreCreationId,
+) -> Vec<u8> {
+    format!("coven.store-key-confirmation.v1\0{creation_id}").into_bytes()
+}
+
 macro_rules! store_blob_protection {
     ($storage:expr) => {{
         let cipher = $storage.cipher.read().unwrap();
@@ -292,6 +300,70 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             CloudCipher::Encrypted(encryption) => Some(encryption.seal_key_fingerprint()),
             CloudCipher::Plaintext => None,
         })
+    }
+
+    fn create_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+    ) -> Result<coven_protocol::store_commit::StoreKeyConfirmation, StorageError> {
+        let cipher = self.cipher.read().unwrap();
+        self.pending_rotation.check(cipher.current_generation())?;
+        Ok(match &*cipher {
+            CloudCipher::Encrypted(_) => {
+                coven_protocol::store_commit::StoreKeyConfirmation::Opaque(cipher.seal(
+                    STORE_KEY_CONFIRMATION_PLAINTEXT.to_vec(),
+                    &store_key_confirmation_aad(creation_id),
+                ))
+            }
+            CloudCipher::Plaintext => {
+                coven_protocol::store_commit::StoreKeyConfirmation::NotRequired
+            }
+        })
+    }
+
+    fn verify_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+        confirmation: &coven_protocol::store_commit::StoreKeyConfirmation,
+    ) -> Result<(), StorageError> {
+        let cipher = self.cipher.read().unwrap();
+        self.pending_rotation.check(cipher.current_generation())?;
+        match (&*cipher, confirmation) {
+            (
+                CloudCipher::Plaintext,
+                coven_protocol::store_commit::StoreKeyConfirmation::NotRequired,
+            ) => Ok(()),
+            (
+                CloudCipher::Encrypted(_),
+                coven_protocol::store_commit::StoreKeyConfirmation::Opaque(sealed),
+            ) => {
+                let opened = cipher
+                    .open(sealed.clone(), &store_key_confirmation_aad(creation_id))
+                    .map_err(|source| StorageError::Decryption {
+                        context: "Store key confirmation".to_string(),
+                        source,
+                    })?;
+                if opened == STORE_KEY_CONFIRMATION_PLAINTEXT {
+                    Ok(())
+                } else {
+                    Err(StorageError::InvalidContent(
+                        "Store key confirmation plaintext differs".to_string(),
+                    ))
+                }
+            }
+            (
+                CloudCipher::Plaintext,
+                coven_protocol::store_commit::StoreKeyConfirmation::Opaque(_),
+            ) => Err(StorageError::InvalidContent(
+                "opaque Store root opened through browsable storage".to_string(),
+            )),
+            (
+                CloudCipher::Encrypted(_),
+                coven_protocol::store_commit::StoreKeyConfirmation::NotRequired,
+            ) => Err(StorageError::InvalidContent(
+                "browsable Store root opened through opaque storage".to_string(),
+            )),
+        }
     }
 
     async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError> {

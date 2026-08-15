@@ -51,7 +51,7 @@ impl StoreMembership {
         Ok(coven_domain::joining::encode(&invite))
     }
 
-    pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<String, SyncError> {
+    pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<(), SyncError> {
         let _mutation = self.mutations.lock().await;
         self.sync.remove_store_member(public_key_hex).await
     }

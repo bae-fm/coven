@@ -45,6 +45,13 @@ an opaque home whose custody cannot supply its established key is locked and
 connection fails loudly. A new-home setup may generate a key because that
 operation owns its creation and rollback.
 
+Each Store root carries a signed key confirmation. Browsable roots state that
+no key is required; opaque roots carry a value sealed under the Store key and
+bound to the Store creation ID. Unlocking a returning opaque home stages the
+supplied key, opens and verifies that root, and persists the key only after the
+connection has been prepared successfully. A wrong key therefore cannot enter
+custody or replace the installed connection.
+
 Disconnect and lock also run under the connection lifecycle owner. Disconnect
 removes provider credentials before dropping the installed connection; a
 credential failure preserves that connection. Forgetting the master key removes
@@ -87,6 +94,9 @@ capability, not key material.
   state outcomes above. Keep serialized-key import for join/recovery.
 - Keep returning-store `connect_sync` strict: it uses the configured home and
   established custody state and never creates missing material.
+- Make returning-store unlock one operation that verifies the signed Store-root
+  key confirmation before committing the imported key or installing the
+  connection.
 
 ## Bae changes
 
@@ -113,6 +123,8 @@ capability, not key material.
 - OAuth authorization followed by connection failure leaves no durable tokens.
 - Browsable setup performs no master-key custody write.
 - Returning opaque connect reports `Locked` without generating a key.
+- Returning opaque unlock rejects a wrong key without changing custody or the
+  installed connection, then accepts the matching key and connects.
 - Successful S3, OAuth, and CloudKit setup returns the completed config and
   installs a connection whose sync and blob paths use it.
 - Bae persists config after success, contains no fingerprint/presence state, and

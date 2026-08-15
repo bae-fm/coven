@@ -32,7 +32,9 @@ mod blob_facade_tests;
 pub use coven_database::rusqlite;
 
 pub use circles::{CircleError, Circles};
-pub use cloud_home_setup::{CloudHomeRollbackError, CloudHomeSetupError, ConnectedCloudHome};
+pub use cloud_home_setup::{
+    CloudHomeRollbackError, CloudHomeSetupError, CloudHomeUnlockError, ConnectedCloudHome,
+};
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{
     BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,

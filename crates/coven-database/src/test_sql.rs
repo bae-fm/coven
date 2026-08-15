@@ -1787,6 +1787,7 @@ impl DatabaseTestSql<'_> {
             creation_id: StoreCreationId::from_random_bytes(
                 *ObjectHash::digest(label.as_bytes()).as_bytes(),
             ),
+            key_confirmation: coven_protocol::store_commit::StoreKeyConfirmation::NotRequired,
             provider: StoreProviderBinding::S3 {
                 endpoint: S3EndpointBinding::Custom {
                     origin: "https://test.invalid".to_string(),

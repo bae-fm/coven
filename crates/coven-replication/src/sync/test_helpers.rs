@@ -4995,6 +4995,25 @@ where
         self.inner.store_blob_key_fingerprint()
     }
 
+    fn create_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+    ) -> Result<
+        coven_protocol::store_commit::StoreKeyConfirmation,
+        coven_protocol::objects::StorageError,
+    > {
+        self.inner.create_store_key_confirmation(creation_id)
+    }
+
+    fn verify_store_key_confirmation(
+        &self,
+        creation_id: coven_protocol::store_commit::StoreCreationId,
+        confirmation: &coven_protocol::store_commit::StoreKeyConfirmation,
+    ) -> Result<(), coven_protocol::objects::StorageError> {
+        self.inner
+            .verify_store_key_confirmation(creation_id, confirmation)
+    }
+
     async fn seal_store_blob_to_spool(
         &self,
         locator: &coven_protocol::blob::locator::BlobLocator,

@@ -1,11 +1,48 @@
 use super::*;
-use crate::cloud_home_setup::{CloudHomeRollbackError, CloudHomeSetupError, ConnectedCloudHome};
+use crate::cloud_home_setup::{
+    CloudHomeRollbackError, CloudHomeSetupError, CloudHomeUnlockError, ConnectedCloudHome,
+};
 use crate::store_cloud_storage::PreparedCloudHomeCredentials;
 use crate::store_security::PreparedCloudHomeKey;
 use coven_foundation::config::{CloudHomeConfig, CloudProvider};
 use coven_keys::keys::CloudHomeCredentials;
 
 impl StoreSync {
+    pub(crate) async fn unlock(
+        &self,
+        serialized_master_key: &str,
+    ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let config = self.config();
+        if config.cloud_home.provider.is_none() {
+            return Err(CloudHomeUnlockError::Connection(Box::new(
+                SyncError::NotConfigured,
+            )));
+        }
+        if config.cloud_home.storage.is_browsable() {
+            return Err(CloudHomeUnlockError::KeyNotRequired);
+        }
+        let key = self
+            .security
+            .prepare_imported_cloud_home_key(serialized_master_key)
+            .map_err(|error| CloudHomeUnlockError::MasterKey(Box::new(error)))?;
+        let storage = match self
+            .cloud_storage
+            .open_with_prepared_master_key(&config, key.clone())
+            .await
+        {
+            Ok(storage) => Arc::new(storage),
+            Err(error) => {
+                let failure = CloudHomeUnlockError::Connection(Box::new(
+                    Self::map_storage_setup_error(error),
+                ));
+                return Err(failure.with_rollback(key.rollback()));
+            }
+        };
+        self.install_unlocked_cloud_home(config, storage, &key)
+            .await
+    }
+
     pub(crate) async fn setup_s3(
         &self,
         mut cloud_home: CloudHomeConfig,
@@ -170,6 +207,52 @@ impl StoreSync {
         })
     }
 
+    async fn install_unlocked_cloud_home(
+        &self,
+        config: Config,
+        storage: Arc<CloudSyncConnection>,
+        key: &Arc<PreparedCloudHomeKey>,
+    ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
+        let cloud_home = config.cloud_home.clone();
+        let initialization = match self
+            .prepare_storage_initialization(
+                config,
+                storage,
+                SyncDriver::Loop,
+                SyncKeyCustody::Prepared(key.clone()),
+            )
+            .await
+        {
+            Ok(initialization) => initialization,
+            Err(error) => {
+                let failure = CloudHomeUnlockError::Connection(Box::new(error));
+                return Err(failure.with_rollback(key.rollback()));
+            }
+        };
+        if let Err(error) = initialization.components.verify_open_store_key().await {
+            let failure = CloudHomeUnlockError::Connection(Box::new(error.into()));
+            return Err(failure.with_rollback(key.rollback()));
+        }
+        if let Err(error) = key.commit() {
+            let failure = CloudHomeUnlockError::Commit(Box::new(error));
+            return Err(failure.with_rollback(key.rollback()));
+        }
+        let prepared = match self.initialize_storage(initialization).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let failure = CloudHomeUnlockError::Connection(Box::new(error));
+                return Err(failure.with_rollback(key.rollback()));
+            }
+        };
+        self.stop_current();
+        prepared.install(self);
+        key.finish();
+        Ok(ConnectedCloudHome {
+            cloud_home,
+            key_state: key.state(),
+        })
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn setup_with_test_home(
         &self,
@@ -197,6 +280,43 @@ impl StoreSync {
             }
         };
         self.install_prepared_cloud_home(config, storage, cloud_home, &key, &credentials)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn unlock_with_test_home(
+        &self,
+        serialized_master_key: &str,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+    ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let config = self.config();
+        if config.cloud_home.provider.is_none() {
+            return Err(CloudHomeUnlockError::Connection(Box::new(
+                SyncError::NotConfigured,
+            )));
+        }
+        if config.cloud_home.storage.is_browsable() {
+            return Err(CloudHomeUnlockError::KeyNotRequired);
+        }
+        let key = self
+            .security
+            .prepare_imported_cloud_home_key(serialized_master_key)
+            .map_err(|error| CloudHomeUnlockError::MasterKey(Box::new(error)))?;
+        let storage =
+            match self
+                .cloud_storage
+                .open_home_with_prepared_master_key(&config, home, key.clone())
+            {
+                Ok(storage) => Arc::new(storage),
+                Err(error) => {
+                    let failure = CloudHomeUnlockError::Connection(Box::new(
+                        Self::map_storage_setup_error(error),
+                    ));
+                    return Err(failure.with_rollback(key.rollback()));
+                }
+            };
+        self.install_unlocked_cloud_home(config, storage, &key)
             .await
     }
 }

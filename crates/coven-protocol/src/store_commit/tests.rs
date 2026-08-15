@@ -669,6 +669,7 @@ fn fixture() -> Fixture {
     let store_protocol_root = StoreProtocolRoot::signed(
         StoreCreationDescriptor {
             creation_id: StoreCreationId::from_nonce("store-a"),
+            key_confirmation: StoreKeyConfirmation::NotRequired,
             provider: crate::objects::StoreProviderBinding::S3 {
                 endpoint: crate::objects::S3EndpointBinding::Custom {
                     origin: "https://test.invalid".to_string(),

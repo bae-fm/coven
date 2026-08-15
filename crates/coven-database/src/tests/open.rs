@@ -59,6 +59,7 @@ async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority(
         creation_id: coven_protocol::store_commit::StoreCreationId::from_nonce(
             "required-store-root",
         ),
+        key_confirmation: coven_protocol::store_commit::StoreKeyConfirmation::NotRequired,
         provider: coven_protocol::objects::StoreProviderBinding::S3 {
             endpoint: coven_protocol::objects::S3EndpointBinding::Custom {
                 origin: "https://test.invalid".to_string(),

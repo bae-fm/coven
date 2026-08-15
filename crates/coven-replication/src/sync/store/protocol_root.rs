@@ -43,8 +43,7 @@ impl VerifiedStoreRoot {
         storage: &dyn CloudSyncObjectStorage,
         expected: &StoreRootRef,
     ) -> Result<Self, StoreProtocolRootError> {
-        let object =
-            load_exact_store_protocol_root(storage, expected, database.sync_routing_hash()).await?;
+        let object = load_and_verify_store_protocol_root(storage, expected, database).await?;
         let live_binding = storage.provider_binding().await?;
         if live_binding.store != object.value.descriptor.provider {
             return Err(StoreProtocolRootError::Invariant(
@@ -162,4 +161,30 @@ pub(super) async fn load_exact_store_protocol_root(
         .into());
     }
     Ok(verified)
+}
+
+pub(crate) async fn verify_store_key_confirmation(
+    database: &coven_database::StoreDatabase,
+    storage: &dyn CloudSyncObjectStorage,
+    expected: &StoreRootRef,
+) -> Result<(), StoreProtocolRootError> {
+    load_and_verify_store_protocol_root(storage, expected, database)
+        .await
+        .map(drop)
+}
+
+async fn load_and_verify_store_protocol_root(
+    storage: &dyn CloudSyncObjectStorage,
+    expected: &StoreRootRef,
+    database: &coven_database::StoreDatabase,
+) -> Result<coven_protocol::objects::VerifiedObject<StoreProtocolRoot>, StoreProtocolRootError> {
+    let root =
+        load_exact_store_protocol_root(storage, expected, database.sync_routing_hash()).await?;
+    storage
+        .verify_store_key_confirmation(
+            root.value.descriptor.creation_id,
+            &root.value.descriptor.key_confirmation,
+        )
+        .map_err(StoreProtocolRootError::Provider)?;
+    Ok(root)
 }

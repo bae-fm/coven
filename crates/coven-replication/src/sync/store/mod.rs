@@ -25,9 +25,6 @@ mod reclaim;
 use commit_publication::operation::commit_plan;
 pub(crate) mod owner_role_promotion;
 mod package_preparation;
-#[cfg(not(any(test, feature = "test-utils")))]
-mod protocol_root;
-#[cfg(any(test, feature = "test-utils"))]
 pub(super) mod protocol_root;
 pub(crate) mod pull;
 mod registration_object;

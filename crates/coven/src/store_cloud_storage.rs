@@ -162,8 +162,48 @@ impl StoreCloudStorage {
         )
     }
 
+    pub(crate) async fn open_with_prepared_master_key(
+        &self,
+        config: &Config,
+        master_keys: Arc<crate::store_security::PreparedCloudHomeKey>,
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
+        coven_storage::cloud::setup::require_exact_slot_capabilities_config(config)?;
+        let home = self
+            .cloud_homes
+            .create(
+                config,
+                self.clock.clone(),
+                self.cloudkit_ops.clone(),
+                self.credentials.current(),
+            )
+            .await?;
+        self.security.open_cloud_storage_with_master_keys(
+            config,
+            Arc::from(home),
+            None,
+            self.blob_chunking,
+            master_keys,
+        )
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn open_prepared_home(
+        &self,
+        config: &Config,
+        home: Arc<dyn ExactCloudHome>,
+        master_keys: Arc<crate::store_security::PreparedCloudHomeKey>,
+    ) -> Result<CloudSyncConnection, StorageSetupError> {
+        self.security.open_cloud_storage_with_master_keys(
+            config,
+            home,
+            None,
+            self.blob_chunking,
+            master_keys,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn open_home_with_prepared_master_key(
         &self,
         config: &Config,
         home: Arc<dyn ExactCloudHome>,

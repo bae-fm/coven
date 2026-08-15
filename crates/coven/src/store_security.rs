@@ -216,6 +216,20 @@ impl StoreSecurity {
         }))
     }
 
+    pub(crate) fn prepare_imported_cloud_home_key(
+        &self,
+        serialized: &str,
+    ) -> Result<Arc<PreparedCloudHomeKey>, MasterKeyError> {
+        let keyring = MasterKeyring::from_serialized(serialized)?;
+        let staged =
+            coven_keys::keys::StagedMasterKeyCustody::new(self.master_keys.clone(), keyring)?;
+        Ok(Arc::new(PreparedCloudHomeKey {
+            state: CloudHomeKeyState::Available,
+            custody: staged.clone(),
+            staged: std::sync::Mutex::new(Some(staged)),
+        }))
+    }
+
     pub(crate) fn initialize_identity(&self) -> Result<String, IdentityError> {
         if self.identity.unlock()?.is_some() {
             return Err(IdentityError::AlreadyEstablished);

@@ -1,9 +1,17 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "sealed")]
+pub enum StoreKeyConfirmation {
+    NotRequired,
+    Opaque(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreCreationDescriptor {
     pub creation_id: StoreCreationId,
+    pub key_confirmation: StoreKeyConfirmation,
     pub provider: crate::objects::StoreProviderBinding,
     pub schema_version: u32,
     pub sync_routing_hash: ObjectHash,

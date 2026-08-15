@@ -66,10 +66,7 @@ impl StoreSync {
             .map_err(Into::into)
     }
 
-    pub(crate) async fn remove_store_member(
-        &self,
-        public_key_hex: &str,
-    ) -> Result<String, SyncError> {
+    pub(crate) async fn remove_store_member(&self, public_key_hex: &str) -> Result<(), SyncError> {
         let active = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
@@ -77,6 +74,7 @@ impl StoreSync {
         active
             .remove_member(public_key_hex)
             .await
+            .map(drop)
             .map_err(Into::into)
     }
 

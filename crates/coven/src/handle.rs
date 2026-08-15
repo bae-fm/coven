@@ -424,6 +424,15 @@ impl CovenHandle {
         self.security.cloud_home_key_state(storage)
     }
 
+    /// Import the master key for this returning opaque cloud home, verify it
+    /// against the signed Store root, and connect without retaining a rejected key.
+    pub async fn unlock_cloud_home(
+        &self,
+        serialized_master_key: &str,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeUnlockError> {
+        self.sync.unlock(serialized_master_key).await
+    }
+
     pub async fn connect_sync_with_cloudkit(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
@@ -466,6 +475,19 @@ impl CovenHandle {
     ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
         self.sync
             .setup_with_test_home(cloud_home, home, credentials)
+            .await
+    }
+
+    /// Test-only: unlock a returning opaque home over an injected provider
+    /// while exercising the production key-and-connection transaction.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn unlock_cloud_home_with_test_home(
+        &self,
+        serialized_master_key: &str,
+        home: Arc<dyn ExactCloudHome>,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeUnlockError> {
+        self.sync
+            .unlock_with_test_home(serialized_master_key, home)
             .await
     }
 
@@ -1135,7 +1157,7 @@ impl CovenHandle {
             .await
     }
 
-    pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
+    pub async fn remove_member(&self, public_key_hex: &str) -> Result<(), SyncError> {
         self.membership.remove(public_key_hex).await
     }
 
