@@ -478,6 +478,19 @@ impl CovenHandle {
             .await
     }
 
+    /// Test-only: atomically establish the master key needed by an injected
+    /// cloud home and install a connection whose cycles the caller drives.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn setup_cloud_home_with_test_home_caller_driven(
+        &self,
+        cloud_home: crate::CloudHomeConfig,
+        home: Arc<dyn ExactCloudHome>,
+    ) -> Result<crate::ConnectedCloudHome, crate::CloudHomeSetupError> {
+        self.sync
+            .setup_with_test_home_caller_driven(cloud_home, home)
+            .await
+    }
+
     /// Test-only: unlock a returning opaque home over an injected provider
     /// while exercising the production key-and-connection transaction.
     #[cfg(any(test, feature = "test-utils"))]

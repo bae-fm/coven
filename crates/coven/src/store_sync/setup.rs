@@ -147,8 +147,15 @@ impl StoreSync {
                 return Err(failure.with_rollback(rollback(&key, &credentials)));
             }
         };
-        self.install_prepared_cloud_home(config, storage, cloud_home, &key, &credentials)
-            .await
+        self.install_prepared_cloud_home(
+            config,
+            storage,
+            cloud_home,
+            &key,
+            &credentials,
+            SyncDriver::Loop,
+        )
+        .await
     }
 
     async fn install_prepared_cloud_home(
@@ -158,12 +165,13 @@ impl StoreSync {
         cloud_home: CloudHomeConfig,
         key: &Arc<PreparedCloudHomeKey>,
         credentials: &Arc<PreparedCloudHomeCredentials>,
+        driver: SyncDriver,
     ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
         let initialization = match self
             .prepare_storage_initialization(
                 config,
                 storage,
-                SyncDriver::Loop,
+                driver,
                 SyncKeyCustody::Prepared(key.clone()),
             )
             .await
@@ -261,6 +269,29 @@ impl StoreSync {
         proposed_credentials: Option<CloudHomeCredentials>,
     ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
         let _lifecycle = self.lifecycle.lock().await;
+        self.setup_with_test_home_driver(cloud_home, home, proposed_credentials, SyncDriver::Loop)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn setup_with_test_home_caller_driven(
+        &self,
+        cloud_home: CloudHomeConfig,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.setup_with_test_home_driver(cloud_home, home, None, SyncDriver::Caller)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn setup_with_test_home_driver(
+        &self,
+        cloud_home: CloudHomeConfig,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+        proposed_credentials: Option<CloudHomeCredentials>,
+        driver: SyncDriver,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
         let mut config = self.config();
         config.cloud_home = cloud_home.clone();
         let key = self
@@ -279,7 +310,7 @@ impl StoreSync {
                 return Err(failure.with_rollback(rollback(&key, &credentials)));
             }
         };
-        self.install_prepared_cloud_home(config, storage, cloud_home, &key, &credentials)
+        self.install_prepared_cloud_home(config, storage, cloud_home, &key, &credentials, driver)
             .await
     }
 
