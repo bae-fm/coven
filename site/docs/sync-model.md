@@ -341,9 +341,8 @@ protects against. Either way, the host names its keyring service once at
 startup with
 [`set_keyring_service`](rustdoc:fn:coven::set_keyring_service), which also
 installs the platform keyring store (apple-native on macOS and iOS,
-android-native on Android, windows-native on Windows; a target with no
-bundled store errors). There is no environment-variable or dev-mode key
-path.
+android-native on Android, windows-native on Windows, and Secret Service on
+Linux). There is no environment-variable or dev-mode key path.
 
 The loop runs on a dedicated OS thread with its own current-thread tokio runtime.
 Database access goes through async calls on the `Database` handle, so the loop

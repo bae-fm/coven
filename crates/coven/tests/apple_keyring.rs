@@ -1,4 +1,4 @@
-//! Pins the Apple device-only entry-construction path against the real
+//! Pins the Apple iCloud-synchronized entry-construction path against the real
 //! protected-data store — not the mock every other test in this crate
 //! installs. An integration test binary is its own process, so it can
 //! install the real store without colliding with the mock (`keyring_backend
@@ -23,7 +23,7 @@
 use apple_native_keyring_store::protected::{AccessPolicy, Store};
 
 #[test]
-fn registered_service_builds_protected_device_only_entries() {
+fn registered_service_builds_protected_cloud_synchronized_entries() {
     coven::set_keyring_service("coven-apple-keyring-test").expect("register keyring service");
 
     let default_store =
@@ -36,16 +36,10 @@ fn registered_service_builds_protected_device_only_entries() {
     let facts = coven::apple_keyring_entry_facts_for_test("coven-apple-keyring-test-account")
         .expect("the registered service builds an entry with no keychain I/O");
 
-    assert_eq!(
-        facts.access_policy,
-        AccessPolicy::WhenUnlockedThisDeviceOnly,
-        "the registered service must select the device-only policy directly (Cred::build), \
-         never the modifier-string path apple-native-keyring-store maps to \
-         the non-device-only AccessPolicy::WhenUnlocked",
-    );
+    assert_eq!(facts.access_policy, AccessPolicy::WhenUnlocked);
     assert!(
-        !facts.cloud_synchronize,
-        "coven never opts a keyring item into iCloud sync",
+        facts.cloud_synchronize,
+        "the registered service must keep library keys available through iCloud Keychain",
     );
     assert_eq!(facts.service, "coven-apple-keyring-test");
     assert_eq!(facts.account, "coven-apple-keyring-test-account");

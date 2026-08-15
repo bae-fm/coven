@@ -63,6 +63,7 @@ android-native-keyring-store = "0.5"
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }
 security-framework = "3.7"
 windows-native-keyring-store = "0.5"
+zbus-secret-service-keyring-store = { version = "0.3", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
 coven-foundation = { path = "crates/coven-foundation", version = "1.0.0-rc.1" }
 coven-keys = { path = "crates/coven-keys", version = "1.0.0-rc.1" }

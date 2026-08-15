@@ -328,39 +328,10 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
     Ok(())
 }
 
-/// The sole entry-construction point for the OS keyring: every read, write,
-/// and delete builds its [`keyring_core::Entry`] here, so a target's
-/// protection policy is applied in exactly one place.
-///
-/// On Apple targets, when the process installed the real protected-data
-/// store (as opposed to a test's mock store, or any other store reached
-/// through this same code path), entries are created device-only
-/// (`AccessPolicy::WhenUnlockedThisDeviceOnly`): an encrypted local
-/// (Finder/iTunes) backup restored onto a different device does not restore
-/// this item, because the item is bound to this device's Secure Enclave.
-/// Apple's documented modifier-string path for this policy
-/// (`Entry::new_with_modifiers(service, account, {"access-policy":
-/// "when-unlocked-this-device-only"})`) is silently accepted by
-/// `apple-native-keyring-store`'s string parser but mapped to the
-/// non-device-only `AccessPolicy::WhenUnlocked` instead — no error, just the
-/// wrong protection class — so this calls the store's own `Cred::build`
-/// directly, which takes the `AccessPolicy` enum and bypasses that string
-/// parser entirely. `AccessPolicy::RequireUserPresence` (biometric-gated
-/// access) is the policy argument a future decision would change here; it is
-/// not selected today.
-///
-/// Any other installed store (a test's mock store) gets a plain entry with
-/// no modifier — device-only protection is meaningful only under the real
-/// protected-data store.
-///
-/// Non-Apple targets always get a plain entry: Android and Windows have
-/// their own at-rest protection, and "does not survive a device-to-device
-/// backup restore" is an Apple concept tied to Apple's accessibility
-/// classes.
-///
-/// The access policy an item is created under is fixed for its lifetime;
-/// every Coven-created Apple keyring item therefore enters the device-only
-/// class at its first write.
+/// The sole entry-construction point for the OS keyring. Every read, write,
+/// and delete delegates entry construction to the installed credential store,
+/// so the platform configuration selected during registration applies to every
+/// Coven key and host secret.
 impl KeyringBackend {
     fn execute(&self, operation: KeyringOperation) {
         match operation {
@@ -395,29 +366,6 @@ impl KeyringBackend {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn entry(&self, account: &str) -> Result<keyring_core::Entry, KeyError> {
-        match self
-            .store
-            .as_any()
-            .downcast_ref::<apple_native_keyring_store::protected::Store>()
-        {
-            Some(_) => apple_native_keyring_store::protected::Cred::build(
-                &self.name,
-                account,
-                apple_native_keyring_store::protected::AccessPolicy::WhenUnlockedThisDeviceOnly,
-                None,
-                false,
-            )
-            .map_err(map_keyring_error),
-            None => self
-                .store
-                .build(&self.name, account, None)
-                .map_err(map_keyring_error),
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     fn entry(&self, account: &str) -> Result<keyring_core::Entry, KeyError> {
         self.store
             .build(&self.name, account, None)
@@ -872,6 +820,10 @@ pub mod test_keyring {
     static INSTALL: Once = Once::new();
 
     pub fn install() {
+        install_for_service("coven-tests").expect("register test keyring service");
+    }
+
+    pub fn install_for_service(service_name: &str) -> Result<(), super::KeyError> {
         INSTALL.call_once(|| {
             // Install the in-memory mock before registering the service so
             // `set_keyring_service` keeps it instead of reaching for the OS
@@ -879,8 +831,8 @@ pub mod test_keyring {
             keyring_core::set_default_store(
                 keyring_core::mock::Store::new().expect("create mock keyring store"),
             );
-            super::set_keyring_service("coven-tests").expect("register keyring service");
         });
+        super::set_keyring_service(service_name)
     }
 }
 

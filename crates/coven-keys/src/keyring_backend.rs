@@ -16,7 +16,10 @@ pub(crate) fn install_platform_store() -> Result<(), KeyError> {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn install_bundled_store() -> Result<(), KeyError> {
-    let store = apple_native_keyring_store::protected::Store::new().map_err(KeyError::Keyring)?;
+    let configuration = std::collections::HashMap::from([("cloud-sync", "true")]);
+    let store =
+        apple_native_keyring_store::protected::Store::new_with_configuration(&configuration)
+            .map_err(KeyError::Keyring)?;
     keyring_core::set_default_store(store);
     Ok(())
 }
@@ -35,11 +38,19 @@ fn install_bundled_store() -> Result<(), KeyError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn install_bundled_store() -> Result<(), KeyError> {
+    let store = zbus_secret_service_keyring_store::Store::new().map_err(KeyError::Keyring)?;
+    keyring_core::set_default_store(store);
+    Ok(())
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "android",
-    target_os = "windows"
+    target_os = "windows",
+    target_os = "linux"
 )))]
 fn install_bundled_store() -> Result<(), KeyError> {
     Err(KeyError::UnsupportedKeyringPlatform)

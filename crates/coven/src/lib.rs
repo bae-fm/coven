@@ -75,6 +75,8 @@ pub use coven_keys::encryption::{
     EncryptionError, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE,
 };
 pub use coven_keys::identity_custody::IdentityCustody;
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_keys::keys::test_keyring::install_for_service as install_test_keyring_service;
 #[cfg(all(
     any(test, feature = "test-utils"),
     any(target_os = "macos", target_os = "ios")

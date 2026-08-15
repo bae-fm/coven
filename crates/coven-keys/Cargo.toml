@@ -44,6 +44,9 @@ android-native-keyring-store = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # A `cfg(test)` build of this crate reaches the foundation staged-file test

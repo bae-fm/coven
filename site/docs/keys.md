@@ -20,7 +20,7 @@ protected store), Android (the Android Keystore, via
 `android-native-keyring-store`), and Windows (Credential Manager, via
 `windows-native-keyring-store`). A host names its own keyring service once at
 startup with [`set_keyring_service`](rustdoc:fn:coven::set_keyring_service),
-and that one call also installs whichever of the three is bundled for the
+and that one call also installs the store bundled for the
 target it's compiled for; every key coven or the host stores afterward goes
 through it.
 
@@ -39,25 +39,24 @@ step, but it belongs to the *app*, not to key storage:
 [the JNI application context](#android) must be initialized before the first
 coven call.
 
-The one exception is a host with a requirement no bundled store meets:
+Linux uses the Secret Service over D-Bus, via
+`zbus-secret-service-keyring-store`. The one exception is a host with a
+requirement no bundled store meets:
 `keyring_core::set_default_store` installs any store implementing
 `keyring_core`'s trait, and if one is already installed when
 `set_keyring_service` runs, coven keeps it instead of installing its own. That
-is the deliberate escape hatch — see [Linux](#linux) below, the one target with
-no bundled store at all — not the normal path.
+is the deliberate escape hatch, not the normal path.
 
-## Correct access policy, by default
+## Apple keys follow the user through iCloud Keychain
 
 Every keyring item coven writes on Apple — the master key, cloud-home
 credentials, a store's signing identity, and any [host secret](#host-secrets)
-— is created `WhenUnlockedThisDeviceOnly`: unreadable while the device is
-locked, and, the part that matters, excluded from restoring onto a different
-device through an encrypted local (Finder/iTunes) backup, because the item is
-bound to this device's Secure Enclave. This is the default, not an opt-in — a
-host does not choose it and cannot opt out of it.
-
-The access policy is fixed when the item is created, and every Coven-created
-Apple keyring item receives this policy on its first write.
+— is created in the protected data store with iCloud synchronization enabled.
+The OS keeps it unavailable while the device is locked and makes it available
+to the same app through the user's iCloud Keychain. This is the default, not an
+opt-in: creating, joining, or restoring a store on another device remains the
+authority-establishing operation, while the keyring supplies the keys that
+operation persisted.
 
 ## Custody is a choice, with working presets
 
@@ -122,8 +121,8 @@ implementation).
 
 The two presets are not interchangeable defaults — they protect against
 different things. The keyring protects against a stolen, locked device: the
-OS won't hand the key to any process without the device being unlocked (and,
-on Apple, without the device besides — see above). A passphrase additionally
+OS won't hand the key to any process without the device being unlocked. A
+passphrase additionally
 protects against a process running as the signed-in user: nothing usable is
 at rest until the passphrase is supplied, so malware running as you, or a
 second process sharing your OS session, gets nothing without also knowing the
@@ -196,9 +195,9 @@ seals cloud traffic.
 
 A host with its own store-scoped secret that isn't row data — an API key for
 a third-party service the app integrates with, say — stores it in the same
-platform keyring, under the same access policy, as coven's own key material,
+platform keyring, under the same configured store, as coven's own key material,
 without importing `keyring_core` or hand-building an `Entry` against coven's
-account scheme (which would not get Apple's device-only policy — see above):
+account scheme:
 
 ```rust
 handle.set_host_secret("discogs_api_key", &api_key)?;
@@ -281,10 +280,8 @@ profile above, in CI as much as on a device.
 
 ### Linux
 
-There is no bundled store: `set_keyring_service` fails with
-[`KeyError::UnsupportedKeyringPlatform`](rustdoc:enum:coven::KeyError) on a
-target with none. A host installs one itself before calling
-`set_keyring_service` — `keyring_core::set_default_store(store)` with any
-store implementing `keyring_core`'s trait (a Secret Service-backed one, an
-in-memory one for a CI harness) — and coven uses whatever is installed
-rather than requiring one of its own three.
+The bundled store uses the desktop Secret Service over D-Bus. A session must
+provide a Secret Service implementation, such as GNOME Keyring or KWallet;
+failure to connect is returned by `set_keyring_service` instead of leaving a
+registered service backed by no store. A host may install a different
+`keyring_core` store before registration, and coven will retain it.
