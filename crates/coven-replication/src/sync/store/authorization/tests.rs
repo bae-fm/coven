@@ -123,9 +123,11 @@ async fn owner_anchor_install_verifies_the_stored_replay_image_payload() {
                 )
             ) if matches!(
                 source.as_ref(),
-                coven_database::DbError::PayloadStore(
-                    coven_database::PayloadStoreError::CompressionIo { .. }
-                )
+                coven_database::DbError::PayloadStore(error)
+                    if matches!(
+                        error.as_ref(),
+                        coven_database::PayloadStoreError::CompressionIo { .. }
+                    )
             )
         ),
         "{error:?}"

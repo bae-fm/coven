@@ -483,11 +483,11 @@ pub enum DbError {
     /// does not match, a signature that does not verify, an object in the wrong
     /// slot. The database read them back intact; the protocol refused them.
     #[error("{0}")]
-    Protocol(#[from] coven_protocol::store_commit::StoreProtocolError),
+    Protocol(#[source] Box<coven_protocol::store_commit::StoreProtocolError>),
     #[error("{0}")]
     RemoteObject(#[source] Box<coven_protocol::remote_object::RemoteObjectRecordError>),
     #[error("{0}")]
-    AudiencePackage(#[from] coven_protocol::audience_package::AudiencePackageError),
+    AudiencePackage(#[source] Box<coven_protocol::audience_package::AudiencePackageError>),
     #[error("{0}")]
     ObjectHash(#[from] coven_foundation::object_hash::InvalidObjectHash),
     #[error("{0}")]
@@ -540,7 +540,7 @@ pub enum DbError {
     #[error("{0}")]
     SnapshotImage(#[source] Box<crate::store::SnapshotImageError>),
     #[error("{0}")]
-    PayloadStore(#[from] PayloadStoreError),
+    PayloadStore(#[source] Box<PayloadStoreError>),
     #[error("{operation}; payload cleanup failed: {cleanup}")]
     PayloadCleanupFailed {
         operation: Box<DbError>,
@@ -568,7 +568,7 @@ pub enum DbError {
     #[error("{0}")]
     PreparedCommit(#[source] Box<coven_protocol::prepared_commit::PreparedCommitError>),
     #[error("{0}")]
-    CircleState(#[from] coven_protocol::circle_activation::CircleStateError),
+    CircleState(#[source] Box<coven_protocol::circle_activation::CircleStateError>),
     #[error("{0}")]
     DeviceExclusionJournal(
         #[source] Box<coven_protocol::device_exclusion_journal::StoreDeviceExclusionJournalError>,
@@ -673,6 +673,16 @@ boxed_db_error_from!(
 );
 boxed_db_error_from!(coven_protocol::write::WriteRetractionError, WriteRetraction);
 boxed_db_error_from!(crate::store::SnapshotImageError, SnapshotImage);
+boxed_db_error_from!(coven_protocol::store_commit::StoreProtocolError, Protocol);
+boxed_db_error_from!(
+    coven_protocol::audience_package::AudiencePackageError,
+    AudiencePackage
+);
+boxed_db_error_from!(PayloadStoreError, PayloadStore);
+boxed_db_error_from!(
+    coven_protocol::circle_activation::CircleStateError,
+    CircleState
+);
 boxed_db_error_from!(
     coven_protocol::circle_journal::CircleJournalError,
     CircleJournal
@@ -688,7 +698,7 @@ mod db_error_tests {
 
     #[test]
     fn db_error_fits_result_without_forcing_callers_to_box_it() {
-        assert!(std::mem::size_of::<DbError>() <= 128);
+        assert!(std::mem::size_of::<DbError>() <= 104);
     }
 }
 
