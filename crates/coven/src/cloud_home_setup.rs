@@ -17,6 +17,7 @@ pub enum CloudHomeSetupFailure {
     InvalidConfiguration,
     LocationOccupied,
     Network,
+    DeviceIdentityMissing,
     SecureStorage,
     Internal,
 }
@@ -96,11 +97,13 @@ fn classify_backend_failure(
 fn classify_setup_error(error: &(dyn std::error::Error + 'static)) -> CloudHomeSetupFailure {
     let mut current = Some(error);
     while let Some(source) = current {
-        if source
-            .downcast_ref::<coven_keys::keys::KeyError>()
-            .is_some()
-        {
-            return CloudHomeSetupFailure::SecureStorage;
+        if let Some(error) = source.downcast_ref::<coven_keys::keys::KeyError>() {
+            return match error {
+                coven_keys::keys::KeyError::NoDeviceIdentity => {
+                    CloudHomeSetupFailure::DeviceIdentityMissing
+                }
+                _ => CloudHomeSetupFailure::SecureStorage,
+            };
         }
         if let Some(error) = source.downcast_ref::<coven_storage::cloud::CloudHomeError>() {
             match error {
@@ -241,5 +244,17 @@ mod tests {
         )));
 
         assert_eq!(error.failure(), CloudHomeSetupFailure::LocationOccupied);
+    }
+
+    #[test]
+    fn missing_device_identity_is_distinct_from_secure_storage() {
+        let error = CloudHomeSetupError::Connection(Box::new(SyncError::Key(
+            coven_keys::keys::KeyError::NoDeviceIdentity,
+        )));
+
+        assert_eq!(
+            error.failure(),
+            CloudHomeSetupFailure::DeviceIdentityMissing
+        );
     }
 }
