@@ -79,7 +79,7 @@ impl SyncCycleFailure {
         E: Into<SyncCycleCause>,
     {
         let cause = error.into();
-        let kind = if error_chain_contains_transport(&cause) {
+        let kind = if super::error::error_chain_contains_transport(&cause) {
             SyncCycleFailureKind::Offline
         } else {
             SyncCycleFailureKind::Failed
@@ -157,30 +157,6 @@ pub(crate) enum SyncCycleCause {
     RowRoutingKey(#[from] coven_protocol::circle::RowRoutingKeyError),
     #[error("{0}")]
     Snapshot(#[from] super::store::snapshots::SnapshotError),
-}
-
-fn error_chain_contains_transport(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(source) = current {
-        if source
-            .downcast_ref::<coven_protocol::objects::StorageError>()
-            .is_some_and(coven_protocol::objects::StorageError::is_transport)
-            || source
-                .downcast_ref::<coven_storage::cloud::CloudHomeError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error,
-                        coven_storage::cloud::CloudHomeError::Transport(_)
-                            | coven_storage::cloud::CloudHomeError::TransportSource { .. }
-                            | coven_storage::cloud::CloudHomeError::Io(_)
-                    )
-                })
-        {
-            return true;
-        }
-        current = source.source();
-    }
-    false
 }
 
 #[cfg(test)]
