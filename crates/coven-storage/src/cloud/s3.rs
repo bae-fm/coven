@@ -14,7 +14,7 @@ use aws_sdk_s3::Client;
 use tracing::warn;
 
 use super::s3_common::{
-    apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
+    apply_prefix, is_not_found_code, normalize_prefix, strip_listed_key_prefix,
 };
 use super::{
     combine_cleanup_failure, range_header, BlobBody, CloudAccessOutcome, CloudAccessState,
@@ -315,7 +315,6 @@ impl S3CloudHome {
         MultipartUpload::new(key, body, sink, progress).run().await
     }
 
-    /// HeadBucket — cheap auth + existence check, no listing cost.
     async fn create_at_slot(
         &self,
         slot: &ObjectSlot,
@@ -451,6 +450,9 @@ impl S3CloudHome {
         }
     }
 
+    /// Verify the object capabilities this home uses: conditional creation,
+    /// readback or checksum verification, and deletion. This deliberately does
+    /// not read bucket metadata.
     async fn probe_exact_slots(&self) -> Result<(), CloudHomeError> {
         use coven_foundation::config::ExactUploadVerification;
 
@@ -966,25 +968,6 @@ fn put_object_error(
 #[async_trait]
 impl CloudHome for S3CloudHome {
     async fn probe(&self) -> Result<(), CloudHomeError> {
-        let client = self.client.clone();
-        let bucket = self.bucket.clone();
-        self.runtime
-            .run(move || async move {
-                use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-
-                match client.head_bucket().bucket(&bucket).send().await {
-                    Ok(_) => Ok(()),
-                    Err(SdkError::ServiceError(svc)) => {
-                        let status = svc.raw().status().as_u16();
-                        let code: Option<String> = svc.err().code().map(str::to_string);
-                        // The shared 404→missing / 403→creds-rejected classification both
-                        // S3 backends use.
-                        Err(probe_error(status, code.as_deref(), &bucket))
-                    }
-                    Err(e) => Err(CloudHomeError::transport("probe S3", e)),
-                }
-            })
-            .await?;
         self.probe_exact_slots().await
     }
 

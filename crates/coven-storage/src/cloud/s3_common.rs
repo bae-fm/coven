@@ -3,8 +3,6 @@
 //! These free functions keep key normalization, error classification, and ranged
 //! response validation in one definition.
 
-use super::CloudHomeError;
-
 /// Normalize a configured key prefix ONCE, at construction: trim any trailing
 /// slash and drop an empty prefix. The S3 backend stores the normalized form, so
 /// neither `full_key` nor `list` re-trims it.
@@ -52,28 +50,6 @@ pub(crate) fn strip_listed_key_prefix<'a>(
 /// matching on a Display string.
 pub(crate) fn is_not_found_code(code: Option<&str>) -> bool {
     matches!(code, Some("NoSuchKey") | Some("NotFound"))
-}
-
-/// Map a failed `probe` (HeadBucket) to a `CloudHomeError` from its HTTP status
-/// and optional S3 error code: 404 → the bucket doesn't exist; 403 or an
-/// auth-signalling code → credentials rejected; anything else → a generic probe
-/// failure.
-pub(crate) fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeError {
-    if status == 404 || code == Some("NoSuchBucket") {
-        return CloudHomeError::Configuration(format!("bucket {bucket:?} does not exist"));
-    }
-    let is_auth = status == 403
-        || matches!(
-            code,
-            Some("SignatureDoesNotMatch") | Some("InvalidAccessKeyId")
-        );
-    if is_auth {
-        CloudHomeError::Configuration(format!(
-            "S3 credentials rejected (status {status}, code {code:?})"
-        ))
-    } else {
-        CloudHomeError::Transport(format!("S3 probe failed (status {status}, code {code:?})"))
-    }
 }
 
 /// Whether a ranged GET response is a real partial read: HTTP 206 Partial

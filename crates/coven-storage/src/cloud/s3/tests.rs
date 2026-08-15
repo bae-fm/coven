@@ -155,9 +155,9 @@ async fn fake_s3_checksum_probe_endpoint(
     let bucket_path = format!("/{}", state.bucket);
     if method == Method::HEAD && uri.path().trim_end_matches('/') == bucket_path {
         return Response::builder()
-            .status(StatusCode::OK)
+            .status(StatusCode::FORBIDDEN)
             .body(Body::empty())
-            .expect("build bucket probe response");
+            .expect("build bucket metadata denial");
     }
     if method == Method::PUT && uri.path().starts_with(&format!("{bucket_path}/")) {
         let supplied = headers
@@ -240,7 +240,7 @@ async fn checksum_probe_home(
 }
 
 #[tokio::test]
-async fn upload_checksum_probe_accepts_matching_bytes_and_rejects_a_bad_digest() {
+async fn upload_checksum_probe_does_not_require_bucket_metadata_access() {
     let (home, rejected_mismatches, shutdown) = checksum_probe_home(true).await;
 
     home.probe().await.expect("checksum capability probe");
