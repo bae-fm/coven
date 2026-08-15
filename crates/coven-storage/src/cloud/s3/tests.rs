@@ -103,6 +103,7 @@ async fn test_home(
     exact_upload_verification: ExactUploadVerification,
 ) -> S3CloudHome {
     open_cloud_home(
+        CloudRuntime::new(),
         bucket,
         region.to_string(),
         Some(endpoint),
@@ -853,7 +854,7 @@ async fn fake_s3_cancel_success_endpoint(
 }
 
 #[tokio::test]
-async fn multipart_sink_retains_the_s3_runtime_through_abort() {
+async fn multipart_sink_retains_the_cloud_runtime_through_abort() {
     let bucket = "immutable-cancel-success-test".to_string();
     let abort_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (endpoint, shutdown) = spawn_fake_s3(
@@ -1459,6 +1460,7 @@ async fn read_range_succeeds_against_existing_s3_object() {
         .expect("COVEN_TEST_S3_RANGE_END must be a u64");
 
     let home = open_cloud_home(
+        CloudRuntime::new(),
         bucket,
         region,
         Some(creds.endpoint),
@@ -1479,12 +1481,11 @@ async fn read_range_succeeds_against_existing_s3_object() {
     assert_eq!(bytes.len() as u64, end - start);
 }
 
-/// Proves an `S3CloudHome`'s AWS calls run end to end on its retained
-/// runtime—a different runtime than the `Client` was built on—against a real bucket:
-/// connection establishment, TLS, and body streaming, not just "it compiles".
-/// If the aws connector bound to the build-time runtime's reactor this would
-/// panic with "no reactor running" or hang; a real byte vec back proves the
-/// spawn-on-other-runtime path works.
+/// Proves an `S3CloudHome` builds its AWS client and runs later calls end to end
+/// on its retained cloud runtime rather than the caller's test runtime:
+/// connection establishment, TLS, and body streaming. If a later call escaped
+/// to the caller while retaining connector state owned by the cloud runtime,
+/// it would panic with "no reactor running" or hang.
 ///
 /// Reads an existing object from a real S3-compatible bucket. Coordinates
 /// come from `COVEN_TEST_S3_BUCKET`, `COVEN_TEST_S3_REGION`,
@@ -1497,6 +1498,7 @@ async fn s3_big_stack_reads_real_bytes_from_existing_object() {
     };
 
     let home = open_cloud_home(
+        CloudRuntime::new(),
         env.bucket,
         env.region,
         Some(env.endpoint),
@@ -1538,6 +1540,7 @@ async fn probe_succeeds_against_existing_bucket() {
     let creds = TestCreds::from_env();
     let bucket = format!("coven-probe-ok-{}", uuid::Uuid::new_v4());
     let home = open_cloud_home(
+        CloudRuntime::new(),
         bucket,
         "us-east-1".to_string(),
         Some(creds.endpoint),
@@ -1558,6 +1561,7 @@ async fn probe_fails_for_missing_bucket() {
     let creds = TestCreds::from_env();
     let bucket = format!("coven-probe-missing-{}", uuid::Uuid::new_v4());
     let home = open_cloud_home(
+        CloudRuntime::new(),
         bucket.clone(),
         "us-east-1".to_string(),
         Some(creds.endpoint),
@@ -1587,6 +1591,7 @@ async fn probe_fails_for_bad_secret_key() {
     let bucket = format!("coven-probe-badkey-{}", uuid::Uuid::new_v4());
     // Provision the bucket with the good creds so the only difference is the bad secret.
     let good = open_cloud_home(
+        CloudRuntime::new(),
         bucket.clone(),
         "us-east-1".to_string(),
         Some(creds.endpoint.clone()),
@@ -1600,6 +1605,7 @@ async fn probe_fails_for_bad_secret_key() {
     good.provision_test_bucket().await;
 
     let bad = open_cloud_home(
+        CloudRuntime::new(),
         bucket,
         "us-east-1".to_string(),
         Some(creds.endpoint),

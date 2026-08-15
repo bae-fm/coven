@@ -99,6 +99,7 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
 ];
 
 const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
+    ("CloudRuntime", "CloudHomeFactory"),
     ("ConnectedBlobTransitions", "SyncComponents"),
     ("CurrentRemoteBlobSource", "StoreBlobAccess"),
     ("LocalBlobTransitions", "SyncComponents"),
@@ -109,6 +110,26 @@ const LIFETIME_CONSTRUCTION_AUTHORITIES: &[(&str, &str)] = &[
 ];
 
 const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
+    (
+        "crates/coven-domain/src/joining/client.rs",
+        "DeviceJoinClient",
+        "new",
+    ),
+    (
+        "crates/coven-domain/src/restoration/restore.rs",
+        "RestoreSource",
+        "new",
+    ),
+    (
+        "crates/coven-storage/src/cloud/factory.rs",
+        "CloudHomeFactory",
+        "new",
+    ),
+    (
+        "crates/coven-storage/src/cloud/factory.rs",
+        "CloudHomeFactory",
+        "open_s3",
+    ),
     (
         "crates/coven-database/src/database_connection.rs",
         "DatabaseCore",

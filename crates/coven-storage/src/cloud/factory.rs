@@ -1,3 +1,4 @@
+use super::runtime::{CloudRuntime, CloudRuntimeError};
 use super::{cloudkit, CloudHomeError, ExactCloudHome};
 
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use coven_keys::keys::{CloudHomeCredentialCustody, CloudHomeCredentials};
 #[derive(Clone)]
 pub struct CloudHomeFactory {
     oauth_clients: crate::oauth::OAuthClients,
+    runtime: CloudRuntime,
 }
 
 #[cfg(feature = "oauth-providers")]
@@ -17,7 +19,54 @@ pub struct PreparedOAuthCloudHome {
 
 impl CloudHomeFactory {
     pub fn new(oauth_clients: crate::oauth::OAuthClients) -> Self {
-        Self { oauth_clients }
+        Self {
+            oauth_clients,
+            runtime: CloudRuntime::new(),
+        }
+    }
+
+    pub async fn execute<T, E, F>(
+        &self,
+        operation: impl FnOnce() -> F + Send + 'static,
+    ) -> Result<Result<T, E>, CloudRuntimeError>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.runtime.run(operation).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_s3(
+        &self,
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        access_key: String,
+        secret_key: String,
+        key_prefix: Option<String>,
+        exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    ) -> Result<super::s3::S3CloudHome, CloudHomeError> {
+        super::s3::open_cloud_home(
+            self.runtime.clone(),
+            bucket,
+            region,
+            endpoint,
+            access_key,
+            secret_key,
+            key_prefix,
+            exact_upload_verification,
+        )
+        .await
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    pub fn oauth_config_for(
+        &self,
+        provider: coven_foundation::config::CloudProvider,
+    ) -> Result<crate::oauth::OAuthConfig, crate::oauth::OAuthClientCredsError> {
+        self.oauth_clients.config_for(provider)
     }
 
     #[cfg(feature = "oauth-providers")]
@@ -137,16 +186,17 @@ impl CloudHomeFactory {
                     }
                 };
 
-                let s3 = super::s3::open_cloud_home(
-                    bucket,
-                    region,
-                    endpoint,
-                    access_key,
-                    secret_key,
-                    config.cloud_home.s3_key_prefix.clone(),
-                    config.cloud_home.exact_upload_verification,
-                )
-                .await?;
+                let s3 = self
+                    .open_s3(
+                        bucket,
+                        region,
+                        endpoint,
+                        access_key,
+                        secret_key,
+                        config.cloud_home.s3_key_prefix.clone(),
+                        config.cloud_home.exact_upload_verification,
+                    )
+                    .await?;
                 Ok(Box::new(s3))
             }
             #[cfg(feature = "oauth-providers")]

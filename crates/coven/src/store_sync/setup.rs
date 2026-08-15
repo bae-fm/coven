@@ -8,7 +8,31 @@ use coven_foundation::config::{CloudHomeConfig, CloudProvider};
 use coven_keys::keys::CloudHomeCredentials;
 
 impl StoreSync {
+    pub(super) fn cloud_runtime_setup_error(
+        error: coven_storage::cloud::CloudRuntimeError,
+    ) -> CloudHomeSetupError {
+        CloudHomeSetupError::Connection(Box::new(Self::cloud_runtime_sync_error(error)))
+    }
+
+    fn cloud_runtime_unlock_error(
+        error: coven_storage::cloud::CloudRuntimeError,
+    ) -> CloudHomeUnlockError {
+        CloudHomeUnlockError::Connection(Box::new(Self::cloud_runtime_sync_error(error)))
+    }
+
     pub(crate) async fn unlock(
+        &self,
+        serialized_master_key: &str,
+    ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
+        let serialized_master_key = serialized_master_key.to_string();
+        self.execute_cloud_operation(
+            move |owner| async move { owner.unlock_on_cloud_runtime(&serialized_master_key).await },
+            Self::cloud_runtime_unlock_error,
+        )
+        .await
+    }
+
+    async fn unlock_on_cloud_runtime(
         &self,
         serialized_master_key: &str,
     ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
@@ -45,6 +69,23 @@ impl StoreSync {
 
     pub(crate) async fn setup_s3(
         &self,
+        cloud_home: CloudHomeConfig,
+        access_key: String,
+        secret_key: String,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .setup_s3_on_cloud_runtime(cloud_home, access_key, secret_key)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    async fn setup_s3_on_cloud_runtime(
+        &self,
         mut cloud_home: CloudHomeConfig,
         access_key: String,
         secret_key: String,
@@ -63,6 +104,22 @@ impl StoreSync {
 
     pub(crate) async fn setup_cloudkit(
         &self,
+        cloud_home: CloudHomeConfig,
+        cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .setup_cloudkit_on_cloud_runtime(cloud_home, cloudkit_ops)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    async fn setup_cloudkit_on_cloud_runtime(
+        &self,
         mut cloud_home: CloudHomeConfig,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
@@ -73,6 +130,23 @@ impl StoreSync {
 
     #[cfg(feature = "oauth-providers")]
     pub(crate) async fn setup_oauth(
+        &self,
+        cloud_home: CloudHomeConfig,
+        cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .setup_oauth_on_cloud_runtime(cloud_home, cancel)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    #[cfg(feature = "oauth-providers")]
+    async fn setup_oauth_on_cloud_runtime(
         &self,
         cloud_home: CloudHomeConfig,
         cancel: tokio::sync::watch::Receiver<bool>,
@@ -268,6 +342,24 @@ impl StoreSync {
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         proposed_credentials: Option<CloudHomeCredentials>,
     ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .setup_with_test_home_on_cloud_runtime(cloud_home, home, proposed_credentials)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn setup_with_test_home_on_cloud_runtime(
+        &self,
+        cloud_home: CloudHomeConfig,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+        proposed_credentials: Option<CloudHomeCredentials>,
+    ) -> Result<ConnectedCloudHome, CloudHomeSetupError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.setup_with_test_home_driver(cloud_home, home, proposed_credentials, SyncDriver::Loop)
             .await
@@ -305,6 +397,24 @@ impl StoreSync {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn unlock_with_test_home(
+        &self,
+        serialized_master_key: &str,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+    ) -> Result<ConnectedCloudHome, CloudHomeUnlockError> {
+        let serialized_master_key = serialized_master_key.to_string();
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .unlock_with_test_home_on_cloud_runtime(&serialized_master_key, home)
+                    .await
+            },
+            Self::cloud_runtime_unlock_error,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn unlock_with_test_home_on_cloud_runtime(
         &self,
         serialized_master_key: &str,
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,

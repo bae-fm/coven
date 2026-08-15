@@ -235,6 +235,29 @@ pub(crate) struct StoreSync {
 }
 
 impl StoreSync {
+    async fn execute_cloud_operation<T, E, F, Future>(
+        &self,
+        operation: F,
+        runtime_error: fn(coven_storage::cloud::CloudRuntimeError) -> E,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce(StoreSync) -> Future + Send + 'static,
+        Future: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let owner = self.clone();
+        self.cloud_storage
+            .execute(move || operation(owner))
+            .await
+            .map_err(runtime_error)?
+    }
+
+    fn cloud_runtime_sync_error(error: coven_storage::cloud::CloudRuntimeError) -> SyncError {
+        coven_storage::cloud::CloudHomeError::transport("run cloud lifecycle operation", error)
+            .into()
+    }
+
     async fn prepare_storage_initialization(
         &self,
         config: Config,

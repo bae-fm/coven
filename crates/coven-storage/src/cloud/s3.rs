@@ -3,8 +3,6 @@
 //! Wraps `aws-sdk-s3` to provide raw storage operations against any
 //! S3-compatible endpoint.
 
-mod runtime;
-
 use async_trait::async_trait;
 use aws_config::stalled_stream_protection::StalledStreamProtectionConfig;
 use aws_config::{BehaviorVersion, Region};
@@ -13,6 +11,7 @@ use aws_sdk_s3::config::ResponseChecksumValidation;
 use aws_sdk_s3::Client;
 use tracing::warn;
 
+use super::runtime::CloudRuntime;
 use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, strip_listed_key_prefix,
 };
@@ -23,12 +22,11 @@ use super::{
 };
 use coven_foundation::id_provider::{IdRef, UuidProvider};
 use coven_protocol::objects::ObjectSlot;
-use runtime::S3Runtime;
 
 /// S3-backed cloud home.
 #[derive(Clone)]
 pub struct S3CloudHome {
-    runtime: S3Runtime,
+    runtime: CloudRuntime,
     client: Client,
     sts_client: Option<aws_sdk_sts::Client>,
     bucket: String,
@@ -97,7 +95,7 @@ impl S3CreateOnlyPutError {
 impl S3CloudHome {
     #[allow(clippy::too_many_arguments)]
     async fn new(
-        runtime: S3Runtime,
+        runtime: CloudRuntime,
         bucket: String,
         region: String,
         endpoint: Option<String>,
@@ -204,7 +202,7 @@ impl S3CloudHome {
             let client = self.client.clone();
             let bucket = self.bucket.clone();
             self.runtime
-                .run(move || async move {
+                .run_cloud(move || async move {
                     let mut request = client.create_multipart_upload().bucket(&bucket).key(&full);
                     if uses_checksum {
                         request = request
@@ -239,7 +237,13 @@ impl S3CloudHome {
         };
         Ok(Box::new(S3PartSink {
             commands: Some(commands),
-            owner: Some(self.runtime.spawn(move || owner.run(receiver))),
+            owner: Some(
+                self.runtime
+                    .spawn(move || owner.run(receiver))
+                    .map_err(|error| {
+                        CloudHomeError::transport("start S3 multipart owner", error)
+                    })?,
+            ),
         }))
     }
 
@@ -254,7 +258,7 @@ impl S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .spawn(move || async move {
+            .run(move || async move {
                 let mut request = client
                     .put_object()
                     .bucket(&bucket)
@@ -280,7 +284,10 @@ impl S3CloudHome {
             })
             .await
             .map_err(|error| {
-                S3CreateOnlyPutError::Other(CloudHomeError::transport("run S3 task", error))
+                S3CreateOnlyPutError::Other(CloudHomeError::transport(
+                    "run S3 create-only operation",
+                    error,
+                ))
             })?
     }
 
@@ -373,7 +380,7 @@ impl S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
                 let response = client
                     .head_object()
@@ -553,7 +560,7 @@ impl S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 client
                     .create_bucket()
                     .bucket(&bucket)
@@ -570,7 +577,8 @@ impl S3CloudHome {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn open_cloud_home(
+pub(crate) async fn open_cloud_home(
+    runtime: CloudRuntime,
     bucket: String,
     region: String,
     endpoint: Option<String>,
@@ -579,10 +587,9 @@ pub async fn open_cloud_home(
     key_prefix: Option<String>,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
 ) -> Result<S3CloudHome, CloudHomeError> {
-    let runtime = S3Runtime::new()?;
     let home_runtime = runtime.clone();
     runtime
-        .run(move || {
+        .run_cloud(move || {
             S3CloudHome::new(
                 home_runtime,
                 bucket,
@@ -977,7 +984,7 @@ impl CloudHome for S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 client
                     .put_object()
                     .bucket(&bucket)
@@ -1013,7 +1020,7 @@ impl CloudHome for S3CloudHome {
         // The body `collect()` runs inside the spawn too: streaming the response
         // drives the same aws connector that needs the big stack.
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 let resp = client
                     .get_object()
                     .bucket(&bucket)
@@ -1042,7 +1049,7 @@ impl CloudHome for S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 let resp = client
                     .get_object()
                     .bucket(&bucket)
@@ -1087,9 +1094,9 @@ impl CloudHome for S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         // The whole continuation loop is one spawned task: every page's `send`
-        // runs on the big-stack runtime.
+        // runs on the retained cloud runtime.
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 let mut keys = Vec::new();
                 let mut continuation_token: Option<String> = None;
 
@@ -1149,7 +1156,7 @@ impl CloudHome for S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 use aws_sdk_s3::error::ProvideErrorMetadata;
                 if let Err(e) = client
                     .delete_object()
@@ -1178,7 +1185,7 @@ impl CloudHome for S3CloudHome {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         self.runtime
-            .run(move || async move {
+            .run_cloud(move || async move {
                 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
                 match client.head_object().bucket(&bucket).key(&full).send().await {
                     Ok(_) => Ok(true),
@@ -1244,7 +1251,7 @@ impl ExactSlotStorage for S3CloudHome {
                 })?;
                 let identity = self
                     .runtime
-                    .run(move || async move {
+                    .run_cloud(move || async move {
                         client
                             .get_caller_identity()
                             .send()

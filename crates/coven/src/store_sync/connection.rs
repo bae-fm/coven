@@ -152,6 +152,14 @@ impl StoreSync {
     }
 
     pub(crate) async fn connect(&self) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            |owner| async move { owner.connect_on_cloud_runtime().await },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn connect_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_connection(None).await?;
         info!("store sync connected");
@@ -159,6 +167,15 @@ impl StoreSync {
     }
 
     pub(crate) async fn probe_cloud_home(&self, config: &Config) -> Result<(), SyncError> {
+        let config = config.clone();
+        self.execute_cloud_operation(
+            move |owner| async move { owner.probe_cloud_home_on_cloud_runtime(&config).await },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn probe_cloud_home_on_cloud_runtime(&self, config: &Config) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.cloud_storage
             .probe(config)
@@ -177,14 +194,30 @@ impl StoreSync {
         self.security.import_master_key(serialized)
     }
 
-    pub(crate) async fn forget_master_key(&self) -> Result<(), coven_keys::keys::KeyError> {
+    pub(crate) async fn forget_master_key(&self) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            |owner| async move { owner.forget_master_key_on_cloud_runtime().await },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn forget_master_key_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.security.forget_master_key()?;
         self.stop_current();
         Ok(())
     }
 
-    pub(crate) async fn disconnect_cloud_home(&self) -> Result<(), coven_keys::keys::KeyError> {
+    pub(crate) async fn disconnect_cloud_home(&self) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            |owner| async move { owner.disconnect_cloud_home_on_cloud_runtime().await },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn disconnect_cloud_home_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.cloud_storage.forget_credentials()?;
         self.stop_current();
@@ -193,6 +226,21 @@ impl StoreSync {
     }
 
     pub(crate) async fn connect_with_cloudkit(
+        &self,
+        cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
+    ) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .connect_with_cloudkit_on_cloud_runtime(cloudkit_ops)
+                    .await
+            },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn connect_with_cloudkit_on_cloud_runtime(
         &self,
         cloudkit_ops: Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>,
     ) -> Result<(), SyncError> {
@@ -245,6 +293,23 @@ impl StoreSync {
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
     ) -> Result<(), crate::CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .connect_with_test_home_on_cloud_runtime(home, cipher)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn connect_with_test_home_on_cloud_runtime(
+        &self,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+        cipher: coven_storage::CloudCipher,
+    ) -> Result<(), crate::CloudHomeSetupError> {
         let _lifecycle = self.lifecycle.lock().await;
         self.replace_with_test_home(home, cipher, SyncDriver::Loop)
             .await?;
@@ -254,6 +319,23 @@ impl StoreSync {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn connect_with_test_home_caller_driven(
+        &self,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+        cipher: coven_storage::CloudCipher,
+    ) -> Result<(), crate::CloudHomeSetupError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .connect_with_test_home_caller_driven_on_cloud_runtime(home, cipher)
+                    .await
+            },
+            Self::cloud_runtime_setup_error,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn connect_with_test_home_caller_driven_on_cloud_runtime(
         &self,
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
         cipher: coven_storage::CloudCipher,
@@ -272,6 +354,22 @@ impl StoreSync {
         &self,
         home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
     ) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            move |owner| async move {
+                owner
+                    .connect_with_test_home_custody_on_cloud_runtime(home)
+                    .await
+            },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn connect_with_test_home_custody_on_cloud_runtime(
+        &self,
+        home: Arc<dyn coven_storage::cloud::ExactCloudHome>,
+    ) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         let config = self.config();
         let admitted = self
@@ -285,6 +383,14 @@ impl StoreSync {
     }
 
     pub(crate) async fn start(&self) -> Result<(), SyncError> {
+        self.execute_cloud_operation(
+            |owner| async move { owner.start_on_cloud_runtime().await },
+            Self::cloud_runtime_sync_error,
+        )
+        .await
+    }
+
+    async fn start_on_cloud_runtime(&self) -> Result<(), SyncError> {
         let _lifecycle = self.lifecycle.lock().await;
         if !self.is_connected() {
             debug!("start_sync: no provider connected; nothing to start");

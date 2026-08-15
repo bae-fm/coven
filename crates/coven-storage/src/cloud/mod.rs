@@ -31,6 +31,7 @@ pub mod oauth_session;
 pub mod onedrive;
 #[cfg(feature = "oauth-providers")]
 mod resumable;
+mod runtime;
 pub mod s3;
 pub mod setup;
 #[cfg(feature = "oauth-providers")]
@@ -44,6 +45,7 @@ pub use factory::CloudHomeFactory;
 pub use factory::PreparedOAuthCloudHome;
 #[cfg(feature = "oauth-providers")]
 pub(crate) use google_drive::{folder_search_query, supports_all_drives};
+pub use runtime::CloudRuntimeError;
 #[cfg(feature = "oauth-providers")]
 pub use setup::SetupError;
 

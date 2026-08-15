@@ -96,6 +96,18 @@ impl StoreCloudStorage {
         }
     }
 
+    pub(crate) async fn execute<T, E, F>(
+        &self,
+        operation: impl FnOnce() -> F + Send + 'static,
+    ) -> Result<Result<T, E>, coven_storage::cloud::CloudRuntimeError>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.cloud_homes.execute(operation).await
+    }
+
     pub(crate) async fn open(
         &self,
         config: &Config,

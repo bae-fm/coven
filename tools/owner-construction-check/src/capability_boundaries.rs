@@ -147,7 +147,7 @@ pub(crate) const KEYRING_BOUNDARY: &[GatedCapability] = &[GatedCapability {
 }];
 
 /// Runtimes are constructed by their declared lifetime owners: the sync loop's
-/// dedicated thread, the S3 runtime, and resumable-upload drop cancellation.
+/// dedicated thread, the cloud runtime, and resumable-upload drop cancellation.
 /// Retaining or passing a `tokio::runtime::Handle` is injection and is not
 /// gated; spawning onto the caller's current runtime is not gated either — the
 /// identity of that runtime is coherent by construction. Ambient acquisition
@@ -167,7 +167,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         allowed: &[
             "crates/coven-replication/src/sync/sync_loop.rs",
             "crates/coven-replication/src/sync/sync_loop/",
-            "crates/coven-storage/src/cloud/s3/runtime.rs",
+            "crates/coven-storage/src/cloud/runtime.rs",
             "crates/coven-storage/src/cloud/resumable.rs",
         ],
     },
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn declared_runtime_owners_construct_runtimes() {
         let files = vec![file(
-            "crates/coven-storage/src/cloud/s3/runtime.rs",
+            "crates/coven-storage/src/cloud/runtime.rs",
             r#"
             fn build() {
                 let _ = tokio::runtime::Builder::new_multi_thread().build();

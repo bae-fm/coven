@@ -258,7 +258,7 @@ impl<'a> BootstrapCleanup<'a> {
 async fn build_cloud_home_for_join(
     join_info: &CloudHomeJoinInfo,
     lib_ks: &StoreKeys,
-    oauth_clients: &coven_storage::oauth::OAuthClients,
+    cloud_homes: &coven_storage::cloud::CloudHomeFactory,
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
@@ -267,7 +267,7 @@ async fn build_cloud_home_for_join(
     use coven_storage::cloud::*;
 
     #[cfg(not(feature = "oauth-providers"))]
-    let _ = (&lib_ks, oauth_clients, &oauth_tokens, &clock);
+    let _ = (&lib_ks, cloud_homes, &oauth_tokens, &clock);
     #[cfg(feature = "oauth-providers")]
     let credential_custody =
         coven_keys::keys::CloudHomeCredentialsOwner::new(lib_ks.clone()).current();
@@ -281,16 +281,17 @@ async fn build_cloud_home_for_join(
             secret_key,
             key_prefix,
         } => {
-            let s3 = s3::open_cloud_home(
-                bucket.clone(),
-                region.clone(),
-                endpoint.clone(),
-                access_key.clone(),
-                secret_key.clone(),
-                key_prefix.clone(),
-                exact_upload_verification,
-            )
-            .await?;
+            let s3 = cloud_homes
+                .open_s3(
+                    bucket.clone(),
+                    region.clone(),
+                    endpoint.clone(),
+                    access_key.clone(),
+                    secret_key.clone(),
+                    key_prefix.clone(),
+                    exact_upload_verification,
+                )
+                .await?;
             Ok(Arc::new(s3))
         }
         #[cfg(feature = "oauth-providers")]
@@ -298,7 +299,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("Google Drive join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients.config_for(CloudProvider::GoogleDrive)?;
+            let oauth_config = cloud_homes.oauth_config_for(CloudProvider::GoogleDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 credential_custody.clone(),
@@ -317,7 +318,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("Dropbox join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients.config_for(CloudProvider::Dropbox)?;
+            let oauth_config = cloud_homes.oauth_config_for(CloudProvider::Dropbox)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 credential_custody.clone(),
@@ -339,7 +340,7 @@ async fn build_cloud_home_for_join(
             let tokens = oauth_tokens.ok_or_else(|| {
                 BootstrapError::Provider("OneDrive join requires an OAuth token".to_string())
             })?;
-            let oauth_config = oauth_clients.config_for(CloudProvider::OneDrive)?;
+            let oauth_config = cloud_homes.oauth_config_for(CloudProvider::OneDrive)?;
             let session = oauth_session::OAuthSession::new(
                 tokens,
                 credential_custody,
@@ -408,7 +409,7 @@ pub struct DeviceJoinClient {
     store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
-    oauth_clients: coven_storage::oauth::OAuthClients,
+    cloud_homes: coven_storage::cloud::CloudHomeFactory,
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
@@ -461,7 +462,7 @@ impl DeviceJoinClient {
             store_keys,
             custody,
             identity_custody,
-            oauth_clients,
+            cloud_homes: coven_storage::cloud::CloudHomeFactory::new(oauth_clients),
             oauth_tokens,
             cloudkit_ops,
             clock,
@@ -831,7 +832,7 @@ impl DeviceJoinClient {
         build_cloud_home_for_join(
             &self.code.join_info,
             &self.store_keys,
-            &self.oauth_clients,
+            &self.cloud_homes,
             self.oauth_tokens.clone(),
             self.cloudkit_ops.clone(),
             self.clock.clone(),

@@ -32,7 +32,7 @@ use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
 pub struct RestoreSource {
     join_info: CloudHomeJoinInfo,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-    oauth_clients: coven_storage::oauth::OAuthClients,
+    cloud_homes: coven_storage::cloud::CloudHomeFactory,
     oauth_tokens: Option<OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -48,7 +48,7 @@ impl RestoreSource {
         Self {
             join_info,
             exact_upload_verification,
-            oauth_clients,
+            cloud_homes: coven_storage::cloud::CloudHomeFactory::new(oauth_clients),
             oauth_tokens,
             cloudkit_ops,
         }
@@ -64,14 +64,14 @@ impl RestoreSource {
         let Self {
             join_info,
             exact_upload_verification,
-            oauth_clients,
+            cloud_homes,
             oauth_tokens,
             cloudkit_ops,
         } = self;
 
         // Consumed only by the oauth provider arms below.
         #[cfg(not(feature = "oauth-providers"))]
-        let _ = (&store_keys, &clock, &oauth_clients, &oauth_tokens);
+        let _ = (&store_keys, &clock, &cloud_homes, &oauth_tokens);
 
         #[cfg(feature = "oauth-providers")]
         let require_oauth = |provider_name: &str| {
@@ -95,16 +95,17 @@ impl RestoreSource {
                 secret_key,
                 key_prefix,
             } => Arc::new(
-                s3::open_cloud_home(
-                    bucket.clone(),
-                    region.clone(),
-                    endpoint.clone(),
-                    access_key.clone(),
-                    secret_key.clone(),
-                    key_prefix.clone(),
-                    *exact_upload_verification,
-                )
-                .await?,
+                cloud_homes
+                    .open_s3(
+                        bucket.clone(),
+                        region.clone(),
+                        endpoint.clone(),
+                        access_key.clone(),
+                        secret_key.clone(),
+                        key_prefix.clone(),
+                        *exact_upload_verification,
+                    )
+                    .await?,
             ),
 
             CloudHomeJoinInfo::CloudKit => {
@@ -130,8 +131,8 @@ impl RestoreSource {
             #[cfg(feature = "oauth-providers")]
             CloudHomeJoinInfo::GoogleDrive { folder_id } => {
                 let tokens = require_oauth("Google Drive")?;
-                let oauth_config = oauth_clients
-                    .config_for(coven_foundation::config::CloudProvider::GoogleDrive)?;
+                let oauth_config = cloud_homes
+                    .oauth_config_for(coven_foundation::config::CloudProvider::GoogleDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     credential_custody.clone(),
@@ -149,8 +150,8 @@ impl RestoreSource {
             #[cfg(feature = "oauth-providers")]
             CloudHomeJoinInfo::Dropbox { folder_path } => {
                 let tokens = require_oauth("Dropbox")?;
-                let oauth_config =
-                    oauth_clients.config_for(coven_foundation::config::CloudProvider::Dropbox)?;
+                let oauth_config = cloud_homes
+                    .oauth_config_for(coven_foundation::config::CloudProvider::Dropbox)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     credential_custody.clone(),
@@ -171,8 +172,8 @@ impl RestoreSource {
                 folder_id,
             } => {
                 let tokens = require_oauth("OneDrive")?;
-                let oauth_config =
-                    oauth_clients.config_for(coven_foundation::config::CloudProvider::OneDrive)?;
+                let oauth_config = cloud_homes
+                    .oauth_config_for(coven_foundation::config::CloudProvider::OneDrive)?;
                 let session = oauth_session::OAuthSession::new(
                     tokens,
                     credential_custody,
