@@ -28,6 +28,8 @@ pub(crate) mod store_sync;
 
 #[cfg(test)]
 mod blob_facade_tests;
+#[cfg(test)]
+mod store_key_ownership_tests;
 
 pub use coven_database::rusqlite;
 

@@ -167,6 +167,17 @@ impl Coven {
             observer: None,
         }
     }
+
+    /// Remove the master key for a closed store that cannot be opened.
+    ///
+    /// An open store performs this through [`CovenHandle::forget_master_key`],
+    /// which also disconnects operations retaining the unlocked value. This
+    /// entry point exists for host deletion flows whose damaged local database
+    /// prevents constructing a handle at all; Coven still owns the keyring
+    /// account and slot selection.
+    pub fn forget_keyring_master_key(store_id: &str) -> Result<(), coven_keys::keys::KeyError> {
+        StoreKeys::bind(store_id.to_string()).delete_encryption_key()
+    }
 }
 
 pub struct CovenBuilder {
