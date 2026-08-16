@@ -160,9 +160,9 @@ struct Recorder {
 
 #[async_trait]
 impl BlobTransitionObserver for Recorder {
-    async fn on_blob_upload_started(&self, _blob_id: &str) {}
-    async fn on_blob_uploaded(&self, _blob_id: &str) {}
-    async fn on_blob_upload_failed(&self, _blob_id: &str, _error: &str) {}
+    async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {}
+    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
+    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
     async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {
         self.made_remote
             .lock()

@@ -13,7 +13,9 @@ use coven_foundation::clock::{Clock, FixedClock};
 use coven_foundation::store_dir::StoreDir;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
-use coven_protocol::blob::{BlobTransitionObserver, CacheFill, Provenance};
+use coven_protocol::blob::{
+    BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance, RowBlobAuthority, RowBlobRef,
+};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::synced_schema::BlobDecl;
 use coven_storage::cloud::test_utils::InMemoryCloudHome;
@@ -452,6 +454,21 @@ struct RecordingObserver {
     events: Mutex<Vec<ObsEvent>>,
 }
 
+#[derive(Default)]
+struct IdentityObserver {
+    started: Mutex<Vec<RowBlobRef>>,
+}
+
+#[async_trait]
+impl BlobTransitionObserver for IdentityObserver {
+    async fn on_blob_upload_started(&self, upload: &RowBlobRef) {
+        self.started.lock().unwrap().push(upload.clone());
+    }
+
+    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
+    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
+}
+
 impl RecordingObserver {
     fn new() -> Self {
         Self {
@@ -466,32 +483,32 @@ impl RecordingObserver {
 
 #[async_trait]
 impl BlobTransitionObserver for RecordingObserver {
-    async fn on_blob_upload_started(&self, file_id: &str) {
+    async fn on_blob_upload_started(&self, upload: &RowBlobRef) {
         self.events
             .lock()
             .unwrap()
-            .push(ObsEvent::Started(file_id.to_string()));
+            .push(ObsEvent::Started(upload.blob().id.clone()));
     }
 
-    async fn on_blob_upload_progress(&self, file_id: &str, done: u64, total: u64) {
+    async fn on_blob_upload_progress(&self, upload: &RowBlobRef, done: u64, total: u64) {
         self.events
             .lock()
             .unwrap()
-            .push(ObsEvent::Progress(file_id.to_string(), done, total));
+            .push(ObsEvent::Progress(upload.blob().id.clone(), done, total));
     }
 
-    async fn on_blob_uploaded(&self, file_id: &str) {
+    async fn on_blob_uploaded(&self, upload: &RowBlobRef) {
         self.events
             .lock()
             .unwrap()
-            .push(ObsEvent::Uploaded(file_id.to_string()));
+            .push(ObsEvent::Uploaded(upload.blob().id.clone()));
     }
 
-    async fn on_blob_upload_failed(&self, file_id: &str, error: &str) {
-        self.events
-            .lock()
-            .unwrap()
-            .push(ObsEvent::Failed(file_id.to_string(), error.to_string()));
+    async fn on_blob_upload_failed(&self, upload: &RowBlobRef, error: &str) {
+        self.events.lock().unwrap().push(ObsEvent::Failed(
+            upload.blob().id.clone(),
+            error.to_string(),
+        ));
     }
 }
 
@@ -517,12 +534,12 @@ impl PausingObserver {
 
 #[async_trait]
 impl BlobTransitionObserver for PausingObserver {
-    async fn on_blob_upload_started(&self, file_id: &str) {
-        self.started.lock().unwrap().push(file_id.to_string());
+    async fn on_blob_upload_started(&self, upload: &RowBlobRef) {
+        self.started.lock().unwrap().push(upload.blob().id.clone());
     }
 
-    async fn on_blob_uploaded(&self, _file_id: &str) {}
-    async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
+    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
+    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
 
     fn should_skip_uploads(&self) -> bool {
         self.checks.fetch_add(1, Ordering::SeqCst) >= self.admit_before
@@ -561,6 +578,58 @@ async fn successful_drain_does_not_read_uploaded_body_from_provider() {
         !fixture.home.exact_reads()[reads_before..].contains(created_slot(&entry)),
         "the successful create response verifies the exact blob without fetching its body",
     );
+}
+
+#[tokio::test]
+async fn upload_observer_receives_the_exact_blob_bearing_row() {
+    let fixture = UploadFixture::new(1).await;
+    let bytes = b"cover bytes";
+    let source_path = fixture
+        .store_dir
+        .db_path()
+        .parent()
+        .expect("Store directory has a parent")
+        .join("cover.source");
+    coven_foundation::local_file::AtomicStagedFile::write_for_test(&source_path, bytes)
+        .await
+        .expect("write cover source");
+    let row = RowBlobRef::new(
+        "note_covers".to_string(),
+        "release-row".to_string(),
+        "cover-stamp".to_string(),
+        "cover".to_string(),
+        BlobRef {
+            namespace: "covers".to_string(),
+            id: "cover-blob".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::UserProvided,
+            fill: CacheFill::CacheLazy,
+        },
+        bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(bytes),
+        RowBlobAuthority::Local,
+        None,
+    )
+    .expect("valid cover row blob");
+    fixture
+        .db
+        .enqueue_blob_upload_with_retention_for_test(
+            "notes",
+            ROOT_ID,
+            row.clone(),
+            source_path,
+            false,
+            T0,
+        )
+        .await
+        .expect("enqueue cover upload");
+    fixture.home.fail_creates();
+    let observer = IdentityObserver::default();
+
+    let _ = fixture.drain(&fixed_clock(T0), Some(&observer)).await;
+
+    assert_eq!(*observer.started.lock().unwrap(), vec![row]);
 }
 
 /// A pass that finishes what an earlier pass created counts no upload — the

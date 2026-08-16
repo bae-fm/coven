@@ -717,23 +717,28 @@ pub enum RowBlobRefError {
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {
     /// An upload attempt for this blob is starting now.
-    async fn on_blob_upload_started(&self, blob_id: &str);
+    async fn on_blob_upload_started(&self, upload: &RowBlobRef);
 
     /// `bytes_done` of `bytes_total` encrypted bytes have reached the cloud for
     /// this in-flight blob. `bytes_done` is cumulative and monotonic within one
     /// upload attempt. The default is a no-op so observers that don't surface
     /// sub-file progress don't need a stub.
-    async fn on_blob_upload_progress(&self, blob_id: &str, bytes_done: u64, bytes_total: u64) {
-        let _ = (blob_id, bytes_done, bytes_total);
+    async fn on_blob_upload_progress(
+        &self,
+        upload: &RowBlobRef,
+        bytes_done: u64,
+        bytes_total: u64,
+    ) {
+        let _ = (upload, bytes_done, bytes_total);
     }
 
     /// The blob was uploaded to the cloud successfully — notification only. coven
     /// owns flipping the gate and breaking the drain to publish a completed
     /// make_remote.
-    async fn on_blob_uploaded(&self, blob_id: &str);
+    async fn on_blob_uploaded(&self, upload: &RowBlobRef);
 
     /// An upload attempt failed; the entry remains queued for retry.
-    async fn on_blob_upload_failed(&self, blob_id: &str, error: &str);
+    async fn on_blob_upload_failed(&self, upload: &RowBlobRef, error: &str);
 
     /// If true, the sync cycle skips the upload drain this round and
     /// the queue stops before pulling the next queued entry. The default is `false`

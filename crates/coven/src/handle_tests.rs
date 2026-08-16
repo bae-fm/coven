@@ -105,11 +105,11 @@ impl PausedUploadDrain {
 
 #[async_trait::async_trait]
 impl coven_protocol::blob::BlobTransitionObserver for PausedUploadDrain {
-    async fn on_blob_upload_started(&self, _blob_id: &str) {}
+    async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {}
 
-    async fn on_blob_uploaded(&self, _blob_id: &str) {}
+    async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
 
-    async fn on_blob_upload_failed(&self, _blob_id: &str, _error: &str) {}
+    async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
 
     fn should_skip_uploads(&self) -> bool {
         let paused = self.paused.load(std::sync::atomic::Ordering::SeqCst);

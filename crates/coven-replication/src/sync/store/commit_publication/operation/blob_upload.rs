@@ -15,7 +15,7 @@ use coven_database::DbError;
 use coven_database::{OutboxEntry, OutboxOperation, OutboxUploadState};
 use coven_keys::encryption::EncryptionService;
 use coven_protocol::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
-use coven_protocol::blob::BlobTransitionObserver;
+use coven_protocol::blob::{BlobTransitionObserver, RowBlobRef};
 
 use crate::blob::{DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures};
 
@@ -330,9 +330,8 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         else {
             unreachable!("pending_blob_uploads returns only Upload rows");
         };
-        let file_id = row.blob().id.clone();
         if let Some(observer) = self.observer {
-            observer.on_blob_upload_started(&file_id).await;
+            observer.on_blob_upload_started(&row).await;
         }
 
         match self
@@ -341,12 +340,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             .await
         {
             Ok(Some(coven_database::MakeRemoteIntentState::Cancelling)) => {
-                return self.finish_cancelled(&state, &file_id).await;
+                return self.finish_cancelled(&state, &row).await;
             }
             Ok(_) => {}
             Err(error) => {
                 return self
-                    .local_failure(&file_id, self.label(), UploadFailureCause::Database(error))
+                    .local_failure(&row, self.label(), UploadFailureCause::Database(error))
                     .await;
             }
         }
@@ -356,7 +355,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             OutboxUploadState::Pending => {
                 let key_fingerprint = match self.writer.store_blob_key_fingerprint() {
                     Ok(fingerprint) => fingerprint,
-                    Err(error) => return self.storage_failure(&file_id, error).await,
+                    Err(error) => return self.storage_failure(&row, error).await,
                 };
                 let locator = match key_fingerprint {
                     Some(key_fingerprint) => BlobLocator::opaque(
@@ -378,7 +377,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                             );
                             return self
                                 .local_failure(
-                                    &file_id,
+                                    &row,
                                     self.label(),
                                     UploadFailureCause::InvalidState(message),
                                 )
@@ -398,11 +397,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     Ok(locator) => locator,
                     Err(error) => {
                         return self
-                            .local_failure(
-                                &file_id,
-                                self.label(),
-                                UploadFailureCause::Locator(error),
-                            )
+                            .local_failure(&row, self.label(), UploadFailureCause::Locator(error))
                             .await;
                     }
                 };
@@ -412,7 +407,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     .await
                 {
                     Ok(prepared) => prepared,
-                    Err(error) => return self.storage_failure(&file_id, error).await,
+                    Err(error) => return self.storage_failure(&row, error).await,
                 };
                 if let Err(error) = self
                     .writer
@@ -421,7 +416,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 {
                     let object_key = stored.object().slot().logical_key().to_string();
                     return self
-                        .local_failure(&file_id, object_key, UploadFailureCause::Database(error))
+                        .local_failure(&row, object_key, UploadFailureCause::Database(error))
                         .await;
                 }
                 self.set_state(OutboxUploadState::Prepared {
@@ -444,7 +439,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 if authority != coven_protocol::audience_package::PackageAudience::Store {
                     return self
                         .local_failure(
-                            &file_id,
+                            &row,
                             self.label(),
                             UploadFailureCause::InvalidState(
                                 "make_remote upload has non-Store package authority".to_string(),
@@ -463,16 +458,13 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 ..
             }
         ) {
-            if let Err(error) = self
-                .create_with_progress(&stored, &spool_path, &file_id)
-                .await
-            {
-                return self.storage_failure(&file_id, error).await;
+            if let Err(error) = self.create_with_progress(&stored, &spool_path, &row).await {
+                return self.storage_failure(&row, error).await;
             }
             if let Err(error) = self.writer.mark_blob_upload_created(&self.entry).await {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self
-                    .local_failure(&file_id, object_key, UploadFailureCause::Database(error))
+                    .local_failure(&row, object_key, UploadFailureCause::Database(error))
                     .await;
             }
             self.set_state(OutboxUploadState::Created {
@@ -482,7 +474,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             });
             created_this_pass = true;
             if let Some(observer) = self.observer {
-                observer.on_blob_uploaded(&file_id).await;
+                observer.on_blob_uploaded(&row).await;
             }
         }
 
@@ -490,7 +482,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             if let Err(error) = self.writer.pin_uploaded_blob(&stored, &source_path).await {
                 let object_key = stored.object().slot().logical_key().to_string();
                 return self
-                    .local_failure(&file_id, object_key, UploadFailureCause::Pin(error))
+                    .local_failure(&row, object_key, UploadFailureCause::Pin(error))
                     .await;
             }
         }
@@ -523,13 +515,13 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                         stored,
                         spool_path,
                     },
-                    &file_id,
+                    &row,
                 )
                 .await
             }
             Err(error) => {
                 let object_key = stored.object().slot().logical_key().to_string();
-                self.local_failure(&file_id, object_key, UploadFailureCause::Database(error))
+                self.local_failure(&row, object_key, UploadFailureCause::Database(error))
                     .await
             }
         }
@@ -539,7 +531,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         &self,
         blob: &StoredBlobRef,
         spool_path: &std::path::Path,
-        file_id: &str,
+        upload: &RowBlobRef,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         let total = blob.object().stored_size();
         let sent = Arc::new(AtomicU64::new(0));
@@ -564,20 +556,24 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     let current = sent.load(Ordering::Relaxed);
                     if current != forwarded {
                         forwarded = current;
-                        observer.on_blob_upload_progress(file_id, current, total).await;
+                        observer
+                            .on_blob_upload_progress(upload, current, total)
+                            .await;
                     }
                 }
             }
         };
         if result.is_ok() {
-            observer
-                .on_blob_upload_progress(file_id, total, total)
-                .await;
+            observer.on_blob_upload_progress(upload, total, total).await;
         }
         result
     }
 
-    async fn finish_cancelled(&self, state: &OutboxUploadState, file_id: &str) -> EntryOutcome {
+    async fn finish_cancelled(
+        &self,
+        state: &OutboxUploadState,
+        upload: &RowBlobRef,
+    ) -> EntryOutcome {
         let cleanup = self.writer.cancel_blob_upload(&self.entry, state).await;
 
         match cleanup {
@@ -587,7 +583,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             },
             Err(cause) => {
                 let message = cause.to_string();
-                self.record_failure(file_id, &message).await;
+                self.record_failure(upload, &message).await;
                 EntryOutcome::NotUploaded(UploadFailure {
                     entry_id: self.entry.id,
                     object_key: self.label(),
@@ -599,12 +595,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
 
     async fn local_failure(
         &self,
-        file_id: &str,
+        upload: &RowBlobRef,
         object_key: String,
         cause: UploadFailureCause,
     ) -> EntryOutcome {
         let message = cause.to_string();
-        self.record_failure(file_id, &message).await;
+        self.record_failure(upload, &message).await;
         EntryOutcome::NotUploaded(UploadFailure {
             entry_id: self.entry.id,
             object_key,
@@ -614,12 +610,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
 
     async fn storage_failure(
         &self,
-        file_id: &str,
+        upload: &RowBlobRef,
         error: coven_protocol::objects::StorageError,
     ) -> EntryOutcome {
         let message = error.to_string();
         warn!("Upload failed for {}: {message}", self.label());
-        self.record_failure(file_id, &message).await;
+        self.record_failure(upload, &message).await;
         EntryOutcome::NotUploaded(UploadFailure {
             entry_id: self.entry.id,
             object_key: self.label(),
@@ -627,7 +623,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         })
     }
 
-    async fn record_failure(&self, file_id: &str, error: &str) {
+    async fn record_failure(&self, upload: &RowBlobRef, error: &str) {
         if let Err(record_error) = self
             .writer
             .record_outbox_failure(&self.entry, error, &self.now)
@@ -639,7 +635,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
             );
         }
         if let Some(observer) = self.observer {
-            observer.on_blob_upload_failed(file_id, error).await;
+            observer.on_blob_upload_failed(upload, error).await;
         }
     }
 
