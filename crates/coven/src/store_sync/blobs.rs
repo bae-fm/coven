@@ -78,9 +78,23 @@ impl StoreSync {
     pub(crate) async fn drain_uploads(
         &self,
     ) -> Result<coven_replication::blob::DrainOutcome, SyncError> {
-        active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .drain_uploads()
+        self.drain_uploads_with(active_sync!(self).ok_or(SyncError::LoopNotRunning)?)
+            .await
+    }
+
+    pub(crate) async fn retry_uploads_now(
+        &self,
+    ) -> Result<coven_replication::blob::DrainOutcome, SyncError> {
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        self.database.reset_outbox_backoff().await?;
+        self.drain_uploads_with(sync).await
+    }
+
+    async fn drain_uploads_with(
+        &self,
+        sync: Arc<SyncLoopHandle>,
+    ) -> Result<coven_replication::blob::DrainOutcome, SyncError> {
+        sync.drain_uploads()
             .await
             .map_err(|error| SyncError::BlobUpload(Box::new(error)))
     }

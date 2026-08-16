@@ -417,6 +417,68 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     );
 }
 
+/// An explicit retry is a user command, so it bypasses the automatic retry
+/// delay instead of reporting that every failed upload is still waiting.
+#[tokio::test]
+async fn retry_uploads_now_bypasses_backoff() {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let dir = crate::StoreDir::new_ephemeral(tmp.path());
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let handle = builder(dir)
+        .synced_tables(note_tables())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::from(
+            crate::EncryptionService::from_key([42; 32]),
+        )))
+        .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
+        .open()
+        .expect("open the store");
+    let home = coven_replication::sync::test_helpers::test_cloud_home();
+    handle
+        .create_test_store("retry-upload", owner, home.clone())
+        .await
+        .expect("create Store");
+    handle
+        .connect_sync_with_test_home_caller_driven(
+            home.clone(),
+            coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("connect Store");
+    let user_dir = tempfile::tempdir().expect("user directory");
+    let bytes = b"retry photo".to_vec();
+    let path = user_dir.path().join("photo.jpg");
+    std::fs::write(&path, &bytes).expect("write source photo");
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
+        .await
+        .expect("write note and photo");
+    handle
+        .make_remote("notes", "note-1", false)
+        .await
+        .expect("enqueue make remote");
+
+    home.fail_exact_create_before_call(1);
+    let failed = handle.drain_uploads().await.expect("attempt the upload");
+    assert_eq!(failed.uploaded(), 0);
+    assert_eq!(failed.failures().failures().len(), 1);
+    assert!(matches!(
+        handle
+            .drain_uploads()
+            .await
+            .expect("automatic drain respects backoff"),
+        coven_replication::blob::DrainOutcome::AllInBackoff
+    ));
+
+    let retried = handle
+        .retry_uploads_now()
+        .await
+        .expect("explicit retry bypasses backoff");
+    assert_eq!(retried.uploaded(), 1);
+    assert!(retried.failures().failures().is_empty());
+}
+
 #[tokio::test]
 async fn cloud_outbox_subscription_follows_committed_queue_changes() {
     coven_keys::keys::test_keyring::install();

@@ -949,6 +949,18 @@ impl CovenHandle {
         self.sync.drain_uploads().await
     }
 
+    /// Retry every failed upload now, without waiting for its automatic retry
+    /// delay. This clears the durable delay only after confirming that a cloud
+    /// connection can run the drain, then attempts the queue immediately.
+    ///
+    /// Provider failures remain in the returned [`DrainOutcome`], with their
+    /// updated attempt records available through
+    /// [`subscribe_cloud_outbox`](Self::subscribe_cloud_outbox). Connection or
+    /// database failures are returned as [`SyncError`].
+    pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
+        self.sync.retry_uploads_now().await
+    }
+
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
         self.blobs.cache_budget(namespace).await
     }

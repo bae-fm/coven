@@ -433,7 +433,6 @@ impl StoreSession<'_> {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     fn reset_outbox_backoff(&mut self) -> Result<(), DbError> {
         self.conn
             .execute(
@@ -661,7 +660,6 @@ impl StoreDatabase {
         .await
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_outbox_backoff(&self) -> Result<(), DbError> {
         self.call_store(|session| session.reset_outbox_backoff())
             .await
