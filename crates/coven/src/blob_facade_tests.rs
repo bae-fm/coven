@@ -357,6 +357,10 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         crate::QueuedUploadPhase::Pending,
         "an unattempted durable upload is waiting for preparation",
     );
+    assert_eq!(
+        upload.provider_bytes_total, None,
+        "provider bytes are unknown until preparation produces the stored object",
+    );
     assert!(!upload.created_at.is_empty());
     assert_eq!(upload.last_attempt_at, None);
     assert_eq!(

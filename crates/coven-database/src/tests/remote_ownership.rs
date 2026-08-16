@@ -288,6 +288,16 @@ async fn upload_retry_preserves_prepared_object_handoff() {
         .await
         .expect("record prepared object");
 
+    let queued = crate::StoreDatabase::new(&db)
+        .queued_uploads()
+        .await
+        .expect("read prepared upload projection");
+    assert_eq!(
+        queued[0].provider_bytes_total,
+        Some(stored.object().stored_size()),
+        "a prepared upload exposes its exact provider denominator",
+    );
+
     db.enqueue_blob_upload_with_retention_for_test(
         "photos",
         "photo",
@@ -314,7 +324,7 @@ async fn upload_retry_preserves_prepared_object_handoff() {
             retain_pinned: true,
             state: OutboxUploadState::Prepared {
                 authority: coven_protocol::audience_package::PackageAudience::Store,
-                stored,
+                stored: stored.clone(),
                 spool_path,
             },
         }
@@ -337,6 +347,15 @@ async fn upload_retry_preserves_prepared_object_handoff() {
             ..
         }
     ));
+    let projected = crate::StoreDatabase::new(&db)
+        .queued_uploads()
+        .await
+        .expect("read Created upload projection");
+    assert_eq!(projected[0].phase, QueuedUploadPhase::Created);
+    assert_eq!(
+        projected[0].provider_bytes_total,
+        Some(stored.object().stored_size()),
+    );
 }
 
 #[tokio::test]

@@ -120,6 +120,9 @@ pub struct QueuedUpload {
     /// activity refines this into Preparing or Uploading; after a restart this
     /// is the authoritative lower bound the host renders immediately.
     pub phase: QueuedUploadPhase,
+    /// Exact bytes the cloud provider receives once preparation has produced
+    /// the stored object. Pending preparation has no provider denominator yet.
+    pub provider_bytes_total: Option<u64>,
     /// Failed transfer attempts so far; 0 for an upload never yet tried.
     pub attempt_count: u64,
     /// Why the last attempt failed, if one has.
@@ -708,10 +711,16 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
     let state_json: String = row.get(4)?;
     let state: OutboxUploadState =
         serde_json::from_str(&state_json).map_err(|error| invalid(4, Box::new(error)))?;
-    let phase = match state {
-        OutboxUploadState::Pending => QueuedUploadPhase::Pending,
-        OutboxUploadState::Prepared { .. } => QueuedUploadPhase::Prepared,
-        OutboxUploadState::Created { .. } => QueuedUploadPhase::Created,
+    let (phase, provider_bytes_total) = match &state {
+        OutboxUploadState::Pending => (QueuedUploadPhase::Pending, None),
+        OutboxUploadState::Prepared { stored, .. } => (
+            QueuedUploadPhase::Prepared,
+            Some(stored.object().stored_size()),
+        ),
+        OutboxUploadState::Created { stored, .. } => (
+            QueuedUploadPhase::Created,
+            Some(stored.object().stored_size()),
+        ),
     };
     let attempt_count: i64 = row.get(5)?;
     Ok(QueuedUpload {
@@ -720,6 +729,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         root_id: row.get(2)?,
         retain_pinned: row.get(3)?,
         phase,
+        provider_bytes_total,
         attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(5, Box::new(error)))?,
         last_error: row.get(6)?,
         created_at: row.get(7)?,
