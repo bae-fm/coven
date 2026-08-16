@@ -7,6 +7,21 @@
 
 use coven_replication::sync::test_helpers::*;
 
+struct PauseUploads(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl crate::BlobTransitionObserver for PauseUploads {
+    async fn on_blob_upload_started(&self, _upload: &crate::RowBlobRef) {}
+
+    async fn on_blob_uploaded(&self, _upload: &crate::RowBlobRef) {}
+
+    async fn on_blob_upload_failed(&self, _upload: &crate::RowBlobRef, _error: &str) {}
+
+    fn should_skip_uploads(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A blob-bearing child of a gated root whose bytes stay in the user's own
 /// file — the shape an import produces.
 fn user_file_decl() -> crate::BlobDecl {
@@ -425,6 +440,7 @@ async fn retry_uploads_now_bypasses_backoff() {
     let tmp = tempfile::tempdir().expect("store directory");
     let dir = crate::StoreDir::new_ephemeral(tmp.path());
     let owner = coven_keys::keys::UserKeypair::generate();
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = builder(dir)
         .synced_tables(note_tables())
         .migrations(test_migrations())
@@ -432,6 +448,7 @@ async fn retry_uploads_now_bypasses_backoff() {
             crate::EncryptionService::from_key([42; 32]),
         )))
         .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
+        .observer(std::sync::Arc::new(PauseUploads(paused.clone())))
         .open()
         .expect("open the store");
     let home = coven_replication::sync::test_helpers::test_cloud_home();
@@ -468,6 +485,23 @@ async fn retry_uploads_now_bypasses_backoff() {
             .drain_uploads()
             .await
             .expect("automatic drain respects backoff"),
+        coven_replication::blob::DrainOutcome::AllInBackoff
+    ));
+
+    paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        handle
+            .retry_uploads_now()
+            .await
+            .expect("paused retry reports the pause"),
+        coven_replication::blob::DrainOutcome::Paused
+    ));
+    paused.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        handle
+            .drain_uploads()
+            .await
+            .expect("paused retry preserves automatic backoff"),
         coven_replication::blob::DrainOutcome::AllInBackoff
     ));
 

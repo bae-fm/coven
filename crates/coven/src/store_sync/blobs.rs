@@ -86,6 +86,13 @@ impl StoreSync {
         &self,
     ) -> Result<coven_replication::blob::DrainOutcome, SyncError> {
         let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        if self
+            .observer
+            .as_ref()
+            .is_some_and(|observer| observer.should_skip_uploads())
+        {
+            return Ok(coven_replication::blob::DrainOutcome::Paused);
+        }
         self.database.reset_outbox_backoff().await?;
         self.drain_uploads_with(sync).await
     }
