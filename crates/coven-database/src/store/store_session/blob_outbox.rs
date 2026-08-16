@@ -84,13 +84,9 @@ pub struct QueuedDelete {
 /// distinguishable from a retrying one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedUpload {
-    /// The blob's namespace, from the queued row reference.
-    pub namespace: String,
-    /// The blob's id within that namespace.
-    pub blob_id: String,
-    /// The blob-bearing row this upload belongs to.
-    pub table_name: String,
-    pub row_id: String,
+    /// The exact blob-bearing row version held by the durable queue. This is the
+    /// same identity upload lifecycle callbacks report.
+    pub blob: coven_protocol::blob::RowBlobRef,
     /// The gated root whose make-remote enqueued this upload. Every upload for
     /// one root shares this pair, and the root is what a host groups by.
     pub root_table: String,
@@ -635,10 +631,7 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
         serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
     let attempt_count: i64 = row.get(4)?;
     Ok(QueuedUpload {
-        namespace: reference.blob().namespace.clone(),
-        blob_id: reference.blob().id.clone(),
-        table_name: reference.table().to_string(),
-        row_id: reference.row_id().to_string(),
+        blob: reference,
         root_table: row.get(1)?,
         root_id: row.get(2)?,
         retain_pinned: row.get(3)?,

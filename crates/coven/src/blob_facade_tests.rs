@@ -290,6 +290,10 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
         .await
         .expect("write the note and register its photo");
+    let expected_blob = handle
+        .row_blob_ref("note_photos", "photo-1")
+        .await
+        .expect("resolve the exact queued blob-bearing row");
 
     // Nothing is queued until a transition asks for it.
     assert!(handle
@@ -315,12 +319,13 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
     let queued = handle.queued_uploads().await.expect("read the queue");
     assert_eq!(queued.len(), 1, "one photo is queued: {queued:?}");
     let upload = &queued[0];
-    assert_eq!(upload.namespace, "photos");
+    assert_eq!(upload.blob, expected_blob);
+    assert_eq!(upload.blob.blob().namespace, "photos");
     // The table declares no separate blob-id column, so the row's own id is the
     // blob's id.
-    assert_eq!(upload.blob_id, "photo-1");
-    assert_eq!(upload.table_name, "note_photos");
-    assert_eq!(upload.row_id, "photo-1");
+    assert_eq!(upload.blob.blob().id, "photo-1");
+    assert_eq!(upload.blob.table(), "note_photos");
+    assert_eq!(upload.blob.row_id(), "photo-1");
     assert_eq!(upload.root_table, "notes");
     assert_eq!(upload.root_id, "note-1");
     assert!(
