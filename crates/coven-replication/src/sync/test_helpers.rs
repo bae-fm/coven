@@ -1758,6 +1758,7 @@ mod test_device {
                     coven_protocol::objects::BlobSpoolProtection::Opaque(protection),
                     &plaintext,
                     spool_stage,
+                    coven_storage::cloud::no_preparation_progress(),
                 )
                 .await
                 .expect("seal exact blob");
@@ -1823,6 +1824,7 @@ mod test_device {
                     coven_protocol::objects::BlobSpoolProtection::Browsable,
                     &plaintext,
                     spool_stage,
+                    coven_storage::cloud::no_preparation_progress(),
                 )
                 .await
                 .expect("stage browsable blob");
@@ -5020,10 +5022,11 @@ where
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         plaintext_file: &std::path::Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::PreparationProgress,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, coven_protocol::objects::StorageError>
     {
         self.inner
-            .seal_store_blob_to_spool(locator, authority, plaintext_file, spool)
+            .seal_store_blob_to_spool(locator, authority, plaintext_file, spool, progress)
             .await
     }
 
@@ -5168,10 +5171,18 @@ where
         protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &std::path::Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::PreparationProgress,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, coven_protocol::objects::StorageError>
     {
         self.inner
-            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool)
+            .seal_blob_to_spool(
+                locator,
+                authority,
+                protection,
+                plaintext_file,
+                spool,
+                progress,
+            )
             .await
     }
 

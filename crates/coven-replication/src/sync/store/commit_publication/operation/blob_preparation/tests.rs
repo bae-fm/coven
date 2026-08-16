@@ -190,6 +190,7 @@ async fn failed_partition_preparation_cleans_up_only_its_own_exact_spool() {
                 &authority,
                 fact.external_path.as_ref().expect("external source"),
                 spool_stage,
+                coven_storage::cloud::no_preparation_progress(),
             )
             .await
             .expect("seed exact spool"),

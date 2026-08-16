@@ -53,6 +53,28 @@ pub enum MakeRemoteProgress {
     Publishing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedUploadPhase {
+    Pending,
+    Prepared,
+    Created,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMakeRemote {
+    pub root_table: String,
+    pub root_id: String,
+    pub retain_pinned: bool,
+    pub progress: MakeRemoteProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudOutboxSnapshot {
+    pub uploads: Vec<QueuedUpload>,
+    pub deletes: Vec<QueuedDelete>,
+    pub make_remotes: Vec<QueuedMakeRemote>,
+}
+
 /// One cloud object the durable queue is holding a tombstone for.
 ///
 /// A delete carries only the stored object it removes — there is no row left to
@@ -94,6 +116,10 @@ pub struct QueuedUpload {
     /// Whether the transition asked for the plaintext to stay cached locally
     /// once the upload lands.
     pub retain_pinned: bool,
+    /// The durable handoff this exact upload has reached. In-memory transfer
+    /// activity refines this into Preparing or Uploading; after a restart this
+    /// is the authoritative lower bound the host renders immediately.
+    pub phase: QueuedUploadPhase,
     /// Failed transfer attempts so far; 0 for an upload never yet tried.
     pub attempt_count: u64,
     /// Why the last attempt failed, if one has.
@@ -116,7 +142,7 @@ impl StoreSession<'_> {
         root: Option<(String, String)>,
     ) -> Result<Vec<QueuedUpload>, DbError> {
         const COLUMNS: &str = "SELECT row_ref, root_table, root_id, retain_pinned,
-                    attempt_count, last_error, created_at, last_attempt_at
+                    upload_state, attempt_count, last_error, created_at, last_attempt_at
              FROM cloud_outbox WHERE operation = 'upload'";
         let (sql, parameters): (String, Vec<String>) = match root {
             Some((root_table, root_id)) => (
@@ -148,6 +174,52 @@ impl StoreSession<'_> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(DbError::from)?;
         Ok(deletes)
+    }
+
+    fn queued_make_remotes(&mut self) -> Result<Vec<QueuedMakeRemote>, DbError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT root_table, root_id, retain_pinned, state
+                 FROM blob_make_remote_intents ORDER BY root_table, root_id",
+            )
+            .map_err(DbError::from)?;
+        let make_remotes = statement
+            .query_map([], |row| {
+                let state: String = row.get(3)?;
+                let progress = match state.as_str() {
+                    "uploading" => MakeRemoteProgress::Uploading,
+                    "cancelling" => MakeRemoteProgress::Cancelling,
+                    "publishing" => MakeRemoteProgress::Publishing,
+                    _ => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::other(format!(
+                                "invalid make_remote state {state:?}"
+                            ))),
+                        ))
+                    }
+                };
+                Ok(QueuedMakeRemote {
+                    root_table: row.get(0)?,
+                    root_id: row.get(1)?,
+                    retain_pinned: row.get(2)?,
+                    progress,
+                })
+            })
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        Ok(make_remotes)
+    }
+
+    fn cloud_outbox_snapshot(&mut self) -> Result<CloudOutboxSnapshot, DbError> {
+        Ok(CloudOutboxSnapshot {
+            uploads: self.queued_upload_rows(None)?,
+            deletes: self.queued_deletes()?,
+            make_remotes: self.queued_make_remotes()?,
+        })
     }
 
     fn pending_outbox(&mut self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
@@ -391,6 +463,12 @@ impl StoreSession<'_> {
 
 impl StoreDatabase {
     #[doc(hidden)]
+    pub async fn cloud_outbox_snapshot(&self) -> Result<CloudOutboxSnapshot, DbError> {
+        self.call_store(|session| session.cloud_outbox_snapshot())
+            .await
+    }
+
+    #[doc(hidden)]
     pub async fn queued_uploads(&self) -> Result<Vec<QueuedUpload>, DbError> {
         self.queued_upload_rows(None).await
     }
@@ -629,16 +707,25 @@ fn row_to_queued_upload(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedUploa
     let encoded: String = row.get(0)?;
     let reference: coven_protocol::blob::RowBlobRef =
         serde_json::from_str(&encoded).map_err(|error| invalid(0, Box::new(error)))?;
-    let attempt_count: i64 = row.get(4)?;
+    let state_json: String = row.get(4)?;
+    let state: OutboxUploadState =
+        serde_json::from_str(&state_json).map_err(|error| invalid(4, Box::new(error)))?;
+    let phase = match state {
+        OutboxUploadState::Pending => QueuedUploadPhase::Pending,
+        OutboxUploadState::Prepared { .. } => QueuedUploadPhase::Prepared,
+        OutboxUploadState::Created { .. } => QueuedUploadPhase::Created,
+    };
+    let attempt_count: i64 = row.get(5)?;
     Ok(QueuedUpload {
         blob: reference,
         root_table: row.get(1)?,
         root_id: row.get(2)?,
         retain_pinned: row.get(3)?,
-        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(4, Box::new(error)))?,
-        last_error: row.get(5)?,
-        created_at: row.get(6)?,
-        last_attempt_at: row.get(7)?,
+        phase,
+        attempt_count: u64::try_from(attempt_count).map_err(|error| invalid(5, Box::new(error)))?,
+        last_error: row.get(6)?,
+        created_at: row.get(7)?,
+        last_attempt_at: row.get(8)?,
     })
 }
 

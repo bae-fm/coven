@@ -63,7 +63,10 @@ fn cache_budget_state_key(namespace: &str) -> String {
     format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")
 }
 
-pub use blob_outbox::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
+pub use blob_outbox::{
+    CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
+    QueuedUploadPhase,
+};
 pub use blob_outbox::{OutboxEntry, OutboxOperation, OutboxUploadState};
 pub use blob_transitions::{BlobTransitionRoot, MaterializedLocalBlob, PostUpload};
 #[cfg(any(test, feature = "test-utils"))]

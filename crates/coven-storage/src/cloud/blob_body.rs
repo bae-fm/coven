@@ -6,6 +6,11 @@ use super::*;
 /// The count is of the bytes handed to `write` (the encrypted payload).
 pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
 
+/// Reports how many plaintext source bytes have been consumed while a durable
+/// upload spool is being prepared. Owned because the reader that produces the
+/// sealed body retains it for the lifetime of that stream.
+pub type PreparationProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
+
 /// Chunk size the in-memory test backend uses to drive its `UploadProgress`
 /// callback in several ticks. Real providers whose resumable API mandates a
 /// specific alignment (OneDrive 320 KiB multiples, Google Drive 256 KiB
@@ -18,6 +23,10 @@ pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// progress bar is driven — only the blob outbox surfaces progress.
 pub fn no_progress() -> impl Fn(u64) + Send + Sync {
     |_| {}
+}
+
+pub fn no_preparation_progress() -> PreparationProgress {
+    std::sync::Arc::new(|_| {})
 }
 
 /// A blob as a **sized stream of already-final bytes**: sealed chunks for an

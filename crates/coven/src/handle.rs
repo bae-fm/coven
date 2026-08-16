@@ -849,6 +849,22 @@ impl CovenHandle {
         self.blobs.queued_uploads().await
     }
 
+    /// Subscribe to the durable upload queue and make-remote intents as one
+    /// committed snapshot. The first [`CloudOutboxLiveQuery::next`] returns
+    /// immediately; later calls wake from the same committed-change stream as
+    /// row live queries.
+    pub fn subscribe_cloud_outbox(&self) -> crate::CloudOutboxLiveQuery {
+        self.blobs.subscribe_cloud_outbox()
+    }
+
+    /// Read the same committed durable state the cloud-outbox subscription
+    /// emits, without waiting for a change.
+    pub async fn cloud_outbox_snapshot(
+        &self,
+    ) -> Result<crate::CloudOutboxSnapshot, crate::DbError> {
+        self.blobs.cloud_outbox_snapshot().await
+    }
+
     /// The queued uploads belonging to one gated root.
     ///
     /// The filter runs in SQL, so asking about one root does not decode every

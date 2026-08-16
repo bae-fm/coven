@@ -103,6 +103,7 @@ pub(crate) struct StoreCommitVerifier<'a> {
     >,
     founder_registration: std::sync::OnceLock<VerifiedObject<StoreDeviceRegistration>>,
     verified_heads: std::sync::Mutex<BTreeMap<StoreDeviceHeadRef, VerifiedObject<StoreDeviceHead>>>,
+    acknowledgements: std::sync::Mutex<BTreeMap<StoreAckRef, VerifiedObject<StoreAck>>>,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
@@ -261,6 +262,7 @@ impl<'a> StoreCommitVerifier<'a> {
             registrations: std::sync::Mutex::new(BTreeMap::new()),
             founder_registration: std::sync::OnceLock::new(),
             verified_heads: std::sync::Mutex::new(BTreeMap::new()),
+            acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }
     }

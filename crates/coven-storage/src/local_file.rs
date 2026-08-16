@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 pub struct PlaintextReader(
@@ -67,6 +68,33 @@ pub(crate) async fn open_reader(
     Ok(PlaintextReader(Box::new(FilePlaintextReader {
         file,
         path: path.to_path_buf(),
+        exact: None,
+    })))
+}
+
+pub(crate) async fn open_exact_reader(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: coven_protocol::store_commit::ObjectHash,
+    progress: crate::cloud::PreparationProgress,
+) -> Result<PlaintextReader, coven_foundation::atomic_file::FileError> {
+    let file = tokio::fs::File::open(path).await.map_err(|source| {
+        coven_foundation::atomic_file::FileError::Path {
+            operation: "open local blob for streaming",
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(PlaintextReader(Box::new(FilePlaintextReader {
+        file,
+        path: path.to_path_buf(),
+        exact: Some(ExactPlaintextRead {
+            expected_size,
+            expected_hash,
+            size: 0,
+            hasher: Some(Sha256::new()),
+            progress,
+        }),
     })))
 }
 
@@ -85,6 +113,15 @@ pub(crate) async fn exact_file_facts(
 struct FilePlaintextReader {
     file: tokio::fs::File,
     path: std::path::PathBuf,
+    exact: Option<ExactPlaintextRead>,
+}
+
+struct ExactPlaintextRead {
+    expected_size: u64,
+    expected_hash: coven_protocol::store_commit::ObjectHash,
+    size: u64,
+    hasher: Option<Sha256>,
+    progress: crate::cloud::PreparationProgress,
 }
 
 #[async_trait]
@@ -106,9 +143,45 @@ impl coven_foundation::local_file::PlaintextChunkReader for FilePlaintextReader 
             if read == 0 {
                 break;
             }
+            if let Some(exact) = &mut self.exact {
+                exact.size = exact.size.checked_add(read as u64).ok_or_else(|| {
+                    PlaintextChunkError::InvalidContent(
+                        "local blob size overflow while preparing upload".to_string(),
+                    )
+                })?;
+                if exact.size > exact.expected_size {
+                    return Err(PlaintextChunkError::InvalidContent(format!(
+                        "local blob grew past its declared {} bytes while preparing upload",
+                        exact.expected_size
+                    )));
+                }
+                exact
+                    .hasher
+                    .as_mut()
+                    .expect("exact plaintext hash is unfinished")
+                    .update(&buf[filled..filled + read]);
+                (exact.progress)(exact.size);
+            }
             filled += read;
         }
         buf.truncate(filled);
+        if filled == 0 {
+            if let Some(exact) = &mut self.exact {
+                let digest = exact
+                    .hasher
+                    .take()
+                    .expect("exact plaintext reader reaches EOF once")
+                    .finalize();
+                let actual_hash =
+                    coven_protocol::store_commit::ObjectHash::from_digest(digest.into());
+                if exact.size != exact.expected_size || actual_hash != exact.expected_hash {
+                    return Err(PlaintextChunkError::InvalidContent(format!(
+                        "local blob source differs from its declared size/hash: expected {} bytes/{}, read {} bytes/{}",
+                        exact.expected_size, exact.expected_hash, exact.size, actual_hash
+                    )));
+                }
+            }
+        }
         Ok(buf)
     }
 }

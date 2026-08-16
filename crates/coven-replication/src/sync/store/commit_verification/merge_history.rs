@@ -283,6 +283,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 commits: BTreeMap::new(),
             },
             verified_memberships: Vec::new(),
+            verified_acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -684,6 +685,10 @@ pub struct MergeHistoryVerifier<'a> {
     commit_verifier: StoreCommitVerifier<'a>,
     history: VerifiedMergeHistory,
     verified_memberships: Vec<VerifiedMembershipChain>,
+    /// Exact acknowledgement objects already authenticated under this
+    /// verifier's Store root and registration. Retained commits share long
+    /// prefixes, so walking each proof back to sequence one must reuse them.
+    verified_acknowledgements: std::sync::Mutex<BTreeMap<ExactObjectRef, (StoreAckRef, StoreAck)>>,
 }
 
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;

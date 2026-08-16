@@ -10,6 +10,7 @@
 
 pub(crate) mod circles;
 mod cloud_home_setup;
+mod cloud_outbox_live_query;
 pub(crate) mod coven;
 mod handle;
 mod live_query;
@@ -38,10 +39,12 @@ pub use cloud_home_setup::{
     CloudHomeRollbackError, CloudHomeSetupError, CloudHomeSetupFailure, CloudHomeUnlockError,
     ConnectedCloudHome,
 };
+pub use cloud_outbox_live_query::CloudOutboxLiveQuery;
 pub use coven::{Coven, CovenBuilder, CovenConfig, CovenError, CovenResult};
 pub use coven_database::{
-    BlobFileFailure, BlobFileFailures, DbError, ExternalBlob, MakeRemoteProgress, QueuedDelete,
-    QueuedUpload, SqlContext, SqlReadContext, WriteBatch,
+    BlobFileFailure, BlobFileFailures, CloudOutboxSnapshot, DbError, ExternalBlob,
+    MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload, QueuedUploadPhase,
+    SqlContext, SqlReadContext, WriteBatch,
 };
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{

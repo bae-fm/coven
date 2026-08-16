@@ -51,11 +51,11 @@ pub use setup::SetupError;
 
 mod blob_body;
 mod exact_upload;
-pub use blob_body::no_progress;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
 pub(crate) use blob_body::{combine_cleanup_failure, MultipartUpload};
-pub use blob_body::{BlobBody, BoxPartSink, PartSink, UploadProgress};
+pub use blob_body::{no_preparation_progress, no_progress};
+pub use blob_body::{BlobBody, BoxPartSink, PartSink, PreparationProgress, UploadProgress};
 pub use exact_upload::{ExactUpload, ExactUploadSource};
 
 #[cfg(test)]

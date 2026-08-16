@@ -253,6 +253,16 @@ impl StoreBlobs {
         self.database.queued_uploads().await
     }
 
+    pub(crate) fn subscribe_cloud_outbox(&self) -> crate::CloudOutboxLiveQuery {
+        crate::CloudOutboxLiveQuery::new(self.database.clone())
+    }
+
+    pub(crate) async fn cloud_outbox_snapshot(
+        &self,
+    ) -> Result<crate::CloudOutboxSnapshot, coven_database::DbError> {
+        self.database.cloud_outbox_snapshot().await
+    }
+
     pub(crate) async fn queued_uploads_for_root(
         &self,
         root_table: &str,

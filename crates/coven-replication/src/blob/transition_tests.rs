@@ -153,7 +153,6 @@ async fn cover_ref(db: &Database, id: &str) -> RowBlobRef {
 /// Records the transition observer's completion + materialize callbacks.
 #[derive(Default)]
 struct Recorder {
-    made_remote: Mutex<Vec<(String, String)>>,
     made_local: Mutex<Vec<(String, String)>>,
     materialized: Mutex<Vec<(String, u64, u64)>>,
 }
@@ -163,12 +162,6 @@ impl BlobTransitionObserver for Recorder {
     async fn on_blob_upload_started(&self, _upload: &RowBlobRef) {}
     async fn on_blob_uploaded(&self, _upload: &RowBlobRef) {}
     async fn on_blob_upload_failed(&self, _upload: &RowBlobRef, _error: &str) {}
-    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {
-        self.made_remote
-            .lock()
-            .unwrap()
-            .push((root_table.to_string(), root_id.to_string()));
-    }
     async fn on_root_made_local(&self, root_table: &str, root_id: &str) {
         self.made_local
             .lock()
@@ -460,12 +453,6 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         result.resume_drain_promptly,
         "completing a make_remote breaks the drain so the cycle publishes the subtree",
     );
-    assert_eq!(
-        *recorder.made_remote.lock().unwrap(),
-        vec![("notes".to_string(), "n1".to_string())],
-        "on_root_made_remote fires for the completed make_remote",
-    );
-
     // B pulls and now gets the subtree, and fetches the CacheLazy blob on read.
     storage
         .run_founder_cycle(None)
@@ -2514,7 +2501,13 @@ async fn cancel_make_remote_deletes_every_same_locator_exact_object() {
             .expect("create shared-locator spool stage");
         cloud_storage
             .clone()
-            .seal_store_blob_to_spool(&locator, &authority, source_path, spool_stage)
+            .seal_store_blob_to_spool(
+                &locator,
+                &authority,
+                source_path,
+                spool_stage,
+                coven_storage::cloud::no_preparation_progress(),
+            )
             .await
             .expect("seal shared-locator blob");
         let slot = cloud_storage

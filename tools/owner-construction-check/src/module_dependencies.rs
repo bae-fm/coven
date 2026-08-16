@@ -75,6 +75,7 @@ pub(crate) enum Region {
 pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("circles", Region::Host),
     ("cloud_home_setup", Region::Host),
+    ("cloud_outbox_live_query", Region::Host),
     ("coven", Region::Host),
     ("handle", Region::Host),
     ("live_query", Region::Host),

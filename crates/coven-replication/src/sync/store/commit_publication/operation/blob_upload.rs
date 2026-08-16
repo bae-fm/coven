@@ -133,10 +133,9 @@ impl AuthorizedWriterOperation<'_> {
                         count += 1;
                     }
                     if made_remote {
-                        // This upload completed a make_remote: the gate is flipped and the
-                        // subtree is shareable. Yield so this cycle publishes it, and stop
-                        // admitting new uploads — any other root's blobs drain on the
-                        // promptly-run next cycle, and the in-flight uploads finish here.
+                        // This upload prepared the make_remote's Store write. Yield so this
+                        // cycle publishes and activates it before another root advances; the
+                        // uploads already in flight still finish here.
                         yielded_for_publish = true;
                         stop_admitting = true;
                     }
@@ -179,6 +178,7 @@ impl AuthorizedWriterOperation<'_> {
         locator: &BlobLocator,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         source_path: &std::path::Path,
+        progress: coven_storage::cloud::PreparationProgress,
     ) -> Result<(StoredBlobRef, std::path::PathBuf), coven_protocol::objects::StorageError> {
         let spool_path = self
             .store_dir
@@ -189,7 +189,7 @@ impl AuthorizedWriterOperation<'_> {
             .await
             .map_err(coven_protocol::objects::StorageError::LocalFilesystem)?;
         self.storage
-            .seal_store_blob_to_spool(locator, authority, source_path, spool)
+            .seal_store_blob_to_spool(locator, authority, source_path, spool, progress)
             .await?;
         let slot = self.storage.allocate_blob_slot(locator, authority).await?;
         let stored = self
@@ -330,10 +330,6 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         else {
             unreachable!("pending_blob_uploads returns only Upload rows");
         };
-        if let Some(observer) = self.observer {
-            observer.on_blob_upload_started(&row).await;
-        }
-
         match self
             .writer
             .blob_upload_intent_state(&root_table, &root_id)
@@ -353,6 +349,9 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         let mut created_this_pass = false;
         let (stored, spool_path) = match state {
             OutboxUploadState::Pending => {
+                if let Some(observer) = self.observer {
+                    observer.on_blob_preparation_started(&row).await;
+                }
                 let key_fingerprint = match self.writer.store_blob_key_fingerprint() {
                     Ok(fingerprint) => fingerprint,
                     Err(error) => return self.storage_failure(&row, error).await,
@@ -402,8 +401,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     }
                 };
                 let (stored, spool_path) = match self
-                    .writer
-                    .prepare_blob_upload(&locator, self.authority, &source_path)
+                    .prepare_with_progress(&locator, &source_path, &row)
                     .await
                 {
                     Ok(prepared) => prepared,
@@ -458,6 +456,9 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 ..
             }
         ) {
+            if let Some(observer) = self.observer {
+                observer.on_blob_upload_started(&row).await;
+            }
             if let Err(error) = self.create_with_progress(&stored, &spool_path, &row).await {
                 return self.storage_failure(&row, error).await;
             }
@@ -497,17 +498,12 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 created_this_pass,
             },
             Ok(coven_database::PostUpload::MadeRemote {
-                root_table,
-                root_id,
-            }) => {
-                if let Some(observer) = self.observer {
-                    observer.on_root_made_remote(&root_table, &root_id).await;
-                }
-                EntryOutcome::Uploaded {
-                    made_remote: true,
-                    created_this_pass,
-                }
-            }
+                root_table: _,
+                root_id: _,
+            }) => EntryOutcome::Uploaded {
+                made_remote: true,
+                created_this_pass,
+            },
             Ok(coven_database::PostUpload::Cancelled) => {
                 self.finish_cancelled(
                     &OutboxUploadState::Created {
@@ -525,6 +521,50 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                     .await
             }
         }
+    }
+
+    async fn prepare_with_progress(
+        &self,
+        locator: &BlobLocator,
+        source_path: &std::path::Path,
+        upload: &RowBlobRef,
+    ) -> Result<(StoredBlobRef, std::path::PathBuf), coven_protocol::objects::StorageError> {
+        let total = upload.plaintext_size();
+        let consumed = Arc::new(AtomicU64::new(0));
+        let progress: coven_storage::cloud::PreparationProgress = {
+            let consumed = consumed.clone();
+            Arc::new(move |count: u64| consumed.store(count, Ordering::Relaxed))
+        };
+        let prepare =
+            self.writer
+                .prepare_blob_upload(locator, self.authority, source_path, progress);
+        let Some(observer) = self.observer else {
+            return prepare.await;
+        };
+        tokio::pin!(prepare);
+        let mut ticker = tokio::time::interval(PROGRESS_TICK);
+        ticker.tick().await;
+        let mut forwarded = 0;
+        let result = loop {
+            tokio::select! {
+                result = &mut prepare => break result,
+                _ = ticker.tick() => {
+                    let current = consumed.load(Ordering::Relaxed);
+                    if current != forwarded {
+                        forwarded = current;
+                        observer
+                            .on_blob_preparation_progress(upload, current, total)
+                            .await;
+                    }
+                }
+            }
+        };
+        if result.is_ok() && forwarded != total {
+            observer
+                .on_blob_preparation_progress(upload, total, total)
+                .await;
+        }
+        result
     }
 
     async fn create_with_progress(
@@ -563,7 +603,7 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
                 }
             }
         };
-        if result.is_ok() {
+        if result.is_ok() && forwarded != total {
             observer.on_blob_upload_progress(upload, total, total).await;
         }
         result

@@ -171,6 +171,7 @@ impl HostWriteBlobStaging {
                                     &authority,
                                     source_path.path(),
                                     spool,
+                                    coven_storage::cloud::no_preparation_progress(),
                                 )
                                 .await
                         }
@@ -182,6 +183,7 @@ impl HostWriteBlobStaging {
                                     protection,
                                     source_path.path(),
                                     spool,
+                                    coven_storage::cloud::no_preparation_progress(),
                                 )
                                 .await
                         }

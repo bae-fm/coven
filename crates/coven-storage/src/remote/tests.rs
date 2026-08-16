@@ -193,6 +193,7 @@ async fn publish_sealed_blob(
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             ephemeral_stage(&spool).await,
+            crate::cloud::no_preparation_progress(),
         )
         .await
         .expect("seal exact spool");
@@ -220,6 +221,69 @@ fn small_chunking(chunk: u32) -> BlobChunking {
         std::num::NonZeroU32::new(chunk).expect("nonzero chunk"),
         std::num::NonZeroU64::new(1 << 20).expect("nonzero window"),
     )
+}
+
+#[tokio::test]
+async fn sealing_reports_each_plaintext_buffer_before_upload() {
+    const CHUNK: u32 = 4096;
+    let home = InMemoryCloudHome::new();
+    let storage = CloudSyncConnection::new(
+        Arc::new(home.clone()),
+        CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
+        BlobPathScheme::Hashed,
+        "preparation-progress",
+        UserKeypair::generate(),
+    )
+    .with_blob_chunking(small_chunking(CHUNK));
+    let registration = storage
+        .blob_write_registration("preparation-progress")
+        .await;
+    let authority = BlobWriteAuthority::new(&registration);
+    let audience_key = EncryptionService::from_key([9u8; 32]);
+    let plaintext = ramp(12 * CHUNK as usize + 37);
+    let locator = BlobLocator::opaque(
+        "audio",
+        "progress-track",
+        registration.reference().clone(),
+        RemoteAudience::Store,
+        BlobScope::Master,
+        audience_key.seal_key_fingerprint(),
+        plaintext.len() as u64,
+        ObjectHash::digest(&plaintext),
+    )
+    .expect("build locator");
+    let temp = tempfile::tempdir().expect("temporary blob directory");
+    let source = temp.path().join("plaintext");
+    let spool = temp.path().join("spool");
+    tokio::fs::write(&source, &plaintext)
+        .await
+        .expect("write plaintext source");
+    let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reported = progress.clone();
+
+    storage
+        .seal_blob_to_spool(
+            &locator,
+            &authority,
+            coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
+            &source,
+            ephemeral_stage(&spool).await,
+            Arc::new(move |bytes| reported.lock().unwrap().push(bytes)),
+        )
+        .await
+        .expect("seal exact spool");
+
+    let progress = progress.lock().unwrap();
+    assert!(
+        progress.len() > 2,
+        "preparation must expose advancing source-buffer progress: {progress:?}",
+    );
+    assert!(
+        progress.windows(2).all(|window| window[0] < window[1]),
+        "preparation progress must advance monotonically: {progress:?}",
+    );
+    assert_eq!(progress.last().copied(), Some(plaintext.len() as u64));
+    assert_eq!(home.exact_stream_read_count(), 0, "upload has not started");
 }
 
 /// The receipt the whole design exists for: many small ranges across one
@@ -340,6 +404,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
             coven_protocol::objects::BlobSpoolProtection::Browsable,
             &source,
             ephemeral_stage(&spool).await,
+            crate::cloud::no_preparation_progress(),
         )
         .await
         .expect("stage the browsable spool");
@@ -807,6 +872,7 @@ async fn circle_blob_spool_uses_the_supplied_audience_key() {
             coven_protocol::objects::BlobSpoolProtection::Opaque(circle_key.clone()),
             &source,
             ephemeral_stage(&spool).await,
+            crate::cloud::no_preparation_progress(),
         )
         .await
         .expect("seal Circle blob spool");
@@ -874,6 +940,7 @@ async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
                 ),),
                 &source,
                 ephemeral_stage(&spool).await,
+                crate::cloud::no_preparation_progress(),
             )
             .await,
         Err(StorageError::InvalidContent(_))
@@ -923,6 +990,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             ephemeral_stage(&spool).await,
+            crate::cloud::no_preparation_progress(),
         )
         .await
         .expect("seal exact spool");
@@ -996,6 +1064,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key.clone()),
             &source,
             ephemeral_stage(&spool).await,
+            crate::cloud::no_preparation_progress(),
         )
         .await
         .expect("seal exact spool");

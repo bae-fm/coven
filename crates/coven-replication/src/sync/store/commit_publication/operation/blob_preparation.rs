@@ -444,12 +444,25 @@ impl AuthorizedWriterOperation<'_> {
         let sealed = match destination {
             PartitionBlobDestination::Store => {
                 storage
-                    .seal_store_blob_to_spool(&locator, authority, source.path(), spool)
+                    .seal_store_blob_to_spool(
+                        &locator,
+                        authority,
+                        source.path(),
+                        spool,
+                        coven_storage::cloud::no_preparation_progress(),
+                    )
                     .await
             }
             PartitionBlobDestination::Circle { protection, .. } => {
                 storage
-                    .seal_blob_to_spool(&locator, authority, protection, source.path(), spool)
+                    .seal_blob_to_spool(
+                        &locator,
+                        authority,
+                        protection,
+                        source.path(),
+                        spool,
+                        coven_storage::cloud::no_preparation_progress(),
+                    )
                     .await
             }
         };

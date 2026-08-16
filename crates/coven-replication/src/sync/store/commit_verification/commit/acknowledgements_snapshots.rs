@@ -6,6 +6,19 @@ impl<'a> StoreCommitVerifier<'a> {
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
     ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
+        let registration_matches = reference.registration.device_id == registration.device_id
+            && reference.registration.registration_hash == registration.registration_hash();
+        if registration_matches {
+            let cached = self
+                .acknowledgements
+                .lock()
+                .expect("authenticated acknowledgement cache poisoned")
+                .get(reference)
+                .cloned();
+            if let Some(acknowledgement) = cached {
+                return Ok(acknowledgement);
+            }
+        }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreAck,
@@ -15,16 +28,22 @@ impl<'a> StoreCommitVerifier<'a> {
         let expected_root = self.root.reference().clone();
         let expected = reference.clone();
         let expected_registration = registration.clone();
-        self.load_exact_object(
-            &context,
-            &reference.object,
-            &semantic_prefix,
-            reference.ack_hash,
-            move |bytes| {
-                StoreAck::parse_at(bytes, &expected_root, &expected, &expected_registration)
-            },
-        )
-        .await
+        let acknowledgement = self
+            .load_exact_object(
+                &context,
+                &reference.object,
+                &semantic_prefix,
+                reference.ack_hash,
+                move |bytes| {
+                    StoreAck::parse_at(bytes, &expected_root, &expected, &expected_registration)
+                },
+            )
+            .await?;
+        self.acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned")
+            .insert(reference.clone(), acknowledgement.clone());
+        Ok(acknowledgement)
     }
 
     pub(crate) async fn predecessor_activates_acknowledgement(

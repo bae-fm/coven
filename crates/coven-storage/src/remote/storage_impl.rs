@@ -541,23 +541,12 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         protection: coven_protocol::objects::BlobSpoolProtection,
         plaintext_file: &Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::PreparationProgress,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, StorageError> {
         let spool_file = spool.destination().to_path_buf();
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator, authority)
             .await?;
-        let (plaintext_size, plaintext_hash) = crate::local_file::exact_file_facts(plaintext_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
-        if plaintext_size != locator.plaintext_size() || plaintext_hash != locator.plaintext_hash()
-        {
-            return Err(StorageError::InvalidContent(format!(
-                "blob plaintext {}/{} does not match its locator size/hash",
-                locator.namespace(),
-                locator.blob_id()
-            )));
-        }
-
         match tokio::fs::metadata(&spool_file).await {
             Ok(metadata) => {
                 if !metadata.is_file() {
@@ -592,6 +581,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                         break;
                     }
                 }
+                progress(locator.plaintext_size());
                 return Ok(coven_protocol::objects::BlobSpoolWrite::Reused);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -624,11 +614,14 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
                 }
                 let aad = cloud_aad_context(&self.store_id, &locator.semantic_key());
                 CloudCipher::Encrypted(encryption)
-                    .open_body(
+                    .open_exact_body(
                         scope.clone(),
                         plaintext_file,
                         &aad,
                         self.blob_chunking.chunk(),
+                        locator.plaintext_size(),
+                        locator.plaintext_hash(),
+                        progress,
                     )
                     .await
                     .map_err(StorageError::LocalFilesystem)?
@@ -636,7 +629,16 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             (
                 coven_protocol::blob::locator::BlobLocator::Browsable { .. },
                 coven_protocol::objects::BlobSpoolProtection::Browsable,
-            ) => BlobBody::from_file(plaintext_file)
+            ) => CloudCipher::Plaintext
+                .open_exact_body(
+                    coven_protocol::blob::BlobScope::Master,
+                    plaintext_file,
+                    &[],
+                    self.blob_chunking.chunk(),
+                    locator.plaintext_size(),
+                    locator.plaintext_hash(),
+                    progress,
+                )
                 .await
                 .map_err(StorageError::LocalFilesystem)?,
             (coven_protocol::blob::locator::BlobLocator::Opaque { .. }, _) => {
@@ -725,10 +727,18 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         plaintext_file: &Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::PreparationProgress,
     ) -> Result<coven_protocol::objects::BlobSpoolWrite, StorageError> {
         let protection = store_blob_protection!(self);
-        self.seal_blob_to_spool(locator, authority, protection, plaintext_file, spool)
-            .await
+        self.seal_blob_to_spool(
+            locator,
+            authority,
+            protection,
+            plaintext_file,
+            spool,
+            progress,
+        )
+        .await
     }
 
     async fn prepare_blob_object(

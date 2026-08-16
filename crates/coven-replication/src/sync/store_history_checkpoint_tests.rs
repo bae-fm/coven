@@ -395,6 +395,65 @@ async fn retained_history_depth_does_not_repeat_exact_registration_reads() {
 }
 
 #[tokio::test]
+async fn retained_history_reuses_each_verified_acknowledgement_within_a_cycle() {
+    let fixture = PublishedHistory::publish(1).await;
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        store_database(&fixture.db)
+            .materialized_frontier()
+            .await
+            .expect("load acknowledgement coverage"),
+    )
+    .expect("derive acknowledgement coverage");
+    fixture
+        .device
+        .publish_acknowledgement(coverage)
+        .await
+        .expect("publish retained acknowledgement");
+    let publisher = HistoryPublisher::new(&fixture.db, &fixture.device);
+    for sequence in 2..=12 {
+        publisher.publish_note(sequence).await;
+    }
+    let acknowledgement_slots = fixture
+        .retained_history()
+        .await
+        .into_iter()
+        .filter_map(|materialization| {
+            materialization
+                .history_evidence()
+                .acknowledgement
+                .as_ref()
+                .and_then(|acknowledgement| acknowledgement.latest())
+                .map(|(reference, _)| reference.object.slot().clone())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !acknowledgement_slots.is_empty(),
+        "published retained history carries acknowledgements",
+    );
+    fixture.home.clear_exact_reads();
+
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("pull retained acknowledgement history");
+
+    let reads = fixture.home.exact_reads();
+    let counts = acknowledgement_slots
+        .into_iter()
+        .map(|slot| {
+            let count = reads.iter().filter(|read| *read == &slot).count();
+            (slot, count)
+        })
+        .collect::<Vec<_>>();
+    let maximum = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
+    assert!(
+        maximum <= 1,
+        "retained history verification reread acknowledgement prefixes: {counts:?}",
+    );
+}
+
+#[tokio::test]
 async fn open_connection_reuses_a_verified_retained_history_checkpoint() {
     let fixture = PublishedHistory::publish(3).await;
     let first = fixture

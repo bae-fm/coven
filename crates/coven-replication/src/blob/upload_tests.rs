@@ -444,6 +444,8 @@ fn created_stored(
 
 #[derive(Debug, Clone, PartialEq)]
 enum ObsEvent {
+    Preparing(String),
+    PreparationProgress(String, u64, u64),
     Started(String),
     Progress(String, u64, u64),
     Uploaded(String),
@@ -483,6 +485,24 @@ impl RecordingObserver {
 
 #[async_trait]
 impl BlobTransitionObserver for RecordingObserver {
+    async fn on_blob_preparation_started(&self, upload: &RowBlobRef) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ObsEvent::Preparing(upload.blob().id.clone()));
+    }
+
+    async fn on_blob_preparation_progress(&self, upload: &RowBlobRef, done: u64, total: u64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ObsEvent::PreparationProgress(
+                upload.blob().id.clone(),
+                done,
+                total,
+            ));
+    }
+
     async fn on_blob_upload_started(&self, upload: &RowBlobRef) {
         self.events
             .lock()
@@ -828,7 +848,19 @@ async fn observer_fires_started_then_uploaded_on_success() {
         .unwrap();
 
     let events = observer.events();
-    assert_eq!(events.first(), Some(&ObsEvent::Started("observe1".into())));
+    assert_eq!(
+        events.first(),
+        Some(&ObsEvent::Preparing("observe1".into()))
+    );
+    let preparation_finished = events
+        .iter()
+        .position(|event| matches!(event, ObsEvent::PreparationProgress(id, done, total) if id == "observe1" && done == total))
+        .expect("preparation reports completion");
+    let upload_started = events
+        .iter()
+        .position(|event| event == &ObsEvent::Started("observe1".into()))
+        .expect("upload reports its actual provider start");
+    assert!(preparation_finished < upload_started);
     assert_eq!(events.last(), Some(&ObsEvent::Uploaded("observe1".into())));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -851,8 +883,12 @@ async fn observer_fires_started_then_failed_on_failure() {
         .unwrap();
 
     let events = observer.events();
-    assert_eq!(events[0], ObsEvent::Started("observe2".into()));
-    assert!(matches!(&events[1], ObsEvent::Failed(id, _) if id == "observe2"));
+    assert_eq!(events[0], ObsEvent::Preparing("observe2".into()));
+    let upload_started = events
+        .iter()
+        .position(|event| event == &ObsEvent::Started("observe2".into()))
+        .expect("provider upload starts after preparation");
+    assert!(matches!(&events[upload_started + 1], ObsEvent::Failed(id, _) if id == "observe2"));
 }
 
 #[tokio::test(start_paused = true)]

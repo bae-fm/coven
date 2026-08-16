@@ -333,8 +333,9 @@ impl LocalBlobTransitions {
     /// Start making `(root_table, root_id)` Remote: refuse a root already Remote, then
     /// verify each user-provided blob's external source file, enqueue an upload per blob,
     /// and record the make_remote intent in one transaction. Returns once enqueued — the
-    /// sync cycle uploads all needed blobs and flips the gate true only after they land.
-    /// The caller triggers a sync cycle to start that completion.
+    /// sync cycle uploads all needed blobs, prepares the gate change only after they
+    /// land, and publishes that change before the durable intent completes. The caller
+    /// triggers a sync cycle to start that work.
     ///
     /// Verifying every source up front (exists + length matches the registered size)
     /// means a missing file aborts with nothing enqueued, rather than leaving a

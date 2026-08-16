@@ -274,7 +274,10 @@ pub use store::{resolve_and_apply_changeset, ApplyResult};
 #[cfg(any(test, feature = "test-utils"))]
 pub use store::{select_author_exclusion_activation_locator, AuthorExclusionLocatorTamper};
 pub use store::{BlobFileFailure, BlobFileFailures, SqlContext, SqlReadContext, WriteBatch};
-pub use store::{MakeRemoteProgress, QueuedDelete, QueuedUpload};
+pub use store::{
+    CloudOutboxSnapshot, MakeRemoteProgress, QueuedDelete, QueuedMakeRemote, QueuedUpload,
+    QueuedUploadPhase,
+};
 pub use store_authority_records::DurableFounderMembershipJournal;
 pub(crate) use store_authority_records::{
     founder_graph_identity, install_store_root_authority_on, load_local_store_founder_graph_on,

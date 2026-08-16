@@ -16,7 +16,8 @@ impl StoreDatabase {
         Self { database }
     }
 
-    pub(super) fn subscribe_committed_changes(
+    #[doc(hidden)]
+    pub fn subscribe_committed_changes(
         &self,
     ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<crate::CommittedChanges>> {
         self.database.subscribe_committed_changes()

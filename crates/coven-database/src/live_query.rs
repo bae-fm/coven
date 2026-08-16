@@ -118,6 +118,16 @@ impl CommittedChanges {
     pub(crate) fn mark_schema_changed(&mut self) {
         self.schema_changed = true;
     }
+
+    #[doc(hidden)]
+    pub fn affects_any_table(&self, tables: &[&str]) -> bool {
+        self.unknown
+            || self.schema_changed
+            || self
+                .rows
+                .iter()
+                .any(|change| tables.contains(&change.table.as_str()))
+    }
 }
 
 #[derive(Debug)]
@@ -169,7 +179,11 @@ pub(crate) fn decode_changeset(
     while let Some(item) = iterator.next().map_err(DbError::from)? {
         let operation = item.op().map_err(DbError::from)?;
         let table = normalize(operation.table_name());
-        if is_reserved_table_name(&table) || table.starts_with("sqlite_") {
+        // Host SQL cannot read coven-owned tables, but typed coven projections
+        // subscribe to their committed changes through this same stream. Keep
+        // those rows in the commit description; host query dependencies still
+        // exclude them in `ReadDependencyCapture::authorize` below.
+        if table.starts_with("sqlite_") {
             continue;
         }
         let primary_key = item.pk().map_err(DbError::from)?;

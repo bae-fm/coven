@@ -337,6 +337,11 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
         "a freshly queued upload has not been tried",
     );
     assert_eq!(upload.last_error, None);
+    assert_eq!(
+        upload.phase,
+        crate::QueuedUploadPhase::Pending,
+        "an unattempted durable upload is waiting for preparation",
+    );
     assert!(!upload.created_at.is_empty());
     assert_eq!(upload.last_attempt_at, None);
     assert_eq!(
@@ -409,6 +414,71 @@ async fn run_the_upload_queue_is_readable_before_any_transfer_and_across_a_resta
             .iter()
             .all(|queued| queued.attempt_count == 0),
         "a drained upload records no failed attempt",
+    );
+}
+
+#[tokio::test]
+async fn cloud_outbox_subscription_follows_committed_queue_changes() {
+    coven_keys::keys::test_keyring::install();
+    let tmp = tempfile::tempdir().expect("store directory");
+    let dir = crate::StoreDir::new_ephemeral(tmp.path());
+    let owner = coven_keys::keys::UserKeypair::generate();
+    let handle = builder(dir)
+        .synced_tables(note_tables())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::from(
+            crate::EncryptionService::from_key([42; 32]),
+        )))
+        .identity_custody(crate::IdentityCustody::InMemory(owner.clone()))
+        .open()
+        .expect("open the store");
+    let home = coven_replication::sync::test_helpers::test_cloud_home();
+    handle
+        .create_test_store("outbox-subscription", owner, home.clone())
+        .await
+        .expect("create Store");
+    handle
+        .connect_sync_with_test_home_caller_driven(
+            home,
+            coven_storage::CloudCipher::Encrypted(crate::EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("connect Store");
+    let user_dir = tempfile::tempdir().expect("user directory");
+    let bytes = b"subscription photo".to_vec();
+    let path = user_dir.path().join("photo.jpg");
+    std::fs::write(&path, &bytes).expect("write source photo");
+    handle
+        .write_note_with_external_photo("note-1", "photo-1", &path, &bytes)
+        .await
+        .expect("write note and photo");
+
+    let mut subscription = handle.subscribe_cloud_outbox();
+    assert!(subscription
+        .next()
+        .await
+        .expect("initial outbox snapshot")
+        .uploads
+        .is_empty());
+
+    handle
+        .make_remote("notes", "note-1", false)
+        .await
+        .expect("enqueue make remote");
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+        .await
+        .expect("committed outbox change wakes the subscription")
+        .expect("queued outbox snapshot");
+    assert_eq!(queued.uploads.len(), 1);
+    assert_eq!(queued.uploads[0].phase, crate::QueuedUploadPhase::Pending);
+    assert_eq!(
+        queued.make_remotes,
+        vec![crate::QueuedMakeRemote {
+            root_table: "notes".to_string(),
+            root_id: "note-1".to_string(),
+            retain_pinned: false,
+            progress: crate::MakeRemoteProgress::Uploading,
+        }],
     );
 }
 

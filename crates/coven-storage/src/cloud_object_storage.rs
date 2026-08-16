@@ -314,6 +314,7 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         protection: BlobSpoolProtection,
         plaintext_file: &Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::PreparationProgress,
     ) -> Result<BlobSpoolWrite, StorageError>;
 
     /// Seal a Store-audience blob without handing the Store key to the caller.
@@ -323,6 +324,7 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         authority: &BlobWriteAuthority<'_>,
         plaintext_file: &Path,
         spool: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::PreparationProgress,
     ) -> Result<BlobSpoolWrite, StorageError>;
 
     /// Derive an exact reference from an immutable stored blob file.

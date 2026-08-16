@@ -96,9 +96,9 @@
 //! coven also owns the two locality transitions (`blob::transition`): `make_remote`
 //! (Local → Remote: upload the bytes, then flip the gate) and `make_local`
 //! (Remote → Local: bring each blob back to a local file, then retract). The
-//! make-Remote *completion* — flipping the gate the instant the last user-provided
-//! upload lands — lives in the `blob::upload` drain, the one place that knows an upload
-//! just succeeded.
+//! The upload drain advances the durable make-Remote intent after every exact
+//! object lands. The Store publication activates the resulting gate change;
+//! hosts observe both handoffs through the durable cloud-outbox query.
 
 pub mod locator;
 
@@ -692,22 +692,25 @@ pub enum RowBlobRefError {
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:
 /// per-blob upload progress while a make_remote uploads, per-blob materialize
-/// progress while a make_local copies files back, and a completion hook per
-/// direction the host turns into its own UI event.
+/// progress while a make_local copies files back, and the synchronous
+/// make-local completion the host turns into its own UI event.
 ///
 /// The host no longer drives the transition — coven owns flipping the gate and
 /// deciding when a cycle publishes — so this observer only *reports*. The upload
-/// callbacks fire as the drain works: `on_blob_upload_started` before each
-/// attempt, `on_blob_upload_progress` zero or more times as encrypted bytes reach
+/// callbacks fire as the drain works: preparation starts while the plaintext is
+/// verified and sealed into its durable spool, `on_blob_upload_started` fires
+/// only when that prepared spool is handed to the provider,
+/// `on_blob_upload_progress` fires zero or more times as encrypted bytes reach
 /// the cloud (backends that can't report sub-file progress call it once at the end
 /// with `bytes_done == bytes_total`), `on_blob_uploaded` on success (notification
-/// only — coven, not the host, flips the gate and breaks the drain to publish),
+/// only — the durable queue records Created and the Store publication later
+/// activates the root),
 /// and `on_blob_upload_failed` when an attempt fails and its entry stays queued.
 ///
-/// `on_root_made_remote` / `on_root_made_local` fire whenever coven *completes* a
-/// transition — including one resumed after a restart — so the host's own
-/// row-updated event survives a restart rather than being lost with an in-memory
-/// flag. `on_blob_materialize_progress` moves a make_local's per-file progress bar.
+/// A make-remote's root state is durable and belongs in
+/// `CloudOutboxLiveQuery`, not an observer callback that can be lost across a
+/// restart. `on_root_made_local` reports the synchronous opposite direction;
+/// `on_blob_materialize_progress` moves its per-file progress bar.
 ///
 /// `should_skip_uploads` lets the host pause the upload pipeline without touching
 /// the queue: the sync cycle consults it before draining so a paused queue still
@@ -716,7 +719,25 @@ pub enum RowBlobRefError {
 ///
 #[async_trait::async_trait]
 pub trait BlobTransitionObserver: Send + Sync {
-    /// An upload attempt for this blob is starting now.
+    /// The plaintext source is being verified and sealed into its durable
+    /// upload spool. Fires only for a Pending journal; a restart-resumed
+    /// Prepared journal proceeds directly to upload.
+    async fn on_blob_preparation_started(&self, upload: &RowBlobRef) {
+        let _ = upload;
+    }
+
+    /// `bytes_done` of `bytes_total` plaintext source bytes have been consumed
+    /// by preparation. Values are cumulative and monotonic.
+    async fn on_blob_preparation_progress(
+        &self,
+        upload: &RowBlobRef,
+        bytes_done: u64,
+        bytes_total: u64,
+    ) {
+        let _ = (upload, bytes_done, bytes_total);
+    }
+
+    /// The durable spool is prepared and its provider upload is starting now.
     async fn on_blob_upload_started(&self, upload: &RowBlobRef);
 
     /// `bytes_done` of `bytes_total` encrypted bytes have reached the cloud for
@@ -732,9 +753,9 @@ pub trait BlobTransitionObserver: Send + Sync {
         let _ = (upload, bytes_done, bytes_total);
     }
 
-    /// The blob was uploaded to the cloud successfully — notification only. coven
-    /// owns flipping the gate and breaking the drain to publish a completed
-    /// make_remote.
+    /// The blob was uploaded to the cloud successfully — notification only.
+    /// coven owns the durable Created handoff and the Store publication that
+    /// completes the make_remote.
     async fn on_blob_uploaded(&self, upload: &RowBlobRef);
 
     /// An upload attempt failed; the entry remains queued for retry.
@@ -745,14 +766,6 @@ pub trait BlobTransitionObserver: Send + Sync {
     /// so existing implementations don't need a stub.
     fn should_skip_uploads(&self) -> bool {
         false
-    }
-
-    /// coven completed a make_remote of `(root_table, root_id)`: every blob is
-    /// uploaded and the gate is flipped true (the subtree publishes this cycle).
-    /// Fires for a restart-resumed completion too, so the host's row-updated event
-    /// is not lost to a crash. The default is a no-op.
-    async fn on_root_made_remote(&self, root_table: &str, root_id: &str) {
-        let _ = (root_table, root_id);
     }
 
     /// coven completed a make_local of `(root_table, root_id)`: every blob is back

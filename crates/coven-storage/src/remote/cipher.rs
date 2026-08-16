@@ -360,6 +360,50 @@ impl CloudCipher {
             }
         })
     }
+
+    /// Open a streaming body whose plaintext reader verifies the exact row
+    /// size/hash while it is consumed and reports each source-buffer advance.
+    /// This avoids a separate plaintext hashing pass before sealing.
+    pub async fn open_exact_body(
+        &self,
+        scope: coven_protocol::blob::BlobScope,
+        file_path: &std::path::Path,
+        aad_context: &[u8],
+        chunk_size: std::num::NonZeroU32,
+        expected_size: u64,
+        expected_hash: coven_protocol::store_commit::ObjectHash,
+        progress: crate::cloud::PreparationProgress,
+    ) -> Result<BlobBody, coven_foundation::atomic_file::FileError> {
+        let plaintext_len = coven_foundation::local_file::file_len(file_path).await?;
+        if plaintext_len != expected_size {
+            return Err(coven_foundation::atomic_file::FileError::Path {
+                operation: "validate local blob source size",
+                path: file_path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("declares {expected_size} bytes but the source has {plaintext_len}"),
+                ),
+            });
+        }
+        let header = SealedBlobHeader::new(
+            chunk_size,
+            plaintext_len,
+            &NoncePolicy::DerivedFromContext {
+                context: aad_context.to_vec(),
+            },
+        );
+        let reader =
+            crate::local_file::open_exact_reader(file_path, expected_size, expected_hash, progress)
+                .await?;
+        Ok(match self {
+            CloudCipher::Encrypted(encryption) => {
+                ScopedBlobSealing::new(scope, encryption).into_body(header, reader, aad_context)
+            }
+            CloudCipher::Plaintext => {
+                BlobBody::from_file_with_prefix(self.body_len(header), reader, None, Vec::new())
+            }
+        })
+    }
 }
 
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
