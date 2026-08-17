@@ -36,7 +36,7 @@ impl FacadeFixture {
         coven_keys::keys::test_keyring::install();
         let owner = coven_keys::keys::UserKeypair::generate();
         // The same key `TestStore::create` seals this store's objects with, so
-        // the store key the invite wraps opens the snapshot the joining device
+        // the store key the sealed admission wraps opens the snapshot the joining device
         // bootstraps from.
         let encryption = crate::EncryptionService::from_key([42; 32]);
         let keyring = crate::MasterKeyring::from(encryption.clone());
@@ -307,10 +307,6 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
         .await
         .expect("mint the scannable invite");
     let scanned = invite.to_bytes();
-    assert!(
-        !String::from_utf8_lossy(&scanned).contains("\"invite_code\""),
-        "the device-invite wire must not nest the superseded plaintext credential code",
-    );
     let preview = invite
         .inspect(&join_request)
         .expect("the intended joining identity opens its invitation");

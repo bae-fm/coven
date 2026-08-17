@@ -163,7 +163,8 @@ Everything else follows the same ownership boundary: `handle.write_with_blobs`
 commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs
 unpublished writes after restart, `handle.connect_sync` starts the background
 loop, `handle.subscribe_sync_status` exposes its current state, and
-`handle.invite_member` adds a teammate.
+`handle.begin_device_invite` admits the identity from an exact join request
+and returns a recipient-sealed device invitation.
 
 ## Who owns what
 

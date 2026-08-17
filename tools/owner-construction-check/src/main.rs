@@ -476,7 +476,7 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven-replication/src/sync/test_helpers.rs",
         "TestStore",
-        "invite_and_activate_peer",
+        "admit_and_activate_peer",
     ),
     (
         "crates/coven-replication/src/sync/test_helpers.rs",

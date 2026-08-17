@@ -40,12 +40,12 @@ impl StoreMembership {
     pub(crate) async fn admit(
         &self,
         public_key_hex: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: MemberRole,
-    ) -> Result<coven_replication::sync::MemberInvitation, SyncError> {
+    ) -> Result<coven_replication::sync::MemberAdmission, SyncError> {
         let _mutation = self.mutations.lock().await;
         self.sync
-            .invite_member(public_key_hex, invitee_email, role)
+            .admit_member(public_key_hex, member_email, role)
             .await
     }
 

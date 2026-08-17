@@ -1,8 +1,8 @@
 use super::*;
 
 /// The wire shape is the compact `{"t": "<short-tag>", ...}` form, not the
-/// derive default's `{"VariantName": {...}}` — invite and restore codes
-/// both wrap this type and rely on it staying compact.
+/// derive default's `{"VariantName": {...}}` — membership admissions and
+/// restore codes both wrap this type and rely on it staying compact.
 #[test]
 fn wire_shape_uses_short_t_tags() {
     let cases = [
@@ -50,6 +50,18 @@ fn wire_shape_uses_short_t_tags() {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["t"], tag, "{info:?} must tag as {tag:?}: {json}");
     }
+}
+
+#[test]
+fn wire_shape_rejects_unknown_fields() {
+    let error = serde_json::from_value::<CloudHomeJoinInfo>(serde_json::json!({
+        "t": "gd",
+        "folder_id": "folder",
+        "unexpected_field": true,
+    }))
+    .expect_err("unknown provider field");
+
+    assert!(error.to_string().contains("unknown field"), "{error}");
 }
 
 #[test]

@@ -48,7 +48,7 @@ struct TransportFixture {
     owner_store_dir: coven_foundation::store_dir::StoreDir,
     home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
-    invitation: coven_replication::sync::MemberInvitation,
+    admission: coven_replication::sync::MemberAdmission,
     join_request: String,
     layout: coven_foundation::store_dir::StoreLayout,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
@@ -136,8 +136,8 @@ impl TransportFixture {
         let member_pubkey = crate::joining::decode_join_request(&join_request)
             .expect("decode join request")
             .public_key;
-        let invite = store
-            .invite_member(
+        let admission = store
+            .admit_member(
                 &owner_db,
                 owner_db_store_dir.clone(),
                 &owner,
@@ -148,7 +148,7 @@ impl TransportFixture {
                 "Device Join Transport Store",
             )
             .await
-            .expect("invite joiner identity");
+            .expect("admit joining identity");
         let owner_device = store
             .open_into(&owner_db, owner_db_store_dir.clone())
             .await
@@ -199,7 +199,7 @@ impl TransportFixture {
             owner_store_dir: owner_db_store_dir,
             home,
             member_pubkey,
-            invitation: invite,
+            admission,
             join_request,
             layout,
             tables,
@@ -242,7 +242,7 @@ impl TransportFixture {
     /// but the codes and the on-disk journal carry across.
     fn client(&self) -> crate::joining::client::DeviceJoinClient {
         crate::joining::client::DeviceJoinClient::new(
-            self.invitation.clone(),
+            self.admission.clone(),
             &self.join_request,
             self.layout.clone(),
             self.tables.clone(),
@@ -465,8 +465,8 @@ async fn the_offer_bundle_round_trips_through_its_encoded_form() {
 async fn the_scanned_invitation_exposes_provider_credentials_only_to_its_requesting_device() {
     let fixture = TransportFixture::build("sealed-device-invitation").await;
     let bundle = fixture.begin().await;
-    let mut invitation = fixture.invitation.clone();
-    invitation.join_info = coven_storage::CloudHomeJoinInfo::S3 {
+    let mut admission = fixture.admission.clone();
+    admission.join_info = coven_storage::CloudHomeJoinInfo::S3 {
         bucket: "sealed-bucket".to_string(),
         region: "sealed-region".to_string(),
         endpoint: Some("https://sealed.example".to_string()),
@@ -474,7 +474,7 @@ async fn the_scanned_invitation_exposes_provider_credentials_only_to_its_request
         secret_key: "SECRET-KEY-MUST-STAY-SEALED".to_string(),
         key_prefix: Some("sealed-prefix".to_string()),
     };
-    let invite = crate::joining::DeviceJoinInvite::new(invitation, bundle)
+    let invite = crate::joining::DeviceJoinInvite::new(admission, bundle)
         .expect("seal the invitation for its requesting device");
 
     let wire = invite.to_bytes();

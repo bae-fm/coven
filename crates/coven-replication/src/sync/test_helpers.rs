@@ -240,7 +240,7 @@ enum TestErrorCause {
     #[error(transparent)]
     Membership(#[from] crate::sync::store::MembershipOpsError),
     #[error(transparent)]
-    Invite(#[from] crate::sync::store::InviteError),
+    MembershipMutation(#[from] crate::sync::store::MembershipMutationError),
     #[error(transparent)]
     DeviceJoin(#[from] crate::sync::store::DeviceJoinError),
     #[error(transparent)]
@@ -293,7 +293,10 @@ test_error_from!(crate::sync::store::StorePullError, Pull);
 test_error_from!(crate::sync::cycle::SyncCycleFailure, Cycle);
 test_error_from!(crate::sync::cycle::InitSyncError, SyncInitialization);
 test_error_from!(crate::sync::store::MembershipOpsError, Membership);
-test_error_from!(crate::sync::store::InviteError, Invite);
+test_error_from!(
+    crate::sync::store::MembershipMutationError,
+    MembershipMutation
+);
 test_error_from!(crate::sync::store::DeviceJoinError, DeviceJoin);
 test_error_from!(crate::sync::store::OwnerPromotionError, OwnerPromotion);
 test_error_from!(crate::sync::store::SnapshotError, Snapshot);
@@ -909,7 +912,7 @@ mod test_device {
             &self,
             pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
             adopted_generation: u64,
-        ) -> Result<(), crate::sync::store::InviteError> {
+        ) -> Result<(), crate::sync::store::MembershipMutationError> {
             self.store
                 .complete_revoke_rotation_adoption_for_test(pending_rotation, adopted_generation)
                 .await
@@ -1497,20 +1500,20 @@ mod test_device {
         }
 
         #[allow(clippy::too_many_arguments)]
-        pub async fn invite_member(
+        pub async fn admit_member(
             &self,
             member_pubkey: &str,
-            invitee_email: Option<&str>,
+            member_email: Option<&str>,
             role: coven_protocol::membership::MemberRole,
             encryption: &coven_keys::encryption::EncryptionService,
             store_id: &str,
             store_name: &str,
-        ) -> Result<crate::sync::store::MemberInvitation, crate::sync::store::MembershipOpsError>
+        ) -> Result<crate::sync::store::MemberAdmission, crate::sync::store::MembershipOpsError>
         {
             self.store
-                .invite_member(
+                .admit_member(
                     member_pubkey,
-                    invitee_email,
+                    member_email,
                     role,
                     encryption,
                     store_id,
@@ -3815,25 +3818,25 @@ impl TestStore {
         .map_err(TestError::from)
     }
 
-    pub async fn invite_member(
+    pub async fn admit_member(
         &self,
         db: &Database,
         store_dir: StoreDir,
         identity: &UserKeypair,
         member_pubkey: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_name: &str,
-    ) -> Result<crate::sync::store::MemberInvitation, crate::sync::store::MembershipOpsError> {
+    ) -> Result<crate::sync::store::MemberAdmission, crate::sync::store::MembershipOpsError> {
         let device = self
             .bind_device_in(db, store_dir, identity)
             .await
             .map_err(crate::sync::store::MembershipOpsError::Store)?;
         device
-            .invite_member(
+            .admit_member(
                 member_pubkey,
-                invitee_email,
+                member_email,
                 role,
                 encryption,
                 self.storage.store_id(),
@@ -3842,7 +3845,7 @@ impl TestStore {
             .await
     }
 
-    pub async fn invite_and_activate_peer(
+    pub async fn admit_and_activate_peer(
         &self,
         observer_db: &Database,
         observer_db_store_dir: StoreDir,
@@ -3850,7 +3853,7 @@ impl TestStore {
         peer_db_store_dir: StoreDir,
         peer: &UserKeypair,
     ) -> Result<TestDevice, TestError> {
-        self.invite_member(
+        self.admit_member(
             observer_db,
             observer_db_store_dir.clone(),
             &self.signer,

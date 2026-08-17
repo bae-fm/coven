@@ -51,7 +51,7 @@ author, and creation time.
 
 `PreparedSnapshotBootstrap::prepare` starts from the expected Store protocol
 root hash, founder key, and membership
-floor carried by the invite or restore code. It:
+floor carried by the device invitation or restore code. It:
 
 1. Loads and verifies the exact Store protocol root.
 2. Loads the founder-anchored membership chain at the supplied floor.

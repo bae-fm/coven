@@ -391,7 +391,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
     let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
     let kp_b = UserKeypair::generate();
     let peer = storage
-        .invite_and_activate_peer(
+        .admit_and_activate_peer(
             &db_a,
             db_a_store_dir.clone(),
             &db_b,
@@ -399,7 +399,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
             &kp_b,
         )
         .await
-        .expect("invite and activate peer Store device");
+        .expect("admit and activate peer Store device");
     peer.pull_store().await.expect("pull peer Store");
     assert!(
         !db_b
@@ -695,7 +695,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         let owners_a = TestOwnerGraph::new(store_database_a.clone(), db_a_store_dir.clone());
         let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
-        let peer = Box::pin(storage.invite_and_activate_peer(
+        let peer = Box::pin(storage.admit_and_activate_peer(
             &db_a,
             db_a_store_dir.clone(),
             &db_b,
@@ -703,7 +703,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
             &kp_b,
         ))
         .await
-        .expect("invite and activate peer Store device");
+        .expect("admit and activate peer Store device");
         Box::pin(owners_a.seed_remote_release(
             &storage,
             None,
@@ -1329,7 +1329,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         .expect("store the host-provided cover in the local store");
 
     let peer = storage
-        .invite_and_activate_peer(
+        .admit_and_activate_peer(
             &db_a,
             db_a_store_dir.clone(),
             &db_b,
@@ -1337,7 +1337,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
             &kp_b,
         )
         .await
-        .expect("invite and activate peer Store device");
+        .expect("admit and activate peer Store device");
 
     // A cycle while gated off: nothing reaches a peer.
     storage
@@ -1941,7 +1941,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     let lib_b = db_b_store_dir.clone();
     let owners_b = TestOwnerGraph::new(StoreDatabase::new(&db_b), lib_b.clone());
     let peer = storage
-        .invite_and_activate_peer(
+        .admit_and_activate_peer(
             &db_a,
             db_a_store_dir.clone(),
             &db_b,
@@ -1949,7 +1949,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
             &kp_b,
         )
         .await
-        .expect("invite and activate peer Store device");
+        .expect("admit and activate peer Store device");
     storage
         .run_founder_cycle(None)
         .await

@@ -262,7 +262,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &founder,
@@ -273,7 +273,7 @@ async fn remote_activation_rejects_active_access_for_a_nonmember() {
             "Active access test Store",
         )
         .await
-        .expect("invite Store member outside the Circle roster");
+        .expect("admit Store member outside the Circle roster");
     let journal = store
         .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await
@@ -425,7 +425,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &founder,
@@ -436,7 +436,7 @@ async fn inactive_circle_member_verifies_public_first_head_activations() {
             "Inactive Circle member Store",
         )
         .await
-        .expect("invite Store member outside the Circle");
+        .expect("admit Store member outside the Circle");
     let prepared = store
         .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await

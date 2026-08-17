@@ -8,7 +8,7 @@ use crate::atomic_file::FileError;
 ///
 /// An untrusted string becomes a path component in several places: a blob's
 /// `id`/`namespace` (interpolated into its on-disk file path and cloud object
-/// key), and a `store_id`/`sid` from an unsigned invite or restore code (the
+/// key), and a `store_id`/`sid` from an untrusted device invitation or restore code (the
 /// name of a directory under `stores/`). All arrive from outside — an incoming
 /// changeset authored by any write-capable member, or a pasted code anyone can
 /// craft — so an unconstrained one could climb out of the directory it is joined

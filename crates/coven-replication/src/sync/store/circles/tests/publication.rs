@@ -679,7 +679,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &signer,
@@ -690,7 +690,7 @@ async fn a_journaled_operation_names_its_objects_rather_than_carrying_them() {
             "Circle bulk row Store",
         )
         .await
-        .expect("invite Store member");
+        .expect("admit Store member");
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = open_circle_bulk_row_test_db(member_db_store_dir.clone());
     store
@@ -765,7 +765,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &signer,
@@ -776,7 +776,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             "Circle bootstrap Store",
         )
         .await
-        .expect("invite Store member");
+        .expect("admit Store member");
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = open_circle_blob_test_db(member_db_store_dir.clone());
     store
@@ -842,7 +842,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
     let concurrent_writer = UserKeypair::generate();
     let concurrent_writer_pubkey = keys::public_key_hex(&concurrent_writer);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &signer,
@@ -853,7 +853,7 @@ async fn member_addition_activates_a_recipient_bound_bootstrap_image() {
             "Circle bootstrap Store",
         )
         .await
-        .expect("invite concurrent Store writer");
+        .expect("admit concurrent Store writer");
     let concurrent_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let concurrent_db = open_circle_blob_test_db(concurrent_db_store_dir.clone());
     store
@@ -1257,7 +1257,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &signer,
@@ -1268,11 +1268,11 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             "Circle removal Store",
         )
         .await
-        .expect("invite Store member");
+        .expect("admit Store member");
     let remaining_member = UserKeypair::generate();
     let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &signer,
@@ -1283,7 +1283,7 @@ async fn member_removal_finalizes_an_exact_epoch_close_after_verified_responses(
             "Circle removal Store",
         )
         .await
-        .expect("invite remaining Store member");
+        .expect("admit remaining Store member");
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
     store
@@ -2212,7 +2212,7 @@ impl ClosingFounderCircle {
         let member = UserKeypair::generate();
         let member_pubkey = keys::public_key_hex(&member);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -2223,11 +2223,11 @@ impl ClosingFounderCircle {
                 "Circle cancel Store",
             )
             .await
-            .expect("invite Store member");
+            .expect("admit Store member");
         let remaining_member = UserKeypair::generate();
         let remaining_member_pubkey = keys::public_key_hex(&remaining_member);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -2238,7 +2238,7 @@ impl ClosingFounderCircle {
                 "Circle cancel Store",
             )
             .await
-            .expect("invite remaining Store member");
+            .expect("admit remaining Store member");
         let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
         store
@@ -3256,7 +3256,7 @@ impl SilentParticipantCircle {
         let removed = UserKeypair::generate();
         let removed_pubkey = keys::public_key_hex(&removed);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -3267,11 +3267,11 @@ impl SilentParticipantCircle {
                 "Circle exclude Store",
             )
             .await
-            .expect("invite removed Store member");
+            .expect("admit removed Store member");
         let silent = UserKeypair::generate();
         let silent_pubkey = keys::public_key_hex(&silent);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -3282,7 +3282,7 @@ impl SilentParticipantCircle {
                 "Circle exclude Store",
             )
             .await
-            .expect("invite silent Store member");
+            .expect("admit silent Store member");
         let silent_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let silent_db = open_circle_routing_test_db(silent_db_store_dir.clone());
         store

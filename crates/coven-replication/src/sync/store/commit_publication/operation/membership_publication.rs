@@ -3,11 +3,11 @@ use super::*;
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(super) async fn outbound_membership_mutation(
         &self,
-    ) -> Result<Option<coven_database::DurableMembershipMutation>, InviteError> {
+    ) -> Result<Option<coven_database::DurableMembershipMutation>, MembershipMutationError> {
         self.database
             .outbound_membership_mutation()
             .await
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 
     pub(super) async fn stage_membership_mutation(
@@ -16,7 +16,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         progress_bytes: Vec<u8>,
         remote_objects: Option<Vec<coven_protocol::remote_object::ClosedRemoteObject>>,
         pending_rotation_generation: Option<u64>,
-    ) -> Result<coven_protocol::store_commit::ObjectHash, InviteError> {
+    ) -> Result<coven_protocol::store_commit::ObjectHash, MembershipMutationError> {
         match remote_objects {
             Some(remote_objects) => self
                 .database
@@ -27,12 +27,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     pending_rotation_generation,
                 )
                 .await
-                .map_err(InviteError::from),
+                .map_err(MembershipMutationError::from),
             None => self
                 .database
                 .stage_membership_mutation(plan_bytes, progress_bytes, pending_rotation_generation)
                 .await
-                .map_err(InviteError::from),
+                .map_err(MembershipMutationError::from),
         }
     }
 
@@ -51,13 +51,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         wraps: &[ReplacementWrappedKey],
         publication: &PreparedMembershipPublication,
-    ) -> Result<(), InviteError> {
+    ) -> Result<(), MembershipMutationError> {
         for wrapped in wraps {
             self.storage
                 .as_ref()
                 .create_protocol_object(&wrapped.prepared.object)
                 .await
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
             load_wrapped_store_key(
                 self.storage.as_ref(),
                 self.store_root().store_root_hash,
@@ -69,11 +69,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .create_protocol_object(&publication.prepared_entry()?)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         self.membership_objects()
             .load_entry(&publication.entry_ref)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         Ok(())
     }
 
@@ -81,16 +81,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         publication: &PreparedMembershipPublication,
         author: &coven_protocol::store_commit::StoreDeviceRegistration,
-    ) -> Result<(), InviteError> {
+    ) -> Result<(), MembershipMutationError> {
         self.storage
             .as_ref()
             .create_protocol_object(&publication.prepared_head()?)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         self.membership_objects()
             .load_head_for_registration(&publication.head_ref, author)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         Ok(())
     }
 
@@ -98,13 +98,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         chain: &MembershipChain,
         entry: MembershipEntry,
-    ) -> Result<PreparedMembershipTransition, InviteError> {
+    ) -> Result<PreparedMembershipTransition, MembershipMutationError> {
         let root = self.store_root().clone();
         let storage = self.storage.as_ref();
         let (_, entry_ref) =
             store_objects::prepare_membership_entry(storage, root.store_root_hash, &entry)
                 .await
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
         let coord = entry.coord();
         let predecessor = chain
             .head_ref_for_stream(
@@ -119,7 +119,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     .writer
                     .load_membership_head(self.membership_objects(), reference)
                     .await
-                    .map_err(InviteError::from)?;
+                    .map_err(MembershipMutationError::from)?;
                 loaded.value.body.successor.next_slot.clone()
             }
             None => match chain.membership_anchor(&coord.author_owner_grant) {
@@ -132,13 +132,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     | store_commit::GrantStreamAnchor::CircleRoster { .. }
                     | store_commit::GrantStreamAnchor::CircleMetadata { .. },
                 ) => {
-                    return Err(InviteError::InvalidDurableMutation(format!(
+                    return Err(MembershipMutationError::InvalidDurableMutation(format!(
                         "Owner grant {} uses another domain's anchor as its membership stream",
                         coord.author_owner_grant
                     )));
                 }
                 None => {
-                    return Err(InviteError::InvalidDurableMutation(format!(
+                    return Err(MembershipMutationError::InvalidDurableMutation(format!(
                         "Owner grant {} has no activated membership stream anchor",
                         coord.author_owner_grant
                     )));
@@ -150,7 +150,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             ProtocolObjectDomain::StoreMembershipHead,
         );
         let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
-            InviteError::InvalidDurableMutation("membership head sequence overflow".to_string())
+            MembershipMutationError::InvalidDurableMutation(
+                "membership head sequence overflow".to_string(),
+            )
         })?;
         let next_prefix = membership_head_slot_prefix(
             &coord.author_pubkey,
@@ -164,7 +166,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let anchor = chain
             .membership_anchor(&coord.author_owner_grant)
             .ok_or_else(|| {
-                InviteError::InvalidDurableMutation(format!(
+                MembershipMutationError::InvalidDurableMutation(format!(
                     "Owner grant {} has no activated membership stream anchor",
                     coord.author_owner_grant
                 ))
@@ -189,7 +191,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         chain: &MembershipChain,
         entry: MembershipEntry,
-    ) -> Result<PreparedMembershipPublication, InviteError> {
+    ) -> Result<PreparedMembershipPublication, MembershipMutationError> {
         let prepared = self.prepare_membership_transition(chain, entry).await?;
         self.finish_membership_transition(prepared, membership::MembershipHeadActivation::Direct)
             .await
@@ -199,7 +201,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         prepared: PreparedMembershipTransition,
         activation: membership::MembershipHeadActivation,
-    ) -> Result<PreparedMembershipPublication, InviteError> {
+    ) -> Result<PreparedMembershipPublication, MembershipMutationError> {
         let root = self.store_root().clone();
         let head =
             self.writer
@@ -215,7 +217,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             coord.stream_id,
             coord.seq,
         );
-        let head_bytes = serde_json::to_vec(&head).map_err(InviteError::Json)?;
+        let head_bytes = serde_json::to_vec(&head).map_err(MembershipMutationError::Json)?;
         let head_object = self.storage.as_ref().prepare_protocol_object(
             &context,
             prepared.transition.head_slot.clone(),
@@ -241,7 +243,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &mut self,
         transition: &PreparedMembershipTransition,
         wraps: &[PreparedWrappedStoreKey],
-    ) -> Result<(), InviteError> {
+    ) -> Result<(), MembershipMutationError> {
         transition.validate()?;
         let expected_wraps: Vec<&WrappedStoreKeyRef> = match &transition.entry.change {
             MembershipChange::SetMember { wrapped_key, .. } => vec![wrapped_key],
@@ -256,7 +258,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .zip(wraps)
                 .any(|(expected, prepared)| **expected != prepared.reference)
         {
-            return Err(InviteError::InvalidDurableMutation(
+            return Err(MembershipMutationError::InvalidDurableMutation(
                 "prepared Merge membership wraps differ from their exact transition".to_string(),
             ));
         }
@@ -266,7 +268,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 .as_ref()
                 .create_protocol_object(&prepared.object)
                 .await
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
             load_wrapped_store_key(
                 self.storage.as_ref(),
                 self.store_root().store_root_hash,
@@ -278,11 +280,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .create_protocol_object(&transition.prepared_entry()?)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         self.membership_objects()
             .load_entry(&transition.entry_ref)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         Ok(())
     }
 
@@ -292,12 +294,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         publication: &PreparedMembershipPublication,
         candidate: Box<commit_plan::PreparedStoreOperationCommit>,
         completion: coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, InviteError> {
+    ) -> Result<commit_plan::StoreOperationPublicationOutcome, MembershipMutationError> {
         transition.validate()?;
         publication.validate()?;
         candidate
             .validate_closed_shape()
-            .map_err(InviteError::PreparedCommit)?;
+            .map_err(MembershipMutationError::PreparedCommit)?;
         if candidate.commit.control()
             != Some(&store_commit::StoreControl {
                 transition: transition.transition.clone(),
@@ -312,7 +314,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             || !self.writer.verify_membership_head(&publication.head)
         {
-            return Err(InviteError::InvalidDurableMutation(
+            return Err(MembershipMutationError::InvalidDurableMutation(
                 "prepared Merge membership head differs from its exact Store activation"
                     .to_string(),
             ));
@@ -321,17 +323,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .as_ref()
             .create_protocol_object(&publication.prepared_head()?)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         self.writer
             .load_membership_head(self.membership_objects(), &publication.head_ref)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let database = self.database.clone();
         database
             .mark_remote_object_uploaded(
                 completion
                     .remote_object(&publication.head_ref.object)
-                    .map_err(InviteError::from)?,
+                    .map_err(MembershipMutationError::from)?,
             )
             .await?;
         let membership_objects = VerifiedMergeMembershipObjects::verify(
@@ -344,6 +346,6 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let _authorship = database.author_own_stream().await;
         self.publish_prepared(candidate, Some(membership_objects), Some(completion))
             .await
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 }

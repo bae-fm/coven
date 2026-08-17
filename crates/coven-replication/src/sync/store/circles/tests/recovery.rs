@@ -32,7 +32,7 @@ impl RevokedOperation {
         let successor_pubkey = keys::public_key_hex(&successor);
         let encryption = EncryptionService::from_key([42; 32]);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &founder,
@@ -43,7 +43,7 @@ impl RevokedOperation {
                 "Recovery test Store",
             )
             .await
-            .expect("invite successor member");
+            .expect("admit successor member");
         let successor_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let successor_db = crate::sync::test_helpers::open_test_db(successor_db_store_dir.clone());
         store

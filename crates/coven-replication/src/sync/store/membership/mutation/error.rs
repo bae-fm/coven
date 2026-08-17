@@ -4,7 +4,7 @@ use coven_protocol::objects::StorageError;
 use coven_storage::cloud::CloudHomeError;
 
 #[derive(Debug, thiserror::Error)]
-pub enum InviteError {
+pub enum MembershipMutationError {
     #[error("Bucket error: {0}")]
     Bucket(#[from] StorageError),
     #[error("Key error: {0}")]
@@ -55,19 +55,19 @@ pub enum InviteError {
     MembershipFloor(#[from] coven_protocol::membership::MembershipFloorError),
 }
 
-impl From<crate::sync::store::StoreError> for InviteError {
+impl From<crate::sync::store::StoreError> for MembershipMutationError {
     fn from(error: crate::sync::store::StoreError) -> Self {
         Self::Store(Box::new(error))
     }
 }
 
-impl From<crate::sync::store::StorePullError> for InviteError {
+impl From<crate::sync::store::StorePullError> for MembershipMutationError {
     fn from(error: crate::sync::store::StorePullError) -> Self {
         Self::Pull(Box::new(error))
     }
 }
 
-impl From<crate::sync::store::AnchoredChainError> for InviteError {
+impl From<crate::sync::store::AnchoredChainError> for MembershipMutationError {
     fn from(error: crate::sync::store::AnchoredChainError) -> Self {
         Self::AnchoredChain(Box::new(error))
     }

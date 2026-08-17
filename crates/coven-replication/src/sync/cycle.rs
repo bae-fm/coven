@@ -1018,21 +1018,21 @@ impl SyncComponents {
             .await
     }
 
-    pub(crate) async fn invite_member(
+    pub(crate) async fn admit_member(
         &self,
         public_key_hex: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         store_name: &str,
-    ) -> Result<crate::sync::store::MemberInvitation, super::store::MembershipOpsError> {
+    ) -> Result<crate::sync::store::MemberAdmission, super::store::MembershipOpsError> {
         let encryption = self
             .routing_encryption
             .as_ref()
             .ok_or(super::store::MembershipOpsError::NotEncryptedHome)?;
         self.store
-            .invite_member(
+            .admit_member(
                 public_key_hex,
-                invitee_email,
+                member_email,
                 role,
                 encryption,
                 &self.store_id,

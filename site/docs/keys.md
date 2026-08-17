@@ -146,9 +146,9 @@ of these three acts brought the store into existence on this device:
   cloud-home setup that needs it.
 - **Joining a shared store** —
   [`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request)
-  mints the keypair before the joiner even knows which store the invite
+  mints the keypair before the joiner even knows which store the device invitation
   names (a *pending* identity, held under a slot keyed by the request), and
-  [`coven::DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) drives
+  [`coven::join_with_scanned_invite`](rustdoc:fn:coven::join_with_scanned_invite) drives
   the signed admission exchange and promotes it into that store's own identity
   custody only after the activation is installed. A join never finished can discard its pending identity with
   [`coven::abandon_join_request`](rustdoc:fn:coven::abandon_join_request).

@@ -9,7 +9,7 @@ impl LocalStoreWriter {
         keyring: coven_keys::encryption::EncryptionService,
     ) -> Result<
         coven_protocol::wrapped_store_key::WrappedStoreKey,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         let signer = self.identity.clone();
         coven_foundation::blocking::run(move || {
@@ -20,10 +20,10 @@ impl LocalStoreWriter {
                 &keyring,
                 &signer,
             )
-            .map_err(crate::sync::store::membership::InviteError::Encryption)
+            .map_err(crate::sync::store::membership::MembershipMutationError::Encryption)
         })
         .await
-        .map_err(crate::sync::store::membership::InviteError::Blocking)?
+        .map_err(crate::sync::store::membership::MembershipMutationError::Blocking)?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -142,13 +142,13 @@ impl LocalStoreWriter {
         head_slot: coven_protocol::objects::ObjectSlot,
     ) -> Result<
         coven_protocol::membership::MergeMembershipHeadTransition,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         if self.registration.value().author_pubkey != entry.author_pubkey
             || self.registration.reference().device_id != self.registration.value().device_id
         {
             return Err(
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                     "membership author differs from the active exact device registration"
                         .to_string(),
                 ),
@@ -182,13 +182,15 @@ impl LocalStoreWriter {
         entry: &coven_protocol::membership::MembershipEntry,
         transition: &coven_protocol::membership::MergeMembershipHeadTransition,
         activation: coven_protocol::membership::MembershipHeadActivation,
-    ) -> Result<coven_protocol::membership::AuthorHead, crate::sync::store::membership::InviteError>
-    {
+    ) -> Result<
+        coven_protocol::membership::AuthorHead,
+        crate::sync::store::membership::MembershipMutationError,
+    > {
         if self.registration.value().author_pubkey != entry.author_pubkey
             || self.registration.reference() != &transition.body.author_registration
         {
             return Err(
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                     "membership transition author differs from the active exact device registration"
                         .to_string(),
                 ),

@@ -6136,7 +6136,7 @@ impl PersistedCycleRemoval {
             create_store_fixture(&db, db_store_dir.clone(), founder.clone()).await;
         let encryption = EncryptionService::from_key([42; 32]);
         storage
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &founder,
@@ -6147,7 +6147,7 @@ impl PersistedCycleRemoval {
                 "Test Store",
             )
             .await
-            .expect("invite second Owner as a Member");
+            .expect("admit second Owner as a Member");
         let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let second_owner_db =
             crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());
@@ -6488,7 +6488,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
         .expect("activate a separate founder-identity Store producer");
     let encryption = EncryptionService::from_key([42; 32]);
     storage
-        .invite_member(
+        .admit_member(
             &source,
             source_store_dir.clone(),
             &owner,
@@ -6499,7 +6499,7 @@ async fn pull_authorizes_merge_operations_at_their_exact_predecessor_membership(
             "Test Store",
         )
         .await
-        .expect("invite second Owner as a Member");
+        .expect("admit second Owner as a Member");
     let second_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let second_owner_db =
         crate::sync::test_helpers::open_test_db(second_owner_db_store_dir.clone());

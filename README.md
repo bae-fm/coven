@@ -82,7 +82,9 @@ handle.sync_now();
 `blocked_writes`, `retry_blocked_write`, and `discard_blocked_write` expose the
 explicit recovery path for a write stopped by a missing blob or invalid package
 or protocol state. `handle.subscribe_sync_status` exposes the current loop
-state, and `handle.invite_member` adds a member. The whole tour is the
+state. Device sharing starts with `handle.begin_device_invite`, which admits
+the identity in an exact join request and returns a recipient-sealed device
+invitation. The whole tour is the
 [example](https://coven.bae.fm/docs/example).
 
 `Offline` means a provider or network operation failed. Invalid remote blob

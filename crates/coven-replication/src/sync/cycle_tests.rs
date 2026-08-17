@@ -154,8 +154,8 @@ async fn owner_and_member() -> OwnerAndMember {
     }
 }
 
-/// Invites `member` into the owner's Store as an ordinary member.
-async fn invite_test_member(
+/// Admits `member` into the owner's Store as an ordinary member.
+async fn admit_test_member(
     storage: &TestStore,
     owner_db: &Database,
     owner_db_store_dir: StoreDir,
@@ -164,7 +164,7 @@ async fn invite_test_member(
     encryption: &EncryptionService,
 ) {
     storage
-        .invite_member(
+        .admit_member(
             owner_db,
             owner_db_store_dir.clone(),
             owner,
@@ -175,7 +175,7 @@ async fn invite_test_member(
             "Test Store",
         )
         .await
-        .expect("invite exact Member identity");
+        .expect("admit exact Member identity");
 }
 
 /// A `note_photos` schema whose rows carry a blob at `fill`, plus the Store its
@@ -909,7 +909,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
     let (storage, cloud_storage) = fixture;
     let member = UserKeypair::generate();
     storage
-        .invite_member(
+        .admit_member(
             &database,
             database_store_dir.clone(),
             &owner,
@@ -920,7 +920,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             "Test Store",
         )
         .await
-        .expect("invite exact Member identity");
+        .expect("admit exact Member identity");
     let owner_db = coven_database::StoreDatabase::new(&database);
     let owner_db = &owner_db;
     let storage = &storage;
@@ -1148,7 +1148,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                     .await;
                 let peer = UserKeypair::generate();
                 storage
-                    .invite_member(
+                    .admit_member(
                         &db,
                         db_store_dir.clone(),
                         &keypair,
@@ -1159,7 +1159,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
                         "Test Store",
                     )
                     .await
-                    .expect("invite exact pending-upload peer");
+                    .expect("admit exact pending-upload peer");
                 let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
                 let db_b = crate::sync::test_helpers::open_test_db_with_blob(
                     db_b_store_dir.clone(),
@@ -1263,7 +1263,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                 .await;
                 let peer = UserKeypair::generate();
                 storage
-                    .invite_member(
+                    .admit_member(
                         &db,
                         db_store_dir.clone(),
                         &keypair,
@@ -1274,7 +1274,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
                         "Test Store",
                     )
                     .await
-                    .expect("invite exact gate-flip peer");
+                    .expect("admit exact gate-flip peer");
                 let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
                 let db_b = crate::sync::test_helpers::open_test_db_with_blob(
                     db_b_store_dir.clone(),
@@ -4334,7 +4334,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
 
         let unregistered_member = UserKeypair::generate();
         storage
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &owner,
@@ -4345,7 +4345,7 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 "Test Store",
             )
             .await
-            .expect("invite unregistered member to hold back package reclamation");
+            .expect("admit unregistered member to hold back package reclamation");
 
         let cycle_device = storage
             .open_into(&db, db_store_dir.clone())
@@ -4895,7 +4895,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
 
         let behind = UserKeypair::generate();
         storage
-            .invite_member(
+            .admit_member(
                 &owner_db,
                 owner_db_store_dir.clone(),
                 &owner,
@@ -4906,7 +4906,7 @@ async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
                 "Test Store",
             )
             .await
-            .expect("invite exact behind Member identity");
+            .expect("admit exact behind Member identity");
         let behind_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let behind_db = crate::sync::test_helpers::open_test_db(behind_db_store_dir.clone());
         let behind_store = storage
@@ -5039,7 +5039,7 @@ async fn member_device_does_not_create_a_snapshot() {
     .await;
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([42; 32]);
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -5103,7 +5103,7 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
     let successor_owner = UserKeypair::generate();
     let encryption = EncryptionService::from_key([64; 32]);
     storage
-        .invite_member(
+        .admit_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -5114,7 +5114,7 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
             "Test Store",
         )
         .await
-        .expect("invite successor Owner");
+        .expect("admit successor Owner");
     let successor_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let successor_db = crate::sync::test_helpers::open_test_db(successor_db_store_dir.clone());
     storage
@@ -5194,7 +5194,7 @@ async fn same_principal_device_join_completes_on_the_runtime_stack() {
         ..
     } = owner_and_member().await;
     let encryption = EncryptionService::from_key([43; 32]);
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -5243,7 +5243,7 @@ impl<'storage> SamePrincipalApprovalFixture<'storage> {
         owner: &UserKeypair,
         member: &UserKeypair,
     ) -> Self {
-        invite_test_member(
+        admit_test_member(
             storage,
             owner_db,
             owner_db_store_dir.clone(),
@@ -5638,7 +5638,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         let excluding_owner = UserKeypair::generate();
         let encryption = EncryptionService::from_key([62; 32]);
         storage
-            .invite_member(
+            .admit_member(
                 &founder_db,
                 founder_db_store_dir.clone(),
                 &founder,
@@ -5649,7 +5649,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
                 "Test Store",
             )
             .await
-            .expect("invite second exact Owner identity");
+            .expect("admit second exact Owner identity");
         let excluding_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let excluding_db = crate::sync::test_helpers::open_test_db(excluding_db_store_dir.clone());
         storage
@@ -5932,7 +5932,7 @@ async fn pre_attempt_device_join_abandonment_is_observed_and_retry_safe() {
         ..
     } = owner_and_member().await;
     let encryption = EncryptionService::from_key([44; 32]);
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -5961,7 +5961,7 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
         member,
         ..
     } = owner_and_member().await;
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -5991,7 +5991,7 @@ async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
         member,
         ..
     } = owner_and_member().await;
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -6021,7 +6021,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         member,
         ..
     } = owner_and_member().await;
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -6132,7 +6132,7 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
         member,
         ..
     } = owner_and_member().await;
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -6162,7 +6162,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         member,
         ..
     } = owner_and_member().await;
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),
@@ -6211,7 +6211,7 @@ async fn cross_principal_device_join_completes_on_the_runtime_stack() {
     .expect("create exact cross-principal test Store");
     let member = UserKeypair::generate();
     let encryption = EncryptionService::from_key([43; 32]);
-    invite_test_member(
+    admit_test_member(
         &storage,
         &owner_db,
         owner_db_store_dir.clone(),

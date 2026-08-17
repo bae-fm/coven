@@ -73,9 +73,9 @@ reads it (see [Revocation](#revocation-is-key-rotation)).
 
 ## Per-author-stream commitment
 
-Two owners inviting people at the same moment must not be able to erase each
+Two owners admitting people at the same moment must not be able to erase each
 other's work. Any design with one shared "latest" object has that failure
-built in: the second writer wins, the first invite vanishes. So there is no
+built in: the second writer wins, the first admission vanishes. So there is no
 shared object anywhere in membership. Entries live in streams identified by
 their author, the Owner grant authorizing that author, and a random stream id:
 
@@ -158,9 +158,9 @@ downgrade), so an owner can demote a member without removing them.
 [`MemberRole`](rustdoc:enum:coven::MemberRole) has three
 forms:
 
-- **Owner** can write, and can mutate the chain: invite, remove, and change
+- **Owner** can write, and can mutate the chain: admit, remove, and change
   roles. The founder is an owner, and an owner can promote others. Any current
-  owner can invite, not just the founder.
+  owner can admit, not just the founder.
 - **Member** can read and write todos, but cannot touch the chain.
 - **Follower** holds the store keyring and reads everything, but may not
   write. The restriction is enforced acceptance-side: a puller re-derives each
@@ -181,15 +181,15 @@ home](/docs/storage) — an owner writes only into its own prefix, which is what
 lets a reader trust that a wrap came from that owner. Only the holder of the
 matching private key can open it.
 
-Inviting a member writes the keyring wrapped to that member at
+Admitting a member writes the keyring wrapped to that member at
 `keys/{owner_pubkey}/{recipient_pubkey}.enc`. The wrapped keyring names the
 exact membership activation — the causal entry coordinate that granted it — and
 a joiner unwraps it only once that activation is visible. The new
 member downloads and unwraps their copy when they join.
 
-If any step of an invite fails partway, the steps already taken are rolled
+If any step of an admission fails partway, the steps already taken are rolled
 back (a previously wrapped keyring is restored, not deleted), so a failed
-invite never leaves a member half-added or an existing member locked out.
+admission never leaves a member half-added or an existing member locked out.
 
 ## Pull verification
 
@@ -258,12 +258,12 @@ stops admitting new ones.
 
 ## Invite and join
 
-An invite has to move two different things safely: the joiner's identity to
-the owner (so the keyring can be wrapped to it), and cloud access plus the
-wrapped keyring back to the joiner. A two-step handshake moves each in the
-right direction, and neither side ever types a key by hand.
+A device invitation moves two things safely: the joining device's pending
+identity to the owner, then cloud access and the wrapped keyring back to that
+exact identity. The credential-bearing admission is encrypted to the public key
+from the request before it leaves the owner.
 
-<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The joiner sends a join request code; the owner grants access and returns an invite code; the joiner bootstraps from it">
+<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The joining device sends a join request; the owner admits that identity and returns its sealed device invitation">
 <text class="hdr" x="120" y="22" text-anchor="middle">JOINER</text>
 <text class="hdr" x="330" y="22" text-anchor="middle">OUT OF BAND</text>
 <text class="hdr" x="540" y="22" text-anchor="middle">OWNER</text>
@@ -278,16 +278,16 @@ right direction, and neither side ever types a key by hand.
 <circle class="numc" cx="444" cy="108" r="8"/>
 <text class="num" x="444" y="111.5" text-anchor="middle">2</text>
 <rect class="chip" x="450" y="88" width="180" height="40" rx="7"/>
-<text class="lbl s11" x="540" y="104" text-anchor="middle">invite_member(...)</text>
-<text class="sub" x="540" y="120" text-anchor="middle">Add entry + wrapped keyring</text>
+<text class="lbl s11" x="540" y="104" text-anchor="middle">begin_device_invite(...)</text>
+<text class="sub" x="540" y="120" text-anchor="middle">Admit + seal exact payload</text>
 <line class="arr" x1="446" y1="150" x2="234" y2="150" marker-end="url(#fa)"/>
 <circle class="numc" cx="330" cy="150" r="8"/>
 <text class="num" x="330" y="153.5" text-anchor="middle">3</text>
-<text class="sub" x="330" y="136" text-anchor="middle">invite code: cloud access + store id</text>
+<text class="sub" x="330" y="136" text-anchor="middle">sealed device invitation</text>
 <circle class="numc" cx="24" cy="177" r="8"/>
 <text class="num" x="24" y="180.5" text-anchor="middle">4</text>
 <rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="181" text-anchor="middle">DeviceJoinClient</text>
+<text class="lbl s11" x="120" y="181" text-anchor="middle">join_with_scanned_invite</text>
 </svg>
 
 The joiner runs `generate_join_request`, which mints a fresh Ed25519 keypair
@@ -295,23 +295,23 @@ The joiner runs `generate_join_request`, which mints a fresh Ed25519 keypair
 code carrying its public key (and, for folder-sharing providers, the account
 email the owner should share to). They send it to the owner out of band.
 
-The owner calls `handle.invite_member(...)` with that public key and a role.
-coven:
+The owner calls `handle.begin_device_invite(...)` with the exact request and a
+role. coven:
 
 1. grants the joiner cloud access,
 2. wraps the store keyring to their X25519 key,
 3. signs and validates the membership change against the committed state,
-4. activates the change through the owner's causal head.
+4. activates the change through the owner's causal head,
+5. serializes those exact admission facts and encrypts them to the request's
+   pending identity,
+6. binds the sealed admission to the signed transport offer for this attempt.
 
-The cloud connection details come back packed with the store id, name, owner
-pubkey, wrapped-key author, exact Store root, and membership floor into an
-`InviteCode`. The owner sends
-that back.
-
-The joiner constructs
-[`DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) from the invite and
-the join-request code it kept. The owner creates an offer with
-`CovenHandle::begin_device_join`. Four exact values then cross between them:
+The owner sends the returned `DeviceJoinInvite::to_bytes()` to the joining
+device. Only the pending identity retained for the exact request can decrypt its
+cloud connection, store id, owner key, wrapped key, Store root, and membership
+floor. The owner runs `drive_device_join` while the joining device calls
+`join_with_scanned_invite` with those bytes and its retained request. Four exact
+values then cross through the invitation's cloud transport:
 
 1. The offer becomes a provider access request; the selected provider
    administrator returns an approval.
@@ -330,15 +330,16 @@ The device is now a writer. A join that fails partway never deletes a store
 that already existed on the device, and leaves the pending identity from
 step 1 untouched — the same join can be retried with the same request code.
 
-The invite code carries plaintext cloud credentials (for S3, the access key and
-secret). Treat it with the same secrecy as the encryption key, and send it over
-a private channel.
+The device invitation carries cloud credentials only as recipient-sealed
+ciphertext. Its delivery channel still needs integrity: before the join, the
+joining device has no trusted owner key with which to distinguish the intended
+store from an attacker's replacement invitation.
 
 ## Restore codes
 
 A restore code recovers a store on a *new device of an existing member*,
-without anyone re-inviting them. Where an invite code adds a new identity to the
-chain, a restore code re-establishes an identity that is already in it.
+without another admission. A device invitation adds a new identity to the chain;
+a restore code re-establishes an identity that is already in it.
 
 `handle.generate_restore_code()` encodes everything needed to reconnect into
 one `coven:`-prefixed base64url string: the store id, `store_root_hash`, store

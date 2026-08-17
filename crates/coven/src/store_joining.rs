@@ -14,7 +14,7 @@ pub enum BeginDeviceInviteError {
 }
 
 /// The two parts of device joining that are not a plain sync command: minting
-/// an invite, which pairs a membership invite with the attempt's transport
+/// an invitation, which pairs a membership admission with the attempt's transport
 /// bundle, and reading the join journal the database holds. Every other step is
 /// a command on [`StoreSync`], which its caller issues there.
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl StoreJoining {
         role: MemberRole,
     ) -> Result<coven_domain::joining::DeviceJoinInvite, BeginDeviceInviteError> {
         let request = coven_domain::joining::decode_join_request(join_request_code)?;
-        let invitation = self
+        let admission = self
             .membership
             .admit(&request.public_key, request.email.as_deref(), role)
             .await?;
@@ -52,7 +52,7 @@ impl StoreJoining {
             .begin_device_join_bundle(&request.public_key)
             .await?;
         Ok(coven_domain::joining::DeviceJoinInvite::new(
-            invitation, bundle,
+            admission, bundle,
         )?)
     }
 

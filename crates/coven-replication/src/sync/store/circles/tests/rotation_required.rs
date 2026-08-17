@@ -134,7 +134,7 @@ impl RotationFixture {
         let member = UserKeypair::generate();
         let member_pubkey = keys::public_key_hex(&member);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -145,7 +145,7 @@ impl RotationFixture {
                 "Rotation Store",
             )
             .await
-            .expect("invite Store member");
+            .expect("admit Store member");
         let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let member_db = open_circle_routing_test_db(member_db_store_dir.clone());
         let member_device = store
@@ -718,7 +718,7 @@ async fn re_adding_the_store_member_clears_rotation_required() {
 
     fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.db,
             fixture.store_dir.clone(),
             &fixture.signer,
@@ -1076,7 +1076,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
     let outsider_pubkey = keys::public_key_hex(&outsider);
     fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.db,
             fixture.store_dir.clone(),
             &fixture.signer,
@@ -1087,7 +1087,7 @@ async fn removing_a_store_member_outside_every_roster_blocks_nothing() {
             "Rotation Store",
         )
         .await
-        .expect("invite a Store member who joins no Circle");
+        .expect("admit a Store member who joins no Circle");
 
     fixture
         .components
@@ -1189,7 +1189,7 @@ async fn device_join_succeeds_after_a_circle_epoch_close() {
 /// member, cut without an epoch close (so Circle history stays live and no
 /// coverage is reclaimed). The shared base for the restore-selection cases that
 /// differ only in who restores and what the storage provider serves.
-/// A Store with an activated founder Circle, one invited Store member on that
+/// A Store with an activated founder Circle, one admitted Store member on that
 /// Circle's roster, and the production sync components the owner drives. Every
 /// restore case starts from this shape and differs only in what it does next.
 struct CircleWithOneMember {
@@ -1223,7 +1223,7 @@ impl CircleWithOneMember {
         let member = UserKeypair::generate();
         let member_pubkey = keys::public_key_hex(&member);
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &signer,
@@ -1234,7 +1234,7 @@ impl CircleWithOneMember {
                 "Restore Store",
             )
             .await
-            .expect("invite Store member");
+            .expect("admit Store member");
         let components = prepare_owner_sync_components(
             &db,
             &store,
@@ -3158,7 +3158,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
     let second_pubkey = keys::public_key_hex(&second);
     fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.db,
             fixture.store_dir.clone(),
             &fixture.signer,
@@ -3169,7 +3169,7 @@ async fn two_circle_recipients_never_share_one_bootstrap_image() {
             "Rotation Store",
         )
         .await
-        .expect("invite the second Store member");
+        .expect("admit the second Store member");
     let second_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let second_db = open_circle_routing_test_db(second_db_store_dir.clone());
     fixture

@@ -207,7 +207,7 @@ impl LocalStoreWriter {
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
     ) -> Result<
         coven_protocol::membership::StoreMembershipConflictResolution,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         let acceptance = coven_protocol::store_commit::OwnerConflictResolutionAcceptance::signed(
             store_root_hash,
@@ -219,7 +219,7 @@ impl LocalStoreWriter {
             self.registration.value(),
             &self.identity,
         )
-        .map_err(crate::sync::store::membership::InviteError::from)?;
+        .map_err(crate::sync::store::membership::MembershipMutationError::from)?;
         chain
             .signed_conflict_resolution(
                 store_root_hash,
@@ -228,7 +228,7 @@ impl LocalStoreWriter {
                 acceptance,
                 &self.identity,
             )
-            .map_err(crate::sync::store::membership::InviteError::from)
+            .map_err(crate::sync::store::membership::MembershipMutationError::from)
     }
 
     pub(super) fn sign_conflict_resolution_activation(
@@ -397,7 +397,7 @@ impl<'storage> LocalWriterKeyrings<'storage> {
         membership: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         self.keyrings.open(self.writer.as_ref(), membership).await
     }
@@ -408,7 +408,7 @@ impl<'storage> LocalWriterKeyrings<'storage> {
         initial: &coven_keys::encryption::EncryptionService,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         self.keyrings
             .open_or(self.writer.as_ref(), membership, initial)

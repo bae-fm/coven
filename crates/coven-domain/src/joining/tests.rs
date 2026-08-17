@@ -51,8 +51,8 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let member_pubkey = crate::joining::decode_join_request(&join_request)
         .expect("decode join request")
         .public_key;
-    let invite = store
-        .invite_member(
+    let admission = store
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -63,7 +63,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             "Device Join Client Store",
         )
         .await
-        .expect("invite joiner identity");
+        .expect("admit joining identity");
     let owner_device = store
         .open_into(&owner_db, owner_db_store_dir.clone())
         .await
@@ -89,7 +89,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
     let new_client = || {
         crate::joining::client::DeviceJoinClient::new(
-            invite.clone(),
+            admission.clone(),
             &join_request,
             layout.clone(),
             tables.clone(),

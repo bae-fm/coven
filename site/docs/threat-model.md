@@ -140,7 +140,7 @@ retains is scheduling power over what it serves: it can withhold an object,
 serve an older version, or reorder what a reader sees.
 
 Rollback of *membership* is bounded: readers persist per-author-stream head
-watermarks and refuse regressions. Invite and restore codes carry the
+watermarks and refuse regressions. Device invitations and restore codes carry the
 corresponding causal frontier, so a fresh device refuses membership older than
 the code it received (see [Bootstrap](/docs/bootstrap)).
 
@@ -165,24 +165,26 @@ envelope is the one piece coven treats as untrusted input from disk, and only
 narrowly: it reads the envelope's KDF parameters from an unauthenticated file, so
 it floors them rather than deriving a key at whatever cost the file names.
 
-## The invite channel
+## The device-invitation channel
 
-The out-of-band channel over which an owner sends an invite code to a joiner.
+The out-of-band channel over which a joining device sends its join request to
+an owner and receives its sealed device invitation.
 
-**Assumed integrity-preserving. This is a hard trust assumption.** An invite code
-is unsigned — there is no prior key to sign it with — and it carries the store's
-`owner_pubkey`, which the joiner **pins** as the signed membership founder and
+**Assumed integrity-preserving. This is a hard trust assumption.** The
+credential-bearing admission is encrypted to the pending identity that created
+the exact join request, so another device cannot open it. The invitation also
+carries the store's `owner_pubkey`, which the joiner **pins** as the signed membership founder and
 thereafter anchors every authorization decision against. Whoever controls
-delivery of the code chooses the founder key the joiner pins, and therefore the
-entire authority chain: an attacker who substitutes both the `owner_pubkey` and
-the bucket details makes the victim join the attacker's store believing it is the
-shared one. The founder anchor defends against a bucket writer who is *not* the
-pinned owner; it cannot detect that the pinned owner is itself wrong.
+delivery can still replace the whole response with an invitation for the
+joiner's public key, but for an attacker's store. That chooses the founder key
+the joiner pins and therefore the authority chain. The founder anchor defends
+against a bucket writer who is *not* the pinned owner; it cannot detect that the
+pinned owner is itself wrong.
 
-There is no cryptographic fix inside the artifact — an unsigned code delivered
-out of band is trust-on-first-use by construction. The requirement is therefore
-stated, not solved: **the invite code must be delivered over a channel the joiner
-trusts for integrity.** Comparing the founder fingerprint out of band (both sides
+There is no prior trusted owner key with which the joining device can authenticate
+the first invitation. The requirement is therefore stated, not solved: **the
+device invitation must be delivered over a channel the joiner trusts for
+integrity.** Comparing the founder fingerprint out of band (both sides
 read it aloud) narrows the window and is a product decision, not a precondition
 for this assumption.
 

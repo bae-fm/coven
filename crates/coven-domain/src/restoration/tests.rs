@@ -1407,7 +1407,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let owner_pk = pubkey_hex(&owner);
     let encryption = EncryptionService::from_key([42; 32]);
     storage
-        .invite_member(
+        .admit_member(
             &db_owner,
             db_owner_store_dir.clone(),
             &owner,

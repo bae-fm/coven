@@ -85,7 +85,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
-    ) -> Result<(), crate::sync::store::membership::InviteError> {
+    ) -> Result<(), crate::sync::store::membership::MembershipMutationError> {
         self.complete_revoke_rotation_adoption(pending_rotation, adopted_generation)
             .await
     }

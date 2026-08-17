@@ -2,4 +2,4 @@
 
 mod error;
 
-pub use error::InviteError;
+pub use error::MembershipMutationError;

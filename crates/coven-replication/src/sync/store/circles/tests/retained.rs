@@ -18,7 +18,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
     let successor_pubkey = keys::public_key_hex(&successor);
     let encryption = EncryptionService::from_key([42; 32]);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &founder,
@@ -29,7 +29,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
             "Revocation test Store",
         )
         .await
-        .expect("invite successor member through the production membership path");
+        .expect("admit successor member through the production membership path");
 
     let successor_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let successor_db = crate::sync::test_helpers::open_test_db(successor_db_store_dir.clone());
@@ -77,7 +77,7 @@ async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations(
             .expect("scoped Store has an established keyring"),
     );
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &founder,
@@ -187,7 +187,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
     let peer = UserKeypair::generate();
     let peer_pubkey = keys::public_key_hex(&peer);
     store
-        .invite_member(
+        .admit_member(
             &db,
             db_store_dir.clone(),
             &founder,
@@ -198,7 +198,7 @@ async fn retained_circle_activation_reverifies_every_retained_boundary() {
             "Retained Circle activation Store",
         )
         .await
-        .expect("invite retained Circle peer");
+        .expect("admit retained Circle peer");
     let prepared = store
         .bind_device_in(&db, db_store_dir.clone(), &founder)
         .await

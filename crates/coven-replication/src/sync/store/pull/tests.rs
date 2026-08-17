@@ -472,7 +472,7 @@ impl EffectiveAccessFixture {
             .await
             .expect("open effective-access owner Store");
         store
-            .invite_member(
+            .admit_member(
                 &owner_database,
                 owner_database_store_dir.clone(),
                 &owner,
@@ -483,7 +483,7 @@ impl EffectiveAccessFixture {
                 "Effective Access Store",
             )
             .await
-            .expect("invite effective-access Store member");
+            .expect("admit effective-access Store member");
         let member_device = store
             .activate_joined_device(
                 &owner_database,
@@ -924,7 +924,7 @@ async fn readded_store_member_restores_circle_access_from_a_stale_removed_member
 
     fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.owner_database,
             fixture.owner_database_store_dir.clone(),
             &fixture.owner,
@@ -1300,7 +1300,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
     let candidate = crate::sync::test_helpers::user_keypair_from_seed([43; 32]);
     let encryption = coven_keys::encryption::EncryptionService::from_key([73; 32]);
     store
-        .invite_member(
+        .admit_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -1311,7 +1311,7 @@ async fn merge_outbound_projects_membership_to_the_commits_predecessors() {
             "Causal Membership Proof",
         )
         .await
-        .expect("invite exact Store member");
+        .expect("admit exact Store member");
 
     let candidate_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let candidate_db = crate::sync::test_helpers::open_test_db(candidate_db_store_dir.clone());

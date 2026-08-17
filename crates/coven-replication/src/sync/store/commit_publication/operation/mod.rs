@@ -1,7 +1,7 @@
 use super::*;
 use crate::sync::store::authorization::load_wrapped_store_key;
 use crate::sync::store::commit_verification::commit::StoreMembershipObjectVerifier;
-use crate::sync::store::membership::InviteError;
+use crate::sync::store::membership::MembershipMutationError;
 use coven_database::VerifiedMergeMembershipObjects;
 use coven_protocol::membership::{
     self, MembershipChain, MembershipChange, MembershipEntry, MembershipError, MembershipHeadRef,
@@ -42,7 +42,7 @@ pub(super) use blob_preparation::close_prepared_packages;
 pub(crate) use blob_preparation::prepare_partition_blob_locator;
 
 use membership_mutation_journal::{
-    decode_membership_mutation, exact_owned_remote, InviteMutationPlan, MembershipMutationPlan,
+    decode_membership_mutation, exact_owned_remote, AdmissionMutationPlan, MembershipMutationPlan,
     MembershipMutationProgress, MutationPersistence, ReplacementWrappedKey, ResolveMutationPlan,
     RevokeMembershipPublication, RevokeMutationPlan,
 };
@@ -104,7 +104,10 @@ impl MergeConflictResolutionCommitPlan {
         replacement_grant: coven_protocol::membership::MembershipGrantId,
         membership: coven_protocol::store_commit::GrantStreamAnchor,
         recovery: coven_protocol::store_commit::GrantStreamAnchor,
-    ) -> Result<coven_protocol::membership::StoreMembershipConflictResolution, InviteError> {
+    ) -> Result<
+        coven_protocol::membership::StoreMembershipConflictResolution,
+        MembershipMutationError,
+    > {
         self.writer.sign_conflict_resolution(
             chain,
             self.root.store_root_hash,
@@ -218,7 +221,7 @@ pub(crate) enum AuthorizationRefreshError {
     #[error("select this device's wrapped-key authority: {0}")]
     Membership(#[source] coven_protocol::membership::MembershipError),
     #[error("read this device's wrapped key: {0}")]
-    WrappedKey(#[source] crate::sync::store::membership::InviteError),
+    WrappedKey(#[source] crate::sync::store::membership::MembershipMutationError),
     #[error("rotation gate database state: {0}")]
     Database(#[source] coven_database::DbError),
     #[error("merge this device's live and selected keyrings: {0}")]

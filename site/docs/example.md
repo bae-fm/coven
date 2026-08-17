@@ -288,35 +288,34 @@ layout, and the [Cache](/docs/cache) page covers the device-local read side.
 ## Share with a teammate
 
 A store starts with one member, the device that created it. To add a teammate,
-the owner calls
-`handle.invite_member(...)` with the teammate's public key and a
-[`MemberRole`](rustdoc:enum:coven::MemberRole) (`Owner`,
-`Member`, or read-only `Follower`). It returns a code the teammate redeems.
+the joining device first calls `generate_join_request(...)` and sends that
+request code to an owner. The owner passes the exact request and a
+[`MemberRole`](rustdoc:enum:coven::MemberRole) (`Owner`, `Member`, or read-only
+`Follower`) to `handle.begin_device_invite(...)`.
 
 ```rust
-let invite_code = handle
-    .invite_member(&teammate_pubkey_hex, None, MemberRole::Member)
+let device_invitation = handle
+    .begin_device_invite(&join_request_code, MemberRole::Member)
     .await?;
+let scanned_bytes = device_invitation.to_bytes();
 ```
 
-On the teammate's device,
-[`DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) persists the join
-journal and turns the transferred offer, approval, provider-ready bootstrap,
-and activation into the corresponding access request, registration request,
-readiness proof, and installed `Config`. The owner handles the other side with
-the device-join methods on `CovenHandle`.
+The invitation encrypts the credential-bearing membership admission to the
+pending identity that created that request. The host transfers `scanned_bytes`
+back to that same device. The joining side passes them and its retained request
+to `join_with_scanned_invite(...)`, while the owner keeps
+`handle.drive_device_join(&device_invitation, ...)` running until activation or
+abandonment.
 
 Handing those artifacts between the two devices is the host's to arrange, and
 coven ships one way to do it. Each artifact travels as a create-once object in
 the store's own cloud home, under a namespace for that join attempt, sealed
 with a key minted for it — so the storage provider carries the exchange without
-reading it. The owner mints a
-[`DeviceJoinOfferBundle`](rustdoc:struct:coven::DeviceJoinOfferBundle) (the
-offer plus that namespace and key) for the joining device to scan or type in;
-from there
-[`join_via_transport`](rustdoc:struct:coven::DeviceJoinClient) on the joining
-side and `drive_device_join` on the
-owner's carry the join to a saved `Config`. Hosts that would rather deliver the
+reading it. The owner mints a sealed
+[`DeviceJoinInvite`](rustdoc:struct:coven::DeviceJoinInvite) containing the
+admission and the attempt's transport bundle. From there,
+`join_with_scanned_invite` on the joining side and `drive_device_join` on the
+owner's side carry the join to a saved `Config`. Hosts that deliver the
 artifacts themselves — over a local network, a relay, a QR per step — keep
 using the `DeviceJoinAction` surface directly.
 

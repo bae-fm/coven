@@ -717,16 +717,16 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invite_member(
+    pub(crate) async fn admit_member(
         &self,
         public_key_hex: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
     ) -> Result<
-        crate::sync::store::membership::MemberInvitation,
+        crate::sync::store::membership::MemberAdmission,
         crate::sync::store::membership::MembershipOpsError,
     > {
         let mut authorization = self
@@ -735,9 +735,9 @@ impl Store {
             .map_err(StoreError::from)
             .map_err(membership::MembershipOpsError::from)?;
         authorization
-            .invite_member(
+            .admit_member(
                 public_key_hex,
-                invitee_email,
+                member_email,
                 role,
                 encryption,
                 store_id,

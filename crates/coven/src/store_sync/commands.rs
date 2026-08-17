@@ -45,20 +45,20 @@ impl StoreSync {
         }
     }
 
-    pub(crate) async fn invite_member(
+    pub(crate) async fn admit_member(
         &self,
         public_key_hex: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
-    ) -> Result<coven_replication::sync::MemberInvitation, SyncError> {
+    ) -> Result<coven_replication::sync::MemberAdmission, SyncError> {
         let active = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
         if !active.is_encrypted() {
             return Err(SyncError::NotEncryptedHome);
         }
         active
-            .invite_member(
+            .admit_member(
                 public_key_hex,
-                invitee_email,
+                member_email,
                 role,
                 &active.config().store_name,
             )

@@ -53,7 +53,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::InviteError,
+        crate::sync::store::commit_publication::membership::MembershipMutationError,
     > {
         self.keyrings.open(&self.membership).await
     }
@@ -63,7 +63,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         membership: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::InviteError,
+        crate::sync::store::commit_publication::membership::MembershipMutationError,
     > {
         self.keyrings.open(membership).await
     }
@@ -74,7 +74,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         initial: &coven_keys::encryption::EncryptionService,
     ) -> Result<
         coven_keys::encryption::EncryptionService,
-        crate::sync::store::commit_publication::membership::InviteError,
+        crate::sync::store::commit_publication::membership::MembershipMutationError,
     > {
         self.keyrings.open_or(membership, initial).await
     }
@@ -98,7 +98,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         chain: &coven_protocol::membership::MembershipChain,
     ) -> Result<
         coven_protocol::membership::AuthorStreamId,
-        crate::sync::store::commit_publication::membership::InviteError,
+        crate::sync::store::commit_publication::membership::MembershipMutationError,
     > {
         let author = self.writer.author_pubkey();
         let grant = chain.active_owner_grant(&author).ok_or_else(|| {
@@ -119,17 +119,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         publication: &PreparedMembershipPublication,
     ) -> Result<
         coven_protocol::store_commit::StoreDeviceRegistration,
-        crate::sync::store::membership::InviteError,
+        crate::sync::store::membership::MembershipMutationError,
     > {
         let author = self
             .history
             .load_registration(&publication.head.body.author_registration)
             .await
-            .map_err(crate::sync::store::membership::InviteError::from)?
+            .map_err(crate::sync::store::membership::MembershipMutationError::from)?
             .value;
         if !publication.head.verify(&author) {
             return Err(
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                     "prepared membership head has an invalid certified-device signature"
                         .to_string(),
                 ),

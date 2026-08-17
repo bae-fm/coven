@@ -17,7 +17,7 @@ pub enum OwnerPromotionError {
     #[error("Owner promotion Store pull: {0}")]
     StorePull(#[source] Box<crate::sync::store::StorePullError>),
     #[error("Owner promotion membership operation: {0}")]
-    Invite(#[source] Box<crate::sync::store::InviteError>),
+    MembershipMutation(#[source] Box<crate::sync::store::MembershipMutationError>),
     #[error("Owner promotion membership chain: {0}")]
     AnchoredChain(#[source] Box<crate::sync::store::AnchoredChainError>),
     #[error("Owner promotion Store object: {0}")]
@@ -64,9 +64,9 @@ impl From<crate::sync::store::StorePullError> for OwnerPromotionError {
     }
 }
 
-impl From<crate::sync::store::InviteError> for OwnerPromotionError {
-    fn from(error: crate::sync::store::InviteError) -> Self {
-        Self::Invite(Box::new(error))
+impl From<crate::sync::store::MembershipMutationError> for OwnerPromotionError {
+    fn from(error: crate::sync::store::MembershipMutationError) -> Self {
+        Self::MembershipMutation(Box::new(error))
     }
 }
 

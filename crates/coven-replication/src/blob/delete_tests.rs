@@ -155,7 +155,7 @@ async fn storage_with_chain(
     .expect("create exact Store membership fixture");
     let (store, connection) = fixture;
     store
-        .invite_member(
+        .admit_member(
             db,
             db_store_dir.clone(),
             &founder,
@@ -166,7 +166,7 @@ async fn storage_with_chain(
             "Test Store",
         )
         .await
-        .expect("publish exact member invitation");
+        .expect("publish exact member admission");
 
     ((store, connection), founder, member)
 }

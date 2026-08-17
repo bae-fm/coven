@@ -2,32 +2,34 @@ use super::*;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invite_member(
+    pub(crate) async fn admit_member(
         &mut self,
         public_key_hex: &str,
-        invitee_email: Option<&str>,
+        member_email: Option<&str>,
         role: coven_protocol::membership::MemberRole,
         encryption: &coven_keys::encryption::EncryptionService,
         store_id: &str,
         store_name: &str,
     ) -> Result<
-        crate::sync::store::membership::MemberInvitation,
+        crate::sync::store::membership::MemberAdmission,
         crate::sync::store::membership::MembershipOpsError,
     > {
         if role == coven_protocol::membership::MemberRole::Owner {
-            return Err(crate::sync::store::membership::MembershipOpsError::Invite(
-                crate::sync::store::membership::InviteError::Membership(
-                    coven_protocol::membership::MembershipError::OwnerPromotionRequired,
+            return Err(
+                crate::sync::store::membership::MembershipOpsError::Mutation(
+                    crate::sync::store::membership::MembershipMutationError::Membership(
+                        coven_protocol::membership::MembershipError::OwnerPromotionRequired,
+                    ),
                 ),
-            ));
+            );
         }
         if public_key_hex == self.writer.author_pubkey() {
-            return Err(crate::sync::store::membership::MembershipOpsError::SelfInvite);
+            return Err(crate::sync::store::membership::MembershipOpsError::SelfAdmission);
         }
         self.resolved_membership()?;
         let root = self.store_root().clone();
         let protocol_store_id = root.store_root_id.to_string();
-        let invite_timestamp = self.database.stamp();
+        let admission_timestamp = self.database.stamp();
         let (join_info, wrapped_key, validated_chain) = async {
             let storage = self.storage.clone();
             let database = self.database.clone();
@@ -38,27 +40,27 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 Some(row) => {
                     let intent_hash = row.intent_hash;
                     let (pending, progress) = decode_membership_mutation(row)?;
-                    let MembershipMutationPlan::Invite(plan) = pending else {
-                        return Err(crate::sync::store::membership::InviteError::PendingMutation(
+                    let MembershipMutationPlan::Admission(plan) = pending else {
+                        return Err(crate::sync::store::membership::MembershipMutationError::PendingMutation(
                             "a member removal is pending".to_string(),
                         ));
                     };
                     if !plan.matches_request(
                         &self.writer_pubkey(),
                         public_key_hex,
-                        invitee_email,
+                        member_email,
                         &role,
                         &protocol_store_id,
                     ) {
-                        return Err(crate::sync::store::membership::InviteError::PendingMutation(
-                            "the pending invitation has different immutable inputs".to_string(),
+                        return Err(crate::sync::store::membership::MembershipMutationError::PendingMutation(
+                            "the pending admission has different immutable inputs".to_string(),
                         ));
                     }
                     (plan, progress, intent_hash)
                 }
                 None => {
                     let stream_id = self.select_membership_author_stream(&chain).await?;
-                    let invitee_x25519_pk =
+                    let member_x25519_pk =
                         coven_keys::keys::ed25519_hex_to_x25519_public_key(public_key_hex)?;
                     let authorized_keyring = self
                         .open_keyring_or_for_membership(&chain, encryption)
@@ -68,7 +70,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .seal_keyring_for_member(
                             protocol_store_id.clone(),
                             public_key_hex.to_string(),
-                            invitee_x25519_pk,
+                            member_x25519_pk,
                             authorized_keyring,
                         )
                         .await?;
@@ -77,26 +79,26 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         &chain,
                         stream_id,
                         public_key_hex.to_string(),
-                        invitee_email.map(str::to_string),
+                        member_email.map(str::to_string),
                         role.clone(),
                         wrapped_key.reference.clone(),
-                        invite_timestamp.clone(),
+                        admission_timestamp.clone(),
                     )?;
                     let publication = self
                         .prepare_membership_publication(&chain, entry)
                         .await?;
-                    let plan = InviteMutationPlan {
+                    let plan = AdmissionMutationPlan {
                         publication,
-                        invitee_pubkey: public_key_hex.to_string(),
-                        invitee_email: invitee_email.map(str::to_string),
+                        member_pubkey: public_key_hex.to_string(),
+                        member_email: member_email.map(str::to_string),
                         role,
                         desired_access: coven_storage::cloud::CloudAccessState::Present {
                             member_pubkey: public_key_hex.to_string(),
-                            provider_account_email: invitee_email.map(str::to_string),
+                            provider_account_email: member_email.map(str::to_string),
                         },
                         wrapped_key,
                     };
-                    let encoded = MembershipMutationPlan::Invite(plan.clone()).encode()?;
+                    let encoded = MembershipMutationPlan::Admission(plan.clone()).encode()?;
                     let progress = MembershipMutationProgress::Pending;
                     let intent_hash = database
                         .stage_membership_mutation(
@@ -124,14 +126,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             || wrapped
                 .verify_and_unwrap(
                     &plan.publication.entry.store_id,
-                    &plan.invitee_pubkey,
+                    &plan.member_pubkey,
                     std::iter::once(plan.publication.entry.author_pubkey.as_str()),
                 )
                 .is_err()
         {
             return Err(
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
-                    "planned invitation wrap is not bound to its exact entry, recipient, and author"
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
+                    "planned admission wrap is not bound to its exact entry, recipient, and author"
                         .to_string(),
                 ),
             );
@@ -141,7 +143,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         let coven_storage::cloud::CloudAccessOutcome::Present(observed_join_info) = outcome else {
             return Err(
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                     "provider returned absent outcome for present access request".to_string(),
                 ),
             );
@@ -149,16 +151,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let persistence = self.membership_mutation_persistence(intent_hash);
         let join_info = match progress {
             MembershipMutationProgress::Pending => {
-                progress = MembershipMutationProgress::InviteGranted {
+                progress = MembershipMutationProgress::AdmissionGranted {
                     join_info: observed_join_info.clone(),
                 };
                 persistence.record_progress(&progress).await?;
                 observed_join_info
             }
-            MembershipMutationProgress::InviteGranted { join_info } => {
+            MembershipMutationProgress::AdmissionGranted { join_info } => {
                 if join_info != observed_join_info {
                     return Err(
-                        crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                        crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                             "provider returned different join information while verifying persisted access"
                                 .to_string(),
                         ),
@@ -172,8 +174,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             | MembershipMutationProgress::RevokeActivated { .. }
             | MembershipMutationProgress::ResolutionActivated { .. } => {
                 return Err(
-                    crate::sync::store::membership::InviteError::InvalidDurableMutation(
-                        "invitation carries member-removal progress".to_string(),
+                    crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
+                        "admission carries member-removal progress".to_string(),
                     ),
                 );
             }
@@ -183,38 +185,38 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .create_protocol_object(&plan.wrapped_key.object)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::from(error)
+                crate::sync::store::membership::MembershipMutationError::from(error)
             })?;
         storage
             .as_ref()
             .create_protocol_object(&plan.publication.prepared_entry()?)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::from(error)
+                crate::sync::store::membership::MembershipMutationError::from(error)
             })?;
         self.membership_objects()
             .load_entry(&plan.publication.entry_ref)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::from(error)
+                crate::sync::store::membership::MembershipMutationError::from(error)
             })?;
         storage
             .as_ref()
             .create_protocol_object(&plan.publication.prepared_head()?)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::from(error)
+                crate::sync::store::membership::MembershipMutationError::from(error)
             })?;
         self.membership_objects()
             .load_head_for_registration(&plan.publication.head_ref, &author)
             .await
             .map_err(|error| {
-                crate::sync::store::membership::InviteError::from(error)
+                crate::sync::store::membership::MembershipMutationError::from(error)
             })?;
         validated_chain.activate_head_ref(plan.publication.head_ref.clone())?;
         persistence.complete().await?;
         let wrapped_key = plan.wrapped_key.reference;
-        Ok::<_, crate::sync::store::membership::InviteError>((
+        Ok::<_, crate::sync::store::membership::MembershipMutationError>((
             join_info,
             wrapped_key,
             validated_chain,
@@ -232,11 +234,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         {
             return Err(crate::sync::store::membership::MembershipOpsError::Chain(
                 crate::sync::store::membership::AnchoredChainError::LoadFailed(
-                    "Store protocol root differs from the invite authority".to_string(),
+                    "Store protocol root differs from the admission authority".to_string(),
                 ),
             ));
         }
-        Ok(crate::sync::store::membership::MemberInvitation {
+        Ok(crate::sync::store::membership::MemberAdmission {
             store_id: store_id.to_string(),
             store_name: store_name.to_string(),
             join_info,
@@ -312,14 +314,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
-    ) -> Result<(), crate::sync::store::membership::InviteError> {
+    ) -> Result<(), crate::sync::store::membership::MembershipMutationError> {
         let _mutation = self.database.membership_mutation_permit().await;
         let row = self
             .database
             .outbound_membership_mutation()
             .await?
             .ok_or_else(|| {
-                crate::sync::store::membership::InviteError::InvalidDurableMutation(
+                crate::sync::store::membership::MembershipMutationError::InvalidDurableMutation(
                     "activated removal journal is absent during key adoption".to_string(),
                 )
             })?;
@@ -339,11 +341,11 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         conflict_hash: store_commit::ObjectHash,
         selection: membership::MembershipConflictSelection,
         created_at: &str,
-    ) -> Result<ResolveMutationPlan, InviteError> {
+    ) -> Result<ResolveMutationPlan, MembershipMutationError> {
         let base = self
             .prepare_conflict_resolution_plan(chain.head_refs())
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let chain = base.membership().clone();
         let membership::MembershipStatus::Conflict(conflict) = chain.status() else {
             return Err(MembershipError::Conflict.into());
@@ -409,7 +411,8 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             membership,
             recovery,
         )?;
-        let resolution_bytes = serde_json::to_vec(&resolution).map_err(InviteError::Json)?;
+        let resolution_bytes =
+            serde_json::to_vec(&resolution).map_err(MembershipMutationError::Json)?;
         let resolution_context = ProtocolObjectContext::signed_plaintext(
             base.root().store_root_hash,
             ProtocolObjectDomain::StoreMembershipResolution,
@@ -449,7 +452,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         let operation_plan = base
             .finish(&resolved_chain, &reference)
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let mut stream_activations = vec![
             store_commit::StreamActivation::grant_authorized(
                 resolution.store_root_hash,
@@ -474,7 +477,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 },
             )
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let publication = self
             .finish_membership_transition(
                 transition.clone(),
@@ -484,7 +487,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             )
             .await?;
         self.attach_merge_membership_proof(&mut candidate, &publication, Some(&resolution))
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let plan = ResolveMutationPlan {
             resolution,
             reference,
@@ -534,10 +537,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             _ => false,
         };
         if !valid_choice {
-            return Err(crate::sync::store::membership::InviteError::Membership(
-                coven_protocol::membership::MembershipError::InvalidConflictResolution,
-            )
-            .into());
+            return Err(
+                crate::sync::store::membership::MembershipMutationError::Membership(
+                    coven_protocol::membership::MembershipError::InvalidConflictResolution,
+                )
+                .into(),
+            );
         }
         let conflict_hash = choice.conflict_hash();
         let selection = choice.selection().clone();
@@ -547,13 +552,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let (mut plan, progress, intent_hash) = match database
             .outbound_membership_mutation()
             .await
-            .map_err(InviteError::from)?
+            .map_err(MembershipMutationError::from)?
         {
             Some(row) => {
                 let intent_hash = row.intent_hash;
                 let (pending, progress) = decode_membership_mutation(row)?;
                 let MembershipMutationPlan::Resolve(plan) = pending else {
-                    return Err(InviteError::PendingMutation(
+                    return Err(MembershipMutationError::PendingMutation(
                         "another membership mutation is pending".to_string(),
                     )
                     .into());
@@ -562,7 +567,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     || plan.resolution.resolver_pubkey != signer_pubkey
                     || plan.resolution.selection != selection
                 {
-                    return Err(InviteError::PendingMutation(
+                    return Err(MembershipMutationError::PendingMutation(
                         "the pending resolution has different immutable inputs".to_string(),
                     )
                     .into());
@@ -583,7 +588,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         None,
                     )
                     .await
-                    .map_err(InviteError::from)?;
+                    .map_err(MembershipMutationError::from)?;
                 (plan, progress, intent_hash)
             }
         };
@@ -592,21 +597,25 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         if let MembershipMutationProgress::ResolutionCandidateNonactivating { nonactivation } =
             &progress
         {
-            if nonactivation.reference().map_err(InviteError::from)? != plan.candidate.reference {
-                return Err(InviteError::InvalidDurableMutation(
+            if nonactivation
+                .reference()
+                .map_err(MembershipMutationError::from)?
+                != plan.candidate.reference
+            {
+                return Err(MembershipMutationError::InvalidDurableMutation(
                     "resolution nonactivation names another candidate".to_string(),
                 )
                 .into());
             }
             persistence.finish_nonactivating_resolution(&plan).await?;
-            return Err(InviteError::InvalidDurableMutation(
+            return Err(MembershipMutationError::InvalidDurableMutation(
                 "membership resolution candidate did not activate".to_string(),
             )
             .into());
         }
         if let MembershipMutationProgress::ResolutionActivated { candidate } = &progress {
             if candidate != &plan.candidate.reference {
-                return Err(InviteError::InvalidDurableMutation(
+                return Err(MembershipMutationError::InvalidDurableMutation(
                     "resolution activation names another candidate".to_string(),
                 )
                 .into());
@@ -616,18 +625,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     plan.resolution.store_root_hash,
                     &[(plan.reference.clone(), plan.resolution.clone())],
                 )
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
             membership
                 .add_entry(plan.publication.entry.clone())
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
             membership
                 .activate_head_ref(plan.publication.head_ref.clone())
-                .map_err(InviteError::from)?;
+                .map_err(MembershipMutationError::from)?;
             self.membership = membership;
             return Ok(plan.reference);
         }
         if !matches!(progress, MembershipMutationProgress::Pending) {
-            return Err(InviteError::InvalidDurableMutation(
+            return Err(MembershipMutationError::InvalidDurableMutation(
                 "membership resolution carries another mutation's progress".to_string(),
             )
             .into());
@@ -637,20 +646,20 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 plan.resolution.store_root_hash,
                 &[(plan.reference.clone(), plan.resolution.clone())],
             )
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         membership
             .add_entry(plan.publication.entry.clone())
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         let remotes = plan.remote_objects()?;
         self.storage
             .as_ref()
             .create_protocol_object(&plan.prepared_resolution()?)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         self.membership_objects()
             .load_resolution(&plan.reference)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         persistence
             .mark_remote_object_uploaded(
                 exact_owned_remote(&remotes, &plan.reference.object)?.into_record(),
@@ -665,7 +674,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await?;
         self.upload_commit(&plan.candidate)
             .await
-            .map_err(InviteError::from)?;
+            .map_err(MembershipMutationError::from)?;
         persistence
             .mark_remote_object_uploaded(
                 exact_owned_remote(&remotes, &plan.candidate.reference.object)?.into_record(),
@@ -698,7 +707,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 {
                     membership
                         .activate_head_ref(plan.publication.head_ref.clone())
-                        .map_err(InviteError::from)?;
+                        .map_err(MembershipMutationError::from)?;
                     self.membership = membership;
                     return Ok(plan.reference);
                 }
@@ -728,13 +737,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     persistence
                         .begin_nonactivating_resolution(&plan, *nonactivation)
                         .await?;
-                    return Err(InviteError::InvalidDurableMutation(
+                    return Err(MembershipMutationError::InvalidDurableMutation(
                         "membership resolution candidate did not activate".to_string(),
                     )
                     .into());
                 }
                 _ => {
-                    return Err(InviteError::InvalidDurableMutation(
+                    return Err(MembershipMutationError::InvalidDurableMutation(
                         "membership resolution returned an inapplicable publication outcome"
                             .to_string(),
                     )

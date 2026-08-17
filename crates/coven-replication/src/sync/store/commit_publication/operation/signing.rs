@@ -56,14 +56,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         recipient: &str,
         recipient_key: &[u8; coven_keys::keys::CURVE25519_PUBLICKEYBYTES],
         keyring: &coven_keys::encryption::EncryptionService,
-    ) -> Result<PreparedWrappedStoreKey, InviteError> {
+    ) -> Result<PreparedWrappedStoreKey, MembershipMutationError> {
         let wrapped = self
             .writer
             .seal_keyring(store_id, recipient, recipient_key, keyring)
-            .map_err(InviteError::Encryption)?;
+            .map_err(MembershipMutationError::Encryption)?;
         self.prepare_wrapped_key(recipient, wrapped)
             .await
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 
     pub(super) fn sign_owner_barrier_removal(
@@ -74,7 +74,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         wrapped_keys: Vec<WrappedStoreKeyRef>,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         timestamp: String,
-    ) -> Result<MembershipEntry, InviteError> {
+    ) -> Result<MembershipEntry, MembershipMutationError> {
         self.writer
             .sign_owner_barrier_removal(
                 chain,
@@ -84,7 +84,7 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 device_state,
                 timestamp,
             )
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 
     pub(super) fn sign_direct_removal(
@@ -94,10 +94,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         revokee_pubkey: String,
         wrapped_keys: Vec<WrappedStoreKeyRef>,
         timestamp: String,
-    ) -> Result<MembershipEntry, InviteError> {
+    ) -> Result<MembershipEntry, MembershipMutationError> {
         self.writer
             .sign_direct_removal(chain, stream_id, revokee_pubkey, wrapped_keys, timestamp)
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 
     pub(crate) fn attach_merge_membership_proof(
@@ -114,18 +114,18 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         &self,
         candidate: &mut commit_plan::PreparedStoreOperationCommit,
         publication: &PreparedMembershipPublication,
-    ) -> Result<(), InviteError> {
+    ) -> Result<(), MembershipMutationError> {
         self.attach_merge_membership_proof(candidate, publication, None)
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 
     pub(super) async fn set_membership_access(
         &self,
         state: coven_storage::cloud::CloudAccessState,
-    ) -> Result<coven_storage::cloud::CloudAccessOutcome, InviteError> {
+    ) -> Result<coven_storage::cloud::CloudAccessOutcome, MembershipMutationError> {
         self.storage
             .set_member_access(state)
             .await
-            .map_err(InviteError::from)
+            .map_err(MembershipMutationError::from)
     }
 }

@@ -288,24 +288,24 @@ impl CloudHomeError {
 
 /// Information needed to join a cloud home from another device.
 ///
-/// The compact tagged shape (short `t` tags) is shared by invite codes and
-/// restore codes — both wrap this same type, so a code adding neither weight
-/// nor a second serde shape to carry around.
+/// The compact tagged shape (short `t` tags) is shared by recipient-sealed
+/// membership admissions and restore codes, so both carry one exact provider
+/// shape.
 ///
 /// `Debug` is hand-written so the S3 `secret_key` prints as `<redacted>` —
 /// `{:?}` in an error path cannot leak the storage credential.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "t")]
+#[serde(tag = "t", deny_unknown_fields)]
 pub enum CloudHomeJoinInfo {
     #[serde(rename = "s3")]
     S3 {
         bucket: String,
         region: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
         access_key: String,
         secret_key: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
     #[serde(rename = "gd")]

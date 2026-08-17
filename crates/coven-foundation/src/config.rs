@@ -63,7 +63,7 @@ impl CloudProvider {
 ///   key (the `.enc` suffix) and blobs use coven's content-addressed path under
 ///   the uploading device, `{namespace}/{uploader}/{ab}/{cd}/{id}`. Anyone with
 ///   bucket access sees only ciphertext
-///   under opaque keys. Sharing a store (inviting members) requires an opaque
+///   under opaque keys. Sharing a store (admitting members) requires an opaque
 ///   home, because it wraps and rotates the store key.
 /// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and
 ///   blobs use the consumer-supplied readable path `{namespace}/{cloud_path}`, so
@@ -97,29 +97,17 @@ impl HomeStorage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CloudHomeConfig {
     /// Selected provider. None = not configured.
-    #[serde(default)]
     pub provider: Option<CloudProvider>,
-    #[serde(default)]
     pub s3_bucket: Option<String>,
-    #[serde(default)]
     pub s3_region: Option<String>,
-    #[serde(default)]
     pub s3_endpoint: Option<String>,
-    #[serde(default)]
     pub s3_key_prefix: Option<String>,
-    #[serde(default = "default_exact_upload_verification")]
     pub exact_upload_verification: ExactUploadVerification,
-    #[serde(default)]
     pub google_drive_folder_id: Option<String>,
-    #[serde(default)]
     pub dropbox_folder_path: Option<String>,
-    #[serde(default)]
     pub onedrive_drive_id: Option<String>,
-    #[serde(default)]
     pub onedrive_folder_id: Option<String>,
-    #[serde(default)]
     pub cloudkit_owner_name: Option<String>,
-    #[serde(default)]
     pub cloudkit_zone_name: Option<String>,
     /// How this home stores its objects: opaque ([`HomeStorage::Opaque`]) or
     /// browsable ([`HomeStorage::Browsable`]). Drives both the at-rest cipher and
@@ -223,7 +211,7 @@ pub(crate) struct ConfigYaml {
     pub(crate) store_id: String,
     pub(crate) store_name: String,
     pub(crate) device_id: String,
-    #[serde(default, flatten)]
+    #[serde(flatten)]
     pub(crate) cloud_home: CloudHomeConfig,
 }
 
@@ -317,18 +305,15 @@ mod tests {
         assert_eq!(loaded, config);
     }
 
-    /// A file that omits every field with a designed default (the flattened
-    /// `cloud_home`) still loads — those absences are real inputs, not bugs.
-    /// `storage` has no default (the host must pick opaque vs. browsable when
-    /// it creates the home), so it is the one `cloud_home` field still spelled
-    /// out.
+    /// Optional provider fields are absent for a local store, while the two
+    /// required cloud-home policy fields remain explicit on disk.
     #[test]
-    fn load_with_absent_optional_fields_uses_defaults() {
+    fn load_with_absent_optional_provider_fields() {
         let dir = tempfile::tempdir().expect("temp dir");
         let store_dir = StoreDir::new_ephemeral(dir.path());
         std::fs::write(
             store_dir.config_path(),
-            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nstorage: opaque\n",
+            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nexact_upload_verification: metadata_hash\nstorage: opaque\n",
         )
         .expect("write config.yaml");
 
@@ -340,9 +325,23 @@ mod tests {
         assert_eq!(loaded.cloud_home, CloudHomeConfig::default());
     }
 
-    /// `device_id` is a required field on the wire, unlike the designed-default
-    /// ones above: the save side always writes it, so a file without one is bad
-    /// data, not an absence to tolerate — it must fail loudly, not default.
+    #[test]
+    fn load_with_missing_upload_verification_errors() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_dir = StoreDir::new_ephemeral(dir.path());
+        std::fs::write(
+            store_dir.config_path(),
+            "store_id: store-1\nstore_name: My Store\ndevice_id: device-1\nstorage: opaque\n",
+        )
+        .expect("write config.yaml");
+
+        let error = Config::load_from_config_yaml(&store_dir)
+            .expect_err("missing exact upload verification");
+        assert!(matches!(error, ConfigError::Parse { .. }));
+    }
+
+    /// `device_id` is a required field on the wire: the save side always writes
+    /// it, so a file without one is bad data and must fail loudly.
     #[test]
     fn load_with_missing_device_id_errors() {
         let dir = tempfile::tempdir().expect("temp dir");

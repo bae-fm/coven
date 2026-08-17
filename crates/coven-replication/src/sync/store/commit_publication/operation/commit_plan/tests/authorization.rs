@@ -18,7 +18,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
     .await
     .expect("create Merge Store");
     store
-        .invite_member(
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -29,7 +29,7 @@ async fn merge_operation_authorization_uses_its_exact_predecessor_membership_cut
             "Operation predecessor membership",
         )
         .await
-        .expect("invite operation author");
+        .expect("admit operation author");
     let writer_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let writer_db = crate::sync::test_helpers::open_test_db(writer_db_store_dir.clone());
     let writer_device = store
@@ -125,7 +125,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
     .await
     .expect("create Merge Store");
     store
-        .invite_member(
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -136,7 +136,7 @@ async fn merge_outbound_authorization_rejects_a_direct_cut_older_than_its_predec
             "Direct removal predecessor membership",
         )
         .await
-        .expect("invite operation author");
+        .expect("admit operation author");
     let writer_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let writer_db = crate::sync::test_helpers::open_test_db(writer_db_store_dir.clone());
     store
@@ -263,7 +263,7 @@ async fn merge_outbound_authorization_admits_direct_membership_after_its_predece
     let new_member = UserKeypair::generate();
     let new_member_pubkey = pubkey_hex(&new_member);
     store
-        .invite_member(
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,

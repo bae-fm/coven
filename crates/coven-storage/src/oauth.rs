@@ -685,13 +685,10 @@ impl Drop for AbortOnDrop {
 #[cfg(any(test, feature = "oauth-providers"))]
 #[derive(Deserialize)]
 struct TokenResponse {
-    #[serde(default)]
     access_token: Option<String>,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
-    #[serde(default)]
     error: Option<String>,
-    #[serde(default)]
     error_description: Option<String>,
 }
 

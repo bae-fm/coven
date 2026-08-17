@@ -6,7 +6,7 @@ use coven_protocol::wrapped_store_key::{
     PreparedWrappedStoreKey, WrappedStoreKey, WrappedStoreKeyRef,
 };
 
-use crate::sync::store::membership::InviteError;
+use crate::sync::store::membership::MembershipMutationError;
 
 /// Store-key operations bound to one exact Store root and its storage.
 pub struct StoreKeyrings<'storage> {
@@ -26,7 +26,7 @@ impl<'storage> StoreKeyrings<'storage> {
         &self,
         identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
-    ) -> Result<EncryptionService, InviteError> {
+    ) -> Result<EncryptionService, MembershipMutationError> {
         let references = wrapped_key_references(identity, membership)?;
         self.open_references(identity, &references).await
     }
@@ -36,10 +36,10 @@ impl<'storage> StoreKeyrings<'storage> {
         identity: &UserKeypair,
         membership: &MembershipChain,
         required: &WrappedStoreKeyRef,
-    ) -> Result<EncryptionService, InviteError> {
+    ) -> Result<EncryptionService, MembershipMutationError> {
         let references = wrapped_key_references(identity, membership)?;
         if !references.contains(required) {
-            return Err(InviteError::Crypto(
+            return Err(MembershipMutationError::Crypto(
                 "wrapped-key ref is not activated by the verified membership".to_string(),
             ));
         }
@@ -51,7 +51,7 @@ impl<'storage> StoreKeyrings<'storage> {
         identity: &dyn IdentityKeyAuthority,
         membership: &MembershipChain,
         initial: &EncryptionService,
-    ) -> Result<EncryptionService, InviteError> {
+    ) -> Result<EncryptionService, MembershipMutationError> {
         let references = wrapped_key_references(identity, membership)?;
         if references.is_empty() {
             Ok(initial.clone())
@@ -105,14 +105,14 @@ impl<'storage> StoreKeyrings<'storage> {
         &self,
         identity: &dyn IdentityKeyAuthority,
         references: &[WrappedStoreKeyRef],
-    ) -> Result<EncryptionService, InviteError> {
+    ) -> Result<EncryptionService, MembershipMutationError> {
         let recipient = hex::encode(identity.public_key());
         let root = &self.root;
         let store_id = root.store_root_id.to_string();
         let mut merged: Option<EncryptionService> = None;
         for reference in references {
             if reference.recipient_pubkey != recipient {
-                return Err(InviteError::Crypto(
+                return Err(MembershipMutationError::Crypto(
                     "activated wrapped-key ref names another recipient".to_string(),
                 ));
             }
@@ -126,18 +126,18 @@ impl<'storage> StoreKeyrings<'storage> {
                     reference.generation,
                     identity,
                 )
-                .map_err(InviteError::WrappedKeyring)?;
+                .map_err(MembershipMutationError::WrappedKeyring)?;
             merged = Some(match merged {
                 Some(existing) => existing
                     .merged_with(&keyring)
-                    .map_err(InviteError::Encryption)?,
+                    .map_err(MembershipMutationError::Encryption)?,
                 None => keyring,
             });
         }
         merged.ok_or_else(|| {
-            InviteError::Bucket(coven_protocol::objects::StorageError::NotFound(format!(
-                "no activated wrapped Store-key ref for {recipient}"
-            )))
+            MembershipMutationError::Bucket(coven_protocol::objects::StorageError::NotFound(
+                format!("no activated wrapped Store-key ref for {recipient}"),
+            ))
         })
     }
 }
@@ -145,10 +145,10 @@ impl<'storage> StoreKeyrings<'storage> {
 fn wrapped_key_references(
     identity: &dyn IdentityKeyAuthority,
     membership: &MembershipChain,
-) -> Result<Vec<WrappedStoreKeyRef>, InviteError> {
+) -> Result<Vec<WrappedStoreKeyRef>, MembershipMutationError> {
     membership
         .wrapped_key_authority_for(&hex::encode(identity.public_key()))
-        .map_err(InviteError::from)
+        .map_err(MembershipMutationError::from)
 }
 
 /// Read and validate one wrapped Store key through the exact reference the

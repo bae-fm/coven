@@ -138,7 +138,7 @@ pub enum MembershipChange {
     },
     SetMember {
         user_pubkey: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         provider_account_email: Option<String>,
         role: StoreMembershipRoleGrant,
         grant_id: MembershipGrantId,
@@ -570,7 +570,7 @@ pub enum MembershipError {
 pub struct MembershipGrantRecord {
     pub member_pubkey: String,
     pub role: StoreMembershipRoleGrant,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_account_email: Option<String>,
     pub creation_authority: MembershipGrantCreationAuthority,
 }

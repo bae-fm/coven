@@ -753,7 +753,7 @@ impl MemberRemovalHistory {
         .await
         .expect("create removal-proof Store");
         store
-            .invite_member(
+            .admit_member(
                 &db,
                 db_store_dir.clone(),
                 &owner,
@@ -764,7 +764,7 @@ impl MemberRemovalHistory {
                 "Retained removal proof",
             )
             .await
-            .expect("invite removable member");
+            .expect("admit removable member");
         let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
         store

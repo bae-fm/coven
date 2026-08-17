@@ -225,11 +225,9 @@ impl<'storage> AuthorizedStore<'storage> {
         &self,
     ) -> Result<super::StoreRestoreMembership, crate::sync::store::membership::MembershipOpsError>
     {
-        let founder_pubkey = self
-            .membership
-            .founder_pubkey()
-            .map(str::to_string)
-            .ok_or(crate::sync::store::membership::MembershipOpsError::NoFounderChain)?;
+        let founder_pubkey = self.membership.founder_pubkey().map(str::to_string).ok_or(
+            crate::sync::store::membership::MembershipOpsError::NoFounderChainForAdmission,
+        )?;
         Ok(super::StoreRestoreMembership {
             store_root: self.history.root().clone(),
             founder_pubkey,
@@ -303,7 +301,7 @@ impl<'storage> AuthorizedStore<'storage> {
     #[cfg(test)]
     pub(super) async fn membership_keyring_facts_for_test(
         &self,
-    ) -> Result<([u8; 32], usize), crate::sync::store::membership::InviteError> {
+    ) -> Result<([u8; 32], usize), crate::sync::store::membership::MembershipMutationError> {
         self.history
             .membership_keyring_facts(self.identity, &self.membership)
             .await

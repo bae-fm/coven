@@ -74,13 +74,13 @@ impl MergeFixture {
         self.device.membership_for_test().await
     }
 
-    async fn invite_member(
+    async fn admit_member(
         &self,
         member: &UserKeypair,
         role: MemberRole,
-    ) -> crate::sync::store::MemberInvitation {
+    ) -> crate::sync::store::MemberAdmission {
         self.store
-            .invite_member(
+            .admit_member(
                 &self.db,
                 self.store_dir.clone(),
                 &self.owner,
@@ -91,7 +91,7 @@ impl MergeFixture {
                 "Test Store",
             )
             .await
-            .expect("invite exact member")
+            .expect("admit exact member")
     }
 
     async fn try_remove_member(&self, member: &UserKeypair) -> Result<String, MembershipOpsError> {
@@ -142,7 +142,7 @@ async fn anchored_chain_loads_the_root_named_by_its_authoritative_hash() {
 async fn current_floor_is_the_exact_signed_head_cut() {
     let fixture = MergeFixture::new("exact-floor").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
 
     let chain = fixture.load().await;
     let floor = fixture
@@ -161,7 +161,7 @@ async fn current_floor_is_the_exact_signed_head_cut() {
 async fn current_floor_requires_every_exact_entry() {
     let fixture = MergeFixture::new("missing-entry").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let chain = fixture.load().await;
     let head = chain.head_refs().last().expect("current head").clone();
     let loaded_head = fixture
@@ -185,7 +185,7 @@ async fn current_floor_requires_every_exact_entry() {
 async fn persisted_author_floor_requires_readable_head() {
     let fixture = MergeFixture::new("missing-head").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let chain = fixture.load().await;
     let head = chain.head_refs().last().expect("current head").clone();
     fixture
@@ -204,7 +204,7 @@ async fn persisted_author_floor_requires_readable_head() {
 async fn membership_head_must_match_its_exact_author_coordinate() {
     let fixture = MergeFixture::new("head-author").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let chain = fixture.load().await;
     let reference = chain.head_refs().last().expect("current head").clone();
     let mut head = fixture
@@ -228,7 +228,7 @@ async fn membership_head_must_match_its_exact_author_coordinate() {
 async fn invalid_membership_head_signature_preserves_owner_and_cursor() {
     let fixture = MergeFixture::new("bad-head-signature").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let chain = fixture.load().await;
     let before_owner = fixture
         .db
@@ -366,7 +366,7 @@ async fn entry_beyond_membership_head_is_not_committed() {
 async fn complete_chain_still_validates() {
     let fixture = MergeFixture::new("complete-chain").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
 
     assert!(fixture.load().await.can_write_now(&pubkey_hex(&member)));
 }
@@ -415,9 +415,11 @@ async fn store_owns_membership_conflict_reads_and_rejects_a_foreign_choice_atomi
     assert!(
         matches!(
             &result,
-            Err(MembershipOpsError::Invite(InviteError::Membership(
-                coven_protocol::membership::MembershipError::InvalidConflictResolution
-            )))
+            Err(MembershipOpsError::Mutation(
+                MembershipMutationError::Membership(
+                    coven_protocol::membership::MembershipError::InvalidConflictResolution
+                )
+            ))
         ),
         "foreign conflict choice returned {result:?}"
     );
@@ -527,7 +529,7 @@ async fn open_store_reuses_its_verified_replay_baseline() {
 async fn store_prefix_projection_retains_direct_membership_heads() {
     let fixture = MergeFixture::new("project-direct-membership").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let current = fixture.load().await;
     let projected = fixture
         .device
@@ -543,7 +545,7 @@ async fn store_prefix_projection_retains_direct_membership_heads() {
 async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_suffix() {
     let fixture = MergeFixture::new("project-store-bound-membership").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture
@@ -576,7 +578,7 @@ async fn store_prefix_projection_excludes_store_bound_membership_and_its_direct_
     assert_ne!(after_promotion.head_refs(), before_promotion.head_refs());
     let later_member = UserKeypair::generate();
     fixture
-        .invite_member(&later_member, MemberRole::Member)
+        .admit_member(&later_member, MemberRole::Member)
         .await;
     let candidate = fixture.load().await;
     assert!(candidate.can_write_now(&pubkey_hex(&later_member)));
@@ -663,25 +665,25 @@ async fn exact_membership_heads_must_begin_at_their_grant_anchor() {
 }
 
 #[tokio::test]
-async fn invite_carries_the_founder_and_exact_root() {
-    let fixture = MergeFixture::new("invite-authority").await;
-    let invitee = UserKeypair::generate();
-    let invite = fixture.invite_member(&invitee, MemberRole::Member).await;
+async fn admission_carries_the_founder_and_exact_root() {
+    let fixture = MergeFixture::new("admission-authority").await;
+    let candidate = UserKeypair::generate();
+    let admission = fixture.admit_member(&candidate, MemberRole::Member).await;
 
-    assert_eq!(invite.owner_pubkey, fixture.owner_pubkey);
-    assert_eq!(invite.store_root, fixture.store.root());
+    assert_eq!(admission.owner_pubkey, fixture.owner_pubkey);
+    assert_eq!(admission.store_root, fixture.store.root());
     assert!(matches!(
-        invite.membership_floor,
+        admission.membership_floor,
         coven_protocol::membership::MembershipFloor(ref floor) if !floor.is_empty()
     ));
 }
 
 #[tokio::test]
-async fn inviting_yourself_is_a_typed_self_invite_error() {
-    let fixture = MergeFixture::new("self-invite").await;
+async fn admitting_yourself_is_a_typed_self_admission_error() {
+    let fixture = MergeFixture::new("self-admission").await;
     let result = fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.db,
             fixture.store_dir.clone(),
             &fixture.owner,
@@ -693,14 +695,14 @@ async fn inviting_yourself_is_a_typed_self_invite_error() {
         )
         .await;
 
-    assert!(matches!(result, Err(MembershipOpsError::SelfInvite)));
+    assert!(matches!(result, Err(MembershipOpsError::SelfAdmission)));
 }
 
 #[tokio::test]
 async fn remove_member_completes_when_the_home_reports_no_per_member_revocation() {
     let fixture = MergeFixture::new("unsupported-revocation").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     fixture.remove_member(&member).await;
 
     assert!(!fixture.load().await.can_write_now(&pubkey_hex(&member)));
@@ -710,7 +712,7 @@ async fn remove_member_completes_when_the_home_reports_no_per_member_revocation(
 async fn suppressed_remove_is_detected_by_the_exact_cursor() {
     let fixture = MergeFixture::new("suppressed-remove").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     fixture.remove_member(&member).await;
     let chain = fixture.load().await;
     let remove_head = chain.head_refs().last().expect("remove head").clone();
@@ -950,7 +952,7 @@ async fn owner_pin_and_complete_head_floor_commit_atomically() {
 async fn reader_refuses_a_head_that_regresses_below_its_cursor() {
     let fixture = MergeFixture::new("cursor-regression").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     fixture.remove_member(&member).await;
     let chain = fixture.load().await;
     let latest = chain.head_refs().last().expect("latest head").clone();
@@ -1006,7 +1008,7 @@ async fn membership_projection_handles_a_deep_valid_predecessor_path_iteratively
 async fn the_membership_mutation_journal_carries_no_object_it_already_names() {
     let fixture = MergeFixture::new("mutation-journal-names-its-objects").await;
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture
@@ -1061,7 +1063,7 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
     let fixture = MergeFixture::new("removal-loses-its-position").await;
     let encryption = EncryptionService::from_key([42; 32]);
     let member = UserKeypair::generate();
-    fixture.invite_member(&member, MemberRole::Member).await;
+    fixture.admit_member(&member, MemberRole::Member).await;
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
     fixture

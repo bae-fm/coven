@@ -42,7 +42,7 @@ impl PromotionCandidate {
         let member = UserKeypair::generate();
         let encryption = EncryptionService::from_key([42; 32]);
         store
-            .invite_member(
+            .admit_member(
                 &owner_db,
                 owner_db_store_dir.clone(),
                 &owner,
@@ -53,7 +53,7 @@ impl PromotionCandidate {
                 "Merge Store",
             )
             .await
-            .expect("invite Member identity");
+            .expect("admit Member identity");
         let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
         let member_db = crate::sync::test_helpers::open_test_db(member_db_store_dir.clone());
         store
@@ -108,7 +108,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
     let encryption = EncryptionService::from_key([42; 32]);
     for member in [&first_owner, &second_owner] {
         store
-            .invite_member(
+            .admit_member(
                 &founder_db,
                 founder_db_store_dir.clone(),
                 &founder,
@@ -119,7 +119,7 @@ async fn second_merge_owner_promotion_verifies_existing_promotion_history() {
                 "Merge Store",
             )
             .await
-            .expect("invite Member identity");
+            .expect("admit Member identity");
     }
 
     let first_owner_db_store_dir = crate::sync::test_helpers::test_store_dir();

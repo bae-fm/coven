@@ -253,7 +253,7 @@ pub(crate) const RESERVED_HOST_SECRET_NAMES: &[&str] = &[
 /// is stored under. The device signing key, the encryption master key, the
 /// cloud-home credentials, and a host secret are all per store; a pending
 /// identity is keyed by its own join request instead of a store (it exists
-/// before the joiner knows which store the invite names — see
+/// before the joiner knows which store the device invitation names — see
 /// [`crate::keys::mint_pending_identity`]). Every keyring read/write/delete
 /// names its entry with one of these variants, so the on-disk account
 /// strings live in exactly one place: [`KeyringSlot::account`].
@@ -524,7 +524,7 @@ pub fn require_identity(custody: &dyn DeviceIdentityCustody) -> Result<UserKeypa
 }
 
 /// Mint a fresh identity for a join request that has not yet named a store:
-/// the joiner sends its public key before it learns which store the invite
+/// the joiner sends its public key before it learns which store the device invitation
 /// is for (`JoinRequestCode`), so this keypair is generated now and held
 /// under a pending slot keyed by its own public key. The join establishes it
 /// in the joined store's own identity custody (via

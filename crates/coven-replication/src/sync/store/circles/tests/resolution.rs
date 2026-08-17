@@ -540,11 +540,11 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
         .await
         .expect("activate founder transition");
 
-    // Invite and add a Circle member so a removal has something to close over.
+    // Admission and add a Circle member so a removal has something to close over.
     let member = UserKeypair::generate();
     let member_pubkey = keys::public_key_hex(&member);
     store
-        .invite_member(
+        .admit_member(
             &db1,
             db1_store_dir.clone(),
             &founder,
@@ -555,7 +555,7 @@ async fn concurrent_closes_can_cancel_one_branch_then_resolve_the_other() {
             "Resolve closing Store",
         )
         .await
-        .expect("invite Store member");
+        .expect("admit Store member");
     let member_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let member_db = open_routing_db(member_db_store_dir.clone());
     store
@@ -826,7 +826,7 @@ async fn non_owner_resolution_is_refused() {
     let outsider_pubkey = keys::public_key_hex(&outsider);
     fixture
         .store
-        .invite_member(
+        .admit_member(
             &fixture.db1,
             fixture.dir1.clone(),
             &fixture.founder,
@@ -837,7 +837,7 @@ async fn non_owner_resolution_is_refused() {
             "Resolution test Store",
         )
         .await
-        .expect("invite a non-owner Store member");
+        .expect("admit a non-owner Store member");
     let outsider_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let outsider_db = crate::sync::test_helpers::open_test_db(outsider_db_store_dir.clone());
     fixture

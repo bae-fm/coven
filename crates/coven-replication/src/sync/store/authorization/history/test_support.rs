@@ -17,7 +17,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         &self,
         identity: &UserKeypair,
         membership: &MembershipChain,
-    ) -> Result<([u8; 32], usize), crate::sync::store::membership::InviteError> {
+    ) -> Result<([u8; 32], usize), crate::sync::store::membership::MembershipMutationError> {
         let keyring = self.keyrings.open(identity, membership).await?;
         Ok((keyring.key_bytes(), keyring.key_count()))
     }

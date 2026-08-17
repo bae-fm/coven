@@ -211,11 +211,11 @@ Two capabilities exist only on an opaque home:
   The presence of `ek` *is* the home's storage mode: present ⇒ opaque (rebuilt as
   `CloudCipher::Encrypted` + `BlobPathScheme::Hashed`), absent ⇒ browsable
   (`CloudCipher::Plaintext` + `BlobPathScheme::Plain`).
-- **Sharing** (inviting and removing members) wraps and rotates the store key.
+- **Sharing** (admitting and removing members) wraps and rotates the store key.
   With no key there is nothing to wrap or rotate, so a member operation on a
   browsable home is a clear error ("sharing requires an opaque cloud home")
-  rather than a silent no-op. An invite is therefore always for an opaque home,
-  and the invite code carries no storage flag.
+  rather than a silent no-op. A device invitation is therefore always for an
+  opaque home, and it carries no storage flag.
 
 The two kinds of home at a glance:
 
@@ -228,7 +228,7 @@ The two kinds of home at a glance:
 | Object bytes at rest | sealed (XChaCha20-Poly1305) | verbatim |
 | Object-key suffix | `.enc` | none |
 | Blob key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
-| Sharing (invite / remove member) | available | error |
+| Sharing (admit / remove member) | available | error |
 
 ## Chunked encryption
 

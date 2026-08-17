@@ -14,7 +14,7 @@ impl HistoryConstructionAuthority {
         Self(())
     }
 
-    pub fn invitation() -> Self {
+    pub fn admission() -> Self {
         Self(())
     }
 

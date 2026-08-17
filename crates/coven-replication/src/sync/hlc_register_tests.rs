@@ -388,7 +388,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     .expect("create exact revocation test Store");
     let encryption = EncryptionService::from_key([42; 32]);
     storage
-        .invite_member(
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -399,7 +399,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
             "Test Store",
         )
         .await
-        .expect("invite exact member identity");
+        .expect("admit exact member identity");
 
     let receiver_db_store_dir = crate::sync::test_helpers::test_store_dir();
     let receiver_db = crate::sync::test_helpers::open_test_db(receiver_db_store_dir.clone());

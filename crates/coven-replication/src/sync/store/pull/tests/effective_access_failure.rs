@@ -35,7 +35,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         open_scoped_replay_database(second_owner_database_store_dir.clone());
     let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
     store
-        .invite_member(
+        .admit_member(
             &owner_database,
             owner_database_store_dir.clone(),
             &owner,
@@ -46,7 +46,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
             "Unresolved Membership Store",
         )
         .await
-        .expect("invite the second owner");
+        .expect("admit the second owner");
     store
         .activate_joined_device(
             &owner_database,
@@ -94,7 +94,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
     let target = coven_keys::keys::UserKeypair::generate();
     let target_pubkey = coven_keys::keys::public_key_hex(&target);
     founder_writer
-        .invite_member(
+        .admit_member(
             &target_pubkey,
             None,
             coven_protocol::membership::MemberRole::Member,
@@ -105,7 +105,7 @@ async fn pull_rejects_unresolved_membership_instead_of_treating_it_as_removal() 
         .await
         .expect("publish the founder's assignment");
     second_writer
-        .invite_member(
+        .admit_member(
             &target_pubkey,
             None,
             coven_protocol::membership::MemberRole::Follower,

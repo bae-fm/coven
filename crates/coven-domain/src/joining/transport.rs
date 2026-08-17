@@ -21,11 +21,11 @@ use coven_replication::sync::store::{
     DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
 
-use coven_replication::sync::MemberInvitation;
+use coven_replication::sync::MemberAdmission;
 
 /// Everything a joining device needs, sealed to the pending identity named by
 /// its join request. The transport bundle is public kickoff data; the member
-/// invitation inside `sealed_invitation` carries provider credentials and can
+/// admission inside `sealed_invitation` carries provider credentials and can
 /// be opened only by that joining device.
 #[derive(Clone, Debug)]
 pub struct DeviceJoinInvite {
@@ -43,25 +43,25 @@ struct DeviceJoinInviteWire {
 
 impl DeviceJoinInvite {
     pub fn new(
-        invitation: MemberInvitation,
+        admission: MemberAdmission,
         bundle: DeviceJoinOfferBundle,
     ) -> Result<Self, DeviceInviteError> {
-        validate_invitation(&invitation)?;
-        require_invitation_matches_bundle(&invitation, &bundle)?;
+        validate_admission(&admission)?;
+        require_admission_matches_bundle(&admission, &bundle)?;
         let recipient =
             coven_keys::keys::ed25519_hex_to_x25519_public_key(&bundle.offer.member_pubkey)?;
         let plaintext =
-            serde_json::to_vec(&invitation).expect("member invitation serialization cannot fail");
+            serde_json::to_vec(&admission).expect("member admission serialization cannot fail");
         Ok(Self {
             sealed_invitation: coven_keys::keys::seal_box_encrypt(&plaintext, &recipient),
             bundle,
         })
     }
 
-    pub(crate) fn open_invitation(
+    pub(crate) fn open_admission(
         &self,
         join_request_code: &str,
-    ) -> Result<MemberInvitation, DeviceInviteError> {
+    ) -> Result<MemberAdmission, DeviceInviteError> {
         let request = crate::joining::decode_join_request(join_request_code)?;
         if request.public_key != self.bundle.offer.member_pubkey {
             return Err(DeviceInviteError::RecipientMismatch);
@@ -71,16 +71,16 @@ impl DeviceJoinInvite {
             &self.sealed_invitation,
             &recipient.to_x25519_secret_key(),
         )?;
-        let invitation: MemberInvitation =
-            serde_json::from_slice(&plaintext).map_err(DeviceInviteError::InvitationJson)?;
-        validate_invitation(&invitation)?;
-        require_invitation_matches_bundle(&invitation, &self.bundle)?;
-        Ok(invitation)
+        let admission: MemberAdmission =
+            serde_json::from_slice(&plaintext).map_err(DeviceInviteError::AdmissionJson)?;
+        validate_admission(&admission)?;
+        require_admission_matches_bundle(&admission, &self.bundle)?;
+        Ok(admission)
     }
 
     pub fn inspect(&self, join_request_code: &str) -> Result<DeviceInviteInfo, DeviceInviteError> {
-        Ok(DeviceInviteInfo::from_invitation(
-            self.open_invitation(join_request_code)?,
+        Ok(DeviceInviteInfo::from_admission(
+            self.open_admission(join_request_code)?,
         ))
     }
 
@@ -118,12 +118,12 @@ pub struct DeviceInviteInfo {
 }
 
 impl DeviceInviteInfo {
-    fn from_invitation(invitation: MemberInvitation) -> Self {
-        let cloud_provider = invitation.join_info.cloud_provider();
+    fn from_admission(admission: MemberAdmission) -> Self {
+        let cloud_provider = admission.join_info.cloud_provider();
         Self {
-            store_id: invitation.store_id,
-            store_name: invitation.store_name,
-            owner_pubkey: invitation.owner_pubkey,
+            store_id: admission.store_id,
+            store_name: admission.store_name,
+            owner_pubkey: admission.owner_pubkey,
             needs_oauth: cloud_provider.needs_oauth(),
             cloud_provider,
         }
@@ -136,8 +136,8 @@ pub enum DeviceInviteError {
     WireJson(#[source] serde_json::Error),
     #[error("device invitation ciphertext is not valid base64: {0}")]
     Ciphertext(#[source] base64::DecodeError),
-    #[error("device invitation could not be opened as JSON: {0}")]
-    InvitationJson(#[source] serde_json::Error),
+    #[error("device invitation admission payload is not valid JSON: {0}")]
+    AdmissionJson(#[source] serde_json::Error),
     #[error("join request is invalid: {0}")]
     JoinRequest(#[from] crate::joining::JoinRequestError),
     #[error("device invitation key: {0}")]
@@ -146,12 +146,12 @@ pub enum DeviceInviteError {
     RecipientMismatch,
     #[error("device invitation does not match its signed join offer")]
     OfferMismatch,
-    #[error("device invitation is invalid: {0}")]
-    Invitation(#[from] InvitationError),
+    #[error("device invitation admission payload is invalid: {0}")]
+    Admission(#[from] AdmissionPayloadError),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum InvitationError {
+pub enum AdmissionPayloadError {
     #[error("store id: {0}")]
     StoreId(#[from] coven_foundation::store_dir::PathTokenError),
     #[error("owner public key: {0}")]
@@ -166,46 +166,46 @@ pub enum InvitationError {
     MembershipFloor(#[source] coven_protocol::membership::MembershipFloorError),
 }
 
-fn validate_invitation(invitation: &MemberInvitation) -> Result<(), InvitationError> {
-    coven_foundation::store_dir::validate_path_token(&invitation.store_id)?;
+fn validate_admission(admission: &MemberAdmission) -> Result<(), AdmissionPayloadError> {
+    coven_foundation::store_dir::validate_path_token(&admission.store_id)?;
     coven_foundation::code_envelope::decode_fixed_hex(
         "owner public key",
-        &invitation.owner_pubkey,
+        &admission.owner_pubkey,
         32,
     )
-    .map_err(InvitationError::OwnerPublicKey)?;
+    .map_err(AdmissionPayloadError::OwnerPublicKey)?;
     for (subject, value) in [
         (
             "wrapped-key author public key",
-            &invitation.wrapped_key.owner_pubkey,
+            &admission.wrapped_key.owner_pubkey,
         ),
         (
             "wrapped-key recipient public key",
-            &invitation.wrapped_key.recipient_pubkey,
+            &admission.wrapped_key.recipient_pubkey,
         ),
     ] {
         coven_foundation::code_envelope::decode_fixed_hex(subject, value, 32)
-            .map_err(InvitationError::WrappedKeyMaterial)?;
+            .map_err(AdmissionPayloadError::WrappedKeyMaterial)?;
     }
-    invitation
+    admission
         .wrapped_key
         .validate_identity()
-        .map_err(InvitationError::WrappedKeyIdentity)?;
-    if invitation.membership_floor.0.is_empty() {
-        return Err(InvitationError::EmptyMembershipFloor);
+        .map_err(AdmissionPayloadError::WrappedKeyIdentity)?;
+    if admission.membership_floor.0.is_empty() {
+        return Err(AdmissionPayloadError::EmptyMembershipFloor);
     }
-    invitation
+    admission
         .membership_floor
         .validate()
-        .map_err(InvitationError::MembershipFloor)
+        .map_err(AdmissionPayloadError::MembershipFloor)
 }
 
-fn require_invitation_matches_bundle(
-    invitation: &MemberInvitation,
+fn require_admission_matches_bundle(
+    admission: &MemberAdmission,
     bundle: &DeviceJoinOfferBundle,
 ) -> Result<(), DeviceInviteError> {
-    if invitation.wrapped_key.recipient_pubkey != bundle.offer.member_pubkey
-        || invitation.store_root != bundle.offer.store_root
+    if admission.wrapped_key.recipient_pubkey != bundle.offer.member_pubkey
+        || admission.store_root != bundle.offer.store_root
     {
         return Err(DeviceInviteError::OfferMismatch);
     }
@@ -232,9 +232,9 @@ fn scanned_invite_client(
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
 ) -> Result<DeviceJoinClient, BootstrapError> {
-    let invitation = invite.open_invitation(join_request_code)?;
+    let admission = invite.open_admission(join_request_code)?;
     DeviceJoinClient::new(
-        invitation,
+        admission,
         join_request_code,
         layout,
         synced_tables,

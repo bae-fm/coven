@@ -1,6 +1,6 @@
 //! Restore an existing store from cloud storage.
 //!
-//! Unlike join (which unwraps the encryption key from an invite), restore takes
+//! Unlike join (which unwraps the encryption key from a sealed admission), restore takes
 //! the encryption key directly from the user — present for an opaque home,
 //! absent for a browsable one.
 

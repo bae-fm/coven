@@ -32,6 +32,7 @@ use coven_protocol::recovery::RestoreAuthority;
 /// secrets and print as `<redacted>` so `{:?}` in an error path
 /// cannot leak key material.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RestoreCode {
     /// Wire-format version.
     pub v: u8,
@@ -526,6 +527,21 @@ mod tests {
         assert!(matches!(
             decode_restore_code(&encoded),
             Err(RestoreCodeError::UnsupportedVersion(99))
+        ));
+    }
+
+    #[test]
+    fn unknown_restore_code_fields_are_rejected() {
+        let mut wire = serde_json::to_value(sample_s3_code()).expect("serialize restore code");
+        wire.as_object_mut()
+            .expect("restore code is an object")
+            .insert("unexpected_field".to_string(), serde_json::json!(true));
+        let bytes = serde_json::to_vec(&wire).expect("serialize altered restore code");
+        let encoded = format!("coven:{}", URL_SAFE_NO_PAD.encode(bytes));
+
+        assert!(matches!(
+            decode_restore_code(&encoded),
+            Err(RestoreCodeError::InvalidJson(_))
         ));
     }
 

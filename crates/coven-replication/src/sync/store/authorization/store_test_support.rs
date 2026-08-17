@@ -188,7 +188,7 @@ impl Store {
         &self,
         pending_rotation: &dyn coven_storage::CloudSyncRotationStateAccess,
         adopted_generation: u64,
-    ) -> Result<(), membership::InviteError> {
+    ) -> Result<(), membership::MembershipMutationError> {
         self.authorize_writer()
             .await
             .expect("authorize Store writer")

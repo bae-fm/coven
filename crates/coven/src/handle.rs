@@ -850,7 +850,7 @@ impl CovenHandle {
     }
 
     /// Subscribe to the durable upload queue and make-remote intents as one
-    /// committed snapshot. The first [`CloudOutboxLiveQuery::next`] returns
+    /// committed snapshot. The first [`crate::CloudOutboxLiveQuery::next`] returns
     /// immediately; later calls wake from the same committed-change stream as
     /// row live queries.
     pub fn subscribe_cloud_outbox(&self) -> crate::CloudOutboxLiveQuery {

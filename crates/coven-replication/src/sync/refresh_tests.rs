@@ -52,7 +52,7 @@ trait RefreshTestStoreOps {
         pending_rotation: &PendingRotation,
     ) -> Result<EncryptionService, MembershipOpsError>;
 
-    async fn invite_exact_member(
+    async fn admit_exact_member(
         &self,
         owner_db: &coven_database::Database,
         owner_db_store_dir: coven_foundation::store_dir::StoreDir,
@@ -132,7 +132,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             .await
     }
 
-    async fn invite_exact_member(
+    async fn admit_exact_member(
         &self,
         owner_db: &coven_database::Database,
         owner_db_store_dir: coven_foundation::store_dir::StoreDir,
@@ -141,7 +141,7 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
         role: MemberRole,
         encryption: &EncryptionService,
     ) -> MembershipChain {
-        self.invite_member(
+        self.admit_member(
             owner_db,
             owner_db_store_dir.clone(),
             owner,
@@ -152,15 +152,15 @@ impl RefreshTestStoreOps for std::sync::Arc<TestStore> {
             "Refresh Test Store",
         )
         .await
-        .expect("publish exact membership invitation");
+        .expect("publish exact membership admission");
         let device = self
             .open_into(owner_db, owner_db_store_dir.clone())
             .await
-            .expect("reload exact membership after invitation");
+            .expect("reload exact membership after admission");
         device
             .membership_for_test()
             .await
-            .expect("read exact membership after invitation")
+            .expect("read exact membership after admission")
     }
 
     async fn load_exact_chain(
@@ -301,7 +301,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -311,7 +311,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -408,10 +408,10 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 }
 
 #[tokio::test]
-async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
+async fn admission_after_rotation_uses_the_membership_selected_keyring() {
     let owner = UserKeypair::generate();
     let removed_member = UserKeypair::generate();
-    let invited_member = UserKeypair::generate();
+    let admitted_member = UserKeypair::generate();
     let initial = EncryptionService::from_key([52u8; 32]);
     let ExactStoreFixture {
         store: storage,
@@ -420,7 +420,7 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &initial).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -456,40 +456,40 @@ async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
         .await
         .expect("owner completes the activated removal journal");
 
-    let invitation = storage
-        .invite_member(
+    let admission = storage
+        .admit_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
-            &pubkey_hex(&invited_member),
+            &pubkey_hex(&admitted_member),
             None,
             MemberRole::Member,
             &initial,
             "Refresh Test Store",
         )
         .await
-        .expect("publish post-rotation invitation");
-    let mut history = crate::sync::store::HistoryConstructionAuthority::invitation()
-        .open_pinned(&*cloud_storage, &invitation.store_root)
+        .expect("publish post-rotation admission");
+    let mut history = crate::sync::store::HistoryConstructionAuthority::admission()
+        .open_pinned(&*cloud_storage, &admission.store_root)
         .await
-        .expect("open invitation history");
+        .expect("open admission history");
     let chain = history
         .load_exact_anchored_membership(
-            &invitation.membership_floor.0,
-            Some(&invitation.owner_pubkey),
+            &admission.membership_floor.0,
+            Some(&admission.owner_pubkey),
         )
         .await
-        .expect("load invitation membership");
-    let invited_keyring =
-        crate::sync::store::StoreKeyrings::new(&*cloud_storage, invitation.store_root.clone())
-            .open_containing(&invited_member, &chain, &invitation.wrapped_key)
+        .expect("load admission membership");
+    let admitted_keyring =
+        crate::sync::store::StoreKeyrings::new(&*cloud_storage, admission.store_root.clone())
+            .open_containing(&admitted_member, &chain, &admission.wrapped_key)
             .await
-            .expect("invited member opens the activated exact wrap");
-    let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation invite");
+            .expect("admitted member opens the activated exact wrap");
+    let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation admission");
     assert_eq!(
-        invited_keyring
-            .open_app_data(&sealed, b"post-rotation invite")
-            .expect("invitation retains the current Store key"),
+        admitted_keyring
+            .open_app_data(&sealed, b"post-rotation admission")
+            .expect("admit retains the current Store key"),
         b"current Store data",
     );
 }
@@ -514,7 +514,7 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -619,7 +619,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -629,7 +629,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         )
         .await;
     let chain = storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -642,7 +642,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .active_wrapped_keys_for(&pubkey_hex(&device_b))
         .into_iter()
         .next()
-        .expect("invitation activates the initial exact wrapped key");
+        .expect("admit activates the initial exact wrapped key");
 
     let db_b_store_dir = crate::sync::test_helpers::test_store_dir();
     let db_b = crate::sync::test_helpers::open_test_db(db_b_store_dir.clone());
@@ -716,7 +716,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 }
 
 #[tokio::test]
-async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() {
+async fn readmitting_member_supersedes_old_wrap_and_merges_same_generation_key() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let current_key: [u8; 32] = [13u8; 32];
@@ -734,7 +734,7 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &current).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -744,7 +744,7 @@ async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() 
         )
         .await;
     let chain = storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -816,7 +816,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &founder,
@@ -826,7 +826,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &founder,
@@ -836,7 +836,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &founder,
@@ -927,7 +927,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         db_store_dir: founder_db_store_dir,
     } = exact_store(&founder, &initial).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -963,7 +963,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         .await
         .expect("promote active second Owner");
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -973,7 +973,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -983,7 +983,7 @@ async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
@@ -1091,7 +1091,7 @@ async fn removed_owner_key_is_not_adopted() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&founder, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &founder,
@@ -1101,7 +1101,7 @@ async fn removed_owner_key_is_not_adopted() {
         )
         .await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &founder,
@@ -1196,7 +1196,7 @@ async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -1279,7 +1279,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     let chain = storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -1352,7 +1352,7 @@ async fn one_cycle_loads_exact_membership_once() {
         db_store_dir: owner_db_store_dir,
     } = exact_store(&owner, &encryption).await;
     let chain = storage
-        .invite_exact_member(
+        .admit_exact_member(
             &owner_db,
             owner_db_store_dir.clone(),
             &owner,
@@ -1440,7 +1440,7 @@ async fn removal_rotation_stays_resumable_when_local_adoption_fails() {
         db_store_dir,
     } = exact_store(&owner, &encryption).await;
     storage
-        .invite_exact_member(
+        .admit_exact_member(
             &db,
             db_store_dir.clone(),
             &owner,
