@@ -10,6 +10,7 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::config::{RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::error::ProvideErrorMetadata as _;
 use aws_sdk_s3::Client;
+use std::fmt;
 use tracing::warn;
 
 mod google_cloud_storage;
@@ -1103,7 +1104,28 @@ where
         _ => None,
     };
     let kind = s3_backend_failure(error.code(), status);
-    CloudHomeError::backend(kind, operation, error)
+    CloudHomeError::backend(kind, operation, S3SdkError(error))
+}
+
+#[derive(Debug)]
+struct S3SdkError<E>(aws_sdk_s3::error::SdkError<E>);
+
+impl<E> fmt::Display for S3SdkError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        aws_sdk_s3::error::DisplayErrorContext(&self.0).fmt(formatter)
+    }
+}
+
+impl<E> std::error::Error for S3SdkError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 /// Map a GetObject failure to a `CloudHomeError`, surfacing the S3 error code and

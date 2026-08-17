@@ -60,6 +60,22 @@ fn normalized_prefix_drops_trailing_slash() {
     assert_eq!(key, "libs/abc/objects/dev1.json");
 }
 
+#[test]
+fn s3_operation_errors_display_the_nested_transport_cause() {
+    let sdk_error = aws_sdk_s3::error::SdkError::<
+        aws_sdk_s3::operation::get_object::GetObjectError,
+    >::construction_failure(std::io::Error::other("Android connector rejected the request"));
+
+    let error = s3_operation_error("get protocol root", sdk_error);
+
+    assert!(
+        error
+            .to_string()
+            .contains("Android connector rejected the request"),
+        "{error}"
+    );
+}
+
 #[derive(Clone)]
 struct FakeRangeObject {
     bucket: String,
