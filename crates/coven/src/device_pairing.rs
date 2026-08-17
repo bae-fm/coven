@@ -28,6 +28,8 @@ pub enum StartDevicePairingError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApproveDevicePairingError {
+    #[error("device pairing was cancelled")]
+    Cancelled,
     #[error("pairing transport: {0}")]
     Pairing(#[from] DevicePairingTransportError),
     #[error("device invitation: {0}")]
@@ -111,7 +113,16 @@ impl StoreDevicePairing {
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
+        cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, ApproveDevicePairingError> {
+        if let Some(bytes) = host.cancellation_invitation(request)? {
+            let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
+            self.sync
+                .abort_device_join_transport(&invitation.bundle, timing)
+                .await?;
+            host.finish()?;
+            return Err(ApproveDevicePairingError::Cancelled);
+        }
         let invitation = match host.invitation(request)? {
             Some(bytes) => coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?,
             None => self.joining.begin_invite(request, role).await?,
@@ -120,12 +131,33 @@ impl StoreDevicePairing {
             return Err(ApproveDevicePairingError::RequestMismatch);
         }
         host.deliver_invitation(request, invitation.to_bytes())?;
-        let outcome = self
-            .sync
-            .drive_device_join(&invitation.bundle, policy, access_administrator, timing)
-            .await?;
+        let drive =
+            self.sync
+                .drive_device_join(&invitation.bundle, policy, access_administrator, timing);
+        let cancellation = cancellation_requested(cancel);
+        tokio::pin!(drive);
+        tokio::pin!(cancellation);
+        let outcome = tokio::select! {
+            outcome = &mut drive => outcome?,
+            () = &mut cancellation => {
+                host.cancel()?;
+                self.sync
+                    .abort_device_join_transport(&invitation.bundle, timing)
+                    .await?;
+                host.finish()?;
+                return Err(ApproveDevicePairingError::Cancelled);
+            }
+        };
         host.finish()?;
         Ok(outcome)
+    }
+}
+
+async fn cancellation_requested(mut cancel: tokio::sync::watch::Receiver<bool>) {
+    while !*cancel.borrow() {
+        if cancel.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 

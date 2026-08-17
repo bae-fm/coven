@@ -536,7 +536,6 @@ impl DeviceJoinClient {
         Ok(pending.actions()?)
     }
 
-    #[cfg(test)]
     pub(crate) async fn close_pending_device_join(
         &self,
         cancellation: coven_replication::sync::DeviceJoinCancellation,
@@ -556,7 +555,6 @@ impl DeviceJoinClient {
         Ok(closure.close(cancellation).await?)
     }
 
-    #[cfg(test)]
     pub(crate) async fn complete_cancelled_device_join(
         &self,
         activation: coven_replication::sync::DeviceJoinCleanupActivation,

@@ -294,6 +294,18 @@ impl StoreSync {
             .await?)
     }
 
+    pub(crate) async fn abort_device_join_transport(
+        &self,
+        bundle: &crate::DeviceJoinOfferBundle,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<(), SyncError> {
+        active_sync!(self)
+            .ok_or(SyncError::LoopNotRunning)?
+            .abort_device_join_transport(bundle, timing)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn begin_device_join(
         &self,
         member_pubkey: &str,

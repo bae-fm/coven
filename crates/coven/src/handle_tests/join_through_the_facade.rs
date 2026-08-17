@@ -158,6 +158,7 @@ async fn run_a_facade_only_host_runs_a_whole_join_from_one_scanned_pairing_code(
                 crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
                 None,
                 timing(),
+                tokio::sync::watch::channel(false).1,
             )
             .await
     };
@@ -176,6 +177,92 @@ async fn run_a_facade_only_host_runs_a_whole_join_from_one_scanned_pairing_code(
     assert!(fixture
         .layout
         .store_dir("facade-one-scan-pairing")
+        .config_path()
+        .exists());
+}
+
+/// Cancelling approval after the invitation exists unwinds the Store attempt,
+/// tells the joining device to discard its partial Store, and closes the local
+/// pairing session without requiring either process to be killed.
+#[test]
+fn owner_cancellation_reaches_a_joiner_through_the_facade() {
+    on_a_deep_stack(run_owner_cancellation_reaches_a_joiner_through_the_facade);
+}
+
+async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
+    let fixture = FacadeFixture::build("facade-cancelled-pairing").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pairing listener");
+    let endpoint = listener.local_addr().expect("pairing endpoint");
+    let pairing_key = crate::UserKeypair::generate();
+    let offer = crate::DevicePairingOffer::new(
+        &pairing_key,
+        vec![endpoint],
+        "Facade Join Store".to_string(),
+        crate::CloudProvider::S3,
+        1_900_000_000,
+    )
+    .expect("pairing offer");
+    let pairing_journal = tempfile::tempdir().expect("pairing journal directory");
+    let host = crate::DevicePairingHost::start(
+        listener,
+        offer.clone(),
+        pairing_key,
+        pairing_journal.path().join("pairing.json"),
+        Arc::new(crate::SystemClock),
+    )
+    .await
+    .expect("start pairing host");
+    let pairing =
+        crate::PreparedDevicePairing::open_or_create(&offer.encode(), None, &fixture.layout)
+            .expect("prepare joining identity from the scanned code");
+    let (_join_cancel_tx, join_cancel) = tokio::sync::watch::channel(false);
+    let (_approval_cancel_tx, approval_cancel) = tokio::sync::watch::channel(true);
+
+    let joining = coven_domain::joining::join_with_device_pairing_over_test_home(
+        &pairing,
+        fixture.layout.clone(),
+        fixture.tables.clone(),
+        test_migrations(),
+        Arc::new(crate::SystemClock),
+        fixture.home.clone(),
+        timing(),
+        |_status| {},
+        &join_cancel,
+    );
+    let admitting = async {
+        let request = host
+            .wait_for_request()
+            .await
+            .expect("receive signed request");
+        fixture
+            .handle
+            .approve_device_pairing(
+                &host,
+                &request,
+                crate::MemberRole::Member,
+                crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+                None,
+                timing(),
+                approval_cancel,
+            )
+            .await
+    };
+    let (joined, admitted) = tokio::join!(Box::pin(joining), Box::pin(admitting));
+
+    assert!(matches!(
+        admitted,
+        Err(crate::ApproveDevicePairingError::Cancelled)
+    ));
+    assert!(matches!(
+        joined.expect("joining device completes cancellation"),
+        crate::DeviceJoinTransportOutcome::Abandoned(_)
+            | crate::DeviceJoinTransportOutcome::Cancelled(_)
+    ));
+    assert!(!fixture
+        .layout
+        .store_dir("facade-cancelled-pairing")
         .config_path()
         .exists());
 }

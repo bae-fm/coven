@@ -419,6 +419,17 @@ impl SyncLoopHandle {
             .await
     }
 
+    pub async fn abort_device_join_transport(
+        &self,
+        bundle: &crate::sync::DeviceJoinOfferBundle,
+        timing: crate::sync::DeviceJoinTransportTiming,
+    ) -> Result<(), crate::sync::store::DeviceJoinTransportError> {
+        self.inner
+            .components
+            .abort_device_join_transport(bundle, timing)
+            .await
+    }
+
     pub async fn abandon_device_join_transport(
         &self,
         bundle: &crate::sync::DeviceJoinOfferBundle,

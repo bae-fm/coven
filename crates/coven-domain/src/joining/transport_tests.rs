@@ -336,6 +336,9 @@ fn joined(
         crate::joining::DeviceJoinTransportOutcome::Abandoned(_) => {
             panic!("the join was abandoned, not completed")
         }
+        crate::joining::DeviceJoinTransportOutcome::Cancelled(_) => {
+            panic!("the join was cancelled, not completed")
+        }
     }
 }
 
@@ -886,6 +889,56 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
     }
 }
 
+/// A joining app runs the ordinary join entrypoint while the owner cancels.
+/// It must enter the unwind itself; requiring a separate test-only close call
+/// is the deadlock the product flow cannot perform.
+#[test]
+fn the_joining_flow_observes_owner_cancellation() {
+    on_a_deep_stack(run_the_joining_flow_observes_owner_cancellation);
+}
+
+async fn run_the_joining_flow_observes_owner_cancellation() {
+    let fixture = TransportFixture::build("device-join-transport-live-cancel").await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+    let joiner = fixture.client();
+
+    assert_joiner_waited_for(
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        DeviceJoinTransportKind::ProviderAdmissionApproval,
+    );
+    assert_owner_waited_for(
+        fixture.drive_owner_with(&bundle, one_shot()).await,
+        DeviceJoinTransportKind::RegistrationRequest,
+    );
+    assert_joiner_waited_for(
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        DeviceJoinTransportKind::ProviderReadyBootstrap,
+    );
+    assert_owner_waited_for(
+        fixture.drive_owner_with(&bundle, one_shot()).await,
+        DeviceJoinTransportKind::Readiness,
+    );
+
+    let owner_transport = fixture.owner_store.device_join_transport();
+    let owner_cancel = Box::pin(owner_transport.cancel(&bundle, timing()));
+    let joining_client = fixture.client();
+    let joining =
+        Box::pin(joining_client.join_via_transport(&bundle, timing(), |_status| {}, &cancel));
+    let (owner, joined) = tokio::join!(owner_cancel, joining);
+    owner.expect("owner completes cancellation");
+    assert!(matches!(
+        joined.expect("joining flow accepts cancellation"),
+        crate::joining::DeviceJoinTransportOutcome::Cancelled(_)
+    ));
+    for kind in DeviceJoinTransportKind::ALL {
+        assert!(
+            fixture.slot_bytes(&bundle, kind).await.is_none(),
+            "{kind:?} slot outlived the cancelled attempt",
+        );
+    }
+}
+
 /// An owner that gives up before the attempt exists publishes its abandonment,
 /// and the joining device — sitting in its wait for the approval — reads that
 /// instead and converges on the same terminal, clearing the namespace behind it.
@@ -937,6 +990,9 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
         }
         crate::joining::DeviceJoinTransportOutcome::Joined(_) => {
             panic!("an abandoned attempt must not produce a member config")
+        }
+        crate::joining::DeviceJoinTransportOutcome::Cancelled(_) => {
+            panic!("an abandoned attempt must not report cancellation")
         }
     }
     for kind in DeviceJoinTransportKind::ALL {

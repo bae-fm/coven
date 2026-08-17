@@ -19,6 +19,7 @@ const MAX_PAIRING_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 enum HostResponse {
     AwaitingApproval,
     Invited(Vec<u8>),
+    Cancelling(Vec<u8>),
     Cancelled,
 }
 
@@ -293,7 +294,7 @@ impl DevicePairingHost {
                 next.state.response = HostResponse::Invited(invitation);
             }
             HostResponse::Invited(existing) if existing == &invitation => {}
-            HostResponse::Invited(_) | HostResponse::Cancelled => {
+            HostResponse::Invited(_) | HostResponse::Cancelling(_) | HostResponse::Cancelled => {
                 return Err(DevicePairingTransportError::ResponseConflict)
             }
         }
@@ -314,22 +315,49 @@ impl DevicePairingHost {
         match &persisted.state.response {
             HostResponse::AwaitingApproval => Ok(None),
             HostResponse::Invited(invitation) => Ok(Some(invitation.clone())),
-            HostResponse::Cancelled => Err(DevicePairingTransportError::Cancelled),
+            HostResponse::Cancelling(_) | HostResponse::Cancelled => {
+                Err(DevicePairingTransportError::Cancelled)
+            }
         }
     }
 
-    pub fn cancel(&self) -> Result<(), DevicePairingTransportError> {
+    /// Return the exact Store attempt retained by a durable cancellation so a
+    /// restarted owner can finish its signed unwind instead of approving it.
+    pub fn cancellation_invitation(
+        &self,
+        request: &DevicePairingRequest,
+    ) -> Result<Option<Vec<u8>>, DevicePairingTransportError> {
+        let persisted = self.inner.state.lock().expect("lock pairing host state");
+        if persisted.state.request.as_ref() != Some(request) {
+            return Err(DevicePairingTransportError::RequestMismatch);
+        }
+        match &persisted.state.response {
+            HostResponse::Cancelling(invitation) => Ok(Some(invitation.clone())),
+            HostResponse::AwaitingApproval | HostResponse::Invited(_) | HostResponse::Cancelled => {
+                Ok(None)
+            }
+        }
+    }
+
+    /// Persist cancellation and return the delivered invitation, when one
+    /// exists, so the owner can unwind the exact Store attempt it started.
+    pub fn cancel(&self) -> Result<Option<Vec<u8>>, DevicePairingTransportError> {
         let mut persisted = self.inner.state.lock().expect("lock pairing host state");
         let mut next = persisted.clone();
-        match next.state.response {
-            HostResponse::AwaitingApproval => next.state.response = HostResponse::Cancelled,
-            HostResponse::Cancelled => {}
-            HostResponse::Invited(_) => return Err(DevicePairingTransportError::ResponseConflict),
-        }
+        let invitation = match &next.state.response {
+            HostResponse::AwaitingApproval => None,
+            HostResponse::Invited(invitation) => Some(invitation.clone()),
+            HostResponse::Cancelling(invitation) => Some(invitation.clone()),
+            HostResponse::Cancelled => None,
+        };
+        next.state.response = match &invitation {
+            Some(invitation) => HostResponse::Cancelling(invitation.clone()),
+            None => HostResponse::Cancelled,
+        };
         self.inner.journal.replace(&next)?;
         *persisted = next;
         drop(persisted);
-        Ok(())
+        Ok(invitation)
     }
 
     pub fn finish(&self) -> Result<(), DevicePairingTransportError> {
@@ -395,6 +423,11 @@ fn response_for(response: &HostResponse) -> PairingWireResponse {
     match response {
         HostResponse::AwaitingApproval => PairingWireResponse::AwaitingApproval,
         HostResponse::Invited(invitation) => PairingWireResponse::Invited {
+            invitation: URL_SAFE_NO_PAD.encode(invitation),
+        },
+        // Once a Store attempt exists, the joining device needs that exact
+        // invitation before it can observe and complete the signed unwind.
+        HostResponse::Cancelling(invitation) => PairingWireResponse::Invited {
             invitation: URL_SAFE_NO_PAD.encode(invitation),
         },
         HostResponse::Cancelled => PairingWireResponse::Cancelled,
@@ -762,5 +795,53 @@ mod tests {
             Err(DevicePairingTransportError::Cancelled)
         ));
         assert!(journal.path().join("pairing.json").exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_invitation_retains_the_attempt_needed_to_unwind() {
+        let (host, joining_identity, journal) = host().await;
+        let request = DevicePairingRequest::signed(host.offer(), &joining_identity, None);
+        let sealed = SealedDevicePairingRequest::new(host.offer(), &request).expect("seal request");
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let receiving = tokio::spawn({
+            let offer = host.offer().clone();
+            async move {
+                receive_device_invitation(
+                    &offer,
+                    &sealed,
+                    timing(),
+                    Arc::new(coven_foundation::clock::SystemClock),
+                    &cancel,
+                )
+                .await
+            }
+        });
+        assert_eq!(host.wait_for_request().await.expect("request"), request);
+        host.deliver_invitation(&request, b"sealed invitation".to_vec())
+            .expect("deliver invitation");
+        assert_eq!(
+            host.cancel().expect("cancel invited pairing"),
+            Some(b"sealed invitation".to_vec()),
+        );
+        assert_eq!(
+            receiving.await.expect("joining task").expect("invitation"),
+            b"sealed invitation",
+        );
+        drop(host);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind resumed pairing listener");
+        let resumed = DevicePairingHost::resume(
+            listener,
+            journal.path().join("pairing.json"),
+            Arc::new(coven_foundation::clock::SystemClock),
+        )
+        .await
+        .expect("resume cancelled pairing");
+        assert_eq!(
+            resumed.cancel().expect("resume cancellation"),
+            Some(b"sealed invitation".to_vec()),
+        );
     }
 }

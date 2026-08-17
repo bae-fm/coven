@@ -1017,9 +1017,18 @@ impl CovenHandle {
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
+        cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, crate::ApproveDevicePairingError> {
         self.pairing
-            .approve(host, request, role, policy, access_administrator, timing)
+            .approve(
+                host,
+                request,
+                role,
+                policy,
+                access_administrator,
+                timing,
+                cancel,
+            )
             .await
     }
 

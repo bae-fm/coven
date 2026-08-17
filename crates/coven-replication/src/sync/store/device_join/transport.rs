@@ -565,6 +565,23 @@ impl<'a> DeviceJoinTransport<'a> {
         }
     }
 
+    /// Observe one artifact without imposing a phase deadline. A concurrent
+    /// operation owns the deadline; this observation exists to interrupt that
+    /// operation when a terminal artifact appears.
+    pub async fn observe_artifact<T: DeviceJoinArtifact>(
+        &self,
+        poll: Duration,
+    ) -> Result<T, DeviceJoinTransportError> {
+        let kind = T::KIND;
+        loop {
+            if let Some(action) = self.read(kind).await? {
+                return T::from_action(action)
+                    .ok_or(DeviceJoinTransportError::KindMismatch { kind });
+            }
+            tokio::time::sleep(poll).await;
+        }
+    }
+
     /// Poll for the next artifact of type `T`, or for the owner's abandonment
     /// of the whole attempt, whichever appears first.
     ///
@@ -741,6 +758,44 @@ impl<'store> StoreDeviceJoinTransport<'store> {
                 .await
         })
         .await
+    }
+
+    /// End an admitted-side attempt from its durable owner state. Before the
+    /// attempt exists this publishes abandonment; after activation it performs
+    /// the signed cancellation cleanup.
+    pub async fn abort(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        timing: DeviceJoinTransportTiming,
+    ) -> Result<(), DeviceJoinTransportError> {
+        let attempt = AttemptTransport::open(self.store, bundle).await?;
+        match attempt.owner_status().await? {
+            Some(
+                DeviceJoinStatus::AwaitingAccessRequest { .. }
+                | DeviceJoinStatus::AwaitingBootstrap { .. }
+                | DeviceJoinStatus::AbandonmentCreatePending { .. }
+                | DeviceJoinStatus::Abandoned { .. },
+            ) => {
+                self.abandon(bundle).await?;
+            }
+            Some(
+                DeviceJoinStatus::AwaitingChallengePublication { .. }
+                | DeviceJoinStatus::CancellationCreatePending { .. }
+                | DeviceJoinStatus::CleanupPending { .. }
+                | DeviceJoinStatus::AwaitingCleanupActivation { .. }
+                | DeviceJoinStatus::CleanupActivated { .. },
+            ) => {
+                self.cancel(bundle, timing).await?;
+            }
+            status => {
+                return Err(DeviceJoinError::Store(format!(
+                    "device join {} cannot be aborted from {status:?}",
+                    bundle.offer.attempt_id
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1021,6 +1076,11 @@ impl<'attempt> AttemptTransport<'attempt> {
             Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
                 self.store
                     .cancel_device_join(bootstrap.publication_authorization.attempt.clone())
+                    .await?
+            }
+            Some(DeviceJoinStatus::CancellationCreatePending { cancellation }) => {
+                self.store
+                    .cancel_device_join(cancellation.attempt().clone())
                     .await?
             }
             other => {

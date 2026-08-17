@@ -848,6 +848,17 @@ impl SyncComponents {
             .await
     }
 
+    pub(crate) async fn abort_device_join_transport(
+        &self,
+        bundle: &crate::sync::DeviceJoinOfferBundle,
+        timing: crate::sync::DeviceJoinTransportTiming,
+    ) -> Result<(), super::store::DeviceJoinTransportError> {
+        self.store
+            .device_join_transport()
+            .abort(bundle, timing)
+            .await
+    }
+
     pub(crate) async fn abandon_device_join_transport(
         &self,
         bundle: &crate::sync::DeviceJoinOfferBundle,
