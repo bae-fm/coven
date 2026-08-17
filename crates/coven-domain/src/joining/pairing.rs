@@ -59,6 +59,13 @@ impl DevicePairingOffer {
         Ok(offer)
     }
 
+    /// Whether `code` carries the device-pairing envelope. This identifies
+    /// which decoder owns a scanned code without accepting or validating its
+    /// payload.
+    pub fn is_pairing_code(code: &str) -> bool {
+        code.trim().starts_with(PAIRING_CODE_PREFIX)
+    }
+
     pub fn session_id(&self) -> &str {
         &self.pairing_public_key
     }
@@ -408,6 +415,17 @@ mod tests {
         assert_eq!(opened.provider_account_email(), Some("member@example.com"));
         assert_eq!(decoded.store_name(), "Pairing Test Store");
         assert_eq!(decoded.cloud_provider(), &CloudProvider::GoogleDrive);
+    }
+
+    #[test]
+    fn pairing_offer_recognizes_its_envelope_before_decoding() {
+        assert!(DevicePairingOffer::is_pairing_code(
+            "  coven:device-pairing:not-yet-decoded  "
+        ));
+        assert!(!DevicePairingOffer::is_pairing_code(
+            "coven:restore-payload"
+        ));
+        assert!(!DevicePairingOffer::is_pairing_code("not-a-coven-code"));
     }
 
     #[test]
