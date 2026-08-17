@@ -27,8 +27,8 @@ pub fn encode_join_request(request: &JoinRequest) -> String {
     code_envelope::encode_code("", request)
 }
 
-pub fn decode_join_request(value: &str) -> Result<JoinRequest, EnvelopeError> {
-    code_envelope::decode_code("", value)
+pub fn decode_join_request(value: &str) -> Result<JoinRequest, JoinRequestError> {
+    Ok(code_envelope::decode_code("", value)?)
 }
 
 /// Build a join request and retain its pending device identity until the join
@@ -48,10 +48,14 @@ pub fn abandon_join_request(request_code: &str) -> Result<(), AbandonJoinRequest
 #[derive(Debug, thiserror::Error)]
 pub enum AbandonJoinRequestError {
     #[error("invalid join request: {0}")]
-    Code(#[from] EnvelopeError),
+    Request(#[from] JoinRequestError),
     #[error("failed to discard pending identity: {0}")]
     Key(#[from] coven_keys::keys::KeyError),
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid join request: {0}")]
+pub struct JoinRequestError(#[from] EnvelopeError);
 
 #[cfg(test)]
 mod tests {

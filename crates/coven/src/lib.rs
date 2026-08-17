@@ -49,7 +49,7 @@ pub use coven_database::{
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{
     abandon_join_request, decode_join_request, generate_join_request, BootstrapError,
-    DeviceInviteError, DeviceInviteInfo, JoinRequest,
+    DeviceInviteError, DeviceInviteInfo, JoinRequest, JoinRequestError,
 };
 pub use coven_domain::joining::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,

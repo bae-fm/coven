@@ -63,7 +63,7 @@ pub enum BootstrapError {
     #[error("device invitation: {0}")]
     DeviceInvite(#[from] crate::joining::DeviceInviteError),
     #[error("invalid join request code: {0}")]
-    JoinRequest(#[source] coven_foundation::code_envelope::EnvelopeError),
+    JoinRequest(#[source] crate::joining::JoinRequestError),
     #[error("device join invite version {0} is not supported")]
     UnsupportedDeviceInviteVersion(u32),
     #[error("invalid store id: {0}")]

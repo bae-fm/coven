@@ -40,8 +40,6 @@ pub enum SyncError {
     DeviceJoin(#[source] Box<crate::sync::DeviceJoinError>),
     #[error("device join transport: {0}")]
     DeviceJoinTransport(#[source] Box<crate::sync::store::DeviceJoinTransportError>),
-    #[error("invalid join request code: {0}")]
-    InvalidJoinRequest(#[source] coven_foundation::code_envelope::EnvelopeError),
     #[error("invalid Store membership operation code: {0}")]
     InvalidMembershipOperationCode(#[source] coven_foundation::code_envelope::EnvelopeError),
     #[error("Store device exclusion: {0}")]

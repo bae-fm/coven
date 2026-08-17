@@ -139,7 +139,7 @@ pub enum DeviceInviteError {
     #[error("device invitation could not be opened as JSON: {0}")]
     InvitationJson(#[source] serde_json::Error),
     #[error("join request is invalid: {0}")]
-    JoinRequest(#[from] coven_foundation::code_envelope::EnvelopeError),
+    JoinRequest(#[from] crate::joining::JoinRequestError),
     #[error("device invitation key: {0}")]
     Key(#[from] coven_keys::keys::KeyError),
     #[error("device invitation is for a different join request")]

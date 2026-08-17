@@ -5,6 +5,8 @@ use coven_protocol::membership::MemberRole;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BeginDeviceInviteError {
+    #[error("join request: {0}")]
+    JoinRequest(#[from] coven_domain::joining::JoinRequestError),
     #[error("sync: {0}")]
     Sync(#[from] SyncError),
     #[error("device invitation: {0}")]
@@ -40,8 +42,7 @@ impl StoreJoining {
         join_request_code: &str,
         role: MemberRole,
     ) -> Result<coven_domain::joining::DeviceJoinInvite, BeginDeviceInviteError> {
-        let request = coven_domain::joining::decode_join_request(join_request_code)
-            .map_err(SyncError::InvalidJoinRequest)?;
+        let request = coven_domain::joining::decode_join_request(join_request_code)?;
         let invitation = self
             .membership
             .admit(&request.public_key, request.email.as_deref(), role)

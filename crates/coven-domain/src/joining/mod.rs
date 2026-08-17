@@ -15,7 +15,7 @@ pub use client::{
 };
 pub use request::{
     abandon_join_request, decode_join_request, encode_join_request, generate_join_request,
-    generate_join_request_for_keypair, JoinRequest,
+    generate_join_request_for_keypair, JoinRequest, JoinRequestError,
 };
 pub use transport::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceInviteError, DeviceInviteInfo,
