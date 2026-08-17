@@ -201,6 +201,72 @@ fn stopping_sync_cancels_the_post_open_eager_fill() {
     on_a_deep_stack(run_stopping_sync_cancels_the_post_open_eager_fill);
 }
 
+/// Cancelling artwork loading leaves the library's sync connection running and
+/// retains the exact partial counters at which only the cache fill stopped.
+#[test]
+fn eager_artwork_can_be_cancelled_without_stopping_sync() {
+    on_a_deep_stack(run_eager_artwork_can_be_cancelled_without_stopping_sync);
+}
+
+async fn run_eager_artwork_can_be_cancelled_without_stopping_sync() {
+    let store_id = "facade-cancel-only-eager-cache";
+    let fixture = FacadeFixture::build_with_eager_images(store_id, 2).await;
+    let config = join_eager_fixture(&fixture).await;
+    fixture
+        .memory_home
+        .as_ref()
+        .expect("in-memory eager cache fixture")
+        .stream_exact_reads_in_chunks(4 * 1024, Duration::from_millis(50));
+
+    let joined_handle = crate::Coven::builder(fixture.layout.store_dir(store_id), config)
+        .synced_tables(fixture.tables.clone())
+        .migrations(test_migrations())
+        .open()
+        .expect("open joined library");
+    let mut fill = joined_handle.subscribe_eager_cache_fill_status();
+    joined_handle
+        .connect_sync_with_test_home(
+            fixture.home.clone(),
+            coven_storage::CloudCipher::Encrypted(fixture.encryption.clone()),
+        )
+        .await
+        .expect("connect joined library");
+
+    let downloading = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let crate::EagerCacheFillStatus::Downloading(progress) = fill.borrow().clone() {
+                if progress.bytes_done > 0 {
+                    break progress;
+                }
+            }
+            fill.changed()
+                .await
+                .expect("cache fill status remains open");
+        }
+    })
+    .await
+    .expect("eager fill reports streamed bytes");
+
+    joined_handle.cancel_eager_cache_fill();
+    fill.changed()
+        .await
+        .expect("cache fill cancellation remains observable");
+    let cancelled = fill.borrow().clone();
+    assert!(
+        matches!(
+            cancelled,
+            crate::EagerCacheFillStatus::Cancelled(progress)
+                if progress.bytes_done >= downloading.bytes_done
+                    && progress.bytes_done < progress.bytes_total
+        ),
+        "explicit cancellation must retain eager-fill progress, got {cancelled:?}",
+    );
+    assert!(
+        joined_handle.is_syncing(),
+        "cache cancellation stopped sync"
+    );
+}
+
 async fn run_stopping_sync_cancels_the_post_open_eager_fill() {
     let store_id = "facade-cancel-eager-cache";
     let fixture = FacadeFixture::build_with_eager_images(store_id, 2).await;

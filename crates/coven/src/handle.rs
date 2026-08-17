@@ -327,6 +327,11 @@ impl CovenHandle {
         self.sync.subscribe_eager_cache_status()
     }
 
+    /// Stop post-open CacheEager downloads without stopping cloud sync.
+    pub fn cancel_eager_cache_fill(&self) {
+        self.sync.cancel_eager_cache_fill();
+    }
+
     /// Writes that have shared rows and have not reached a published position.
     pub async fn pending_writes(&self) -> Result<Vec<crate::PendingWrite>, crate::CovenError> {
         self.rows

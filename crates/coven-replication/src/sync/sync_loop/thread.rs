@@ -133,6 +133,7 @@ pub(super) struct SyncLoopThread {
     trigger_rx: tokio::sync::mpsc::Receiver<()>,
     command_rx: tokio::sync::mpsc::Receiver<SyncCommand>,
     stop_rx: tokio::sync::watch::Receiver<bool>,
+    eager_cache_cancel_rx: tokio::sync::watch::Receiver<bool>,
     activate_rx: tokio::sync::watch::Receiver<bool>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
     eager_cache_status_tx: tokio::sync::watch::Sender<crate::sync::store::EagerCacheFillStatus>,
@@ -145,6 +146,7 @@ impl SyncLoopThread {
         trigger_rx: tokio::sync::mpsc::Receiver<()>,
         command_rx: tokio::sync::mpsc::Receiver<SyncCommand>,
         stop_rx: tokio::sync::watch::Receiver<bool>,
+        eager_cache_cancel_rx: tokio::sync::watch::Receiver<bool>,
         activate_rx: tokio::sync::watch::Receiver<bool>,
         status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
         eager_cache_status_tx: tokio::sync::watch::Sender<crate::sync::store::EagerCacheFillStatus>,
@@ -155,6 +157,7 @@ impl SyncLoopThread {
             trigger_rx,
             command_rx,
             stop_rx,
+            eager_cache_cancel_rx,
             activate_rx,
             status_tx,
             eager_cache_status_tx,
@@ -197,7 +200,7 @@ impl SyncLoopThread {
         }
 
         let eager_components = Arc::clone(&self.inner);
-        let eager_cancel = self.stop_rx.clone();
+        let eager_cancel = self.eager_cache_cancel_rx.clone();
         let eager_status = self.eager_cache_status_tx.clone();
         let eager_fill = async move {
             if let Err(error) = eager_components

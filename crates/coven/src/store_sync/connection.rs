@@ -427,6 +427,13 @@ impl StoreSync {
         self.eager_cache_status_tx.subscribe()
     }
 
+    pub(crate) fn cancel_eager_cache_fill(&self) {
+        match connected_sync!(self) {
+            Some(sync) => sync.cancel_eager_cache_fill(),
+            None => debug!("cancel eager cache fill: no cloud connection; request ignored"),
+        }
+    }
+
     pub(crate) fn is_command_configured(&self) -> bool {
         self.has_cloud() || self.config().cloud_home.provider.is_some()
     }

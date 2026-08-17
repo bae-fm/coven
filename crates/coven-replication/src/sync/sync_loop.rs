@@ -114,6 +114,7 @@ pub struct SyncLoopHandle {
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     command_tx: tokio::sync::mpsc::Sender<SyncCommand>,
     stop_tx: tokio::sync::watch::Sender<bool>,
+    eager_cache_cancel_tx: tokio::sync::watch::Sender<bool>,
     activate_tx: tokio::sync::watch::Sender<bool>,
     /// The current status value, owned by the [`CovenHandle`] and cloned into each
     /// loop it starts, so a subscription survives a loop restart (a reconnect
@@ -203,6 +204,7 @@ impl SyncLoopHandle {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (eager_cache_cancel_tx, eager_cache_cancel_rx) = tokio::sync::watch::channel(false);
         let (activate_tx, activate_rx) = tokio::sync::watch::channel(false);
         let inner = Arc::new(SyncLoopHandleInner {
             components,
@@ -218,6 +220,7 @@ impl SyncLoopHandle {
                 trigger_rx,
                 command_rx,
                 stop_rx,
+                eager_cache_cancel_rx,
                 activate_rx,
                 status_tx.clone(),
                 eager_cache_status_tx,
@@ -229,6 +232,7 @@ impl SyncLoopHandle {
             trigger_tx,
             command_tx,
             stop_tx,
+            eager_cache_cancel_tx,
             activate_tx,
             status_tx,
             thread_handle: std::sync::Mutex::new(thread_handle),
@@ -256,6 +260,7 @@ impl SyncLoopHandle {
             if self.stop_tx.send(true).is_err() {
                 debug!("sync loop stop requested after stop receiver closed");
             }
+            self.eager_cache_cancel_tx.send_replace(true);
             self.trigger();
             guard.take()
         };
@@ -283,6 +288,11 @@ impl SyncLoopHandle {
                 debug!("Sync trigger channel closed, loop is not running");
             }
         }
+    }
+
+    /// Stop the post-open CacheEager fill without stopping cloud sync.
+    pub fn cancel_eager_cache_fill(&self) {
+        self.eager_cache_cancel_tx.send_replace(true);
     }
 
     pub async fn discard_blocked_write(
