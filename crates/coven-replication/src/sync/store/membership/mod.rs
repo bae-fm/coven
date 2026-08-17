@@ -56,6 +56,10 @@ pub enum MembershipOpsError {
     },
     #[error("cannot admit this device as a new member")]
     SelfAdmission,
+    #[error("the identity is already a member with different role or provider account")]
+    ExistingMemberMismatch,
+    #[error("the existing member does not have exactly one current wrapped Store key")]
+    ExistingMemberKeyAuthority,
     /// Admitting into a store whose founder entry is missing (a fresh store
     /// that never founded, or a wiped `membership/*`). Bootstrapping a founder on
     /// the spot is the takeover primitive, so admission is refused (issue #104).

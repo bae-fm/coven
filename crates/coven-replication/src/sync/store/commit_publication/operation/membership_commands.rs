@@ -29,6 +29,58 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         self.resolved_membership()?;
         let root = self.store_root().clone();
         let protocol_store_id = root.store_root_id.to_string();
+        if let Some((_, existing_role)) = self
+            .membership
+            .current_members()
+            .into_iter()
+            .find(|(pubkey, _)| pubkey == public_key_hex)
+        {
+            if existing_role != role
+                || self
+                    .membership
+                    .current_member_provider_email(public_key_hex)
+                    != member_email
+            {
+                return Err(
+                    crate::sync::store::membership::MembershipOpsError::ExistingMemberMismatch,
+                );
+            }
+            let wrapped_keys = self
+                .membership
+                .wrapped_key_authority_for(public_key_hex)
+                .map_err(crate::sync::store::membership::MembershipMutationError::Membership)?;
+            let [wrapped_key] = wrapped_keys.as_slice() else {
+                return Err(
+                    crate::sync::store::membership::MembershipOpsError::ExistingMemberKeyAuthority,
+                );
+            };
+            let desired_access = coven_storage::cloud::CloudAccessState::Present {
+                member_pubkey: public_key_hex.to_string(),
+                provider_account_email: member_email.map(str::to_string),
+            };
+            let outcome = self.storage.set_member_access(desired_access).await?;
+            let coven_storage::cloud::CloudAccessOutcome::Present(join_info) = outcome else {
+                return Err(
+                    crate::sync::store::membership::MembershipOpsError::ExistingMemberMismatch,
+                );
+            };
+            let owner_pubkey = self
+                .membership
+                .founder_pubkey()
+                .ok_or(crate::sync::store::membership::MembershipOpsError::ChainHasNoFounder)?
+                .to_string();
+            return Ok(crate::sync::store::membership::MemberAdmission {
+                store_id: store_id.to_string(),
+                store_name: store_name.to_string(),
+                join_info,
+                owner_pubkey,
+                wrapped_key: wrapped_key.clone(),
+                store_root: root,
+                membership_floor: coven_protocol::membership::MembershipFloor(
+                    self.membership.head_refs().to_vec(),
+                ),
+            });
+        }
         let admission_timestamp = self.database.stamp();
         let (join_info, wrapped_key, validated_chain) = async {
             let storage = self.storage.clone();

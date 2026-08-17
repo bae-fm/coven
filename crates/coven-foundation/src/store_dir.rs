@@ -229,6 +229,14 @@ impl StoreLayout {
         self.app_dir.join(&self.stores_dirname)
     }
 
+    pub fn pending_device_pairing_path(&self, session_id: &str) -> Result<PathBuf, PathTokenError> {
+        validate_path_token(session_id)?;
+        Ok(self
+            .app_dir
+            .join("pending-device-pairings")
+            .join(format!("{session_id}.json")))
+    }
+
     /// The one `(app_dir, store_id) -> StoreDir` rule, named with this
     /// layout's directory. Callers validate an untrusted `store_id`
     /// ([`validate_path_token`]) BEFORE calling, as every
@@ -323,6 +331,10 @@ impl StoreDir {
 
     pub fn config_path(&self) -> PathBuf {
         self.path.join("config.yaml")
+    }
+
+    pub fn device_pairing_journal_path(&self) -> PathBuf {
+        self.path.join("device-pairing.json")
     }
 
     /// The two-level partition shard for `id`: `{ab}/{cd}/{id}`, where `{ab}`/`{cd}`

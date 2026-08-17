@@ -63,8 +63,10 @@ pub enum BootstrapError {
     Io(#[from] std::io::Error),
     #[error("device invitation: {0}")]
     DeviceInvite(#[from] crate::joining::DeviceInviteError),
-    #[error("invalid join request code: {0}")]
-    JoinRequest(#[source] crate::joining::JoinRequestError),
+    #[error("device pairing: {0}")]
+    Pairing(#[from] crate::joining::DevicePairingTransportError),
+    #[error("device pairing state: {0}")]
+    PairingState(#[from] crate::joining::DevicePairingError),
     #[error("device join invite version {0} is not supported")]
     UnsupportedDeviceInviteVersion(u32),
     #[error("invalid store id: {0}")]
@@ -426,7 +428,7 @@ impl DeviceJoinClient {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         admission: MemberAdmission,
-        join_request_code: &str,
+        member_pubkey: String,
         layout: StoreLayout,
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
@@ -438,9 +440,9 @@ impl DeviceJoinClient {
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
-        let member_pubkey = crate::joining::decode_join_request(join_request_code)
-            .map_err(BootstrapError::JoinRequest)?
-            .public_key;
+        if admission.wrapped_key.recipient_pubkey != member_pubkey {
+            return Err(crate::joining::DeviceInviteError::RecipientMismatch.into());
+        }
         coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
             &admission.join_info,
             exact_upload_verification,
@@ -526,6 +528,7 @@ impl DeviceJoinClient {
         Ok(pending.status(attempt_id)?)
     }
 
+    #[cfg(test)]
     pub(crate) fn resume_device_joins(
         &self,
     ) -> Result<Vec<coven_replication::sync::DeviceJoinAction>, BootstrapError> {
@@ -533,6 +536,7 @@ impl DeviceJoinClient {
         Ok(pending.actions()?)
     }
 
+    #[cfg(test)]
     pub(crate) async fn close_pending_device_join(
         &self,
         cancellation: coven_replication::sync::DeviceJoinCancellation,
@@ -552,6 +556,7 @@ impl DeviceJoinClient {
         Ok(closure.close(cancellation).await?)
     }
 
+    #[cfg(test)]
     pub(crate) async fn complete_cancelled_device_join(
         &self,
         activation: coven_replication::sync::DeviceJoinCleanupActivation,

@@ -87,6 +87,7 @@ const OPERATION_SCOPED_OWNER_TYPES: &[&str] = &[
     "AuthorizedWriterOperation",
     "CircleEpochAccess",
     "CloudOutboxLiveQuery",
+    "DevicePairingHost",
     "HostWriteBlobStaging",
     "LiveQuery",
     "PreparedCloudHomeCredentials",

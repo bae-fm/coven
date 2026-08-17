@@ -1661,22 +1661,13 @@ async fn plaintext_membership_operations_are_typed() {
 
                     let joining_identity = coven_keys::keys::UserKeypair::generate();
                     let public_key_hex = hex::encode(joining_identity.public_key());
-                    let request = coven_domain::joining::generate_join_request_for_keypair(
-                        &joining_identity,
-                        None,
-                    );
                     let admission = handle
-                        .begin_device_invite(&request, MemberRole::Member)
+                        .admit_member_for_test(&public_key_hex, MemberRole::Member)
                         .await;
                     let remove = handle.remove_member(&public_key_hex).await;
                     let circle = handle.circles().create("Household").await;
 
-                    assert!(matches!(
-                        admission,
-                        Err(crate::BeginDeviceInviteError::Sync(
-                            SyncError::NotEncryptedHome
-                        ))
-                    ));
+                    assert!(matches!(admission, Err(SyncError::NotEncryptedHome)));
                     assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
                     assert!(
                         matches!(&circle, Err(crate::CircleError::BrowsableStorage)),

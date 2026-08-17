@@ -4,7 +4,7 @@
 //! Both compose the layers below — cloud home, keys, protocol, database,
 //! replication — into an operation with its own journal and its own resumable
 //! terminal states, so neither belongs to any one of them. Module paths are the
-//! API: `coven_domain::joining::join_with_scanned_invite`,
+//! API: `coven_domain::joining::join_with_device_pairing`,
 //! `coven_domain::restoration::restore_from_code`.
 
 pub mod joining;

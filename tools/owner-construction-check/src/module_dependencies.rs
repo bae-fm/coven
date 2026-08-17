@@ -77,6 +77,7 @@ pub(crate) const MODULE_REGIONS: &[(&str, Region)] = &[
     ("cloud_home_setup", Region::Host),
     ("cloud_outbox_live_query", Region::Host),
     ("coven", Region::Host),
+    ("device_pairing", Region::Host),
     ("handle", Region::Host),
     ("live_query", Region::Host),
     ("read_handle", Region::Host),

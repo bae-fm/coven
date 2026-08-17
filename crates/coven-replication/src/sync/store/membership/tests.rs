@@ -158,6 +158,42 @@ async fn current_floor_is_the_exact_signed_head_cut() {
 }
 
 #[tokio::test]
+async fn retrying_the_same_admission_reuses_the_active_membership_grant() {
+    let fixture = MergeFixture::new("idempotent-admission").await;
+    let member = UserKeypair::generate();
+    let first = fixture.admit_member(&member, MemberRole::Member).await;
+    let first_heads = fixture.load().await.head_refs().to_vec();
+
+    let second = fixture.admit_member(&member, MemberRole::Member).await;
+
+    assert_eq!(fixture.load().await.head_refs(), first_heads);
+    assert_eq!(second.wrapped_key, first.wrapped_key);
+    assert_eq!(second.membership_floor, first.membership_floor);
+    assert_eq!(second.join_info, first.join_info);
+}
+
+#[tokio::test]
+async fn retrying_join_after_admission_reuses_the_active_attempt() {
+    let fixture = MergeFixture::new("idempotent-device-join").await;
+    let member = UserKeypair::generate();
+    fixture.admit_member(&member, MemberRole::Member).await;
+    let member_pubkey = pubkey_hex(&member);
+
+    let first = fixture
+        .device
+        .begin_device_join(&member_pubkey)
+        .await
+        .expect("begin device join");
+    let resumed = fixture
+        .device
+        .begin_device_join(&member_pubkey)
+        .await
+        .expect("resume device join");
+
+    assert_eq!(resumed.attempt_id, first.attempt_id);
+}
+
+#[tokio::test]
 async fn current_floor_requires_every_exact_entry() {
     let fixture = MergeFixture::new("missing-entry").await;
     let member = UserKeypair::generate();

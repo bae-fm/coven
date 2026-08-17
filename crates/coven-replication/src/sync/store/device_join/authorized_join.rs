@@ -115,6 +115,23 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         member_pubkey: &str,
     ) -> Result<DeviceJoinOffer, DeviceJoinError> {
         self.require_eligible_member(member_pubkey)?;
+        let mut existing = self
+            .database
+            .device_join_actions()
+            .await?
+            .into_iter()
+            .filter_map(|action| match action {
+                DeviceJoinAction::TransferOffer(offer) if offer.member_pubkey == member_pubkey => {
+                    Some(offer)
+                }
+                _ => None,
+            });
+        if let Some(offer) = existing.next() {
+            if existing.next().is_some() {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            return Ok(offer);
+        }
         let provider_admin_grant = self
             .protocol_root
             .descriptor

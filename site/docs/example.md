@@ -288,36 +288,26 @@ layout, and the [Cache](/docs/cache) page covers the device-local read side.
 ## Share with a teammate
 
 A store starts with one member, the device that created it. To add a teammate,
-the joining device first calls `generate_join_request(...)` and sends that
-request code to an owner. The owner passes the exact request and a
-[`MemberRole`](rustdoc:enum:coven::MemberRole) (`Owner`, `Member`, or read-only
-`Follower`) to `handle.begin_device_invite(...)`.
+the owner starts one LAN pairing session and displays its code:
 
 ```rust
-let device_invitation = handle
-    .begin_device_invite(&join_request_code, MemberRole::Member)
-    .await?;
-let scanned_bytes = device_invitation.to_bytes();
+let pairing = handle.start_device_pairing().await?;
+show_qr(pairing.offer().encode());
 ```
 
-The invitation encrypts the credential-bearing membership admission to the
-pending identity that created that request. The host transfers `scanned_bytes`
-back to that same device. The joining side passes them and its retained request
-to `join_with_scanned_invite(...)`, while the owner keeps
-`handle.drive_device_join(&device_invitation, ...)` running until activation or
-abandonment.
+The joining device scans that code, completes provider authorization when the
+provider requires it, and opens a durable `PreparedDevicePairing`. That object
+mints and retains the pending device identity and repeatedly submits the same
+signed, encrypted request to the endpoints in the code.
 
-Handing those artifacts between the two devices is the host's to arrange, and
-coven ships one way to do it. Each artifact travels as a create-once object in
-the store's own cloud home, under a namespace for that join attempt, sealed
-with a key minted for it — so the storage provider carries the exchange without
-reading it. The owner mints a sealed
-[`DeviceJoinInvite`](rustdoc:struct:coven::DeviceJoinInvite) containing the
-admission and the attempt's transport bundle. From there,
-`join_with_scanned_invite` on the joining side and `drive_device_join` on the
-owner's side carry the join to a saved `Config`. Hosts that deliver the
-artifacts themselves — over a local network, a relay, a QR per step — keep
-using the `DeviceJoinAction` surface directly.
+The owner receives the verified public key and provider account from
+`pairing.wait_for_request()`, shows them for approval, then calls
+`handle.approve_device_pairing(...)`. Approval seals cloud access and the Store
+key to that exact identity. The invitation returns through the encrypted LAN
+session; the remaining signed registration artifacts use create-once objects in
+the Store cloud home. `join_with_device_pairing(...)` resumes the joining side
+from its journal until the Store configuration is saved. No code travels back
+to the joining device by camera or clipboard.
 
 `handle.remove_member(...)` appends a
 fresh key generation the removed member never receives. The signed membership

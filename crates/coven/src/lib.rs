@@ -12,6 +12,7 @@ pub(crate) mod circles;
 mod cloud_home_setup;
 mod cloud_outbox_live_query;
 pub(crate) mod coven;
+mod device_pairing;
 mod handle;
 mod live_query;
 #[cfg(test)]
@@ -47,13 +48,11 @@ pub use coven_database::{
     SqlContext, SqlReadContext, WriteBatch,
 };
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
+pub use coven_domain::joining::{join_with_device_pairing, DeviceJoinTransportOutcome};
 pub use coven_domain::joining::{
-    abandon_join_request, decode_join_request, generate_join_request, BootstrapError,
-    DeviceInviteError, DeviceInviteInfo, JoinRequest, JoinRequestError,
-};
-pub use coven_domain::joining::{
-    close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
-    DeviceJoinTransportOutcome,
+    BootstrapError, DevicePairingError, DevicePairingHost, DevicePairingOffer,
+    DevicePairingRequest, DevicePairingTransportError, PreparedDevicePairing,
+    SealedDevicePairingRequest,
 };
 pub use coven_domain::restoration::{
     decode_restore_code_info, restore_from_cloud, restore_from_code, ActivatedContinuation,
@@ -155,11 +154,12 @@ pub use coven_storage::{
     ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink,
     S3CloudHome, UploadProgress,
 };
+pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
 pub use handle::CovenHandle;
 pub use live_query::{
     LiveQuery, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,
 };
 pub use read_handle::CovenReadHandle;
-pub use store_joining::BeginDeviceInviteError;
+pub use store_joining::DeviceAdmissionError;
 pub use store_security::CloudHomeKeyState;

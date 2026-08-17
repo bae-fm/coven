@@ -445,7 +445,7 @@ fn establishing_identity_refuses_to_overwrite_a_different_identity() {
     );
 }
 
-/// A pending identity minted for a join request establishes into a store's
+/// A pending identity minted for device pairing establishes into a store's
 /// identity custody via `DeviceIdentityCustody::establish` while the pending slot still
 /// serves it — the split the join relies on: establish before the
 /// completion marker, discard the slot only once the whole join succeeds.
@@ -494,7 +494,7 @@ fn pending_identity_establishes_then_discards() {
     );
 }
 
-/// An abandoned join request's pending identity is removed and no longer
+/// An abandoned pairing's pending identity is removed and no longer
 /// served; discarding is `Ok` even when nothing was pending.
 #[test]
 fn discard_pending_identity_removes_it_and_is_idempotent() {
@@ -515,7 +515,7 @@ fn discard_pending_identity_removes_it_and_is_idempotent() {
     );
 }
 
-/// Two concurrent join requests mint distinct pending identities, keyed by
+/// Two concurrent pairing attempts mint distinct pending identities, keyed by
 /// their own public keys, and establishing one never touches the other.
 #[test]
 fn two_concurrent_pending_joins_do_not_cross() {

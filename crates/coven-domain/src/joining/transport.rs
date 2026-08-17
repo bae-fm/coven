@@ -15,16 +15,70 @@ use tokio::sync::watch;
 use crate::joining::client::{BootstrapError, DeviceJoinClient};
 use coven_foundation::config::Config;
 use coven_replication::sync::store::{
-    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinOfferBundle, DeviceJoinRoles, DeviceJoinStatus,
-    DeviceJoinStep, DeviceJoinTransport, DeviceJoinTransportTiming,
-    DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinOfferBundle,
+    DeviceJoinRoles, DeviceJoinStatus, DeviceJoinStep, DeviceJoinTransport,
+    DeviceJoinTransportTiming, DeviceProviderAdmissionApproval, ProviderReadyDeviceBootstrap,
 };
+#[cfg(test)]
+use coven_replication::sync::store::{DeviceJoinCancellation, DeviceJoinCleanupActivation};
 
 use coven_replication::sync::MemberAdmission;
 
+/// Complete the joining side after scanning the existing device's one pairing
+/// code. The local session returns the invitation sealed to this attempt; the
+/// existing Store transport then performs registration and bootstrap.
+#[allow(clippy::too_many_arguments)]
+pub async fn join_with_device_pairing(
+    pairing: &crate::joining::PreparedDevicePairing,
+    layout: coven_foundation::store_dir::StoreLayout,
+    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
+    migrations: Vec<coven_database::Migration>,
+    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    key_custody: coven_keys::custody::KeyCustody,
+    identity_custody: coven_keys::identity_custody::IdentityCustody,
+    oauth_clients: coven_storage::oauth::OAuthClients,
+    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+    cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
+    clock: coven_foundation::clock::ClockRef,
+    timing: DeviceJoinTransportTiming,
+    on_status: impl Fn(&str),
+    cancel: &watch::Receiver<bool>,
+) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
+    on_status("Waiting for approval");
+    let invitation = crate::joining::receive_device_invitation(
+        pairing.offer(),
+        pairing.sealed_request(),
+        timing,
+        clock.clone(),
+        cancel,
+    )
+    .await
+    .map_err(BootstrapError::Pairing)?;
+    on_status("Joining library");
+    let outcome = join_with_invitation(
+        &invitation,
+        pairing.request().public_key(),
+        layout.clone(),
+        synced_tables,
+        migrations,
+        exact_upload_verification,
+        key_custody,
+        identity_custody,
+        oauth_clients,
+        oauth_tokens,
+        cloudkit_ops,
+        clock,
+        timing,
+        on_status,
+        cancel,
+    )
+    .await?;
+    pairing.finish(&layout)?;
+    Ok(outcome)
+}
+
 /// Everything a joining device needs, sealed to the pending identity named by
-/// its join request. The transport bundle is public kickoff data; the member
+/// its signed pairing request. The transport bundle is public kickoff data; the member
 /// admission inside `sealed_invitation` carries provider credentials and can
 /// be opened only by that joining device.
 #[derive(Clone, Debug)]
@@ -60,13 +114,12 @@ impl DeviceJoinInvite {
 
     pub(crate) fn open_admission(
         &self,
-        join_request_code: &str,
+        member_pubkey: &str,
     ) -> Result<MemberAdmission, DeviceInviteError> {
-        let request = crate::joining::decode_join_request(join_request_code)?;
-        if request.public_key != self.bundle.offer.member_pubkey {
+        if member_pubkey != self.bundle.offer.member_pubkey {
             return Err(DeviceInviteError::RecipientMismatch);
         }
-        let recipient = coven_keys::keys::peek_pending_identity(&request.public_key)?;
+        let recipient = coven_keys::keys::peek_pending_identity(member_pubkey)?;
         let plaintext = coven_keys::keys::seal_box_decrypt(
             &self.sealed_invitation,
             &recipient.to_x25519_secret_key(),
@@ -76,12 +129,6 @@ impl DeviceJoinInvite {
         validate_admission(&admission)?;
         require_admission_matches_bundle(&admission, &self.bundle)?;
         Ok(admission)
-    }
-
-    pub fn inspect(&self, join_request_code: &str) -> Result<DeviceInviteInfo, DeviceInviteError> {
-        Ok(DeviceInviteInfo::from_admission(
-            self.open_admission(join_request_code)?,
-        ))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -108,28 +155,6 @@ impl DeviceJoinInvite {
     }
 }
 
-/// The non-secret fields a join screen can show after opening an invitation.
-pub struct DeviceInviteInfo {
-    pub store_id: String,
-    pub store_name: String,
-    pub owner_pubkey: String,
-    pub cloud_provider: coven_foundation::config::CloudProvider,
-    pub needs_oauth: bool,
-}
-
-impl DeviceInviteInfo {
-    fn from_admission(admission: MemberAdmission) -> Self {
-        let cloud_provider = admission.join_info.cloud_provider();
-        Self {
-            store_id: admission.store_id,
-            store_name: admission.store_name,
-            owner_pubkey: admission.owner_pubkey,
-            needs_oauth: cloud_provider.needs_oauth(),
-            cloud_provider,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceInviteError {
     #[error("device invitation wire is not valid JSON: {0}")]
@@ -138,11 +163,9 @@ pub enum DeviceInviteError {
     Ciphertext(#[source] base64::DecodeError),
     #[error("device invitation admission payload is not valid JSON: {0}")]
     AdmissionJson(#[source] serde_json::Error),
-    #[error("join request is invalid: {0}")]
-    JoinRequest(#[from] crate::joining::JoinRequestError),
     #[error("device invitation key: {0}")]
     Key(#[from] coven_keys::keys::KeyError),
-    #[error("device invitation is for a different join request")]
+    #[error("device invitation is for a different pairing identity")]
     RecipientMismatch,
     #[error("device invitation does not match its signed join offer")]
     OfferMismatch,
@@ -214,13 +237,13 @@ fn require_admission_matches_bundle(
 
 /// Build the joining device's client from a scanned payload.
 ///
-/// The arguments after the payload are this device's own — the join request it
-/// generated, and the same custody, schema, and provider wiring
+/// The arguments after the payload are this device's own — its pending public
+/// key, and the same custody, schema, and provider wiring
 /// [`DeviceJoinClient::new`] takes, since that is what this constructs.
 #[allow(clippy::too_many_arguments)]
-fn scanned_invite_client(
+fn invitation_client(
     invite: &DeviceJoinInvite,
-    join_request_code: &str,
+    member_pubkey: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
@@ -232,10 +255,10 @@ fn scanned_invite_client(
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
 ) -> Result<DeviceJoinClient, BootstrapError> {
-    let admission = invite.open_admission(join_request_code)?;
+    let admission = invite.open_admission(member_pubkey)?;
     DeviceJoinClient::new(
         admission,
-        join_request_code,
+        member_pubkey.to_string(),
         layout,
         synced_tables,
         migrations,
@@ -249,13 +272,12 @@ fn scanned_invite_client(
     )
 }
 
-/// Join a store from a scanned invite: one call from the payload the owner's
-/// device displayed to this device's saved [`coven_foundation::config::Config`], or to the owner's
-/// abandonment of the attempt.
+/// Join a store from the recipient-sealed invitation returned by the local
+/// pairing session.
 #[allow(clippy::too_many_arguments)]
-pub async fn join_with_scanned_invite(
+async fn join_with_invitation(
     invite: &[u8],
-    join_request_code: &str,
+    member_pubkey: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
@@ -271,9 +293,9 @@ pub async fn join_with_scanned_invite(
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;
-    scanned_invite_client(
+    invitation_client(
         &invite,
-        join_request_code,
+        member_pubkey,
         layout,
         synced_tables,
         migrations,
@@ -289,61 +311,24 @@ pub async fn join_with_scanned_invite(
     .await
 }
 
-/// Close this device's side of a join the owner cancelled, and discard the
-/// pending join state the attempt left behind.
-#[allow(clippy::too_many_arguments)]
-pub async fn close_scanned_invite_join(
-    invite: &[u8],
-    join_request_code: &str,
-    layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<coven_database::Migration>,
-    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-    key_custody: coven_keys::custody::KeyCustody,
-    identity_custody: coven_keys::identity_custody::IdentityCustody,
-    oauth_clients: coven_storage::oauth::OAuthClients,
-    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
-    cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
-    clock: coven_foundation::clock::ClockRef,
-    timing: DeviceJoinTransportTiming,
-) -> Result<(), BootstrapError> {
-    let invite = DeviceJoinInvite::from_bytes(invite)?;
-    scanned_invite_client(
-        &invite,
-        join_request_code,
-        layout,
-        synced_tables,
-        migrations,
-        exact_upload_verification,
-        key_custody,
-        identity_custody,
-        oauth_clients,
-        oauth_tokens,
-        cloudkit_ops,
-        clock,
-    )?
-    .close_device_join_via_transport(&invite.bundle, timing)
-    .await
-}
-
 /// Test-only: the joining device's client over an injected cloud home, the way
 /// the host's own test entry point injects one for the admitting side. The
 /// provider knobs a real device reads from its invitation are fixed here,
 /// since the home is supplied outright — including the exact-slot capability,
 /// which the injected home has by construction.
 #[cfg(any(test, feature = "test-utils"))]
-fn scanned_invite_test_client(
+fn invitation_test_client(
     invite: &DeviceJoinInvite,
-    join_request_code: &str,
+    member_pubkey: &str,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
 ) -> Result<DeviceJoinClient, BootstrapError> {
-    Ok(scanned_invite_client(
+    Ok(invitation_client(
         invite,
-        join_request_code,
+        member_pubkey,
         layout,
         synced_tables,
         migrations,
@@ -358,12 +343,11 @@ fn scanned_invite_test_client(
     .with_test_bootstrap_home(home))
 }
 
-/// Test-only counterpart of [`join_with_scanned_invite`].
+/// Test-only counterpart of [`join_with_device_pairing`].
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::too_many_arguments)]
-pub async fn join_with_scanned_invite_over_test_home(
-    invite: &[u8],
-    join_request_code: &str,
+pub async fn join_with_device_pairing_over_test_home(
+    pairing: &crate::joining::PreparedDevicePairing,
     layout: coven_foundation::store_dir::StoreLayout,
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
@@ -373,45 +357,30 @@ pub async fn join_with_scanned_invite_over_test_home(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    let invite = DeviceJoinInvite::from_bytes(invite)?;
-    scanned_invite_test_client(
+    on_status("Waiting for approval");
+    let invitation = crate::joining::receive_device_invitation(
+        pairing.offer(),
+        pairing.sealed_request(),
+        timing,
+        clock.clone(),
+        cancel,
+    )
+    .await?;
+    on_status("Joining library");
+    let invite = DeviceJoinInvite::from_bytes(&invitation)?;
+    let outcome = invitation_test_client(
         &invite,
-        join_request_code,
-        layout,
+        pairing.request().public_key(),
+        layout.clone(),
         synced_tables,
         migrations,
         clock,
         home,
     )?
     .join_via_transport(&invite.bundle, timing, on_status, cancel)
-    .await
-}
-
-/// Test-only counterpart of [`close_scanned_invite_join`].
-#[cfg(any(test, feature = "test-utils"))]
-#[allow(clippy::too_many_arguments)]
-pub async fn close_scanned_invite_join_over_test_home(
-    invite: &[u8],
-    join_request_code: &str,
-    layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<coven_database::Migration>,
-    clock: coven_foundation::clock::ClockRef,
-    home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
-    timing: DeviceJoinTransportTiming,
-) -> Result<(), BootstrapError> {
-    let invite = DeviceJoinInvite::from_bytes(invite)?;
-    scanned_invite_test_client(
-        &invite,
-        join_request_code,
-        layout,
-        synced_tables,
-        migrations,
-        clock,
-        home,
-    )?
-    .close_device_join_via_transport(&invite.bundle, timing)
-    .await
+    .await?;
+    pairing.finish(&layout)?;
+    Ok(outcome)
 }
 
 /// How a join driven through the transport ended for the joining device.
@@ -560,6 +529,7 @@ impl DeviceJoinClient {
     /// The joiner is the last reader in the unwind — it consumes the cleanup
     /// activation the owner publishes last — so the deletion belongs here, at
     /// the same point the joiner discards the rest of its pending join state.
+    #[cfg(test)]
     pub(crate) async fn close_device_join_via_transport(
         &self,
         bundle: &DeviceJoinOfferBundle,

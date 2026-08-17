@@ -4,9 +4,7 @@ use coven_database::StoreDatabase;
 use coven_protocol::membership::MemberRole;
 
 #[derive(Debug, thiserror::Error)]
-pub enum BeginDeviceInviteError {
-    #[error("join request: {0}")]
-    JoinRequest(#[from] coven_domain::joining::JoinRequestError),
+pub enum DeviceAdmissionError {
     #[error("sync: {0}")]
     Sync(#[from] SyncError),
     #[error("device invitation: {0}")]
@@ -39,17 +37,16 @@ impl StoreJoining {
 
     pub(crate) async fn begin_invite(
         &self,
-        join_request_code: &str,
+        request: &coven_domain::joining::DevicePairingRequest,
         role: MemberRole,
-    ) -> Result<coven_domain::joining::DeviceJoinInvite, BeginDeviceInviteError> {
-        let request = coven_domain::joining::decode_join_request(join_request_code)?;
+    ) -> Result<coven_domain::joining::DeviceJoinInvite, DeviceAdmissionError> {
         let admission = self
             .membership
-            .admit(&request.public_key, request.email.as_deref(), role)
+            .admit(request.public_key(), request.provider_account_email(), role)
             .await?;
         let bundle = self
             .sync
-            .begin_device_join_bundle(&request.public_key)
+            .begin_device_join_bundle(request.public_key())
             .await?;
         Ok(coven_domain::joining::DeviceJoinInvite::new(
             admission, bundle,

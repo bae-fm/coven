@@ -1,10 +1,8 @@
 //! Shared wire format for pasted coven codes: `prefix + base64url(json)`.
 //!
-//! Restore and membership-operation codes are JSON payloads wrapped the same
-//! way — a recognizable prefix, then the payload base64url-encoded — so they
-//! share one implementation of those mechanics. A join-request code carries no
-//! prefix; it reuses the same functions with an empty one, since an empty
-//! prefix always strips and never rejects.
+//! Restore, device-pairing, and membership-operation codes are JSON payloads
+//! wrapped the same way — a recognizable prefix, then the payload
+//! base64url-encoded — so they share one implementation of those mechanics.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

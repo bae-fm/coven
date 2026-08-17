@@ -1,6 +1,7 @@
 mod client;
 pub mod config;
-mod request;
+mod pairing;
+mod pairing_transport;
 mod transport;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -13,17 +14,17 @@ mod transport_tests;
 pub use client::{
     BootstrapCleanupFailure, BootstrapCleanupFailures, BootstrapError, SigningKeyError,
 };
-pub use request::{
-    abandon_join_request, decode_join_request, encode_join_request, generate_join_request,
-    generate_join_request_for_keypair, JoinRequest, JoinRequestError,
+pub use pairing::{
+    DevicePairingError, DevicePairingOffer, DevicePairingRequest, PreparedDevicePairing,
+    SealedDevicePairingRequest,
 };
-pub use transport::{
-    close_scanned_invite_join, join_with_scanned_invite, DeviceInviteError, DeviceInviteInfo,
-    DeviceJoinInvite, DeviceJoinTransportOutcome,
+pub use pairing_transport::{
+    receive_device_invitation, DevicePairingHost, DevicePairingTransportError,
 };
 #[cfg(any(test, feature = "test-utils"))]
+pub use transport::join_with_device_pairing_over_test_home;
 pub use transport::{
-    close_scanned_invite_join_over_test_home, join_with_scanned_invite_over_test_home,
+    join_with_device_pairing, DeviceInviteError, DeviceJoinInvite, DeviceJoinTransportOutcome,
 };
 
 // What `restoration` shares with the join flow it grew out of.

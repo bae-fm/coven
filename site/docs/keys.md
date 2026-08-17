@@ -145,13 +145,14 @@ of these three acts brought the store into existence on this device:
   a second call. The master key is established separately by the atomic
   cloud-home setup that needs it.
 - **Joining a shared store** —
-  [`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request)
-  mints the keypair before the joiner even knows which store the device invitation
-  names (a *pending* identity, held under a slot keyed by the request), and
-  [`coven::join_with_scanned_invite`](rustdoc:fn:coven::join_with_scanned_invite) drives
-  the signed admission exchange and promotes it into that store's own identity
-  custody only after the activation is installed. A join never finished can discard its pending identity with
-  [`coven::abandon_join_request`](rustdoc:fn:coven::abandon_join_request).
+  [`PreparedDevicePairing::open_or_create`](rustdoc:method:coven::PreparedDevicePairing::open_or_create)
+  opens the existing device's pairing code and mints the keypair used to sign
+  this device's request. The pending keypair remains in the platform key store,
+  addressed by its public key; the pairing journal contains no private key.
+  [`coven::join_with_device_pairing`](rustdoc:fn:coven::join_with_device_pairing)
+  promotes it into the joined store's identity custody only after activation.
+  [`PreparedDevicePairing::abandon`](rustdoc:method:coven::PreparedDevicePairing::abandon)
+  removes both the journal and pending key when the user abandons pairing.
 - **Restoring a store** —
   [`coven::restore_from_code`](rustdoc:fn:coven::restore_from_code) imports
   the identity the restore code carries, scoped to the one store it names.

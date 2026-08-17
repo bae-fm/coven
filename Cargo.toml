@@ -34,6 +34,7 @@ ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 fallible-streaming-iterator = "0.1.9"
 futures-util = "0.3"
 hex = "0.4"
+if-addrs = "0.15.0"
 hkdf = "0.13"
 hmac = "0.13"
 keyring-core = "0.7"

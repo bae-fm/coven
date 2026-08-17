@@ -49,7 +49,6 @@ struct TransportFixture {
     home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
     admission: coven_replication::sync::MemberAdmission,
-    join_request: String,
     layout: coven_foundation::store_dir::StoreLayout,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     /// The cloud home the joining device sees. Same principal as the owner's
@@ -131,11 +130,9 @@ impl TransportFixture {
         .expect("Store creation task")
         .expect("create Owner Store");
         let (store, owner_storage) = fixture;
-        let join_request =
-            crate::joining::generate_join_request(None).expect("generate join request");
-        let member_pubkey = crate::joining::decode_join_request(&join_request)
-            .expect("decode join request")
-            .public_key;
+        let joining_identity =
+            coven_keys::keys::mint_pending_identity().expect("mint pending joining identity");
+        let member_pubkey = coven_keys::keys::public_key_hex(&joining_identity);
         let admission = store
             .admit_member(
                 &owner_db,
@@ -200,7 +197,6 @@ impl TransportFixture {
             home,
             member_pubkey,
             admission,
-            join_request,
             layout,
             tables,
             joiner_home,
@@ -243,7 +239,7 @@ impl TransportFixture {
     fn client(&self) -> crate::joining::client::DeviceJoinClient {
         crate::joining::client::DeviceJoinClient::new(
             self.admission.clone(),
-            &self.join_request,
+            self.member_pubkey.clone(),
             self.layout.clone(),
             self.tables.clone(),
             test_migrations(),
@@ -493,15 +489,16 @@ async fn the_scanned_invitation_exposes_provider_credentials_only_to_its_request
         .expect("decode the sealed invitation wire");
     assert_eq!(
         decoded
-            .inspect(&fixture.join_request)
+            .open_admission(&fixture.member_pubkey)
             .expect("requesting device opens the invitation")
             .store_id,
         "sealed-device-invitation",
     );
-    let other_request =
-        crate::joining::generate_join_request(None).expect("generate an unrelated device request");
+    let other_identity =
+        coven_keys::keys::mint_pending_identity().expect("mint unrelated pending identity");
+    let other_pubkey = coven_keys::keys::public_key_hex(&other_identity);
     assert!(matches!(
-        decoded.inspect(&other_request),
+        decoded.open_admission(&other_pubkey),
         Err(crate::joining::DeviceInviteError::RecipientMismatch)
     ));
 }

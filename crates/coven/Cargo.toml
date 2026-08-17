@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
+if-addrs = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 rusqlite = { workspace = true }

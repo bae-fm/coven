@@ -130,9 +130,9 @@ pub enum KeyError {
         imported_pubkey_hex: String,
     },
     #[error(
-        "no pending identity is held for join request {request_public_key_hex}; the request may have already completed, been abandoned, or never existed"
+        "no pending identity is held for device pairing {pending_public_key_hex}; the pairing may have already completed, been abandoned, or never existed"
     )]
-    NoPendingIdentity { request_public_key_hex: String },
+    NoPendingIdentity { pending_public_key_hex: String },
     #[error("invalid host secret name {name:?}: {reason}")]
     InvalidSecretName { name: String, reason: String },
     /// The OS refused a Keychain data-protection-store operation with

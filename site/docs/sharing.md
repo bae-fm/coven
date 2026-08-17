@@ -256,47 +256,56 @@ owner.
 Removal does not retract old changesets the member already authored; pull
 stops admitting new ones.
 
-## Invite and join
+## One-scan device pairing
 
-A device invitation moves two things safely: the joining device's pending
-identity to the owner, then cloud access and the wrapped keyring back to that
-exact identity. The credential-bearing admission is encrypted to the public key
-from the request before it leaves the owner.
+An existing device displays one pairing code. The joining device scans it,
+establishes an encrypted LAN session, and sends its signed identity and provider
+account through that session. After the owner approves the exact identity, cloud
+access and the wrapped keyring return through the same session, encrypted to the
+joining device. No second code is displayed, scanned, or pasted.
 
-<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The joining device sends a join request; the owner admits that identity and returns its sealed device invitation">
+<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The owner displays one pairing code; the joining device scans it and the devices complete approval over an encrypted LAN session">
 <text class="hdr" x="120" y="22" text-anchor="middle">JOINER</text>
-<text class="hdr" x="330" y="22" text-anchor="middle">OUT OF BAND</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">ENCRYPTED LAN SESSION</text>
 <text class="hdr" x="540" y="22" text-anchor="middle">OWNER</text>
 <rect class="lane" x="10" y="32" width="220" height="172" rx="10"/>
 <rect class="lane" x="430" y="32" width="220" height="172" rx="10"/>
 <circle class="numc" cx="24" cy="59" r="8"/>
 <text class="num" x="24" y="62.5" text-anchor="middle">1</text>
 <rect class="chip" x="30" y="46" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="63" text-anchor="middle">join request code</text>
+<text class="lbl s11" x="120" y="63" text-anchor="middle">scan pairing code</text>
 <line class="arr" x1="214" y1="59" x2="426" y2="59" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="49" text-anchor="middle">carries the joiner's public key</text>
+<text class="sub" x="330" y="49" text-anchor="middle">offer carries endpoint + ephemeral key</text>
 <circle class="numc" cx="444" cy="108" r="8"/>
 <text class="num" x="444" y="111.5" text-anchor="middle">2</text>
 <rect class="chip" x="450" y="88" width="180" height="40" rx="7"/>
-<text class="lbl s11" x="540" y="104" text-anchor="middle">begin_device_invite(...)</text>
-<text class="sub" x="540" y="120" text-anchor="middle">Admit + seal exact payload</text>
+<text class="lbl s11" x="540" y="104" text-anchor="middle">approve_device_pairing(...)</text>
+<text class="sub" x="540" y="120" text-anchor="middle">verify identity + approve</text>
 <line class="arr" x1="446" y1="150" x2="234" y2="150" marker-end="url(#fa)"/>
 <circle class="numc" cx="330" cy="150" r="8"/>
 <text class="num" x="330" y="153.5" text-anchor="middle">3</text>
-<text class="sub" x="330" y="136" text-anchor="middle">sealed device invitation</text>
+<text class="sub" x="330" y="136" text-anchor="middle">recipient-sealed admission</text>
 <circle class="numc" cx="24" cy="177" r="8"/>
 <text class="num" x="24" y="180.5" text-anchor="middle">4</text>
 <rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="181" text-anchor="middle">join_with_scanned_invite</text>
+<text class="lbl s11" x="120" y="181" text-anchor="middle">join_with_device_pairing</text>
 </svg>
 
-The joiner runs `generate_join_request`, which mints a fresh Ed25519 keypair
-— scoped to this one join, not yet to any store — and produces a base64url
-code carrying its public key (and, for folder-sharing providers, the account
-email the owner should share to). They send it to the owner out of band.
+The owner calls `handle.start_device_pairing()`. The returned
+`DevicePairingHost` owns the listener and a durable journal; its offer contains
+the Store name and provider, expiry, LAN endpoints, and an ephemeral public
+key. Dropping and reopening the app resumes that exact
+session rather than minting another code.
 
-The owner calls `handle.begin_device_invite(...)` with the exact request and a
-role. coven:
+After scanning, the joining device completes provider sign-in when required,
+then calls `PreparedDevicePairing::open_or_create`. The pending Ed25519 identity
+stays in the platform key store; the pairing journal retains the offer and
+signed request but no private key. The complete request is sealed to the offer's
+ephemeral key and is bound to the complete offer hash.
+
+The owner receives the exact request from `wait_for_request()`, displays its
+public-key fingerprint and provider account, and passes it with a role to
+`handle.approve_device_pairing(...)`. coven:
 
 1. grants the joiner cloud access,
 2. wraps the store keyring to their X25519 key,
@@ -306,12 +315,10 @@ role. coven:
    pending identity,
 6. binds the sealed admission to the signed transport offer for this attempt.
 
-The owner sends the returned `DeviceJoinInvite::to_bytes()` to the joining
-device. Only the pending identity retained for the exact request can decrypt its
-cloud connection, store id, owner key, wrapped key, Store root, and membership
-floor. The owner runs `drive_device_join` while the joining device calls
-`join_with_scanned_invite` with those bytes and its retained request. Four exact
-values then cross through the invitation's cloud transport:
+The sealed admission returns through the same LAN session. Only the pending
+identity retained for that request can decrypt its cloud connection, Store id,
+owner key, wrapped key, Store root, and membership floor. The two sides then
+exchange four exact values through the Store's cloud transport:
 
 1. The offer becomes a provider access request; the selected provider
    administrator returns an approval.
@@ -326,14 +333,16 @@ values then cross through the invitation's cloud transport:
 Every client call resumes the durable journal. The same exchange admits a new
 member's device and another device belonging to an existing member.
 
-The device is now a writer. A join that fails partway never deletes a store
-that already existed on the device, and leaves the pending identity from
-step 1 untouched — the same join can be retried with the same request code.
+The device is now a writer. A join that is interrupted keeps the exact pairing,
+pending identity, membership admission, and join journals so both apps resume
+the same attempt. Before approval, `PreparedDevicePairing::abandon` removes the
+joining device's pending key and journal; the owner can cancel the waiting
+session without admitting anyone.
 
-The device invitation carries cloud credentials only as recipient-sealed
-ciphertext. Its delivery channel still needs integrity: before the join, the
-joining device has no trusted owner key with which to distinguish the intended
-store from an attacker's replacement invitation.
+The pairing code is the trust handoff. A substituted code can point at another
+Store because the joining device has no earlier owner key. Once the intended
+code is scanned, the signed and encrypted request/response prevent LAN traffic
+from replacing either identity.
 
 ## Restore codes
 

@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::device_pairing::StoreDevicePairing;
 use crate::store_blobs::StoreBlobAccess;
 use crate::store_blobs::StoreBlobs;
 use crate::store_circles::StoreCircles;
@@ -114,6 +115,7 @@ pub struct CovenHandle {
     sync: StoreSync,
     membership: StoreMembership,
     joining: StoreJoining,
+    pairing: StoreDevicePairing,
     recovery: StoreRecovery,
     circles: StoreCircles,
 }
@@ -172,12 +174,12 @@ impl CovenHandle {
         );
         let read_database = StoreDatabase::from_database(read_db);
         let sync = StoreSync::new(
-            config_provider,
+            config_provider.clone(),
             security.clone(),
             database.clone(),
             #[cfg(test)]
             store_dir.clone(),
-            clock,
+            clock.clone(),
             observer,
             open_guard,
             cloud_storage,
@@ -193,6 +195,13 @@ impl CovenHandle {
         let blobs = StoreBlobs::new(database.clone(), blob_access, local_blob_access);
         let membership = StoreMembership::new(sync.clone());
         let joining = StoreJoining::new(database.clone(), membership.clone(), sync.clone());
+        let pairing = StoreDevicePairing::new(
+            config_provider,
+            store_dir.device_pairing_journal_path(),
+            clock,
+            joining.clone(),
+            sync.clone(),
+        );
         let recovery = StoreRecovery::new(database.clone(), security.clone(), sync.clone());
         let circles = StoreCircles::new(
             database.clone(),
@@ -207,6 +216,7 @@ impl CovenHandle {
             sync,
             membership,
             joining,
+            pairing,
             recovery,
             circles,
         }
@@ -993,70 +1003,23 @@ impl CovenHandle {
         self.membership.conflict().await
     }
 
-    /// Admit the device that generated `join_request_code`, and return the one
-    /// payload that device needs: its sealed invitation and this attempt's transport
-    /// bundle.
-    ///
-    /// The joining device generates its join request first and shows it here —
-    /// the offer is signed for that device's key, so it cannot be minted
-    /// before this device knows it.
-    pub async fn begin_device_invite(
+    pub async fn start_device_pairing(
         &self,
-        join_request_code: &str,
-        role: MemberRole,
-    ) -> Result<coven_domain::joining::DeviceJoinInvite, crate::BeginDeviceInviteError> {
-        self.joining.begin_invite(join_request_code, role).await
+    ) -> Result<crate::DevicePairingHost, crate::StartDevicePairingError> {
+        self.pairing.start().await
     }
 
-    /// Drive the admitting side of a join this device issued, publishing each
-    /// artifact it produces and waiting for the joining device's.
-    ///
-    /// Returns when the attempt reaches an end this side owns: its activation,
-    /// or the abandonment that ended it early.
-    pub async fn drive_device_join(
+    pub async fn approve_device_pairing(
         &self,
-        invite: &coven_domain::joining::DeviceJoinInvite,
+        host: &crate::DevicePairingHost,
+        request: &crate::DevicePairingRequest,
+        role: MemberRole,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         timing: crate::DeviceJoinTransportTiming,
-    ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
-        self.sync
-            .drive_device_join(&invite.bundle, policy, access_administrator, timing)
-            .await
-    }
-
-    /// Cancel an invited join and carry the unwind to its activated cleanup,
-    /// publishing each artifact the joining device needs to close its own side.
-    ///
-    /// Which attempt this cancels comes from this device's own owner journal,
-    /// which is what decided it. Retry the whole call if it fails: a Store
-    /// commit that loses a race with this handle's sync loop is refused before
-    /// it persists, and the unwind resumes from where its journal stands.
-    ///
-    /// The counterpart for a host delivering artifacts itself is
-    /// [`cancel_device_join`](Self::cancel_device_join), which produces the
-    /// cancellation and hands it back rather than publishing it.
-    pub async fn cancel_device_invite(
-        &self,
-        invite: &crate::DeviceJoinInvite,
-        timing: crate::DeviceJoinTransportTiming,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        self.sync
-            .cancel_device_join_transport(&invite.bundle, timing)
-            .await
-    }
-
-    /// Give up on an invited join and publish the abandonment, so a joining
-    /// device waiting on its next artifact learns the join is over.
-    ///
-    /// The counterpart for a host delivering artifacts itself is
-    /// [`abandon_device_join`](Self::abandon_device_join).
-    pub async fn abandon_device_invite(
-        &self,
-        invite: &crate::DeviceJoinInvite,
-    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        self.sync
-            .abandon_device_join_transport(&invite.bundle)
+    ) -> Result<crate::DeviceJoinDriveOutcome, crate::ApproveDevicePairingError> {
+        self.pairing
+            .approve(host, request, role, policy, access_administrator, timing)
             .await
     }
 
@@ -1180,6 +1143,15 @@ impl CovenHandle {
 
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<(), SyncError> {
         self.membership.remove(public_key_hex).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn admit_member_for_test(
+        &self,
+        public_key_hex: &str,
+        role: MemberRole,
+    ) -> Result<coven_replication::sync::MemberAdmission, SyncError> {
+        self.membership.admit(public_key_hex, None, role).await
     }
 
     pub async fn resolve_membership_conflict(

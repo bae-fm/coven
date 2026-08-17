@@ -104,7 +104,7 @@ impl StoreSync {
         )
     }
 
-    pub(super) fn config(&self) -> Config {
+    pub(crate) fn config(&self) -> Config {
         (self.config_provider)()
     }
 

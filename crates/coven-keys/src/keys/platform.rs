@@ -234,7 +234,7 @@ const ENCRYPTION_MASTER_KEY_BASE: &str = "encryption_master_key";
 /// `{base}:{store_id}` under.
 const CLOUD_HOME_CREDENTIALS_BASE: &str = "cloud_home_credentials";
 /// The base account name [`KeyringSlot::PendingIdentity`] renders as
-/// `{base}:{request_public_key_hex}` under.
+/// `{base}:{pending_public_key_hex}` under.
 const PENDING_IDENTITY_BASE: &str = "coven_pending_identity";
 
 /// Every name coven's own [`KeyringSlot`] variants reserve for themselves —
@@ -252,8 +252,8 @@ pub(crate) const RESERVED_HOST_SECRET_NAMES: &[&str] = &[
 /// Which key a keyring entry holds, and the sole owner of the account name it
 /// is stored under. The device signing key, the encryption master key, the
 /// cloud-home credentials, and a host secret are all per store; a pending
-/// identity is keyed by its own join request instead of a store (it exists
-/// before the joiner knows which store the device invitation names — see
+/// identity is keyed by its own public key instead of a store (it exists while
+/// the device pairing has not established the Store-scoped identity — see
 /// [`crate::keys::mint_pending_identity`]). Every keyring read/write/delete
 /// names its entry with one of these variants, so the on-disk account
 /// strings live in exactly one place: [`KeyringSlot::account`].
@@ -264,8 +264,8 @@ pub(crate) enum KeyringSlot {
     EncryptionMasterKey(String),
     /// A store's cloud-home credentials.
     CloudHomeCredentials(String),
-    /// A join request's not-yet-store-scoped signing identity, keyed by the
-    /// request's own public key.
+    /// A pairing attempt's not-yet-store-scoped signing identity, keyed by its
+    /// own public key.
     PendingIdentity(String),
     /// A host's own store-scoped secret, named by the host and validated
     /// against [`RESERVED_HOST_SECRET_NAMES`] before it ever reaches this
@@ -291,8 +291,8 @@ impl KeyringSlot {
             KeyringSlot::CloudHomeCredentials(store_id) => {
                 format!("{CLOUD_HOME_CREDENTIALS_BASE}:{store_id}")
             }
-            KeyringSlot::PendingIdentity(request_public_key_hex) => {
-                format!("{PENDING_IDENTITY_BASE}:{request_public_key_hex}")
+            KeyringSlot::PendingIdentity(pending_public_key_hex) => {
+                format!("{PENDING_IDENTITY_BASE}:{pending_public_key_hex}")
             }
             KeyringSlot::HostSecret { name, store_id } => format!("{name}:{store_id}"),
         }
@@ -523,15 +523,14 @@ pub fn require_identity(custody: &dyn DeviceIdentityCustody) -> Result<UserKeypa
     custody.unlock()?.ok_or(KeyError::NoDeviceIdentity)
 }
 
-/// Mint a fresh identity for a join request that has not yet named a store:
-/// the joiner sends its public key before it learns which store the device invitation
-/// is for (`JoinRequestCode`), so this keypair is generated now and held
+/// Mint a fresh identity for a device-pairing attempt that has not joined a
+/// store yet. The joiner signs its pairing request with this keypair and holds it
 /// under a pending slot keyed by its own public key. The join establishes it
 /// in the joined store's own identity custody (via
 /// [`DeviceIdentityCustody::establish`],
 /// before the store's completion marker) and discards the pending slot only
 /// once the whole join succeeds; [`discard_pending_identity`] also removes it
-/// if the request is abandoned instead. Always the OS keyring: unlike an
+/// if the pairing is abandoned instead. Always the OS keyring: unlike an
 /// established store's identity, there is no store yet to select a custody
 /// policy for, and a pending identity's lifetime is short (a join round trip,
 /// not a store's lifetime).
@@ -541,29 +540,29 @@ pub fn mint_pending_identity() -> Result<UserKeypair, KeyError> {
         &KeyringSlot::PendingIdentity(public_key_hex(&keypair)),
         &hex::encode(keypair.to_keypair_bytes()),
     )?;
-    info!("Minted a pending identity for a join request");
+    info!("Minted a pending identity for device pairing");
     Ok(keypair)
 }
 
 /// Read (without consuming) the pending identity keyed by
-/// `request_public_key_hex` — what a join in progress signs its bootstrap
+/// `pending_public_key_hex` — what a pairing in progress signs its bootstrap
 /// traffic with, and what it establishes in the store's own custody before
 /// the completion marker. [`KeyError::NoPendingIdentity`] if none is held
 /// under that key.
-pub fn peek_pending_identity(request_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
+pub fn peek_pending_identity(pending_public_key_hex: &str) -> Result<UserKeypair, KeyError> {
     read_pending_identity_slot(&KeyringSlot::PendingIdentity(
-        request_public_key_hex.to_string(),
+        pending_public_key_hex.to_string(),
     ))
 }
 
 fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyError> {
-    let KeyringSlot::PendingIdentity(request_public_key_hex) = slot else {
+    let KeyringSlot::PendingIdentity(pending_public_key_hex) = slot else {
         unreachable!("read_pending_identity_slot is only ever called with a PendingIdentity slot");
     };
     let sk_hex = registered_keyring()?
         .read(slot)?
         .ok_or_else(|| KeyError::NoPendingIdentity {
-            request_public_key_hex: request_public_key_hex.clone(),
+            pending_public_key_hex: pending_public_key_hex.clone(),
         })?;
     let signing_key = hex::decode(&sk_hex).map_err(|source| KeyError::Hex {
         subject: "pending identity",
@@ -581,14 +580,14 @@ fn read_pending_identity_slot(slot: &KeyringSlot) -> Result<UserKeypair, KeyErro
     UserKeypair::from_signing_key_bytes(&signing_key)
 }
 
-/// Discard the pending identity keyed by `request_public_key_hex` — a join
-/// request abandoned without completing, or one whose identity the completed
+/// Discard the pending identity keyed by `pending_public_key_hex` — a pairing
+/// abandoned without completing, or one whose identity the completed
 /// join has already established in the store's own custody. `Ok` whether or
 /// not one was pending.
-pub fn discard_pending_identity(request_public_key_hex: &str) -> Result<(), KeyError> {
+pub fn discard_pending_identity(pending_public_key_hex: &str) -> Result<(), KeyError> {
     registered_keyring()?
         .delete(&KeyringSlot::PendingIdentity(
-            request_public_key_hex.to_string(),
+            pending_public_key_hex.to_string(),
         ))
         .map(|_| ())
 }

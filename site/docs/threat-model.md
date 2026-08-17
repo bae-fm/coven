@@ -165,28 +165,21 @@ envelope is the one piece coven treats as untrusted input from disk, and only
 narrowly: it reads the envelope's KDF parameters from an unauthenticated file, so
 it floors them rather than deriving a key at whatever cost the file names.
 
-## The device-invitation channel
+## The device-pairing channel
 
-The out-of-band channel over which a joining device sends its join request to
-an owner and receives its sealed device invitation.
+The existing device displays one pairing code in person. It contains an
+ephemeral public key, LAN endpoints, provider identity,
+and expiry. The joining device seals its signed identity request to that key;
+the existing device accepts one exact request for the session and refuses a
+competing identity. Its credential-bearing response is sealed again to the
+approved joining identity.
 
-**Assumed integrity-preserving. This is a hard trust assumption.** The
-credential-bearing admission is encrypted to the pending identity that created
-the exact join request, so another device cannot open it. The invitation also
-carries the store's `owner_pubkey`, which the joiner **pins** as the signed membership founder and
-thereafter anchors every authorization decision against. Whoever controls
-delivery can still replace the whole response with an invitation for the
-joiner's public key, but for an attacker's store. That chooses the founder key
-the joiner pins and therefore the authority chain. The founder anchor defends
-against a bucket writer who is *not* the pinned owner; it cannot detect that the
-pinned owner is itself wrong.
-
-There is no prior trusted owner key with which the joining device can authenticate
-the first invitation. The requirement is therefore stated, not solved: **the
-device invitation must be delivered over a channel the joiner trusts for
-integrity.** Comparing the founder fingerprint out of band (both sides
-read it aloud) narrows the window and is a product decision, not a precondition
-for this assumption.
+**The displayed code is the trust handoff.** A replacement code can point the
+joining device at an attacker's Store because the joining device has no earlier
+owner key to compare. Once scanned, changing LAN traffic cannot substitute
+either side: the request is bound to the complete offer, and
+the returned admission is bound to the request's public key. The admission's
+founder key is pinned for every later membership decision.
 
 ## Cross-store linkability
 

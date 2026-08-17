@@ -47,10 +47,9 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     .await
     .expect("join Owner Store creation task")
     .expect("create Owner Store");
-    let join_request = crate::joining::generate_join_request(None).expect("generate join request");
-    let member_pubkey = crate::joining::decode_join_request(&join_request)
-        .expect("decode join request")
-        .public_key;
+    let joining_identity =
+        coven_keys::keys::mint_pending_identity().expect("mint pending joining identity");
+    let member_pubkey = coven_keys::keys::public_key_hex(&joining_identity);
     let admission = store
         .admit_member(
             &owner_db,
@@ -90,7 +89,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let new_client = || {
         crate::joining::client::DeviceJoinClient::new(
             admission.clone(),
-            &join_request,
+            member_pubkey.clone(),
             layout.clone(),
             tables.clone(),
             test_migrations(),
