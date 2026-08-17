@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 use tracing::debug;
 
 const MAX_PAIRING_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -121,7 +121,6 @@ struct DevicePairingHostInner {
     offer: DevicePairingOffer,
     state: Arc<Mutex<PersistedPairingHost>>,
     journal: PairingJournal,
-    changed: Arc<Notify>,
     request_tx: watch::Sender<Option<DevicePairingRequest>>,
     server: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -201,7 +200,6 @@ impl DevicePairingHost {
     ) -> Result<Self, DevicePairingTransportError> {
         let offer = persisted.offer.clone();
         let state = Arc::new(Mutex::new(persisted));
-        let changed = Arc::new(Notify::new());
         let initial_request = state
             .lock()
             .expect("lock pairing host state")
@@ -210,7 +208,6 @@ impl DevicePairingHost {
             .clone();
         let request_tx = watch::channel(initial_request).0;
         let server_state = Arc::clone(&state);
-        let server_changed = Arc::clone(&changed);
         let server_request_tx = request_tx.clone();
         let server_offer = offer.clone();
         let server_journal = journal.clone();
@@ -225,7 +222,6 @@ impl DevicePairingHost {
                     }
                 };
                 let state = Arc::clone(&server_state);
-                let changed = Arc::clone(&server_changed);
                 let request_tx = server_request_tx.clone();
                 let offer = server_offer.clone();
                 let pairing_key = pairing_key.clone();
@@ -239,7 +235,6 @@ impl DevicePairingHost {
                         state,
                         journal,
                         clock,
-                        changed,
                         request_tx,
                     )
                     .await
@@ -254,7 +249,6 @@ impl DevicePairingHost {
                 offer,
                 state,
                 journal,
-                changed,
                 request_tx,
                 server: Mutex::new(Some(server)),
             }),
@@ -306,7 +300,6 @@ impl DevicePairingHost {
         self.inner.journal.replace(&next)?;
         *persisted = next;
         drop(persisted);
-        self.inner.changed.notify_waiters();
         Ok(())
     }
 
@@ -336,7 +329,6 @@ impl DevicePairingHost {
         self.inner.journal.replace(&next)?;
         *persisted = next;
         drop(persisted);
-        self.inner.changed.notify_waiters();
         Ok(())
     }
 
@@ -372,7 +364,6 @@ async fn handle_connection(
     state: Arc<Mutex<PersistedPairingHost>>,
     journal: PairingJournal,
     clock: coven_foundation::clock::ClockRef,
-    changed: Arc<Notify>,
     request_tx: watch::Sender<Option<DevicePairingRequest>>,
 ) -> Result<(), DevicePairingTransportError> {
     let wire: PairingWireRequest = read_frame(&mut stream).await?;
@@ -397,7 +388,6 @@ async fn handle_connection(
         }
     };
     write_frame(&mut stream, &response).await?;
-    changed.notify_waiters();
     Ok(())
 }
 
