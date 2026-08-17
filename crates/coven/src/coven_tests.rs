@@ -2709,9 +2709,10 @@ impl ExactSlotStorage for GateCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<(), coven_storage::cloud::CloudFileReadError> {
         self.gate().await;
-        ExactSlotStorage::read_at_to_file(&self.inner, slot, destination).await
+        ExactSlotStorage::read_at_to_file(&self.inner, slot, destination, progress).await
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

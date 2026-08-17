@@ -483,12 +483,13 @@ impl ExactSlotStorage for CloudKitCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<(), crate::cloud::CloudFileReadError> {
         let bytes = self.read_at(slot).await?;
         let stream: crate::cloud::CloudObjectStream = Box::pin(futures_util::stream::once(
             async move { Ok(Bytes::from(bytes)) },
         ));
-        crate::cloud::write_cloud_object_stream(destination, stream)
+        crate::cloud::write_cloud_object_stream(destination, stream, progress)
             .await
             .map(drop)
     }

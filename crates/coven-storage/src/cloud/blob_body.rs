@@ -6,6 +6,10 @@ use super::*;
 /// The count is of the bytes handed to `write` (the encrypted payload).
 pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
 
+/// Reports how many bytes of a cloud object have arrived from the provider.
+/// The count is cumulative and advances once per received stream buffer.
+pub type DownloadProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
+
 /// Reports how many plaintext source bytes have been consumed while a durable
 /// upload spool is being prepared. Owned because the reader that produces the
 /// sealed body retains it for the lifetime of that stream.
@@ -26,6 +30,10 @@ pub fn no_progress() -> impl Fn(u64) + Send + Sync {
 }
 
 pub fn no_preparation_progress() -> PreparationProgress {
+    std::sync::Arc::new(|_| {})
+}
+
+pub fn no_download_progress() -> DownloadProgress {
     std::sync::Arc::new(|_| {})
 }
 

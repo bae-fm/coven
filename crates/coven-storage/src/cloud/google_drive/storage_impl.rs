@@ -554,8 +554,9 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<(), crate::cloud::CloudFileReadError> {
-        GoogleDriveCloudHome::read_at_slot_to_file(self, slot, destination).await
+        GoogleDriveCloudHome::read_at_slot_to_file(self, slot, destination, progress).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         GoogleDriveCloudHome::delete_at_slot(self, slot).await

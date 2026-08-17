@@ -33,6 +33,10 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
 }
 
+fn no_join_progress() -> coven_replication::sync::JoiningDeviceJoinProgressObserver {
+    Arc::new(|_| {})
+}
+
 /// Everything the two sides of one join need: the owner's open Store over the
 /// shared in-memory home, and a factory for the joining device's client.
 struct TransportFixture {
@@ -283,6 +287,15 @@ impl TransportFixture {
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
     ) -> Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
+        self.drive_owner_observing(bundle, timing, &|_| {}).await
+    }
+
+    async fn drive_owner_observing(
+        &self,
+        bundle: &DeviceJoinOfferBundle,
+        timing: DeviceJoinTransportTiming,
+        on_progress: &(dyn Fn(coven_replication::sync::AdmittingDeviceJoinProgress) + Send + Sync),
+    ) -> Result<coven_replication::sync::DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         self.owner_store
             .device_join_transport()
             .drive(
@@ -291,6 +304,7 @@ impl TransportFixture {
                 self.access_administrator.as_ref().map(|administrator| {
                     administrator as &dyn coven_replication::sync::DeviceProviderAccessAdministrator
                 }),
+                on_progress,
                 timing,
             )
             .await
@@ -375,12 +389,59 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
 
     let joiner = fixture.client();
     let cancel = never_cancelled();
+    let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_progress = Arc::clone(&progress);
+    let observe_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver =
+        Arc::new(move |phase| observed_progress.lock().expect("progress lock").push(phase));
+    let owner_progress = std::sync::Mutex::new(Vec::new());
+    let observe_owner_progress = |phase| {
+        owner_progress
+            .lock()
+            .expect("owner progress lock")
+            .push(phase)
+    };
     let (config, activation) = tokio::join!(
-        Box::pin(joiner.join_via_transport(&bundle, timing(), |_status| {}, &cancel)),
-        Box::pin(fixture.drive_owner(&bundle)),
+        Box::pin(joiner.join_via_transport(&bundle, timing(), observe_progress, &cancel,)),
+        Box::pin(fixture.drive_owner_observing(&bundle, timing(), &observe_owner_progress,)),
     );
     let config = joined(config);
     let activation = activated(activation);
+
+    {
+        let progress = progress.lock().expect("progress lock");
+        assert!(progress.contains(
+            &coven_replication::sync::JoiningDeviceJoinProgress::RequestingProviderAccess
+        ));
+        assert!(progress
+            .contains(&coven_replication::sync::JoiningDeviceJoinProgress::WaitingForLibrary));
+        assert!(progress.iter().any(|phase| matches!(
+            phase,
+            coven_replication::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                bytes_done: 0,
+                bytes_total
+            } if *bytes_total > 0
+        )));
+        assert!(progress.iter().any(|phase| matches!(
+            phase,
+            coven_replication::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                bytes_done,
+                bytes_total
+            } if bytes_done == bytes_total && *bytes_total > 0
+        )));
+        assert!(progress
+            .contains(&coven_replication::sync::JoiningDeviceJoinProgress::WaitingForActivation));
+        assert!(
+            progress.contains(&coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary)
+        );
+    }
+    let owner_progress = owner_progress.into_inner().expect("owner progress lock");
+    assert!(owner_progress.contains(
+        &coven_replication::sync::AdmittingDeviceJoinProgress::WaitingForProviderAccessRequest
+    ));
+    assert!(owner_progress
+        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::WaitingForJoiningDevice));
+    assert!(owner_progress
+        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::ActivatingDevice));
 
     assert!(fixture
         .layout
@@ -524,7 +585,7 @@ async fn run_transport_carries_a_cross_principal_join() {
     // Advance far enough to read the approval off its slot, so the test proves
     // this really took the probe path rather than the same-principal one.
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
     assert_owner_waited_for(
@@ -549,7 +610,12 @@ async fn run_transport_carries_a_cross_principal_join() {
 
     let finishing_joiner = fixture.client();
     let (config, activation) = tokio::join!(
-        Box::pin(finishing_joiner.join_via_transport(&bundle, timing(), |_status| {}, &cancel)),
+        Box::pin(finishing_joiner.join_via_transport(
+            &bundle,
+            timing(),
+            no_join_progress(),
+            &cancel,
+        )),
         Box::pin(fixture.drive_owner(&bundle)),
     );
     let config = joined(config);
@@ -602,7 +668,7 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         let cancel = &cancel;
         async move {
             client
-                .join_via_transport(bundle, timing, |_status| {}, cancel)
+                .join_via_transport(bundle, timing, no_join_progress(), cancel)
                 .await
         }
     };
@@ -735,7 +801,7 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
         let cancel = &cancel;
         async move {
             client
-                .join_via_transport(bundle, timing, |_status| {}, cancel)
+                .join_via_transport(bundle, timing, no_join_progress(), cancel)
                 .await
         }
     };
@@ -849,7 +915,7 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
     // attempt it is about to cancel.
     let joiner = fixture.client();
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
     assert_owner_waited_for(
@@ -857,7 +923,7 @@ async fn run_cancelling_mid_join_removes_the_attempts_slots() {
         DeviceJoinTransportKind::RegistrationRequest,
     );
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderReadyBootstrap,
     );
     assert_owner_waited_for(
@@ -904,7 +970,7 @@ async fn run_the_joining_flow_observes_owner_cancellation() {
     let joiner = fixture.client();
 
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
     assert_owner_waited_for(
@@ -912,7 +978,7 @@ async fn run_the_joining_flow_observes_owner_cancellation() {
         DeviceJoinTransportKind::RegistrationRequest,
     );
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderReadyBootstrap,
     );
     assert_owner_waited_for(
@@ -924,7 +990,7 @@ async fn run_the_joining_flow_observes_owner_cancellation() {
     let owner_cancel = Box::pin(owner_transport.cancel(&bundle, timing()));
     let joining_client = fixture.client();
     let joining =
-        Box::pin(joining_client.join_via_transport(&bundle, timing(), |_status| {}, &cancel));
+        Box::pin(joining_client.join_via_transport(&bundle, timing(), no_join_progress(), &cancel));
     let (owner, joined) = tokio::join!(owner_cancel, joining);
     owner.expect("owner completes cancellation");
     assert!(matches!(
@@ -957,7 +1023,7 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
     // The joining device publishes its access request and waits.
     let joiner = fixture.client();
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
@@ -977,11 +1043,12 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
 
     // The joining device's next run finds the abandonment where it would have
     // found the approval.
-    match Box::pin(
-        fixture
-            .client()
-            .join_via_transport(&bundle, timing(), |_status| {}, &cancel),
-    )
+    match Box::pin(fixture.client().join_via_transport(
+        &bundle,
+        timing(),
+        no_join_progress(),
+        &cancel,
+    ))
     .await
     .expect("the joining device accepts the abandonment")
     {
@@ -1033,7 +1100,7 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
     let joiner = fixture.client();
 
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
     assert_owner_waited_for(
@@ -1041,7 +1108,7 @@ async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
         DeviceJoinTransportKind::RegistrationRequest,
     );
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderReadyBootstrap,
     );
     assert_owner_waited_for(
@@ -1165,7 +1232,7 @@ async fn run_auto_approval_refuses_an_attempt_this_device_did_not_issue() {
 
     let joiner = fixture.client();
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
@@ -1208,7 +1275,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
 
     let joiner = fixture.client();
     assert_joiner_waited_for(
-        Box::pin(joiner.join_via_transport(&bundle, one_shot(), |_status| {}, &cancel)).await,
+        Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
         DeviceJoinTransportKind::ProviderAdmissionApproval,
     );
 
@@ -1225,6 +1292,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
             &bundle,
             coven_replication::sync::DeviceJoinApprovalPolicy::Ask(&refuse),
             None,
+            &|_| {},
             one_shot(),
         )
         .await;
@@ -1263,6 +1331,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
                 &bundle,
                 coven_replication::sync::DeviceJoinApprovalPolicy::Ask(&approve),
                 None,
+                &|_| {},
                 one_shot(),
             )
             .await,

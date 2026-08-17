@@ -396,12 +396,13 @@ impl SyncLoopHandle {
         bundle: &crate::sync::DeviceJoinOfferBundle,
         policy: crate::sync::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::sync::DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(crate::sync::AdmittingDeviceJoinProgress) + Send + Sync),
         timing: crate::sync::DeviceJoinTransportTiming,
     ) -> Result<crate::sync::DeviceJoinDriveOutcome, crate::sync::store::DeviceJoinTransportError>
     {
         self.inner
             .components
-            .drive_device_join(bundle, policy, access_administrator, timing)
+            .drive_device_join(bundle, policy, access_administrator, on_progress, timing)
             .await
     }
 

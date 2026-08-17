@@ -39,13 +39,13 @@ serde_urlencoded = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 keyring-core = { workspace = true }
-tempfile = { workspace = true }
 uuid = { workspace = true }
 # A `cfg(test)` build of this crate reaches the foundation, keys, and protocol
 # test hooks, which exist only under those crates' own `test-utils`. `cfg(test)`

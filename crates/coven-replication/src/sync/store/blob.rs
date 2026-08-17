@@ -566,9 +566,10 @@ impl CurrentRemoteBlobSource {
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
-            .stage_verified_plaintext(authority, stored, stage)
+            .stage_verified_plaintext(authority, stored, stage, progress)
             .await
     }
 }
@@ -598,9 +599,10 @@ impl<'storage> RemoteBlobSource<'storage> {
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.inner
-            .stage_verified_plaintext(authority, stored, stage)
+            .stage_verified_plaintext(authority, stored, stage, progress)
             .await
     }
 
@@ -610,9 +612,10 @@ impl<'storage> RemoteBlobSource<'storage> {
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<(), BlobDownloadFailureCause> {
         self.inner
-            .verify_plaintext(cache, authority, stored, retain)
+            .verify_plaintext(cache, authority, stored, retain, progress)
             .await
     }
 
@@ -684,10 +687,11 @@ impl RemoteBlobSourceInner<'_> {
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.resolved_access(authority, stored)
             .await?
-            .stage_verified_plaintext(stored, stage)
+            .stage_verified_plaintext(stored, stage, progress)
             .await
     }
 
@@ -697,12 +701,15 @@ impl RemoteBlobSourceInner<'_> {
         authority: &RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<(), BlobDownloadFailureCause> {
         let remote = self
             .resolved_access(authority, stored)
             .await
             .map_err(BlobDownloadFailureCause::Cache)?;
-        cache.verify_remote_plaintext(&remote, stored, retain).await
+        cache
+            .verify_remote_plaintext(&remote, stored, retain, progress)
+            .await
     }
 
     async fn access(
@@ -762,7 +769,13 @@ impl RemoteStoreBlobAccess {
                     .stage_atomic_file(&destination)
                     .await
                     .map_err(BlobCacheError::File)?;
-                let staged = remote.stage_verified_plaintext(stored, stage).await?;
+                let staged = remote
+                    .stage_verified_plaintext(
+                        stored,
+                        stage,
+                        coven_storage::cloud::no_download_progress(),
+                    )
+                    .await?;
                 let bytes = staged.read_bytes().await.map_err(BlobCacheError::File)?;
                 self.remote.validate(reference).await?;
                 self.local
@@ -856,7 +869,12 @@ impl RemoteStoreBlobAccess {
             .map_err(BlobCacheError::File)?;
         let staged = self
             .remote
-            .stage_verified_plaintext(reference.authority(), stored, stage)
+            .stage_verified_plaintext(
+                reference.authority(),
+                stored,
+                stage,
+                coven_storage::cloud::no_download_progress(),
+            )
             .await?;
         self.remote.validate(reference).await?;
         Ok(staged)
@@ -878,7 +896,9 @@ impl RemoteStoreBlobAccess {
             .stage_atomic_file(&destination)
             .await
             .map_err(BlobCacheError::File)?;
-        let staged = remote.stage_verified_plaintext(stored, stage).await?;
+        let staged = remote
+            .stage_verified_plaintext(stored, stage, coven_storage::cloud::no_download_progress())
+            .await?;
         verify_exact_file(staged.path(), reference).await?;
         let source = open_local_file(staged.path()).await?;
         self.remote.validate(reference).await?;
@@ -991,6 +1011,7 @@ impl StoreBlobCache {
         remote: &ExactRemoteBlobAccess<'_>,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<(), BlobDownloadFailureCause> {
         let locator = stored.locator();
         coven_foundation::store_dir::validate_path_token(locator.namespace())
@@ -1007,7 +1028,7 @@ impl StoreBlobCache {
             .await
             .map_err(BlobDownloadFailureCause::File)?;
         let staged = remote
-            .stage_verified_plaintext(stored, stage)
+            .stage_verified_plaintext(stored, stage, progress)
             .await
             .map_err(|error| match error {
                 BlobCacheError::Storage(error) => BlobDownloadFailureCause::Storage(error),
@@ -1158,7 +1179,9 @@ impl StoreBlobCache {
             .stage_atomic_file(&pinned)
             .await
             .map_err(BlobCacheError::File)?;
-        let staged = remote.stage_verified_plaintext(stored, stage).await?;
+        let staged = remote
+            .stage_verified_plaintext(stored, stage, coven_storage::cloud::no_download_progress())
+            .await?;
         verify_exact_file(staged.path(), reference).await?;
         self.database.validate_row_blob_ref(reference).await?;
         self.publish_materialization(staged, reference).await

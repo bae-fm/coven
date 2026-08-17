@@ -206,6 +206,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_snapshot_image(
         &self,
         snapshot: &coven_database::PublishedStoreSnapshot,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<Vec<u8>, StoreObjectError> {
         let context = ProtocolObjectContext::store_encrypted(
             self.root.reference().store_root_hash,
@@ -216,7 +217,12 @@ impl<'a> MergeHistoryVerifier<'a> {
             snapshot.meta.image.image_hash,
         );
         self.commit_verifier
-            .read_protocol_object(&context, &snapshot.meta.image.object, &semantic_prefix)
+            .read_protocol_object_with_progress(
+                &context,
+                &snapshot.meta.image.object,
+                &semantic_prefix,
+                progress,
+            )
             .await
     }
 

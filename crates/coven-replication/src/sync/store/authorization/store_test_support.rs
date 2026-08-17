@@ -678,6 +678,7 @@ impl Store {
             binary_schema_version,
             target_path,
             restorer_identity,
+            std::sync::Arc::new(|_| {}),
         )
         .await
     }

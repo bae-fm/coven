@@ -828,11 +828,12 @@ impl SyncComponents {
         bundle: &crate::sync::DeviceJoinOfferBundle,
         policy: crate::sync::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::sync::DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(crate::sync::AdmittingDeviceJoinProgress) + Send + Sync),
         timing: crate::sync::DeviceJoinTransportTiming,
     ) -> Result<crate::sync::DeviceJoinDriveOutcome, super::store::DeviceJoinTransportError> {
         self.store
             .device_join_transport()
-            .drive(bundle, policy, access_administrator, timing)
+            .drive(bundle, policy, access_administrator, on_progress, timing)
             .await
     }
 

@@ -453,6 +453,7 @@ impl S3CloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
         slot.require_logical_key_for("S3")
             .map_err(|error| super::CloudFileReadError::Source(CloudHomeError::from(error)))?;
@@ -481,7 +482,7 @@ impl S3CloudHome {
                         })
                     },
                 );
-                super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
+                super::write_cloud_object_stream(&destination, Box::pin(stream), progress).await?;
                 Ok::<(), super::CloudFileReadError>(())
             })
             .await
@@ -1588,8 +1589,9 @@ impl ExactSlotStorage for S3CloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
-        S3CloudHome::read_exact_to_file(self, slot, destination).await
+        S3CloudHome::read_exact_to_file(self, slot, destination, progress).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")?;

@@ -153,16 +153,17 @@ impl<'a> RemoteBlobAccess<'a> {
         &self,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         match &self.protection {
             RemoteBlobProtection::Store => {
                 self.storage
-                    .stage_verified_store_blob_plaintext(stored, stage)
+                    .stage_verified_store_blob_plaintext(stored, stage, progress)
                     .await
             }
             RemoteBlobProtection::Circle(protection) => {
                 self.storage
-                    .stage_verified_blob_plaintext(stored, protection.clone(), stage)
+                    .stage_verified_blob_plaintext(stored, protection.clone(), stage, progress)
                     .await
             }
         }

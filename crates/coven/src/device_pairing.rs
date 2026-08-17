@@ -112,6 +112,7 @@ impl StoreDevicePairing {
         role: MemberRole,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(crate::AdmittingDeviceJoinProgress) + Send + Sync),
         timing: crate::DeviceJoinTransportTiming,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, ApproveDevicePairingError> {
@@ -123,6 +124,7 @@ impl StoreDevicePairing {
             host.finish()?;
             return Err(ApproveDevicePairingError::Cancelled);
         }
+        on_progress(crate::AdmittingDeviceJoinProgress::PreparingInvitation);
         let invitation = match host.invitation(request)? {
             Some(bytes) => coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?,
             None => self.joining.begin_invite(request, role).await?,
@@ -131,9 +133,13 @@ impl StoreDevicePairing {
             return Err(ApproveDevicePairingError::RequestMismatch);
         }
         host.deliver_invitation(request, invitation.to_bytes())?;
-        let drive =
-            self.sync
-                .drive_device_join(&invitation.bundle, policy, access_administrator, timing);
+        let drive = self.sync.drive_device_join(
+            &invitation.bundle,
+            policy,
+            access_administrator,
+            on_progress,
+            timing,
+        );
         let cancellation = cancellation_requested(cancel);
         tokio::pin!(drive);
         tokio::pin!(cancellation);

@@ -438,6 +438,7 @@ async fn a_blob_stored_in_the_clear_refuses_ranged_reading() {
             &blob,
             coven_protocol::objects::BlobSpoolProtection::Browsable,
             stage,
+            crate::cloud::no_download_progress(),
         )
         .await
         .expect("materialize the whole browsable blob");
@@ -1013,6 +1014,7 @@ async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
             &blob,
             coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
             stage,
+            crate::cloud::no_download_progress(),
         )
         .await
         .expect("stage verified plaintext");
@@ -1089,6 +1091,7 @@ async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
                 &blob,
                 coven_protocol::objects::BlobSpoolProtection::Opaque(audience_key),
                 stage,
+                crate::cloud::no_download_progress(),
             )
             .await,
         Err(StorageError::InvalidContent(_))

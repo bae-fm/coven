@@ -70,7 +70,12 @@ async fn a_same_id_planted_blob_cannot_replace_the_signed_exact_reference() {
     let destination = directory.path().join("real");
     let stage = ephemeral_stage(&destination).await;
     let staged = cloud_storage
-        .stage_verified_blob_plaintext(&real_blob, BlobSpoolProtection::Opaque(protection()), stage)
+        .stage_verified_blob_plaintext(
+            &real_blob,
+            BlobSpoolProtection::Opaque(protection()),
+            stage,
+            coven_storage::cloud::no_download_progress(),
+        )
         .await
         .expect("stage the referenced exact blob");
     assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), real);
@@ -126,6 +131,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
                 &current_blob,
                 BlobSpoolProtection::Opaque(protection()),
                 stage,
+                coven_storage::cloud::no_download_progress(),
             )
             .await,
         Err(StorageError::InvalidContent(_))
@@ -139,6 +145,7 @@ async fn provider_rollback_at_the_exact_slot_is_refused_before_plaintext_publica
             &current_blob,
             BlobSpoolProtection::Opaque(protection()),
             stage,
+            coven_storage::cloud::no_download_progress(),
         )
         .await
         .expect("stage restored exact blob");

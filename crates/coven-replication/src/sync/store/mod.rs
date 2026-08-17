@@ -48,9 +48,10 @@ pub use device_exclusion::StoreDeviceExclusionOperationInfo;
 pub use device_exclusion::{StoreDeviceExclusionError, StoreDeviceExclusionResult};
 pub use device_join::transport::StoreDeviceJoinTransport;
 pub use device_join::transport::{
-    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinDriveOutcome, DeviceJoinOfferBundle,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming,
+    AdmittingDeviceJoinProgress, DeviceJoinApproval, DeviceJoinApprovalPolicy,
+    DeviceJoinDriveOutcome, DeviceJoinOfferBundle, DeviceJoinTransportError,
+    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
+    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver,
 };
 pub use device_join::transport::{DeviceJoinRoles, DeviceJoinStep, DeviceJoinTransport};
 pub(crate) use device_join::JoiningStore;

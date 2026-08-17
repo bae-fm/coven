@@ -526,6 +526,7 @@ impl InMemoryCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), CloudFileReadError> {
         self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);
         self.exact_reads.lock().unwrap().push(slot.clone());
@@ -551,7 +552,7 @@ impl InMemoryCloudHome {
             .cloned()
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
         let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from(bytes)) });
-        super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
+        super::write_cloud_object_stream(destination, Box::pin(stream), progress).await?;
         Ok(())
     }
 
@@ -837,8 +838,9 @@ impl ExactSlotStorage for InMemoryCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), CloudFileReadError> {
-        InMemoryCloudHome::read_exact_to_file(self, slot, destination).await
+        InMemoryCloudHome::read_exact_to_file(self, slot, destination, progress).await
     }
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {

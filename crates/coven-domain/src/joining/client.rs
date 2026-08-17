@@ -633,7 +633,7 @@ impl DeviceJoinClient {
     pub(crate) async fn bootstrap_pending_device(
         &self,
         bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
-        on_status: impl Fn(&str),
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
@@ -658,7 +658,6 @@ impl DeviceJoinClient {
             return Err(BootstrapError::StoreExists(self.admission.store_id.clone()));
         }
         store_dir.ensure_created()?;
-        on_status("Downloading store snapshot...");
         let db_path = store_dir.db_path();
         let history_verifier =
             coven_replication::sync::store::HistoryConstructionAuthority::for_snapshot()
@@ -672,8 +671,10 @@ impl DeviceJoinClient {
             supported_version(&self.migrations),
             &db_path,
             &signer,
+            std::sync::Arc::clone(on_progress),
         )
         .await?;
+        on_progress(coven_replication::sync::JoiningDeviceJoinProgress::InstallingSnapshot);
         let routing_encryption = EncryptionService::from(join.keyring.clone());
         let device_id = bootstrap
             .bootstrap
@@ -693,12 +694,11 @@ impl DeviceJoinClient {
                 Some(&routing_encryption),
             )
             .await?;
-        match opened.reconcile_snapshot_blobs(cancel).await? {
+        match opened.reconcile_snapshot_blobs(cancel, on_progress).await? {
             SnapshotBlobReconcile::Complete => {}
             SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
         }
         let published_at = self.clock.now().to_rfc3339();
-        on_status("Installing device registration...");
         let mut joining = opened
             .begin_device_join(&pending, offer.as_ref().clone())
             .await?;
@@ -708,7 +708,7 @@ impl DeviceJoinClient {
     pub(crate) async fn complete_device_join(
         &self,
         activation: coven_replication::sync::DeviceJoinActivation,
-        on_status: impl Fn(&str),
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<Config, BootstrapError> {
         let attempt_id = activation.outcome.attempt().attempt_id;
         let pending = self.open_pending_journal()?;
@@ -758,7 +758,7 @@ impl DeviceJoinClient {
         // bootstrapped history and the commit to materialize. The activation
         // resolves its predecessor device state out of the local history, which
         // has to hold those commits and the row data they carry.
-        on_status("Catching up on store history...");
+        on_progress(coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp);
         let routing_encryption = EncryptionService::from(join.keyring.clone());
         let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
             &pending,
@@ -781,7 +781,7 @@ impl DeviceJoinClient {
         {
             return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
         }
-        on_status("Saving configuration...");
+        on_progress(coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary);
         self.custody.persist(&join.keyring)?;
         self.identity_custody.establish(&signer)?;
         if let Some(credentials) = derive_credentials(&self.admission.join_info) {

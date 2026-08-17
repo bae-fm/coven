@@ -286,11 +286,12 @@ impl StoreSync {
         bundle: &crate::DeviceJoinOfferBundle,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(crate::AdmittingDeviceJoinProgress) + Send + Sync),
         timing: crate::DeviceJoinTransportTiming,
     ) -> Result<crate::DeviceJoinDriveOutcome, SyncError> {
         Ok(active_sync!(self)
             .ok_or(SyncError::LoopNotRunning)?
-            .drive_device_join(bundle, policy, access_administrator, timing)
+            .drive_device_join(bundle, policy, access_administrator, on_progress, timing)
             .await?)
     }
 

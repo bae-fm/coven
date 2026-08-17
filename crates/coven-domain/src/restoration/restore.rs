@@ -352,6 +352,7 @@ pub async fn restore_from_cloud(
             coven_database::supported_version(migrations),
             &store_dir.db_path(),
             keypair,
+            std::sync::Arc::new(|_| {}),
         )
         .await?;
 
@@ -380,7 +381,12 @@ pub async fn restore_from_cloud(
             )
             .await?;
 
-        match store.reconcile_snapshot_blobs(cancel).await? {
+        let ignore_join_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver =
+            std::sync::Arc::new(|_| {});
+        match store
+            .reconcile_snapshot_blobs(cancel, &ignore_join_progress)
+            .await?
+        {
             SnapshotBlobReconcile::Complete => {}
             SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
         }

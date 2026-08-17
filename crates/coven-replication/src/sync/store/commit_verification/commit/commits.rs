@@ -431,6 +431,19 @@ impl<'a> StoreCommitVerifier<'a> {
             .map_err(StoreObjectError::from)
     }
 
+    pub(crate) async fn read_protocol_object_with_progress(
+        &self,
+        context: &ProtocolObjectContext,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+        progress: coven_storage::cloud::DownloadProgress,
+    ) -> Result<Vec<u8>, StoreObjectError> {
+        self.storage
+            .read_protocol_object_with_progress(context, object, semantic_prefix, progress)
+            .await
+            .map_err(StoreObjectError::from)
+    }
+
     pub(crate) async fn read_protocol_slot(
         &self,
         context: &ProtocolObjectContext,

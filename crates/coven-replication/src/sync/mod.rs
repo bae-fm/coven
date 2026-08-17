@@ -37,19 +37,20 @@ pub use loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use status::DeviceActivity;
 pub use store::MemberAdmission;
 pub use store::Store;
-pub use store::{BlobCacheError, BlobStream};
 pub use store::{
-    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval,
-    DeviceJoinApprovalPolicy, DeviceJoinCancellation, DeviceJoinCleanupActivation,
-    DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase,
-    DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinProducer,
-    DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
-    DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
+    AdmittingDeviceJoinProgress, DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation,
+    DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
+    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError,
+    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
+    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
+    DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
     DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
     DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
     DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
-    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap,
+    JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure,
+    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
+    ProvisionalDeviceBootstrap,
 };
+pub use store::{BlobCacheError, BlobStream};
 pub use sync_loop::SyncLoopStatus;

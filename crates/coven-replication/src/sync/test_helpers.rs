@@ -5037,11 +5037,12 @@ where
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, coven_protocol::objects::StorageError>
     {
         self.interceptor.before_blob_stage().await?;
         self.inner
-            .stage_verified_store_blob_plaintext(blob, stage)
+            .stage_verified_store_blob_plaintext(blob, stage, progress)
             .await
     }
 
@@ -5114,6 +5115,21 @@ where
             .await?;
         self.inner
             .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
+    async fn read_protocol_object_with_progress(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        object: &coven_protocol::objects::ExactObjectRef,
+        semantic_prefix: &str,
+        progress: coven_storage::cloud::DownloadProgress,
+    ) -> Result<Vec<u8>, coven_protocol::objects::StorageError> {
+        self.interceptor
+            .before_protocol_read(ProtocolRead::Object, semantic_prefix)
+            .await?;
+        self.inner
+            .read_protocol_object_with_progress(context, object, semantic_prefix, progress)
             .await
     }
 
@@ -5228,11 +5244,12 @@ where
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, coven_protocol::objects::StorageError>
     {
         self.interceptor.before_blob_stage().await?;
         self.inner
-            .stage_verified_blob_plaintext(blob, protection, stage)
+            .stage_verified_blob_plaintext(blob, protection, stage, progress)
             .await
     }
 

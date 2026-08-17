@@ -15,6 +15,10 @@ use coven_storage::cloud::{no_progress, ExactSlotStorage, ExactUpload};
 fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
 }
+
+fn no_join_progress() -> coven_replication::sync::JoiningDeviceJoinProgressObserver {
+    Arc::new(|_| {})
+}
 #[tokio::test]
 async fn device_join_client_four_transfer_retries_and_process_restarts_preserve_exact_state() {
     tokio::spawn(run_device_join_client_four_transfer_retries_and_process_restarts())
@@ -153,16 +157,17 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .publish_device_provider_challenge(provisional)
         .await
         .expect("publish provider challenge");
+    let progress = no_join_progress();
     let readiness = Box::pin(new_client().bootstrap_pending_device(
         provider_ready.clone(),
-        |_status| {},
+        &progress,
         &never_cancelled(),
     ))
     .await
     .expect("bootstrap pending device");
     let readiness_retry = Box::pin(new_client().bootstrap_pending_device(
         provider_ready,
-        |_status| {},
+        &progress,
         &never_cancelled(),
     ))
     .await
@@ -212,7 +217,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("remove activation commit");
     let interrupted_completion = new_client()
-        .complete_device_join(activation.clone(), |_status| {})
+        .complete_device_join(activation.clone(), &progress)
         .await;
     assert!(
         interrupted_completion.is_err(),
@@ -244,11 +249,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("restore activation commit after interruption");
     let config = new_client()
-        .complete_device_join(activation.clone(), |_status| {})
+        .complete_device_join(activation.clone(), &progress)
         .await
         .expect("complete join after process restart");
     let retry = new_client()
-        .complete_device_join(activation, |_status| {})
+        .complete_device_join(activation, &progress)
         .await
         .expect("retry completed join after lost response");
     assert_eq!(retry.device_id, config.device_id);

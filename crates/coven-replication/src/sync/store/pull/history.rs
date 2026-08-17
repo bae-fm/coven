@@ -156,7 +156,13 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
             let retain = eager.iter().any(|download| download == stored);
             if let Err(cause) = self
                 .blob_source
-                .verify_plaintext(self.blob_cache, &blob_authority, stored, retain)
+                .verify_plaintext(
+                    self.blob_cache,
+                    &blob_authority,
+                    stored,
+                    retain,
+                    coven_storage::cloud::no_download_progress(),
+                )
                 .await
             {
                 failures.push(BlobDownloadFailure {

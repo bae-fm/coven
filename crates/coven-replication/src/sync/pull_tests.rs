@@ -465,6 +465,7 @@ impl PullTestStoreOps for TestStore {
                     }
                 },
                 stage,
+                coven_storage::cloud::no_download_progress(),
             )
             .await
             .expect("read exact blob object");

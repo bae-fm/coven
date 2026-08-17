@@ -455,6 +455,34 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         .await
     }
 
+    async fn read_protocol_object_with_progress(
+        &self,
+        context: &ProtocolObjectContext,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+        progress: crate::cloud::DownloadProgress,
+    ) -> Result<Vec<u8>, StorageError> {
+        context.validate_reference(object, semantic_prefix)?;
+        let temporary = tempfile::tempdir().map_err(StorageError::Io)?;
+        let stored_path = temporary.path().join("protocol-object");
+        self.home
+            .read_at_to_file(object.slot(), &stored_path, progress)
+            .await
+            .map_err(map_cloud_file_read_error)?;
+        let stored = tokio::fs::read(&stored_path)
+            .await
+            .map_err(StorageError::Io)?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        self.verify_and_open_protocol_data(
+            "verify and open streamed protocol object",
+            context,
+            object.clone(),
+            stored,
+            aad,
+        )
+        .await
+    }
+
     async fn read_protocol_slot(
         &self,
         context: &ProtocolObjectContext,
@@ -816,6 +844,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: coven_protocol::objects::BlobSpoolProtection,
         mut plaintext: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let stored_destination = plaintext
             .destination()
@@ -824,7 +853,9 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
             .stage_peer(&stored_destination)
             .await
             .map_err(StorageError::LocalFilesystem)?;
-        let stored = self.stage_exact_blob_download(blob, stored_stage).await?;
+        let stored = self
+            .stage_exact_blob_download(blob, stored_stage, progress)
+            .await?;
         let mut reader =
             ExactBlobPlaintextReader::new(stored.path(), &self.store_id, blob, protection).await?;
         let written =
@@ -851,9 +882,10 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         plaintext: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let protection = store_blob_protection!(self);
-        self.stage_verified_blob_plaintext(blob, protection, plaintext)
+        self.stage_verified_blob_plaintext(blob, protection, plaintext, progress)
             .await
     }
 
@@ -948,6 +980,7 @@ impl CloudSyncConnection {
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         mut staged: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError> {
         let locator = blob.locator();
         let object = blob.object();
@@ -960,18 +993,13 @@ impl CloudSyncConnection {
             )));
         }
         self.home
-            .read_at_to_file(object.slot(), staged.path_for_atomic_replacement())
+            .read_at_to_file(
+                object.slot(),
+                staged.path_for_atomic_replacement(),
+                progress,
+            )
             .await
-            .map_err(|error| match error {
-                CloudFileReadError::Source(error) => StorageError::from(error),
-                CloudFileReadError::SourceCleanup { source, cleanup } => {
-                    StorageError::CleanupFailed {
-                        operation: Box::new(StorageError::from(source)),
-                        cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
-                    }
-                }
-                CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
-            })?;
+            .map_err(map_cloud_file_read_error)?;
         {
             let (size, digest) = coven_foundation::local_file::file_facts(staged.path())
                 .await

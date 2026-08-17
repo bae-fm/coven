@@ -1016,6 +1016,7 @@ impl CovenHandle {
         role: MemberRole,
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(crate::AdmittingDeviceJoinProgress) + Send + Sync),
         timing: crate::DeviceJoinTransportTiming,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, crate::ApproveDevicePairingError> {
@@ -1026,6 +1027,7 @@ impl CovenHandle {
                 role,
                 policy,
                 access_administrator,
+                on_progress,
                 timing,
                 cancel,
             )

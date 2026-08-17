@@ -276,6 +276,16 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError>;
 
+    /// Read and open one exact Store protocol object while reporting cumulative
+    /// provider bytes as each response buffer arrives.
+    async fn read_protocol_object_with_progress(
+        &self,
+        context: &ProtocolObjectContext,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+        progress: crate::cloud::DownloadProgress,
+    ) -> Result<Vec<u8>, StorageError>;
+
     /// Read one predecessor-reserved successor slot and return both its opened
     /// bytes and the completed exact reference derived from the stored bytes.
     async fn read_protocol_slot(
@@ -359,6 +369,7 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         protection: BlobSpoolProtection,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
 
     /// Open and verify a Store-audience blob without exposing the Store key.
@@ -366,6 +377,7 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         &self,
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: crate::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, StorageError>;
 
     /// Open a reader that serves plaintext ranges of a stored blob by fetching

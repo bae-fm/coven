@@ -54,8 +54,10 @@ mod exact_upload;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use blob_body::PROGRESS_CHUNK_SIZE;
 pub(crate) use blob_body::{combine_cleanup_failure, MultipartUpload};
-pub use blob_body::{no_preparation_progress, no_progress};
-pub use blob_body::{BlobBody, BoxPartSink, PartSink, PreparationProgress, UploadProgress};
+pub use blob_body::{no_download_progress, no_preparation_progress, no_progress};
+pub use blob_body::{
+    BlobBody, BoxPartSink, DownloadProgress, PartSink, PreparationProgress, UploadProgress,
+};
 pub use exact_upload::{ExactUpload, ExactUploadSource};
 
 #[cfg(test)]
@@ -186,7 +188,22 @@ pub enum CloudFileReadError {
 pub async fn write_cloud_object_stream(
     destination: &Path,
     stream: CloudObjectStream,
+    progress: DownloadProgress,
 ) -> Result<u64, CloudFileReadError> {
+    use futures_util::StreamExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let received = std::sync::Arc::new(AtomicU64::new(0));
+    let stream_received = std::sync::Arc::clone(&received);
+    let stream_progress = std::sync::Arc::clone(&progress);
+    let stream: CloudObjectStream = Box::pin(stream.map(move |item| {
+        if let Ok(bytes) = &item {
+            let done = stream_received.fetch_add(bytes.len() as u64, Ordering::SeqCst)
+                + bytes.len() as u64;
+            stream_progress(done);
+        }
+        item
+    }));
     let staged = coven_foundation::local_file::AtomicStagedFile::create(destination)
         .await
         .map_err(CloudFileReadError::Local)?;
@@ -543,6 +560,7 @@ pub trait ExactSlotStorage: Send + Sync {
         &self,
         slot: &ObjectSlot,
         destination: &Path,
+        progress: DownloadProgress,
     ) -> Result<(), CloudFileReadError>;
 
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;

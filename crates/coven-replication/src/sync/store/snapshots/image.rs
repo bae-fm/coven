@@ -227,6 +227,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         binary_schema_version: u32,
         target_path: &Path,
         restorer_identity: &coven_keys::keys::UserKeypair,
+        on_progress: crate::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<Self, SnapshotError> {
         let root = history_verifier.verified_root();
         if root.protocol().descriptor.store_root_id() != root.reference().store_root_id {
@@ -282,8 +283,26 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 supported: binary_schema_version,
             });
         }
+        let bytes_total = snapshot.meta.image.object.stored_size();
+        on_progress(
+            crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                bytes_done: 0,
+                bytes_total,
+            },
+        );
+        let progress = std::sync::Arc::clone(&on_progress);
         let plaintext = history_verifier
-            .load_snapshot_image(&snapshot)
+            .load_snapshot_image(
+                &snapshot,
+                std::sync::Arc::new(move |bytes_done| {
+                    progress(
+                        crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                            bytes_done,
+                            bytes_total,
+                        },
+                    );
+                }),
+            )
             .await
             .map_err(SnapshotError::StoreObject)?;
         if coven_protocol::store_commit::ObjectHash::digest(&plaintext)
@@ -565,6 +584,8 @@ pub enum SnapshotBlobReconcileError {
     Database(#[from] coven_database::DbError),
     #[error("remote eager blob row has no exact stored reference")]
     MissingStoredReference,
+    #[error("snapshot blob stored sizes exceed the supported byte count")]
+    StoredSizeOverflow,
     #[error("snapshot blob download failed: {0}")]
     Download(#[source] crate::sync::store::pull::BlobDownloadFailures),
 }

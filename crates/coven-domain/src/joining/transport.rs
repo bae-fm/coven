@@ -40,10 +40,10 @@ pub async fn join_with_device_pairing(
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     timing: DeviceJoinTransportTiming,
-    on_status: impl Fn(&str),
+    on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    on_status("Waiting for approval");
+    on_progress(coven_replication::sync::JoiningDeviceJoinProgress::WaitingForApproval);
     let invitation = crate::joining::receive_device_invitation(
         pairing.offer(),
         pairing.sealed_request(),
@@ -53,7 +53,6 @@ pub async fn join_with_device_pairing(
     )
     .await
     .map_err(BootstrapError::Pairing)?;
-    on_status("Joining library");
     let outcome = join_with_invitation(
         &invitation,
         pairing.request().public_key(),
@@ -68,7 +67,7 @@ pub async fn join_with_device_pairing(
         cloudkit_ops,
         clock,
         timing,
-        on_status,
+        on_progress,
         cancel,
     )
     .await?;
@@ -288,7 +287,7 @@ async fn join_with_invitation(
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
     timing: DeviceJoinTransportTiming,
-    on_status: impl Fn(&str),
+    on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
     let invite = DeviceJoinInvite::from_bytes(invite)?;
@@ -306,7 +305,7 @@ async fn join_with_invitation(
         cloudkit_ops,
         clock,
     )?
-    .join_via_transport(&invite.bundle, timing, on_status, cancel)
+    .join_via_transport(&invite.bundle, timing, on_progress, cancel)
     .await
 }
 
@@ -353,10 +352,10 @@ pub async fn join_with_device_pairing_over_test_home(
     clock: coven_foundation::clock::ClockRef,
     home: std::sync::Arc<dyn coven_storage::cloud::ExactCloudHome>,
     timing: DeviceJoinTransportTiming,
-    on_status: impl Fn(&str),
+    on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    on_status("Waiting for approval");
+    on_progress(coven_replication::sync::JoiningDeviceJoinProgress::WaitingForApproval);
     let invitation = crate::joining::receive_device_invitation(
         pairing.offer(),
         pairing.sealed_request(),
@@ -365,7 +364,6 @@ pub async fn join_with_device_pairing_over_test_home(
         cancel,
     )
     .await?;
-    on_status("Joining library");
     let invite = DeviceJoinInvite::from_bytes(&invitation)?;
     let outcome = invitation_test_client(
         &invite,
@@ -376,7 +374,7 @@ pub async fn join_with_device_pairing_over_test_home(
         clock,
         home,
     )?
-    .join_via_transport(&invite.bundle, timing, on_status, cancel)
+    .join_via_transport(&invite.bundle, timing, on_progress, cancel)
     .await?;
     pairing.finish(&layout)?;
     Ok(outcome)
@@ -406,12 +404,13 @@ impl DeviceJoinClient {
         &self,
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
-        on_status: impl Fn(&str),
+        on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let storage = self.transport_storage().await?;
         let transport = DeviceJoinTransport::open(&storage, bundle, DeviceJoinRoles::joiner())?;
-        let joining = self.drive_join_via_transport(&transport, bundle, timing, &on_status, cancel);
+        let joining =
+            self.drive_join_via_transport(&transport, bundle, timing, &on_progress, cancel);
         let cancellation = transport.observe_artifact::<DeviceJoinCancellation>(timing.poll);
         tokio::pin!(joining);
         tokio::pin!(cancellation);
@@ -430,7 +429,7 @@ impl DeviceJoinClient {
         transport: &DeviceJoinTransport<'_>,
         bundle: &DeviceJoinOfferBundle,
         timing: DeviceJoinTransportTiming,
-        on_status: &impl Fn(&str),
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let attempt_id = bundle.offer.attempt_id;
@@ -443,6 +442,9 @@ impl DeviceJoinClient {
         loop {
             match self.device_join_status(attempt_id)? {
                 None | Some(DeviceJoinStatus::AwaitingAccessRequest { .. }) => {
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::RequestingProviderAccess,
+                    );
                     let request = self
                         .prepare_provider_access_request(bundle.offer.clone())
                         .await?;
@@ -457,6 +459,9 @@ impl DeviceJoinClient {
                     transport
                         .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
                         .await?;
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::WaitingForProviderAccess,
+                    );
                     // The owner may give up on the attempt while this device
                     // waits, so the wait watches the abandonment slot alongside
                     // the approval rather than sitting out its deadline.
@@ -469,6 +474,9 @@ impl DeviceJoinClient {
                             return self.accept_abandonment(transport, abandonment).await;
                         }
                     };
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
+                    );
                     let registration_request = self.prepare_registration_request(approval).await?;
                     transport
                         .publish(&DeviceJoinAction::TransferRegistrationRequest(
@@ -477,6 +485,9 @@ impl DeviceJoinClient {
                         .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => {
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
+                    );
                     let registration_request = self.prepare_registration_request(approval).await?;
                     transport
                         .publish(&DeviceJoinAction::TransferRegistrationRequest(
@@ -488,12 +499,18 @@ impl DeviceJoinClient {
                     transport
                         .publish(&DeviceJoinAction::TransferRegistrationRequest(request))
                         .await?;
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::WaitingForLibrary,
+                    );
                     let provider_ready = transport
                         .await_artifact::<ProviderReadyDeviceBootstrap>(timing)
                         .await?;
-                    let readiness =
-                        Box::pin(self.bootstrap_pending_device(provider_ready, on_status, cancel))
-                            .await?;
+                    let readiness = Box::pin(self.bootstrap_pending_device(
+                        provider_ready,
+                        on_progress,
+                        cancel,
+                    ))
+                    .await?;
                     transport
                         .publish(&DeviceJoinAction::TransferReadiness(readiness))
                         .await?;
@@ -502,16 +519,19 @@ impl DeviceJoinClient {
                     transport
                         .publish(&DeviceJoinAction::TransferReadiness(readiness))
                         .await?;
+                    on_progress(
+                        coven_replication::sync::JoiningDeviceJoinProgress::WaitingForActivation,
+                    );
                     let activation = transport
                         .await_artifact::<DeviceJoinActivation>(timing)
                         .await?;
-                    return self.finish(transport, activation, on_status).await;
+                    return self.finish(transport, activation, on_progress).await;
                 }
                 Some(DeviceJoinStatus::AwaitingCompletion { activation }) => {
-                    return self.finish(transport, activation, on_status).await;
+                    return self.finish(transport, activation, on_progress).await;
                 }
                 Some(DeviceJoinStatus::Activated { store }) => {
-                    return self.finish(transport, store.activation, on_status).await;
+                    return self.finish(transport, store.activation, on_progress).await;
                 }
                 Some(_) => {
                     return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into())
@@ -561,9 +581,9 @@ impl DeviceJoinClient {
         &self,
         transport: &DeviceJoinTransport<'_>,
         activation: DeviceJoinActivation,
-        on_status: &impl Fn(&str),
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-        let config = self.complete_device_join(activation, on_status).await?;
+        let config = self.complete_device_join(activation, on_progress).await?;
         transport.delete_attempt_slots().await?;
         Ok(DeviceJoinTransportOutcome::Joined(config))
     }

@@ -1249,9 +1249,14 @@ async fn exact_operations_reject_an_opaque_s3_locator() {
         .expect_err("opaque S3 read must fail");
     assert!(read_error.to_string().contains("must use its logical key"));
     let destination = std::env::temp_dir().join("coven-mismatched-s3-locator");
-    let file_error = ExactSlotStorage::read_at_to_file(&home, &slot, &destination)
-        .await
-        .expect_err("opaque S3 file read must fail");
+    let file_error = ExactSlotStorage::read_at_to_file(
+        &home,
+        &slot,
+        &destination,
+        crate::cloud::no_download_progress(),
+    )
+    .await
+    .expect_err("opaque S3 file read must fail");
     assert!(file_error.to_string().contains("must use its logical key"));
     let delete_error = ExactSlotStorage::delete_at(&home, &slot)
         .await
@@ -1591,9 +1596,14 @@ async fn exact_read_streams_object_to_file() {
     let destination = tmp.path().join("object.bin");
     let slot = ObjectSlot::logical(key).unwrap();
 
-    ExactSlotStorage::read_at_to_file(&home, &slot, &destination)
-        .await
-        .expect("stream exact object");
+    ExactSlotStorage::read_at_to_file(
+        &home,
+        &slot,
+        &destination,
+        crate::cloud::no_download_progress(),
+    )
+    .await
+    .expect("stream exact object");
 
     assert_eq!(
         tokio::fs::read(&destination)
@@ -1637,7 +1647,13 @@ async fn canceling_exact_read_cannot_rename_over_destination_later() {
     let slot = ObjectSlot::logical(key).unwrap();
     let read_destination = destination.clone();
     let read = tokio::spawn(async move {
-        ExactSlotStorage::read_at_to_file(&home, &slot, &read_destination).await
+        ExactSlotStorage::read_at_to_file(
+            &home,
+            &slot,
+            &read_destination,
+            crate::cloud::no_download_progress(),
+        )
+        .await
     });
     first_sent.notified().await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {

@@ -185,7 +185,12 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
             .map_err(crate::sync::BlobCacheError::File)?;
         self.history
-            .stage_verified_blob_plaintext(authority, stored, stage)
+            .stage_verified_blob_plaintext(
+                authority,
+                stored,
+                stage,
+                coven_storage::cloud::no_download_progress(),
+            )
             .await
     }
 

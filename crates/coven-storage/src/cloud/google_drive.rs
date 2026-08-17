@@ -884,12 +884,14 @@ impl GoogleDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
         let response = self.send_exact_read(slot, None).await?;
         response_to_file(
             response,
             destination,
             &format!("read exact body for {}", slot.logical_key()),
+            progress,
         )
         .await
     }

@@ -79,6 +79,17 @@ pub struct CloudSyncConnection {
     keypair: UserKeypair,
 }
 
+fn map_cloud_file_read_error(error: CloudFileReadError) -> StorageError {
+    match error {
+        CloudFileReadError::Source(error) => StorageError::from(error),
+        CloudFileReadError::SourceCleanup { source, cleanup } => StorageError::CleanupFailed {
+            operation: Box::new(StorageError::from(source)),
+            cleanup: Box::new(StorageError::LocalFilesystem(cleanup)),
+        },
+        CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
+    }
+}
+
 impl CloudSyncConnection {
     pub fn new(
         home: Arc<dyn ExactCloudHome>,

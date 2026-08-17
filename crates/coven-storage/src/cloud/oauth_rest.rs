@@ -102,12 +102,13 @@ pub(crate) async fn response_to_file(
     response: reqwest::Response,
     destination: &Path,
     context: &str,
+    progress: super::DownloadProgress,
 ) -> Result<(), CloudFileReadError> {
     let context = context.to_string();
     let stream = response.bytes_stream().map_err(move |error| {
         CloudHomeError::transport(format!("{context}: stream response"), error)
     });
-    super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
+    super::write_cloud_object_stream(destination, Box::pin(stream), progress).await?;
     Ok(())
 }
 

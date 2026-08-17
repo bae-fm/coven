@@ -349,6 +349,52 @@ pub enum DeviceJoinDriveOutcome {
     Abandoned(DeviceJoinAbandonment),
 }
 
+/// The joining device's current user-visible operation. These values describe
+/// the work actually executing or the exact counterpart artifact being
+/// awaited; hosts render them directly instead of collapsing the whole join
+/// into one indeterminate state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoiningDeviceJoinProgress {
+    WaitingForApproval,
+    RequestingProviderAccess,
+    WaitingForProviderAccess,
+    RegisteringDevice,
+    WaitingForLibrary,
+    DownloadingSnapshot {
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    InstallingSnapshot,
+    DownloadingLibraryFiles {
+        files_done: u64,
+        files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    WaitingForActivation,
+    CatchingUp,
+    SavingLibrary,
+}
+
+/// A joining device's retained progress sink. Provider reads keep a clone while
+/// their response stream is active, so every received buffer reaches the host.
+pub type JoiningDeviceJoinProgressObserver =
+    std::sync::Arc<dyn Fn(JoiningDeviceJoinProgress) + Send + Sync>;
+
+/// The existing device's current user-visible operation while admitting the
+/// joining device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmittingDeviceJoinProgress {
+    PreparingInvitation,
+    WaitingForProviderAccessRequest,
+    GrantingProviderAccess,
+    WaitingForRegistrationRequest,
+    RegisteringDevice,
+    PreparingLibrary,
+    WaitingForJoiningDevice,
+    ActivatingDevice,
+}
+
 /// How often to look for a counterpart's artifact, and how long to keep
 /// looking before giving up on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -723,12 +769,13 @@ impl<'store> StoreDeviceJoinTransport<'store> {
         bundle: &DeviceJoinOfferBundle,
         policy: DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(AdmittingDeviceJoinProgress) + Send + Sync),
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         retrying_activation_conflicts(|| async {
             AttemptTransport::open(self.store, bundle)
                 .await?
-                .drive_once(&policy, access_administrator, timing)
+                .drive_once(&policy, access_administrator, on_progress, timing)
                 .await
         })
         .await
@@ -857,6 +904,7 @@ impl<'attempt> AttemptTransport<'attempt> {
         &self,
         policy: &DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+        on_progress: &(dyn Fn(AdmittingDeviceJoinProgress) + Send + Sync),
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinDriveOutcome, DeviceJoinTransportError> {
         let roles = self.roles;
@@ -886,10 +934,12 @@ impl<'attempt> AttemptTransport<'attempt> {
                     | DeviceJoinStatus::AwaitingActivation { .. },
                 ) => None,
                 _ => {
+                    on_progress(AdmittingDeviceJoinProgress::WaitingForProviderAccessRequest);
                     let request = self
                         .await_artifact::<DeviceProviderAccessRequest>(timing)
                         .await?;
                     self.approve_access_request(&request, policy).await?;
+                    on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
                     Some(
                         self.store
                             .authorize_device_provider_access(request, access_administrator)
@@ -914,15 +964,18 @@ impl<'attempt> AttemptTransport<'attempt> {
                     DeviceJoinStatus::AwaitingActivation { .. }
                     | DeviceJoinStatus::AwaitingCompletion { .. },
                 ) => None,
-                Some(DeviceJoinStatus::AwaitingBootstrap { request }) => Some(
+                Some(DeviceJoinStatus::AwaitingBootstrap { request }) => Some({
+                    on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                     self.store
                         .accept_device_registration_request(request)
-                        .await?,
-                ),
+                        .await?
+                }),
                 _ => {
+                    on_progress(AdmittingDeviceJoinProgress::WaitingForRegistrationRequest);
                     let request = self
                         .await_artifact::<DeviceRegistrationRequest>(timing)
                         .await?;
+                    on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                     Some(
                         self.store
                             .accept_device_registration_request(request)
@@ -943,20 +996,22 @@ impl<'attempt> AttemptTransport<'attempt> {
                     DeviceJoinStatus::AwaitingProviderCompletion { .. }
                     | DeviceJoinStatus::AwaitingActivation { .. },
                 ) => None,
-                Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => Some(
+                Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => Some({
+                    on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
                     self.store
                         .publish_device_provider_challenge(bootstrap)
-                        .await?,
-                ),
+                        .await?
+                }),
                 _ => {
                     let provisional = self
                         .await_artifact::<ProvisionalDeviceBootstrap>(timing)
                         .await?;
-                    Some(
+                    Some({
+                        on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
                         self.store
                             .publish_device_provider_challenge(provisional)
-                            .await?,
-                    )
+                            .await?
+                    })
                 }
             };
             if let Some(ready) = ready {
@@ -972,7 +1027,9 @@ impl<'attempt> AttemptTransport<'attempt> {
                         .await?
                 }
                 _ => {
+                    on_progress(AdmittingDeviceJoinProgress::WaitingForJoiningDevice);
                     let readiness = self.await_artifact::<DeviceJoinReadiness>(timing).await?;
+                    on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
                     self.store
                         .complete_device_provider_admission(readiness)
                         .await?
@@ -993,12 +1050,14 @@ impl<'attempt> AttemptTransport<'attempt> {
         let activation = match self.owner_status().await? {
             Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
             Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
+                on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
                 self.store.finalize_device_join(completion).await?
             }
             _ => {
                 let completion = self
                     .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
                     .await?;
+                on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
                 self.store.finalize_device_join(completion).await?
             }
         };

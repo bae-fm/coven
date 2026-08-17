@@ -120,19 +120,20 @@ pub use coven_replication::blob::{
 };
 pub use coven_replication::blob::{MakeLocalError, MakeRemoteError};
 pub use coven_replication::sync::{
-    BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment, DeviceJoinAction,
-    DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy, DeviceJoinCancellation,
-    DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt, DeviceJoinDriveOutcome, DeviceJoinError,
-    DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinOfferBundle,
-    DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
-    DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
-    DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
-    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
-    DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
-    DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
-    ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap,
-    ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError, SyncLoopAlerts,
-    SyncLoopStatus, SyncLoopSuccess,
+    AdmittingDeviceJoinProgress, BlobCacheError, BlobStream, DeviceActivity, DeviceJoinAbandonment,
+    DeviceJoinAction, DeviceJoinActivation, DeviceJoinApproval, DeviceJoinApprovalPolicy,
+    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupReceipt,
+    DeviceJoinDriveOutcome, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
+    DeviceJoinOffer, DeviceJoinOfferBundle, DeviceJoinProducer, DeviceJoinProducerWriteRevocation,
+    DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError,
+    DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
+    DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
+    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
+    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,
+    JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure, ProviderAdminJoinTerminal,
+    ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError,
+    SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;
@@ -151,8 +152,8 @@ pub use coven_storage::{
     CloudKitAtomicCreateBatch, CloudKitOps, CloudKitProviderIdentity, CloudKitRecordCreate,
     CloudKitRecordVersion, CloudKitScope, CloudKitShare, CloudKitShareAcceptance,
     CloudKitSharePermission, CloudObjectStream, CloudObjectVersion, CloudVersionedObject,
-    ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload, ExactUploadSource, PartSink,
-    S3CloudHome, UploadProgress,
+    DownloadProgress, ExactCloudHome, ExactCreateOutcome, ExactSlotStorage, ExactUpload,
+    ExactUploadSource, PartSink, S3CloudHome, UploadProgress,
 };
 pub use device_pairing::{ApproveDevicePairingError, StartDevicePairingError};
 pub use handle::CovenHandle;

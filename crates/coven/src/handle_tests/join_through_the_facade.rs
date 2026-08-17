@@ -141,7 +141,7 @@ async fn run_a_facade_only_host_runs_a_whole_join_from_one_scanned_pairing_code(
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
-        |_status| {},
+        Arc::new(|_| {}),
         &cancel,
     );
     let admitting = async {
@@ -157,6 +157,7 @@ async fn run_a_facade_only_host_runs_a_whole_join_from_one_scanned_pairing_code(
                 crate::MemberRole::Member,
                 crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
                 None,
+                &|_| {},
                 timing(),
                 tokio::sync::watch::channel(false).1,
             )
@@ -228,7 +229,7 @@ async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
-        |_status| {},
+        Arc::new(|_| {}),
         &join_cancel,
     );
     let admitting = async {
@@ -244,6 +245,7 @@ async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
                 crate::MemberRole::Member,
                 crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
                 None,
+                &|_| {},
                 timing(),
                 approval_cancel,
             )
@@ -314,7 +316,7 @@ async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_appro
         Arc::new(crate::SystemClock),
         fixture.home.clone(),
         timing(),
-        |_status| {},
+        Arc::new(|_| {}),
         &join_cancel,
     );
     tokio::pin!(joining);
@@ -329,6 +331,7 @@ async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_appro
             crate::MemberRole::Member,
             crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
             None,
+            &|_| {},
             timing(),
             tokio::sync::watch::channel(false).1,
         );

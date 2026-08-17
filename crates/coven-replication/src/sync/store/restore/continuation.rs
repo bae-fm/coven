@@ -121,6 +121,7 @@ impl<'storage> RestoringStore<'storage> {
     pub async fn reconcile_snapshot_blobs(
         &self,
         cancel: &watch::Receiver<bool>,
+        on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<
         crate::sync::store::snapshots::SnapshotBlobReconcile,
         crate::sync::store::snapshots::SnapshotBlobReconcileError,
@@ -137,28 +138,77 @@ impl<'storage> RestoringStore<'storage> {
             return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete);
         }
 
-        let total = blobs.len();
-        for blob in blobs {
+        let total = blobs.len() as u64;
+        let bytes_total = blobs.iter().try_fold(0_u64, |total, blob| {
+            total.checked_add(blob.stored.object().stored_size())
+        });
+        let bytes_total = bytes_total
+            .ok_or(crate::sync::store::snapshots::SnapshotBlobReconcileError::StoredSizeOverflow)?;
+        let mut completed_bytes = 0_u64;
+        on_progress(
+            crate::sync::JoiningDeviceJoinProgress::DownloadingLibraryFiles {
+                files_done: 0,
+                files_total: total,
+                bytes_done: 0,
+                bytes_total,
+            },
+        );
+        for (index, blob) in blobs.into_iter().enumerate() {
             if *cancel.borrow() {
                 info!(total, "snapshot blob reconciliation cancelled");
                 return Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Cancelled);
             }
-            self.download_blob(blob).await.map_err(|failure| {
-                crate::sync::store::snapshots::SnapshotBlobReconcileError::Download(
-                    pull::BlobDownloadFailures::new(vec![failure]),
-                )
-            })?;
+            let progress = std::sync::Arc::clone(on_progress);
+            let file_progress: coven_storage::cloud::DownloadProgress =
+                std::sync::Arc::new(move |file_bytes_done| {
+                    let Some(bytes_done) = completed_bytes.checked_add(file_bytes_done) else {
+                        return;
+                    };
+                    if bytes_done <= bytes_total {
+                        progress(
+                            crate::sync::JoiningDeviceJoinProgress::DownloadingLibraryFiles {
+                                files_done: index as u64,
+                                files_total: total,
+                                bytes_done,
+                                bytes_total,
+                            },
+                        );
+                    }
+                });
+            let stored_size = blob.stored.object().stored_size();
+            self.download_blob(blob, file_progress)
+                .await
+                .map_err(|failure| {
+                    crate::sync::store::snapshots::SnapshotBlobReconcileError::Download(
+                        pull::BlobDownloadFailures::new(vec![failure]),
+                    )
+                })?;
+            completed_bytes = completed_bytes.checked_add(stored_size).ok_or(
+                crate::sync::store::snapshots::SnapshotBlobReconcileError::StoredSizeOverflow,
+            )?;
+            on_progress(
+                crate::sync::JoiningDeviceJoinProgress::DownloadingLibraryFiles {
+                    files_done: index as u64 + 1,
+                    files_total: total,
+                    bytes_done: completed_bytes,
+                    bytes_total,
+                },
+            );
         }
         info!(total, "snapshot blob reconciliation complete");
         Ok(crate::sync::store::snapshots::SnapshotBlobReconcile::Complete)
     }
 
-    async fn download_blob(&self, download: BlobDownload) -> Result<(), pull::BlobDownloadFailure> {
+    async fn download_blob(
+        &self,
+        download: BlobDownload,
+        progress: coven_storage::cloud::DownloadProgress,
+    ) -> Result<(), pull::BlobDownloadFailure> {
         let BlobDownload { authority, stored } = download;
         let namespace = stored.locator().namespace();
         let id = stored.locator().blob_id();
         self.history
-            .verify_blob_plaintext(&authority, &stored, true)
+            .verify_blob_plaintext(&authority, &stored, true, progress)
             .await
             .map_err(|cause| {
                 warn!(id, namespace, error = %cause, "failed to verify snapshot blob");

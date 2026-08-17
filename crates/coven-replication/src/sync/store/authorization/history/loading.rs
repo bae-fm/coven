@@ -6,9 +6,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         stage: coven_foundation::local_file::AtomicStagedFile,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, crate::sync::BlobCacheError> {
         self.blob_source
-            .stage_verified_plaintext(authority, stored, stage)
+            .stage_verified_plaintext(authority, stored, stage, progress)
             .await
     }
 
@@ -17,9 +18,10 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         authority: &coven_protocol::blob::RowBlobAuthority,
         stored: &coven_protocol::blob::locator::StoredBlobRef,
         retain: bool,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
         self.blob_source
-            .verify_plaintext(&self.blob_cache, authority, stored, retain)
+            .verify_plaintext(&self.blob_cache, authority, stored, retain, progress)
             .await
     }
 

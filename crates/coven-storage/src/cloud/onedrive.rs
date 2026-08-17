@@ -348,6 +348,7 @@ impl OneDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
         self.verify_slot(slot).await?;
         let response = self
@@ -360,8 +361,13 @@ impl OneDriveCloudHome {
             })
             .await?;
         let response = ensure_ok(response, "read exact OneDrive item", NotFound::Status).await?;
-        super::oauth_rest::response_to_file(response, destination, "read exact OneDrive item body")
-            .await
+        super::oauth_rest::response_to_file(
+            response,
+            destination,
+            "read exact OneDrive item body",
+            progress,
+        )
+        .await
     }
 
     async fn delete_at_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
@@ -747,8 +753,9 @@ impl ExactSlotStorage for OneDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         destination: &std::path::Path,
+        progress: super::DownloadProgress,
     ) -> Result<(), super::CloudFileReadError> {
-        OneDriveCloudHome::read_at_to_file(self, slot, destination).await
+        OneDriveCloudHome::read_at_to_file(self, slot, destination, progress).await
     }
     async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
         OneDriveCloudHome::delete_at_slot(self, slot).await

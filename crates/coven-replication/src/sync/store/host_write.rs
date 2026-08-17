@@ -331,12 +331,21 @@ impl HostWriteBlobStaging {
         let staged = match opening {
             BlobMoveOpening::Store => {
                 self.storage
-                    .stage_verified_store_blob_plaintext(&previous.stored, stage)
+                    .stage_verified_store_blob_plaintext(
+                        &previous.stored,
+                        stage,
+                        coven_storage::cloud::no_download_progress(),
+                    )
                     .await
             }
             BlobMoveOpening::Circle(protection) => {
                 self.storage
-                    .stage_verified_blob_plaintext(&previous.stored, protection, stage)
+                    .stage_verified_blob_plaintext(
+                        &previous.stored,
+                        protection,
+                        stage,
+                        coven_storage::cloud::no_download_progress(),
+                    )
                     .await
             }
         }
@@ -415,12 +424,21 @@ impl HostWriteBlobStaging {
         let staged = match opening {
             BlobMoveOpening::Store => {
                 self.storage
-                    .stage_verified_store_blob_plaintext(&previous.stored, stage)
+                    .stage_verified_store_blob_plaintext(
+                        &previous.stored,
+                        stage,
+                        coven_storage::cloud::no_download_progress(),
+                    )
                     .await
             }
             BlobMoveOpening::Circle(protection) => {
                 self.storage
-                    .stage_verified_blob_plaintext(&previous.stored, protection, stage)
+                    .stage_verified_blob_plaintext(
+                        &previous.stored,
+                        protection,
+                        stage,
+                        coven_storage::cloud::no_download_progress(),
+                    )
                     .await
             }
         }
