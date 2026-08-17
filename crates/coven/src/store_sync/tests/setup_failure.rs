@@ -363,53 +363,18 @@ async fn another_store_at_the_same_cloud_location_is_reported_as_occupied() {
 #[tokio::test]
 #[ignore]
 async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
-    use coven_storage::cloud::CloudHome as _;
-
     test_keyring::install();
-    let bucket = std::env::var("COVEN_TEST_S3_BUCKET").expect("COVEN_TEST_S3_BUCKET");
-    let region = std::env::var("COVEN_TEST_S3_REGION").expect("COVEN_TEST_S3_REGION");
-    let endpoint = std::env::var("COVEN_TEST_S3_URL").expect("COVEN_TEST_S3_URL");
-    let prefix = format!(
-        "{}/cloud-home-setup-location-test",
-        std::env::var("COVEN_TEST_S3_PREFIX")
-            .expect("COVEN_TEST_S3_PREFIX")
-            .trim_end_matches('/')
-    );
-    let access_key = std::env::var("COVEN_TEST_S3_KEY").expect("COVEN_TEST_S3_KEY");
-    let secret_key = std::env::var("COVEN_TEST_S3_SECRET").expect("COVEN_TEST_S3_SECRET");
     let factory =
         coven_storage::cloud::CloudHomeFactory::new(coven_storage::oauth::OAuthClients::empty());
-    let home = Arc::new(
-        factory
-            .open_s3(
-                bucket.clone(),
-                region.clone(),
-                Some(endpoint.clone()),
-                access_key.clone(),
-                secret_key.clone(),
-                Some(prefix.clone()),
-                coven_foundation::config::ExactUploadVerification::MetadataHash,
-                Arc::new(SystemClock),
-            )
-            .await
-            .expect("open configured S3 home"),
-    );
-    for key in home.list("").await.expect("list stale test objects") {
-        home.delete(&key).await.expect("delete stale test object");
-    }
-    let cloud_home = coven_foundation::config::CloudHomeConfig {
-        provider: Some(CloudProvider::S3),
-        storage: HomeStorage::Browsable,
-        s3_bucket: Some(bucket),
-        s3_region: Some(region),
-        s3_endpoint: Some(endpoint),
-        s3_key_prefix: Some(prefix),
-        ..Default::default()
-    };
-    let credentials = || coven_keys::keys::CloudHomeCredentials::S3 {
-        access_key: access_key.clone(),
-        secret_key: secret_key.clone(),
-    };
+    let live = crate::test_support::RealS3TestHome::open(
+        &factory,
+        "cloud-home-setup-location",
+        HomeStorage::Browsable,
+    )
+    .await;
+    live.reset().await;
+    let home = live.home();
+    let cloud_home = live.config();
 
     let (_first_tmp, first_store_dir) = coven_replication::sync::test_helpers::temp_store_dir();
     let first_config = Config::with_defaults(
@@ -426,7 +391,7 @@ async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
         &first_store_dir,
     );
     first
-        .setup_with_test_home(cloud_home.clone(), home.clone(), Some(credentials()))
+        .setup_with_test_home(cloud_home.clone(), home.clone(), Some(live.credentials()))
         .await
         .expect("empty prefix accepts the first Store");
 
@@ -446,7 +411,7 @@ async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
     );
 
     let error = second
-        .setup_with_test_home(cloud_home, home.clone(), Some(credentials()))
+        .setup_with_test_home(cloud_home, home, Some(live.credentials()))
         .await
         .expect_err("occupied prefix rejects a different Store");
 
@@ -456,7 +421,5 @@ async fn real_s3_prefix_accepts_one_store_and_reports_the_second_as_occupied() {
     );
     first.stop_current();
     second.stop_current();
-    for key in home.list("").await.expect("list test objects") {
-        home.delete(&key).await.expect("delete test object");
-    }
+    live.reset().await;
 }

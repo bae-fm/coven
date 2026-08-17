@@ -6,8 +6,8 @@
 //! the joining side through the one scanned pairing offer, and nothing in the
 //! flow reaching past those.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use coven_domain::joining::test_runtime::on_a_deep_stack;
 use coven_replication::sync::test_helpers::*;
@@ -23,12 +23,12 @@ fn timing() -> crate::DeviceJoinTransportTiming {
 /// a joining device can also be pointed at.
 struct FacadeFixture {
     handle: crate::CovenHandle,
-    home: Arc<crate::InMemoryCloudHome>,
+    home: Arc<dyn crate::ExactCloudHome>,
     layout: crate::StoreLayout,
     tables: Vec<crate::SyncedTable>,
     _store_tmp: tempfile::TempDir,
     _joiner_tmp: tempfile::TempDir,
-    _snapshot_tmp: tempfile::TempDir,
+    _snapshot_tmp: Option<tempfile::TempDir>,
 }
 
 impl FacadeFixture {
@@ -90,9 +90,232 @@ impl FacadeFixture {
             tables,
             _store_tmp: store_tmp,
             _joiner_tmp: joiner_tmp,
-            _snapshot_tmp: snapshot_tmp,
+            _snapshot_tmp: Some(snapshot_tmp),
         }
     }
+}
+
+async fn wait_for_initial_sync(handle: &crate::CovenHandle) {
+    let mut sync = handle.subscribe_sync_status();
+    handle.sync_now();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let current = sync.borrow_and_update().clone();
+            match current {
+                crate::SyncLoopStatus::Synchronized(_) => break,
+                crate::SyncLoopStatus::Failed { error } => {
+                    panic!("initial live S3 sync failed: {error}")
+                }
+                _ => sync.changed().await.expect("sync status remains open"),
+            }
+        }
+    })
+    .await
+    .expect("initial live S3 sync publishes the joining snapshot");
+}
+
+#[derive(Clone)]
+struct PairingTimeline {
+    started: Instant,
+    events: Arc<Mutex<Vec<PairingTimelineEvent>>>,
+}
+
+struct PairingTimelineEvent {
+    elapsed: Duration,
+    device: &'static str,
+    progress: String,
+}
+
+impl PairingTimeline {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn record(&self, device: &'static str, progress: impl std::fmt::Debug) {
+        let elapsed = self.started.elapsed();
+        let progress = format!("{progress:?}");
+        eprintln!("pairing +{elapsed:.3?} {device}: {progress}");
+        self.events
+            .lock()
+            .expect("lock pairing timeline")
+            .push(PairingTimelineEvent {
+                elapsed,
+                device,
+                progress,
+            });
+    }
+
+    fn recorded_at(&self, device: &'static str, progress: &str) -> Duration {
+        self.events
+            .lock()
+            .expect("lock pairing timeline")
+            .iter()
+            .find(|event| event.device == device && event.progress.starts_with(progress))
+            .unwrap_or_else(|| panic!("{device} never reported {progress}"))
+            .elapsed
+    }
+}
+
+fn live_timing() -> crate::DeviceJoinTransportTiming {
+    crate::DeviceJoinTransportTiming {
+        poll: Duration::from_secs(1),
+        deadline: Duration::from_secs(180),
+    }
+}
+
+/// Two independent device stores complete one-scan pairing over the configured
+/// S3-compatible provider. Run with `--ignored --nocapture`; every user-visible
+/// transition is timestamped so a provider regression cannot hide behind the
+/// in-memory transport's zero-latency reads.
+#[test]
+#[ignore]
+fn two_devices_pair_end_to_end_over_live_s3_within_the_product_bound() {
+    on_a_deep_stack(run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound);
+}
+
+async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound() {
+    coven_keys::keys::test_keyring::install();
+    let factory =
+        coven_storage::cloud::CloudHomeFactory::new(coven_storage::oauth::OAuthClients::empty());
+    let live = crate::test_support::RealS3TestHome::open(
+        &factory,
+        "two-device-pairing",
+        crate::HomeStorage::Opaque,
+    )
+    .await;
+    live.reset().await;
+    let store_id = "live-s3-two-device-pairing";
+    let store_tmp = tempfile::tempdir().expect("store directory");
+    let store_dir = crate::StoreDir::new_ephemeral(store_tmp.path());
+    let tables = test_synced_tables();
+    let mut config = crate::Config::with_defaults(
+        store_id.to_string(),
+        "owner-device".to_string(),
+        "Facade Join Store".to_string(),
+    );
+    config.cloud_home = live.config();
+    let handle = crate::Coven::builder(store_dir, config)
+        .synced_tables(tables.clone())
+        .migrations(test_migrations())
+        .key_custody(crate::KeyCustody::InMemory(crate::MasterKeyring::generate()))
+        .identity_custody(crate::IdentityCustody::InMemory(
+            crate::UserKeypair::generate(),
+        ))
+        .open()
+        .expect("open the owner's store");
+    handle
+        .setup_cloud_home_with_test_home(live.config(), live.home(), Some(live.credentials()))
+        .await
+        .expect("create the owner's Store on live S3");
+    wait_for_initial_sync(&handle).await;
+    let joiner_tmp = tempfile::tempdir().expect("joining device directory");
+    let fixture = FacadeFixture {
+        handle,
+        home: live.home(),
+        layout: crate::StoreLayout::new(joiner_tmp.path()),
+        tables,
+        _store_tmp: store_tmp,
+        _joiner_tmp: joiner_tmp,
+        _snapshot_tmp: None,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pairing listener");
+    let endpoint = listener.local_addr().expect("pairing endpoint");
+    let pairing_key = crate::UserKeypair::generate();
+    let offer = crate::DevicePairingOffer::new(
+        &pairing_key,
+        vec![endpoint],
+        "Facade Join Store".to_string(),
+        crate::CloudProvider::S3,
+        1_900_000_000,
+    )
+    .expect("pairing offer");
+    let pairing_journal = tempfile::tempdir().expect("pairing journal directory");
+    let host = crate::DevicePairingHost::start(
+        listener,
+        offer.clone(),
+        pairing_key,
+        pairing_journal.path().join("pairing.json"),
+        Arc::new(crate::SystemClock),
+    )
+    .await
+    .expect("start pairing host");
+    let pairing =
+        crate::PreparedDevicePairing::open_or_create(&offer.encode(), None, &fixture.layout)
+            .expect("prepare joining identity from the scanned code");
+    let (_cancel_tx, cancel) = tokio::sync::watch::channel(false);
+    let timeline = PairingTimeline::start();
+    let joiner_timeline = timeline.clone();
+    let joining = crate::join_with_device_pairing(
+        &pairing,
+        fixture.layout.clone(),
+        fixture.tables.clone(),
+        test_migrations(),
+        live.config().exact_upload_verification,
+        crate::KeyCustody::Keyring,
+        crate::IdentityCustody::Keyring,
+        crate::OAuthClients::empty(),
+        None,
+        None,
+        Arc::new(crate::SystemClock),
+        live_timing(),
+        Arc::new(move |progress| joiner_timeline.record("joining device", progress)),
+        &cancel,
+    );
+    let owner_timeline = timeline.clone();
+    let owner_progress = move |progress| owner_timeline.record("existing device", progress);
+    let admitting = async {
+        let request = host
+            .wait_for_request()
+            .await
+            .expect("receive signed request");
+        fixture
+            .handle
+            .approve_device_pairing(
+                &host,
+                &request,
+                crate::MemberRole::Member,
+                crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+                None,
+                &owner_progress,
+                live_timing(),
+                tokio::sync::watch::channel(false).1,
+            )
+            .await
+    };
+    let (joined, admitted) = tokio::join!(Box::pin(joining), Box::pin(admitting));
+    let elapsed = timeline.started.elapsed();
+    let joined = joined.expect("joining device completes over live S3");
+    let admitted = admitted.expect("existing device completes over live S3");
+
+    assert!(matches!(
+        joined,
+        crate::DeviceJoinTransportOutcome::Joined(_)
+    ));
+    assert!(matches!(
+        admitted,
+        crate::DeviceJoinDriveOutcome::Activated(_)
+    ));
+    let snapshot_download = timeline.recorded_at("joining device", "DownloadingSnapshot");
+    let snapshot_install = timeline.recorded_at("joining device", "InstallingSnapshot");
+    let waiting_for_joiner = timeline.recorded_at("existing device", "WaitingForJoiningDevice");
+    assert!(snapshot_download <= snapshot_install);
+    assert!(waiting_for_joiner <= elapsed);
+    assert!(
+        elapsed <= Duration::from_secs(30),
+        "live S3 device pairing took {elapsed:.3?}, beyond the 30-second product bound"
+    );
+    assert!(fixture
+        .layout
+        .store_dir("live-s3-two-device-pairing")
+        .config_path()
+        .exists());
+    fixture.handle.stop_sync();
+    live.reset().await;
 }
 
 /// The existing device displays one code; the joining device scans it, submits

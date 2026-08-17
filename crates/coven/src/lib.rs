@@ -27,6 +27,8 @@ pub(crate) mod store_recovery;
 pub(crate) mod store_rows;
 pub(crate) mod store_security;
 pub(crate) mod store_sync;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod blob_facade_tests;
