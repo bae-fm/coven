@@ -23,7 +23,6 @@ aws-config = { version = "1.8", default-features = false, features = ["credentia
 aws-credential-types = "1.2"
 aws-sdk-s3 = { version = "1.122", default-features = false, features = ["rt-tokio", "sigv4a"] }
 aws-sdk-sts = { version = "=1.107.0", default-features = false, features = ["rt-tokio"] }
-aws-smithy-http-client = { version = "1.1", default-features = false, features = ["default-client", "rustls-ring"] }
 axum = "0.7"
 base64 = "0.22"
 bytes = "1.11"
@@ -43,6 +42,7 @@ md-5 = "0.11"
 open = "5.3"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+smithy-transport-reqwest = { version = "0.1.0", features = ["rustls"] }
 rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata", "cache"] }
 sqlite3-parser = "0.17.0"
 serde = { version = "1.0", features = ["derive"] }

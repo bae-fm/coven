@@ -140,13 +140,11 @@ impl S3CloudHome {
         let credentials =
             Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
-        // aws-config has default-features disabled, so the SDK won't auto-bundle
-        // an HTTP client. Plug in the rustls-ring smithy client explicitly.
-        let http_client = aws_smithy_http_client::Builder::new()
-            .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
-                aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
-            ))
-            .build_https();
+        // aws-config has default-features disabled, so the SDK needs an
+        // explicit HTTP client. Coven uses reqwest for every provider; its
+        // rustls backend delegates certificate decisions to the host platform,
+        // including Android's initialized TrustManager.
+        let http_client = smithy_transport_reqwest::ReqwestHttpClient::new();
 
         let mut builder = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(region.clone()))

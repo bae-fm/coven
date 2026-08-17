@@ -59,6 +59,7 @@ pub(crate) const NETWORK_BOUNDARY: &[GatedCapability] = &[
             "aws_smithy_http_client",
             "aws_smithy_runtime_api",
             "aws_smithy_types",
+            "smithy_transport_reqwest",
         ],
         path_patterns: &[],
         allowed: &["crates/coven-storage/src/cloud/"],
