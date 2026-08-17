@@ -151,6 +151,23 @@ impl StoreDevicePairing {
         host.finish()?;
         Ok(outcome)
     }
+
+    /// Persist cancellation, unwind the exact Store attempt retained by the
+    /// pairing journal, and close the local pairing session.
+    pub(crate) async fn cancel(
+        &self,
+        host: &DevicePairingHost,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<(), ApproveDevicePairingError> {
+        if let Some(bytes) = host.cancel()? {
+            let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
+            self.sync
+                .abort_device_join_transport(&invitation.bundle, timing)
+                .await?;
+        }
+        host.finish()?;
+        Ok(())
+    }
 }
 
 async fn cancellation_requested(mut cancel: tokio::sync::watch::Receiver<bool>) {

@@ -266,3 +266,100 @@ async fn run_owner_cancellation_reaches_a_joiner_through_the_facade() {
         .config_path()
         .exists());
 }
+
+/// A persisted invitation remains cancellable even when the approval future
+/// that created it no longer exists. The facade owns the durable Store attempt,
+/// so cancellation cannot depend on an in-memory approval task surviving.
+#[test]
+fn facade_cancellation_unwinds_a_persisted_invitation_without_an_approval_future() {
+    on_a_deep_stack(
+        run_facade_cancellation_unwinds_a_persisted_invitation_without_an_approval_future,
+    );
+}
+
+async fn run_facade_cancellation_unwinds_a_persisted_invitation_without_an_approval_future() {
+    let fixture = FacadeFixture::build("facade-persisted-cancellation").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pairing listener");
+    let endpoint = listener.local_addr().expect("pairing endpoint");
+    let pairing_key = crate::UserKeypair::generate();
+    let offer = crate::DevicePairingOffer::new(
+        &pairing_key,
+        vec![endpoint],
+        "Facade Join Store".to_string(),
+        crate::CloudProvider::S3,
+        1_900_000_000,
+    )
+    .expect("pairing offer");
+    let pairing_journal = tempfile::tempdir().expect("pairing journal directory");
+    let host = crate::DevicePairingHost::start(
+        listener,
+        offer.clone(),
+        pairing_key,
+        pairing_journal.path().join("pairing.json"),
+        Arc::new(crate::SystemClock),
+    )
+    .await
+    .expect("start pairing host");
+    let pairing =
+        crate::PreparedDevicePairing::open_or_create(&offer.encode(), None, &fixture.layout)
+            .expect("prepare joining identity from the scanned code");
+    let (_join_cancel_tx, join_cancel) = tokio::sync::watch::channel(false);
+    let joining = coven_domain::joining::join_with_device_pairing_over_test_home(
+        &pairing,
+        fixture.layout.clone(),
+        fixture.tables.clone(),
+        test_migrations(),
+        Arc::new(crate::SystemClock),
+        fixture.home.clone(),
+        timing(),
+        |_status| {},
+        &join_cancel,
+    );
+    tokio::pin!(joining);
+    let request = tokio::select! {
+        request = host.wait_for_request() => request.expect("receive signed request"),
+        outcome = &mut joining => panic!("joining finished before approval: {outcome:?}"),
+    };
+    {
+        let approving = fixture.handle.approve_device_pairing(
+            &host,
+            &request,
+            crate::MemberRole::Member,
+            crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+            None,
+            timing(),
+            tokio::sync::watch::channel(false).1,
+        );
+        tokio::pin!(approving);
+        loop {
+            tokio::select! {
+                outcome = &mut approving => panic!("approval finished before cancellation: {outcome:?}"),
+                outcome = &mut joining => panic!("joining finished before cancellation: {outcome:?}"),
+                () = tokio::time::sleep(Duration::from_millis(2)) => {
+                    if host.invitation(&request).expect("read pairing journal").is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fixture
+        .handle
+        .cancel_device_pairing(&host, timing())
+        .await
+        .expect("cancel persisted invitation");
+
+    assert!(matches!(
+        joining.await.expect("joining device receives cancellation"),
+        crate::DeviceJoinTransportOutcome::Abandoned(_)
+            | crate::DeviceJoinTransportOutcome::Cancelled(_)
+    ));
+    assert!(!fixture
+        .layout
+        .store_dir("facade-persisted-cancellation")
+        .config_path()
+        .exists());
+}

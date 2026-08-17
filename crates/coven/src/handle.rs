@@ -1032,6 +1032,14 @@ impl CovenHandle {
             .await
     }
 
+    pub async fn cancel_device_pairing(
+        &self,
+        host: &crate::DevicePairingHost,
+        timing: crate::DeviceJoinTransportTiming,
+    ) -> Result<(), crate::ApproveDevicePairingError> {
+        self.pairing.cancel(host, timing).await
+    }
+
     pub async fn begin_device_join(
         &self,
         member_pubkey: &str,
