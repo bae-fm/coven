@@ -410,8 +410,8 @@ impl AtomicStagedFile {
     }
 
     /// Publish a verified user-owned destination without replacing an existing
-    /// path. The staged file is a sibling, so the hard link exposes one complete
-    /// inode atomically and fails if another file already owns the name.
+    /// path. The staged file is a sibling, so the no-clobber rename exposes the
+    /// complete file atomically and fails if another file already owns the name.
     pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
         let file_sync = self.file_sync.clone();
         self.commit_new_with_sync(|path| {
@@ -432,7 +432,7 @@ impl AtomicStagedFile {
     {
         let mut staged = self.take_stage();
         staged.close();
-        match tokio::fs::hard_link(&staged.path, &self.destination).await {
+        match staged.rename_noreplace(&self.destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let operation = CommitNewFileError::DestinationExists(self.destination.clone());
@@ -443,7 +443,7 @@ impl AtomicStagedFile {
             }
             Err(source) => {
                 let operation = FileError::between(
-                    "link verified blob",
+                    "rename verified blob without replacement",
                     &staged.path,
                     &self.destination,
                     source,
@@ -455,22 +455,6 @@ impl AtomicStagedFile {
             }
         }
 
-        if let Err(operation) = sync_committed_parent(&self.destination).await {
-            let destination_rollback = self.rollback_new_destination().await.err();
-            let stage_cleanup = staged.cleanup().await.err();
-            let rollback = match (destination_rollback, stage_cleanup) {
-                (None, None) => return Err(operation.into()),
-                (Some(rollback), None) | (None, Some(rollback)) => rollback,
-                (Some(first), Some(second)) => FileError::rollback(first, second),
-            };
-            return Err(CommitNewFileError::rollback(operation.into(), rollback));
-        }
-        if let Err(operation) = staged.cleanup().await {
-            return match self.rollback_new_destination().await {
-                Ok(()) => Err(operation.into()),
-                Err(rollback) => Err(CommitNewFileError::rollback(operation.into(), rollback)),
-            };
-        }
         if let Err(operation) = sync_committed_parent(&self.destination).await {
             return match self.rollback_new_destination().await {
                 Ok(()) => Err(operation.into()),
@@ -572,6 +556,46 @@ impl AtomicTempFile {
 
     fn close(&mut self) {
         self.file.take();
+    }
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    ))]
+    fn rename_noreplace(&mut self, destination: &Path) -> Result<(), std::io::Error> {
+        use rustix::fs::{renameat_with, RenameFlags, CWD};
+
+        self.close();
+        renameat_with(CWD, &self.path, CWD, destination, RenameFlags::NOREPLACE)?;
+        self.armed = false;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn rename_noreplace(&mut self, destination: &Path) -> Result<(), std::io::Error> {
+        self.close();
+        let path = tempfile::TempPath::try_from_path(self.path.clone())?;
+        match path.persist_noclobber(destination) {
+            Ok(()) => {
+                self.armed = false;
+                Ok(())
+            }
+            Err(error) => {
+                let source = error.error;
+                // `AtomicTempFile` still owns cleanup after a failed rename.
+                // Disarm the temporary guard constructed only to perform the
+                // platform's no-clobber rename.
+                let mut path = error.path;
+                path.disable_cleanup(true);
+                Err(source)
+            }
+        }
     }
 
     fn disarm(&mut self) {

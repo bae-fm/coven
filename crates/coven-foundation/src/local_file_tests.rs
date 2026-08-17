@@ -447,7 +447,37 @@ async fn staged_new_file_publishes_complete_verified_bytes() {
 }
 
 #[tokio::test]
-async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
+async fn staged_new_file_moves_the_stage_before_directory_sync() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let destination = tmp.path().join("blob.bin");
+    let mut staged = AtomicStagedFile::create(&destination)
+        .await
+        .expect("allocate staging path");
+    staged
+        .write_bytes(b"downloaded")
+        .await
+        .expect("write verified staged file");
+    let staged_path = staged.path().to_path_buf();
+
+    staged
+        .commit_new_with_sync(|_| {
+            let staged_path = staged_path.clone();
+            async move {
+                assert!(
+                    !staged_path.exists(),
+                    "publication must move the staged file rather than create another path to it"
+                );
+                Ok(())
+            }
+        })
+        .await
+        .expect("publish new user file");
+
+    assert_eq!(read(&destination).await.unwrap(), b"downloaded");
+}
+
+#[tokio::test]
+async fn staged_new_file_rolls_back_when_directory_sync_fails() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let destination = tmp.path().join("blob.bin");
     let mut staged = AtomicStagedFile::create(&destination)
@@ -466,24 +496,21 @@ async fn staged_new_file_rolls_back_when_final_directory_sync_fails() {
             let invocation = sync_count_for_call.fetch_add(1, Ordering::SeqCst);
             let path = path.to_path_buf();
             async move {
-                if invocation == 1 {
-                    Err(injected_file_error("injected final directory sync", &path))
-                } else {
-                    Ok(())
-                }
+                assert_eq!(invocation, 0, "a rename changes the directory once");
+                Err(injected_file_error("injected directory sync", &path))
             }
         })
         .await
-        .expect_err("final directory sync failure must be reported");
+        .expect_err("directory sync failure must be reported");
 
     assert!(matches!(
         error,
         CommitNewFileError::Filesystem(FileError::Path {
-            operation: "injected final directory sync",
+            operation: "injected directory sync",
             ..
         })
     ));
-    assert_eq!(sync_count.load(Ordering::SeqCst), 2);
+    assert_eq!(sync_count.load(Ordering::SeqCst), 1);
     assert!(!destination.exists());
     assert!(!staged_path.exists());
 }

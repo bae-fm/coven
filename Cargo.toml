@@ -42,6 +42,7 @@ md-5 = "0.11"
 open = "5.3"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls", "stream"] }
+rustix = { version = "1.1.4", features = ["fs"] }
 smithy-transport-reqwest = { version = "0.1.0", features = ["rustls"] }
 rusqlite = { version = "0.40", default-features = false, features = ["session", "serialize", "bundled", "hooks", "column_metadata", "cache"] }
 sqlite3-parser = "0.17.0"

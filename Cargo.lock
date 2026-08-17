@@ -1170,6 +1170,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",
