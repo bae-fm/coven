@@ -293,3 +293,51 @@ fn derive_credentials_only_stores_for_s3() {
         );
     }
 }
+
+#[cfg(feature = "oauth-providers")]
+#[test]
+fn oauth_provider_access_is_durable_before_library_installation() {
+    coven_keys::keys::test_keyring::install();
+    let store_keys = StoreKeys::bind("pending-oauth-enrollment".to_string());
+    let join_info = CloudHomeJoinInfo::Dropbox {
+        folder_path: "/Apps/coven/pending".to_string(),
+    };
+    let tokens = coven_storage::oauth::OAuthTokens {
+        access_token: "enrollment-access".to_string(),
+        refresh_token: Some("enrollment-refresh".to_string()),
+        expires_at: None,
+    };
+
+    let initial = enrollment_oauth_tokens(
+        &join_info,
+        &store_keys,
+        EnrollmentProviderAccess::Supplied(Some(tokens.clone())),
+    )
+    .expect("persist initial provider access");
+    let resumed =
+        enrollment_oauth_tokens(&join_info, &store_keys, EnrollmentProviderAccess::Stored)
+            .expect("reload provider access after process restart");
+    let resumed_before_phase_commit = enrollment_oauth_tokens(
+        &join_info,
+        &store_keys,
+        EnrollmentProviderAccess::Supplied(None),
+    )
+    .expect("reuse provider access when its phase commit was interrupted");
+
+    let initial = initial.expect("initial OAuth tokens");
+    let resumed = resumed.expect("resumed OAuth tokens");
+    let resumed_before_phase_commit =
+        resumed_before_phase_commit.expect("stored OAuth tokens before phase commit");
+    assert_eq!(initial.access_token, tokens.access_token);
+    assert_eq!(initial.refresh_token, tokens.refresh_token);
+    assert_eq!(resumed.access_token, tokens.access_token);
+    assert_eq!(resumed.refresh_token, tokens.refresh_token);
+    assert_eq!(
+        resumed_before_phase_commit.access_token,
+        tokens.access_token
+    );
+    assert_eq!(
+        resumed_before_phase_commit.refresh_token,
+        tokens.refresh_token
+    );
+}

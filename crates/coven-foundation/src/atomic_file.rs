@@ -175,6 +175,13 @@ impl FileError {
 
 pub(crate) const TEMP_FILE_PREFIX: &str = ".tmp.";
 
+/// Whether a directory entry is an unpublished sibling left by this module's
+/// atomic writer. Callers that enumerate committed records exclude these;
+/// they are not part of the durable record set until renamed onto a target.
+pub fn is_atomic_staging_file_name(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().starts_with(TEMP_FILE_PREFIX)
+}
+
 /// A failed atomic write, tagged with whether the write had already committed.
 ///
 /// The distinction is what a caller holding in-memory state needs: after

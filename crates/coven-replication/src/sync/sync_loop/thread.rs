@@ -135,6 +135,7 @@ pub(super) struct SyncLoopThread {
     stop_rx: tokio::sync::watch::Receiver<bool>,
     activate_rx: tokio::sync::watch::Receiver<bool>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+    eager_cache_status_tx: tokio::sync::watch::Sender<crate::sync::store::EagerCacheFillStatus>,
     running: Arc<AtomicBool>,
 }
 
@@ -146,6 +147,7 @@ impl SyncLoopThread {
         stop_rx: tokio::sync::watch::Receiver<bool>,
         activate_rx: tokio::sync::watch::Receiver<bool>,
         status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+        eager_cache_status_tx: tokio::sync::watch::Sender<crate::sync::store::EagerCacheFillStatus>,
         running: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -155,6 +157,7 @@ impl SyncLoopThread {
             stop_rx,
             activate_rx,
             status_tx,
+            eager_cache_status_tx,
             running,
         }
     }
@@ -171,11 +174,51 @@ impl SyncLoopThread {
             let failure = SyncLoopFailure::Panicked;
             error!("{failure}");
             status_tx.send_replace(SyncLoopStatus::Failed { error: failure });
+            let cancelled = match self.eager_cache_status_tx.borrow().clone() {
+                crate::sync::store::EagerCacheFillStatus::Scanning => {
+                    Some(crate::sync::store::EagerCacheFillStatus::Cancelled(
+                        crate::sync::store::EagerCacheFillProgress::empty(),
+                    ))
+                }
+                crate::sync::store::EagerCacheFillStatus::Downloading(progress) => Some(
+                    crate::sync::store::EagerCacheFillStatus::Cancelled(progress),
+                ),
+                _ => None,
+            };
+            if let Some(cancelled) = cancelled {
+                self.eager_cache_status_tx.send_replace(cancelled);
+            }
         }
     }
 
     async fn run_loop(&mut self) {
-        if !self.wait_for_activation().await || !self.wait_for_first_cycle().await {
+        if !self.wait_for_activation().await {
+            return;
+        }
+
+        let eager_components = Arc::clone(&self.inner);
+        let eager_cancel = self.stop_rx.clone();
+        let eager_status = self.eager_cache_status_tx.clone();
+        let eager_fill = async move {
+            if let Err(error) = eager_components
+                .components
+                .fill_eager_cache(eager_cancel, &eager_status)
+                .await
+            {
+                error!(%error, "post-open eager cache fill failed");
+            }
+        };
+        tokio::pin!(eager_fill);
+        let cycles = self.run_cycles();
+        tokio::pin!(cycles);
+        tokio::select! {
+            () = &mut eager_fill => cycles.await,
+            () = &mut cycles => eager_fill.await,
+        }
+    }
+
+    async fn run_cycles(&mut self) {
+        if !self.wait_for_first_cycle().await {
             return;
         }
 

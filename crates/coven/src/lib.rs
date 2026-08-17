@@ -52,7 +52,7 @@ pub use coven_database::{
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{join_with_device_pairing, DeviceJoinTransportOutcome};
 pub use coven_domain::joining::{
-    BootstrapError, DevicePairingError, DevicePairingHost, DevicePairingOffer,
+    BootstrapError, DevicePairingError, DevicePairingHost, DevicePairingOffer, DevicePairingPhase,
     DevicePairingRequest, DevicePairingTransportError, PreparedDevicePairing,
     SealedDevicePairingRequest,
 };
@@ -92,7 +92,7 @@ pub use coven_keys::keys::{
 };
 pub use coven_protocol::blob::{
     content_hash, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    Provenance, RowBlobAuthority, RowBlobRef,
+    Provenance, RowBlobAuthority, RowBlobRef, TransferLimits,
 };
 pub use coven_protocol::hlc::Timestamp;
 pub use coven_protocol::objects::{
@@ -132,7 +132,8 @@ pub use coven_replication::sync::{
     DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
-    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,
+    EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus, JoinedStore,
+    JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,
     JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure, ProviderAdminJoinTerminal,
     ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef, ProvisionalDeviceBootstrap, SyncError,
     SyncLoopAlerts, SyncLoopStatus, SyncLoopSuccess,

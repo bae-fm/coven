@@ -70,6 +70,7 @@ impl StoreSync {
             self.observer.clone(),
             self.open_guard.clone(),
             self.status_tx.clone(),
+            self.eager_cache_status_tx.clone(),
             initialization.runtime,
         ));
         if matches!(&initialization.driver, SyncDriver::Loop) {
@@ -229,6 +230,8 @@ pub(crate) struct StoreSync {
     state: Arc<RwLock<SyncConnection>>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+    eager_cache_status_tx:
+        tokio::sync::watch::Sender<coven_replication::sync::store::EagerCacheFillStatus>,
     runtime_factory: Arc<dyn SyncLoopRuntimeFactory>,
     #[cfg(test)]
     stopped_loops: Arc<std::sync::atomic::AtomicU64>,

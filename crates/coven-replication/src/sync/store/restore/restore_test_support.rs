@@ -38,19 +38,6 @@ impl<'storage> RestoringStore<'storage> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn read_local_blob_for_test(
-        &self,
-        store_dir: &coven_foundation::store_dir::StoreDir,
-        table: &str,
-        row_id: &str,
-    ) -> Result<Vec<u8>, crate::sync::BlobCacheError> {
-        let reference = self.database.row_blob_ref(table, row_id).await?;
-        crate::sync::test_owner_graph::TestOwnerGraph::new(self.database.clone(), store_dir.clone())
-            .read_blob(None, &reference)
-            .await
-    }
-
-    #[cfg(test)]
     pub(crate) fn schema_version_for_test(&self) -> u32 {
         self.database.schema_version()
     }

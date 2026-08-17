@@ -1,8 +1,5 @@
 use std::collections::BTreeMap;
 
-use tokio::sync::watch;
-use tracing::{info, warn};
-
 use super::authorization::history::AuthorizedStoreHistory;
 use super::pull;
 use super::*;

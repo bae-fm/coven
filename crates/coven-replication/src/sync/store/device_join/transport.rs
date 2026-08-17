@@ -360,17 +360,8 @@ pub enum JoiningDeviceJoinProgress {
     WaitingForProviderAccess,
     RegisteringDevice,
     WaitingForLibrary,
-    DownloadingSnapshot {
-        bytes_done: u64,
-        bytes_total: u64,
-    },
+    DownloadingSnapshot { bytes_done: u64, bytes_total: u64 },
     InstallingSnapshot,
-    DownloadingLibraryFiles {
-        files_done: u64,
-        files_total: u64,
-        bytes_done: u64,
-        bytes_total: u64,
-    },
     WaitingForActivation,
     CatchingUp,
     SavingLibrary,
@@ -401,6 +392,18 @@ pub enum AdmittingDeviceJoinProgress {
 pub struct DeviceJoinTransportTiming {
     pub poll: Duration,
     pub deadline: Duration,
+}
+
+impl DeviceJoinTransportTiming {
+    /// Pairing's product timing. Hosts render the states; coven decides how
+    /// frequently storage and the local pairing endpoint are observed and when
+    /// an absent counterpart becomes a failure.
+    pub const fn interactive() -> Self {
+        Self {
+            poll: Duration::from_millis(100),
+            deadline: Duration::from_secs(180),
+        }
+    }
 }
 
 /// Why a transfer through the transport failed.
@@ -533,13 +536,6 @@ impl<'a> DeviceJoinTransport<'a> {
                 role: producer,
             });
         }
-        if let Some(existing) = self.read(kind).await? {
-            return if existing == *action {
-                Ok(())
-            } else {
-                Err(DeviceJoinTransportError::ArtifactConflict { kind })
-            };
-        }
         let sealed = self
             .seal
             .seal_app_data(&serde_json::to_vec(action)?, &self.seal_aad(kind));
@@ -549,13 +545,15 @@ impl<'a> DeviceJoinTransport<'a> {
             &self.semantic_prefix(kind),
             sealed,
         )?;
-        self.storage
-            .create_protocol_object(&prepared)
-            .await
-            .map_err(|error| match error {
-                StorageError::SlotCollision(_) => DeviceJoinTransportError::SlotConflict { kind },
-                other => other.into(),
-            })
+        match self.storage.create_protocol_object(&prepared).await {
+            Ok(()) => Ok(()),
+            Err(StorageError::SlotCollision(_)) => match self.read(kind).await? {
+                Some(existing) if existing == *action => Ok(()),
+                Some(_) => Err(DeviceJoinTransportError::ArtifactConflict { kind }),
+                None => Err(DeviceJoinTransportError::SlotConflict { kind }),
+            },
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Read one kind's artifact, or `None` while its slot is still empty.
@@ -677,23 +675,31 @@ impl<'a> DeviceJoinTransport<'a> {
     /// There is no sweep behind this — an attempt that reaches none of those
     /// ends keeps its slots until its cancellation removes them.
     pub async fn delete_attempt_slots(&self) -> Result<(), DeviceJoinTransportError> {
-        for kind in DeviceJoinTransportKind::ALL {
-            let prepared = match self
-                .storage
-                .read_prepared_protocol_slot(
-                    &slot_context(self.store_root_hash),
-                    self.params.slot(kind)?,
-                    &self.semantic_prefix(kind),
-                )
-                .await
-            {
-                Ok((_, prepared)) => prepared,
-                Err(StorageError::NotFound(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            self.storage
-                .delete_protocol_object(prepared.reference())
-                .await?;
+        let deletions =
+            futures_util::future::join_all(DeviceJoinTransportKind::ALL.into_iter().map(
+                |kind| async move {
+                    let prepared = match self
+                        .storage
+                        .read_prepared_protocol_slot(
+                            &slot_context(self.store_root_hash),
+                            self.params.slot(kind)?,
+                            &self.semantic_prefix(kind),
+                        )
+                        .await
+                    {
+                        Ok((_, prepared)) => prepared,
+                        Err(StorageError::NotFound(_)) => return Ok(()),
+                        Err(error) => return Err(DeviceJoinTransportError::from(error)),
+                    };
+                    self.storage
+                        .delete_protocol_object(prepared.reference())
+                        .await
+                        .map_err(DeviceJoinTransportError::from)
+                },
+            ))
+            .await;
+        for result in deletions {
+            result?;
         }
         Ok(())
     }
@@ -924,6 +930,7 @@ impl<'attempt> AttemptTransport<'attempt> {
         // the artifact republishes it (the crash between producing and publishing),
         // and a journal past it does nothing (its artifact was published, which is
         // how the journal got past it).
+        let mut local_completion = None;
         if roles.provider_administrator {
             let approval = match self.admin_status().await? {
                 Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => Some(approval),
@@ -955,6 +962,7 @@ impl<'attempt> AttemptTransport<'attempt> {
             }
         }
 
+        let mut local_provisional = None;
         if roles.owner {
             let provisional = match self.owner_status().await? {
                 Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => {
@@ -984,8 +992,12 @@ impl<'attempt> AttemptTransport<'attempt> {
                 }
             };
             if let Some(provisional) = provisional {
-                self.publish(DeviceJoinAction::TransferProvisionalBootstrap(provisional))
-                    .await?;
+                if roles.provider_administrator {
+                    local_provisional = Some(provisional);
+                } else {
+                    self.publish(DeviceJoinAction::TransferProvisionalBootstrap(provisional))
+                        .await?;
+                }
             }
         }
 
@@ -1003,9 +1015,13 @@ impl<'attempt> AttemptTransport<'attempt> {
                         .await?
                 }),
                 _ => {
-                    let provisional = self
-                        .await_artifact::<ProvisionalDeviceBootstrap>(timing)
-                        .await?;
+                    let provisional = match local_provisional.take() {
+                        Some(provisional) => provisional,
+                        None => {
+                            self.await_artifact::<ProvisionalDeviceBootstrap>(timing)
+                                .await?
+                        }
+                    };
                     Some({
                         on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
                         self.store
@@ -1035,10 +1051,14 @@ impl<'attempt> AttemptTransport<'attempt> {
                         .await?
                 }
             };
-            self.publish(DeviceJoinAction::TransferProviderAdmissionCompletion(
-                completion,
-            ))
-            .await?;
+            if roles.owner {
+                local_completion = Some(completion);
+            } else {
+                self.publish(DeviceJoinAction::TransferProviderAdmissionCompletion(
+                    completion,
+                ))
+                .await?;
+            }
         }
 
         if !roles.owner {
@@ -1054,9 +1074,13 @@ impl<'attempt> AttemptTransport<'attempt> {
                 self.store.finalize_device_join(completion).await?
             }
             _ => {
-                let completion = self
-                    .await_artifact::<DeviceProviderAdmissionCompletion>(timing)
-                    .await?;
+                let completion = match local_completion {
+                    Some(completion) => completion,
+                    None => {
+                        self.await_artifact::<DeviceProviderAdmissionCompletion>(timing)
+                            .await?
+                    }
+                };
                 on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
                 self.store.finalize_device_join(completion).await?
             }

@@ -33,6 +33,7 @@ pub(crate) mod snapshots;
 use registration_object::prepare_registration_object;
 
 pub use acknowledgements::StoreAckError;
+pub use blob::eager_cache::{EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus};
 pub use blob::{BlobCacheError, BlobStream};
 pub use circles::CircleOperationError;
 #[cfg(test)]
@@ -99,7 +100,4 @@ pub use pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;
 #[doc(hidden)]
-pub use snapshots::{
-    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotBlobReconcileError, SnapshotError,
-    SnapshotSpoolCleanupError,
-};
+pub use snapshots::{PreparedSnapshotBootstrap, SnapshotError, SnapshotSpoolCleanupError};

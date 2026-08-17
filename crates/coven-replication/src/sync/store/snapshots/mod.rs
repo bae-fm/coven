@@ -8,10 +8,7 @@ pub(crate) use circle::{CircleSnapshotReader, CircleSnapshotWriter};
 pub(crate) use publication::AuthorizedSnapshotPublication;
 
 pub(crate) use image::should_create_snapshot;
-pub use image::{
-    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotBlobReconcileError, SnapshotError,
-    SnapshotSpoolCleanupError,
-};
+pub use image::{PreparedSnapshotBootstrap, SnapshotError, SnapshotSpoolCleanupError};
 
 use coven_database::{CreatedSnapshot, SnapshotBlobAudience};
 

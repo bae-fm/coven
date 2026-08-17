@@ -75,26 +75,37 @@ impl TransportFixture {
     /// Owner and joiner on one provider account: the admission takes the
     /// same-principal path and publishes no probe.
     async fn build(store_id: &str) -> Self {
-        Self::build_with(store_id, None).await
+        Self::build_with_members(store_id, None, false).await.0
     }
 
     /// Owner and joiner on separate provider accounts sharing one Dropbox
     /// namespace: the admission takes the cross-principal path, so the
     /// provider probe travels through the transport with everything else.
     async fn build_cross_principal(store_id: &str) -> Self {
-        Self::build_with(
+        Self::build_with_members(
             store_id,
             Some(coven_protocol::ProviderPrincipalId::Dropbox {
                 account_id: "joining-device-account".to_string(),
             }),
+            false,
         )
         .await
+        .0
     }
 
-    async fn build_with(
+    async fn build_two_joiners(store_id: &str) -> (Self, String) {
+        let (fixture, second_member) = Self::build_with_members(store_id, None, true).await;
+        (
+            fixture,
+            second_member.expect("two-joiner fixture creates its second member"),
+        )
+    }
+
+    async fn build_with_members(
         store_id: &str,
         joiner_principal: Option<coven_protocol::ProviderPrincipalId>,
-    ) -> Self {
+        add_second_member: bool,
+    ) -> (Self, Option<String>) {
         coven_keys::keys::test_keyring::install();
         let owner = UserKeypair::generate();
         let (owner_store_tmp, owner_db_store_dir) = temp_store_dir();
@@ -150,6 +161,27 @@ impl TransportFixture {
             )
             .await
             .expect("admit joining identity");
+        let second_member_pubkey = if add_second_member {
+            let identity =
+                coven_keys::keys::mint_pending_identity().expect("mint second joining identity");
+            let pubkey = coven_keys::keys::public_key_hex(&identity);
+            store
+                .admit_member(
+                    &owner_db,
+                    owner_db_store_dir.clone(),
+                    &owner,
+                    &pubkey,
+                    None,
+                    coven_protocol::membership::MemberRole::Member,
+                    &EncryptionService::from_key([42; 32]),
+                    "Device Join Transport Store",
+                )
+                .await
+                .expect("admit second joining identity");
+            Some(pubkey)
+        } else {
+            None
+        };
         let owner_device = store
             .open_into(&owner_db, owner_db_store_dir.clone())
             .await
@@ -191,24 +223,27 @@ impl TransportFixture {
                 namespace_id: CROSS_PRINCIPAL_NAMESPACE.to_string(),
             }
         });
-        Self {
-            owner_store,
-            owner_db,
-            owner_database,
-            owner_storage,
-            owner_test_store: store,
-            owner_store_dir: owner_db_store_dir,
-            home,
-            member_pubkey,
-            admission,
-            layout,
-            tables,
-            joiner_home,
-            access_administrator,
-            _app: app,
-            _snapshot: snapshot_dir,
-            _owner_store_tmp: owner_store_tmp,
-        }
+        (
+            Self {
+                owner_store,
+                owner_db,
+                owner_database,
+                owner_storage,
+                owner_test_store: store,
+                owner_store_dir: owner_db_store_dir,
+                home,
+                member_pubkey,
+                admission,
+                layout,
+                tables,
+                joiner_home,
+                access_administrator,
+                _app: app,
+                _snapshot: snapshot_dir,
+                _owner_store_tmp: owner_store_tmp,
+            },
+            second_member_pubkey,
+        )
     }
 
     /// Publish one ordinary Store commit of the owner's — a row write, the kind
@@ -248,6 +283,7 @@ impl TransportFixture {
             self.tables.clone(),
             test_migrations(),
             coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -261,9 +297,13 @@ impl TransportFixture {
 
     /// Begin a join and mint the offer bundle the host would encode as a QR.
     async fn begin(&self) -> DeviceJoinOfferBundle {
+        self.begin_for(&self.member_pubkey).await
+    }
+
+    async fn begin_for(&self, member_pubkey: &str) -> DeviceJoinOfferBundle {
         let offer = self
             .owner_store
-            .begin_device_join(&self.member_pubkey)
+            .begin_device_join(member_pubkey)
             .await
             .expect("begin join");
         self.owner_store
@@ -386,6 +426,7 @@ fn transport_carries_a_whole_join_between_two_drivers() {
 async fn run_transport_carries_a_whole_join_between_two_drivers() {
     let fixture = TransportFixture::build("device-join-transport-happy-path").await;
     let bundle = fixture.begin().await;
+    fixture.home.clear_exact_creates();
 
     let joiner = fixture.client();
     let cancel = never_cancelled();
@@ -406,6 +447,42 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
     );
     let config = joined(config);
     let activation = activated(activation);
+
+    let transport_creates = fixture
+        .home
+        .exact_creates()
+        .into_iter()
+        .filter(|slot| slot.logical_key().contains("device-join-transport"))
+        .collect::<Vec<_>>();
+    assert!(
+        transport_creates.iter().all(|slot| !slot
+            .logical_key()
+            .ends_with("/provisional-bootstrap.json")),
+        "one admitting device does not transfer an owner artifact to its own provider-administrator role",
+    );
+    assert!(
+        transport_creates.iter().all(|slot| !slot
+            .logical_key()
+            .ends_with("/provider-admission-completion.json")),
+        "one admitting device does not transfer a provider-administrator artifact to its own owner role",
+    );
+    for kind in [
+        "provider-access-request",
+        "provider-admission-approval",
+        "registration-request",
+        "provider-ready-bootstrap",
+        "readiness",
+        "activation",
+    ] {
+        assert_eq!(
+            transport_creates
+                .iter()
+                .filter(|slot| { slot.logical_key().ends_with(&format!("/{kind}.json")) })
+                .count(),
+            1,
+            "the uninterrupted join attempts one create for {kind}",
+        );
+    }
 
     {
         let progress = progress.lock().expect("progress lock");
@@ -474,7 +551,14 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
 async fn the_offer_bundle_round_trips_through_its_encoded_form() {
     tokio::spawn(async {
         let fixture = TransportFixture::build("device-join-transport-bundle").await;
+        fixture
+            .home
+            .delay_exact_slot_allocations(Duration::from_millis(10));
         let bundle = fixture.begin().await;
+        assert!(
+            fixture.home.exact_slot_allocation_max_inflight() > 1,
+            "independent transport slots are allocated concurrently",
+        );
 
         let decoded = DeviceJoinOfferBundle::from_bytes(&bundle.to_bytes())
             .expect("a bundle the owner minted decodes");
@@ -723,16 +807,16 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         Some(&approval),
         "a resumed driver left its first approval's exact bytes in place",
     );
-    // The provisional bootstrap crosses between the two admitting roles through
-    // the transport, not in memory: the owner published it in an earlier run,
-    // and the run that just produced the provider-ready bootstrap read it back
-    // out of its slot.
+    // Both admitting roles run on this device, so their handoff stays in this
+    // invocation rather than paying a storage round trip. Restarting after the
+    // provider-ready bootstrap remains safe because that external artifact is
+    // durable.
     assert!(
         fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::ProvisionalBootstrap)
             .await
-            .is_some(),
-        "the provisional bootstrap travelled through its slot",
+            .is_none(),
+        "one admitting device must not publish an artifact to itself",
     );
 
     // The joiner bootstraps its store, publishes readiness, and dies waiting
@@ -749,8 +833,9 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         activation.outcome.attempt().attempt_id,
         bundle.offer.attempt_id
     );
-    // The admission completion crosses back the same way: the run that
-    // finalized the join read it out of its slot rather than off the stack.
+    // The provider-administrator and owner are still this same invocation, so
+    // their return handoff also stays local. The activation is the durable
+    // external artifact the joining device resumes from.
     assert!(
         fixture
             .slot_bytes(
@@ -758,8 +843,8 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
                 DeviceJoinTransportKind::ProviderAdmissionCompletion
             )
             .await
-            .is_some(),
-        "the admission completion travelled through its slot",
+            .is_none(),
+        "one admitting device must not publish an artifact to itself",
     );
 
     // The joiner's last restart consumes the activation and saves the store.
@@ -1375,8 +1460,27 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
             DeviceJoinTransport::open(&joiner_storage, &bundle, DeviceJoinRoles::joiner())
                 .expect("open transport");
 
+        let mut conflicting_request = request.clone();
+        conflicting_request
+            .body_mut()
+            .offer
+            .body_mut()
+            .member_pubkey
+            .push('0');
         let action = DeviceJoinAction::TransferProviderAccessRequest(request);
+        let creates_before = fixture.home.exact_create_count();
+        let reads_before = fixture.home.exact_full_read_count();
         transport.publish(&action).await.expect("first publish");
+        assert_eq!(
+            fixture.home.exact_create_count(),
+            creates_before + 1,
+            "a first publish creates exactly one object",
+        );
+        assert_eq!(
+            fixture.home.exact_full_read_count(),
+            reads_before,
+            "a first publish does not read an empty slot before creating it",
+        );
         let first_bytes = fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
             .await
@@ -1395,17 +1499,13 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
             "an idempotent republish leaves the first write's exact bytes",
         );
 
-        // A request against a second attempt is a different artifact of the same
-        // kind, and the occupied slot refuses it.
-        let second = fixture.begin().await;
-        let other_request = fixture
-            .client()
-            .prepare_provider_access_request(second.offer.clone())
-            .await
-            .expect("prepare a different access request");
+        // A different artifact of the same kind cannot replace the first one.
+        // Its signature is deliberately stale because transport conflict
+        // detection compares bytes; protocol acceptance is the later verifier's
+        // responsibility.
         let conflict = transport
             .publish(&DeviceJoinAction::TransferProviderAccessRequest(
-                other_request,
+                conflicting_request,
             ))
             .await;
         assert!(
@@ -1416,6 +1516,18 @@ async fn republishing_is_idempotent_and_a_different_artifact_is_refused() {
                 })
             ),
             "a different artifact at an occupied slot is refused, got {conflict:?}",
+        );
+
+        fixture
+            .home
+            .delay_exact_full_reads(Duration::from_millis(10));
+        transport
+            .delete_attempt_slots()
+            .await
+            .expect("delete the attempt transport");
+        assert!(
+            fixture.home.exact_full_read_max_inflight() > 1,
+            "attempt cleanup reads independent slots concurrently",
         );
     })
     .await
@@ -1575,9 +1687,10 @@ async fn tampered_slot_bytes_refuse_to_open() {
 #[tokio::test]
 async fn concurrent_attempts_keep_separate_namespaces() {
     tokio::spawn(async {
-        let fixture = TransportFixture::build("device-join-transport-concurrent").await;
+        let (fixture, second_member_pubkey) =
+            TransportFixture::build_two_joiners("device-join-transport-concurrent").await;
         let first = fixture.begin().await;
-        let second = fixture.begin().await;
+        let second = fixture.begin_for(&second_member_pubkey).await;
 
         assert_ne!(first.offer.attempt_id, second.offer.attempt_id);
         assert_ne!(

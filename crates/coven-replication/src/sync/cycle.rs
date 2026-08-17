@@ -636,18 +636,19 @@ impl PreparedSyncComponents {
         .map_err(InitSyncError::Initialization)?;
 
         let (store, device_id) = initialized.into_parts();
+        let blob_access = std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
+            self.local_blob_access.clone(),
+            super::store::blob::CurrentRemoteBlobSource::current(
+                self.database.clone(),
+                store_storage,
+            ),
+        ));
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
             crate::blob::transition::LocalBlobTransitions::new(
                 self.database.clone(),
                 self.store_dir.clone(),
             ),
-            std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
-                self.local_blob_access.clone(),
-                super::store::blob::CurrentRemoteBlobSource::current(
-                    self.database.clone(),
-                    store_storage,
-                ),
-            )),
+            blob_access.clone(),
             self.routing_encryption.clone(),
             observer,
         );
@@ -662,6 +663,7 @@ impl PreparedSyncComponents {
             routing_encryption: self.routing_encryption,
             master_keys: self.master_keys,
             blob_transitions,
+            blob_access,
         })
     }
 
@@ -701,9 +703,24 @@ pub struct SyncComponents {
     routing_encryption: Option<coven_keys::encryption::EncryptionService>,
     master_keys: std::sync::Arc<dyn coven_keys::keys::MasterKeyCustody>,
     blob_transitions: crate::blob::transition::ConnectedBlobTransitions,
+    blob_access: std::sync::Arc<super::store::blob::RemoteStoreBlobAccess>,
 }
 
 impl SyncComponents {
+    pub(crate) async fn fill_eager_cache(
+        &self,
+        cancel: tokio::sync::watch::Receiver<bool>,
+        status: &tokio::sync::watch::Sender<super::store::blob::eager_cache::EagerCacheFillStatus>,
+    ) -> Result<(), std::sync::Arc<super::store::blob::eager_cache::EagerCacheFillError>> {
+        super::store::blob::eager_cache::run(
+            &self.database,
+            self.blob_access.as_ref(),
+            cancel,
+            status,
+        )
+        .await
+    }
+
     pub(crate) async fn probe_storage(&self) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage.probe_provider().await
     }
@@ -1265,15 +1282,13 @@ impl SyncComponents {
             store_dir.clone(),
             super::store::blob::StoreBlobCache::new(database.clone(), store_dir.clone()),
         );
+        let blob_access = std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
+            local_blob_access.clone(),
+            super::store::blob::CurrentRemoteBlobSource::current(database.clone(), store_storage),
+        ));
         let blob_transitions = crate::blob::transition::ConnectedBlobTransitions::new(
-            crate::blob::transition::LocalBlobTransitions::new(database.clone(), store_dir),
-            std::sync::Arc::new(super::store::blob::RemoteStoreBlobAccess::new(
-                local_blob_access.clone(),
-                super::store::blob::CurrentRemoteBlobSource::current(
-                    database.clone(),
-                    store_storage,
-                ),
-            )),
+            crate::blob::transition::LocalBlobTransitions::new(database.clone(), store_dir.clone()),
+            blob_access.clone(),
             None,
             None,
         );
@@ -1287,6 +1302,7 @@ impl SyncComponents {
             routing_encryption: None,
             master_keys,
             blob_transitions,
+            blob_access,
         }
     }
 

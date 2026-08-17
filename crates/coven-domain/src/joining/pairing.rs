@@ -229,9 +229,62 @@ pub struct PreparedDevicePairing {
     offer: DevicePairingOffer,
     request: DevicePairingRequest,
     sealed_request: SealedDevicePairingRequest,
+    state: PreparedDevicePairingState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case", deny_unknown_fields)]
+enum PreparedDevicePairingState {
+    AwaitingInvitation,
+    ProviderAccessPending { invitation: Vec<u8> },
+    LibraryInstallationPending { invitation: Vec<u8> },
+}
+
+/// The durable user-visible phase of one joining-device enrollment.
+/// Invitation bytes remain private because they contain the sealed Store
+/// admission; callers only need the operation they can resume.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevicePairingPhase {
+    AwaitingInvitation,
+    ProviderAccessPending,
+    LibraryInstallationPending,
 }
 
 impl PreparedDevicePairing {
+    pub fn phase(&self) -> DevicePairingPhase {
+        match &self.state {
+            PreparedDevicePairingState::AwaitingInvitation => {
+                DevicePairingPhase::AwaitingInvitation
+            }
+            PreparedDevicePairingState::ProviderAccessPending { .. } => {
+                DevicePairingPhase::ProviderAccessPending
+            }
+            PreparedDevicePairingState::LibraryInstallationPending { .. } => {
+                DevicePairingPhase::LibraryInstallationPending
+            }
+        }
+    }
+
+    pub fn pending(
+        layout: &coven_foundation::store_dir::StoreLayout,
+    ) -> Result<Vec<Self>, DevicePairingError> {
+        let mut pending = Vec::new();
+        for (path, bytes) in layout.pending_device_pairing_journals()? {
+            let pairing: Self = serde_json::from_slice(&bytes)?;
+            let expected = layout.pending_device_pairing_path(pairing.offer.session_id())?;
+            if expected != path {
+                return Err(DevicePairingError::PreparedPairingPathMismatch {
+                    expected,
+                    actual: path,
+                });
+            }
+            pairing.request.verify(&pairing.offer)?;
+            pending.push(pairing);
+        }
+        pending.sort_by(|left, right| left.offer.session_id().cmp(right.offer.session_id()));
+        Ok(pending)
+    }
+
     pub fn open_or_create(
         pairing_code: &str,
         provider_account_email: Option<String>,
@@ -258,6 +311,7 @@ impl PreparedDevicePairing {
             offer,
             request,
             sealed_request,
+            state: PreparedDevicePairingState::AwaitingInvitation,
         };
         file.replace(
             &serde_json::to_vec(&pairing)
@@ -276,6 +330,80 @@ impl PreparedDevicePairing {
 
     pub fn sealed_request(&self) -> &SealedDevicePairingRequest {
         &self.sealed_request
+    }
+
+    pub(crate) fn record_invitation_received(
+        &self,
+        layout: &coven_foundation::store_dir::StoreLayout,
+        invitation: &[u8],
+    ) -> Result<Self, DevicePairingError> {
+        match &self.state {
+            PreparedDevicePairingState::ProviderAccessPending {
+                invitation: durable,
+            }
+            | PreparedDevicePairingState::LibraryInstallationPending {
+                invitation: durable,
+            } if durable == invitation => return Ok(self.clone()),
+            PreparedDevicePairingState::ProviderAccessPending { .. }
+            | PreparedDevicePairingState::LibraryInstallationPending { .. } => {
+                return Err(DevicePairingError::InvitationConflict)
+            }
+            PreparedDevicePairingState::AwaitingInvitation => {}
+        }
+        self.replace_state(
+            layout,
+            PreparedDevicePairingState::ProviderAccessPending {
+                invitation: invitation.to_vec(),
+            },
+        )
+    }
+
+    pub(crate) fn record_library_installation_pending(
+        &self,
+        layout: &coven_foundation::store_dir::StoreLayout,
+    ) -> Result<Self, DevicePairingError> {
+        let invitation = match &self.state {
+            PreparedDevicePairingState::ProviderAccessPending { invitation } => invitation.clone(),
+            PreparedDevicePairingState::LibraryInstallationPending { .. } => {
+                return Ok(self.clone())
+            }
+            PreparedDevicePairingState::AwaitingInvitation => {
+                return Err(DevicePairingError::InvitationMissing)
+            }
+        };
+        self.replace_state(
+            layout,
+            PreparedDevicePairingState::LibraryInstallationPending { invitation },
+        )
+    }
+
+    fn replace_state(
+        &self,
+        layout: &coven_foundation::store_dir::StoreLayout,
+        state: PreparedDevicePairingState,
+    ) -> Result<Self, DevicePairingError> {
+        let pending = Self {
+            offer: self.offer.clone(),
+            request: self.request.clone(),
+            sealed_request: self.sealed_request.clone(),
+            state,
+        };
+        let path = layout.pending_device_pairing_path(self.offer.session_id())?;
+        coven_foundation::atomic_file::AtomicFile::new(path).replace(
+            &serde_json::to_vec(&pending)
+                .expect("prepared device pairing serialization cannot fail"),
+        )?;
+        Ok(pending)
+    }
+
+    pub(crate) fn pending_invitation(&self) -> Option<&[u8]> {
+        match &self.state {
+            PreparedDevicePairingState::AwaitingInvitation => None,
+            PreparedDevicePairingState::ProviderAccessPending { invitation }
+            | PreparedDevicePairingState::LibraryInstallationPending { invitation } => {
+                Some(invitation)
+            }
+        }
     }
 
     pub fn finish(
@@ -359,6 +487,19 @@ pub enum DevicePairingError {
     InvalidSignature,
     #[error("the durable pairing attempt has different immutable inputs")]
     PreparedPairingMismatch,
+    #[error("the durable pairing attempt already holds another device invitation")]
+    InvitationConflict,
+    #[error("the durable pairing attempt has not received a device invitation")]
+    InvitationMissing,
+    #[error(
+        "the durable pairing path is {}, expected {}",
+        .actual.display(),
+        .expected.display()
+    )]
+    PreparedPairingPathMismatch {
+        expected: std::path::PathBuf,
+        actual: std::path::PathBuf,
+    },
 }
 
 fn decode_32(field: &'static str, value: &str) -> Result<[u8; 32], DevicePairingError> {
@@ -488,5 +629,53 @@ mod tests {
             .pending_device_pairing_path(offer.session_id())
             .expect("pairing journal path")
             .exists());
+    }
+
+    #[test]
+    fn received_invitation_is_durable_until_library_installation_finishes() {
+        coven_keys::keys::test_keyring::install();
+        let pairing_key = UserKeypair::generate();
+        let offer = offer(&pairing_key);
+        let app = tempfile::tempdir().expect("pairing app directory");
+        let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
+        let prepared = PreparedDevicePairing::open_or_create(
+            &offer.encode(),
+            Some("member@example.com".to_string()),
+            &layout,
+        )
+        .expect("prepare pairing");
+        let invitation = b"validated sealed invitation";
+
+        let awaiting_provider = prepared
+            .record_invitation_received(&layout, invitation)
+            .expect("record received invitation");
+        assert_eq!(
+            awaiting_provider.phase(),
+            DevicePairingPhase::ProviderAccessPending
+        );
+        awaiting_provider
+            .record_library_installation_pending(&layout)
+            .expect("record pending library installation");
+        let reopened = PreparedDevicePairing::open_or_create(
+            &offer.encode(),
+            Some("member@example.com".to_string()),
+            &layout,
+        )
+        .expect("reopen pairing after process restart");
+        std::fs::write(
+            layout.pending_device_pairings_dir().join(".tmp.crashed"),
+            b"incomplete atomic stage",
+        )
+        .expect("seed interrupted atomic stage");
+        let pending =
+            PreparedDevicePairing::pending(&layout).expect("enumerate pending device enrollments");
+
+        assert_eq!(
+            reopened.phase(),
+            DevicePairingPhase::LibraryInstallationPending
+        );
+        assert_eq!(reopened.pending_invitation(), Some(invitation.as_slice()));
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].pending_invitation(), Some(invitation.as_slice()));
     }
 }

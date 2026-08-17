@@ -229,12 +229,63 @@ impl StoreLayout {
         self.app_dir.join(&self.stores_dirname)
     }
 
+    pub fn pending_device_pairings_dir(&self) -> PathBuf {
+        self.app_dir.join("pending-device-pairings")
+    }
+
     pub fn pending_device_pairing_path(&self, session_id: &str) -> Result<PathBuf, PathTokenError> {
         validate_path_token(session_id)?;
         Ok(self
-            .app_dir
-            .join("pending-device-pairings")
+            .pending_device_pairings_dir()
             .join(format!("{session_id}.json")))
+    }
+
+    /// Read every committed device-pairing journal entry. Atomic-write stages
+    /// are unpublished files and therefore never enter the durable record set.
+    pub fn pending_device_pairing_journals(&self) -> Result<Vec<(PathBuf, Vec<u8>)>, FileError> {
+        let directory = self.pending_device_pairings_dir();
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(FileError::at(
+                    "read pending device pairings",
+                    directory,
+                    source,
+                ))
+            }
+        };
+        let mut journals = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| {
+                FileError::at(
+                    "read pending device pairing directory entry",
+                    &directory,
+                    source,
+                )
+            })?;
+            let path = entry.path();
+            if crate::atomic_file::is_atomic_staging_file_name(&entry.file_name()) {
+                debug!(path = %path.display(), "ignoring unpublished device-pairing journal stage");
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|source| {
+                    FileError::at("read pending device pairing file type", &path, source)
+                })?
+                .is_file()
+            {
+                return Err(FileError::NotFile {
+                    subject: "pending device pairing",
+                    path,
+                });
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|source| FileError::at("read pending device pairing", &path, source))?;
+            journals.push((path, bytes));
+        }
+        Ok(journals)
     }
 
     /// The one `(app_dir, store_id) -> StoreDir` rule, named with this

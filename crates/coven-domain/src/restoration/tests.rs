@@ -458,6 +458,7 @@ async fn restore_result_for(
         &test_synced_tables(),
         &test_migrations(),
         coven_foundation::config::ExactUploadVerification::MetadataHash,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -503,6 +504,7 @@ async fn restore_accepts_blob_schema_for_google_drive_and_reaches_provider_setup
         &tables,
         &test_migrations(),
         coven_foundation::config::ExactUploadVerification::MetadataHash,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -689,6 +691,7 @@ async fn restore_with_cancel(
         &test_synced_tables(),
         &test_migrations(),
         coven_foundation::config::ExactUploadVerification::MetadataHash,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
@@ -890,6 +893,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource::new(
@@ -973,6 +977,7 @@ async fn late_config_failure_rolls_back_custody_and_retries_recovery() {
         "Late Step Test",
         &tables,
         &migrations,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         crate::restoration::RestoreSource::new(
@@ -1036,6 +1041,7 @@ impl OwnerRecoveryRestoreFixture {
             &tables,
             &migrations,
             coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),
@@ -1272,6 +1278,7 @@ async fn restore_first_cycle_extends_the_imported_snapshot_stream() {
                 &restore_tables,
                 &test_migrations(),
                 coven_foundation::config::ExactUploadVerification::MetadataHash,
+                coven_protocol::blob::TransferLimits::one_at_a_time(),
                 coven_keys::custody::KeyCustody::Keyring,
                 coven_keys::identity_custody::IdentityCustody::Keyring,
                 coven_storage::oauth::OAuthClients::empty(),
@@ -1489,9 +1496,11 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     assert!(message.contains("object not found"), "{message}");
 }
 
-/// Restore bootstrap downloads every eager blob referenced by snapshot rows.
+/// Restore bootstrap installs the complete row graph without downloading eager
+/// blobs. CacheEager materialization belongs to the connected post-open worker,
+/// so restore completion is never coupled to artwork availability.
 #[tokio::test]
-async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
+async fn restore_bootstrap_defers_eager_blob_files_until_open() {
     Box::pin(async {
         coven_keys::keys::test_keyring::install();
 
@@ -1657,6 +1666,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             "Restored Store",
             &tables,
             &test_migrations(),
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             crate::restoration::RestoreSource::new(
@@ -1677,17 +1687,12 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             &tokio::sync::watch::channel(false).1,
         ))
         .await
-        .expect("restore bootstrap backfills the blob");
+        .expect("restore bootstrap installs the snapshot rows");
 
         assert!(
-            expected_blob.exists(),
-            "the cover blob file must be backfilled to {} after restore",
+            !expected_blob.exists(),
+            "the cover blob file must remain remote after restore at {}",
             expected_blob.display(),
-        );
-        assert_eq!(
-            std::fs::read(&expected_blob).expect("read backfilled blob"),
-            b"cover-bytes",
-            "the backfilled file must hold the blob's plaintext bytes",
         );
 
         let restored = Database::open(

@@ -12,7 +12,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use tokio::sync::watch;
 
-use crate::joining::client::{BootstrapError, DeviceJoinClient};
+use crate::joining::client::{
+    enrollment_oauth_tokens, BootstrapError, DeviceJoinClient, EnrollmentProviderAccess,
+};
 use coven_foundation::config::Config;
 use coven_replication::sync::store::{
     DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinCancellation,
@@ -33,46 +35,121 @@ pub async fn join_with_device_pairing(
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: coven_keys::custody::KeyCustody,
     identity_custody: coven_keys::identity_custody::IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
     oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
-    timing: DeviceJoinTransportTiming,
     on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    on_progress(coven_replication::sync::JoiningDeviceJoinProgress::WaitingForApproval);
-    let invitation = crate::joining::receive_device_invitation(
-        pairing.offer(),
-        pairing.sealed_request(),
+    let timing = DeviceJoinTransportTiming::interactive();
+    let continuation = durable_invitation(
+        pairing,
+        &layout,
         timing,
         clock.clone(),
+        &on_progress,
         cancel,
     )
-    .await
-    .map_err(BootstrapError::Pairing)?;
-    let outcome = join_with_invitation(
-        &invitation,
+    .await?;
+    let (pairing, invitation, provider_access) = match continuation {
+        EnrollmentContinuation::ProviderAccessPending {
+            pairing,
+            invitation,
+        } => (
+            pairing,
+            invitation,
+            EnrollmentProviderAccess::Supplied(oauth_tokens),
+        ),
+        EnrollmentContinuation::LibraryInstallationPending {
+            pairing,
+            invitation,
+        } => (pairing, invitation, EnrollmentProviderAccess::Stored),
+    };
+    let invite = DeviceJoinInvite::from_bytes(&invitation)?;
+    let client = invitation_client(
+        &invite,
         pairing.request().public_key(),
         layout.clone(),
         synced_tables,
         migrations,
         exact_upload_verification,
+        transfer_limits,
         key_custody,
         identity_custody,
         oauth_clients,
-        oauth_tokens,
+        provider_access,
         cloudkit_ops,
         clock,
-        timing,
-        on_progress,
-        cancel,
-    )
-    .await?;
+    )?;
+    let pairing = pairing.record_library_installation_pending(&layout)?;
+    let outcome = client
+        .join_via_transport(&invite.bundle, timing, on_progress, cancel)
+        .await?;
     pairing.finish(&layout)?;
     Ok(outcome)
+}
+
+enum EnrollmentContinuation {
+    ProviderAccessPending {
+        pairing: crate::joining::PreparedDevicePairing,
+        invitation: Vec<u8>,
+    },
+    LibraryInstallationPending {
+        pairing: crate::joining::PreparedDevicePairing,
+        invitation: Vec<u8>,
+    },
+}
+
+async fn durable_invitation(
+    pairing: &crate::joining::PreparedDevicePairing,
+    layout: &coven_foundation::store_dir::StoreLayout,
+    timing: DeviceJoinTransportTiming,
+    clock: coven_foundation::clock::ClockRef,
+    on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+    cancel: &watch::Receiver<bool>,
+) -> Result<EnrollmentContinuation, BootstrapError> {
+    let pairing = match pairing.phase() {
+        crate::joining::DevicePairingPhase::AwaitingInvitation => {
+            on_progress(coven_replication::sync::JoiningDeviceJoinProgress::WaitingForApproval);
+            let invitation = crate::joining::receive_device_invitation(
+                pairing.offer(),
+                pairing.sealed_request(),
+                timing,
+                clock,
+                cancel,
+            )
+            .await
+            .map_err(BootstrapError::Pairing)?;
+            pairing.record_invitation_received(layout, &invitation)?
+        }
+        crate::joining::DevicePairingPhase::ProviderAccessPending
+        | crate::joining::DevicePairingPhase::LibraryInstallationPending => pairing.clone(),
+    };
+    let invitation = pairing
+        .pending_invitation()
+        .expect("a durable invitation phase carries its invitation")
+        .to_vec();
+    Ok(match pairing.phase() {
+        crate::joining::DevicePairingPhase::ProviderAccessPending => {
+            EnrollmentContinuation::ProviderAccessPending {
+                pairing,
+                invitation,
+            }
+        }
+        crate::joining::DevicePairingPhase::LibraryInstallationPending => {
+            EnrollmentContinuation::LibraryInstallationPending {
+                pairing,
+                invitation,
+            }
+        }
+        crate::joining::DevicePairingPhase::AwaitingInvitation => {
+            unreachable!("recording the invitation advances the durable phase")
+        }
+    })
 }
 
 /// Everything a joining device needs, sealed to the pending identity named by
@@ -246,14 +323,17 @@ fn invitation_client(
     synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
     migrations: Vec<coven_database::Migration>,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: coven_keys::custody::KeyCustody,
     identity_custody: coven_keys::identity_custody::IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
-    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
+    provider_access: EnrollmentProviderAccess,
     cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
     clock: coven_foundation::clock::ClockRef,
 ) -> Result<DeviceJoinClient, BootstrapError> {
     let admission = invite.open_admission(member_pubkey)?;
+    let store_keys = coven_keys::keys::StoreKeys::bind(admission.store_id.clone());
+    let oauth_tokens = enrollment_oauth_tokens(&admission.join_info, &store_keys, provider_access)?;
     DeviceJoinClient::new(
         admission,
         member_pubkey.to_string(),
@@ -261,6 +341,7 @@ fn invitation_client(
         synced_tables,
         migrations,
         exact_upload_verification,
+        transfer_limits,
         key_custody,
         identity_custody,
         oauth_clients,
@@ -268,45 +349,6 @@ fn invitation_client(
         cloudkit_ops,
         clock,
     )
-}
-
-/// Join a store from the recipient-sealed invitation returned by the local
-/// pairing session.
-#[allow(clippy::too_many_arguments)]
-async fn join_with_invitation(
-    invite: &[u8],
-    member_pubkey: &str,
-    layout: coven_foundation::store_dir::StoreLayout,
-    synced_tables: Vec<coven_protocol::synced_schema::SyncedTable>,
-    migrations: Vec<coven_database::Migration>,
-    exact_upload_verification: coven_foundation::config::ExactUploadVerification,
-    key_custody: coven_keys::custody::KeyCustody,
-    identity_custody: coven_keys::identity_custody::IdentityCustody,
-    oauth_clients: coven_storage::oauth::OAuthClients,
-    oauth_tokens: Option<coven_storage::oauth::OAuthTokens>,
-    cloudkit_ops: Option<std::sync::Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
-    clock: coven_foundation::clock::ClockRef,
-    timing: DeviceJoinTransportTiming,
-    on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
-    cancel: &watch::Receiver<bool>,
-) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    let invite = DeviceJoinInvite::from_bytes(invite)?;
-    invitation_client(
-        &invite,
-        member_pubkey,
-        layout,
-        synced_tables,
-        migrations,
-        exact_upload_verification,
-        key_custody,
-        identity_custody,
-        oauth_clients,
-        oauth_tokens,
-        cloudkit_ops,
-        clock,
-    )?
-    .join_via_transport(&invite.bundle, timing, on_progress, cancel)
-    .await
 }
 
 /// Test-only: the joining device's client over an injected cloud home, the way
@@ -331,10 +373,11 @@ fn invitation_test_client(
         synced_tables,
         migrations,
         coven_foundation::config::ExactUploadVerification::MetadataHash,
+        coven_protocol::blob::TransferLimits::one_at_a_time(),
         coven_keys::custody::KeyCustody::Keyring,
         coven_keys::identity_custody::IdentityCustody::Keyring,
         coven_storage::oauth::OAuthClients::empty(),
-        None,
+        EnrollmentProviderAccess::InjectedHome,
         None,
         clock,
     )?
@@ -355,17 +398,27 @@ pub async fn join_with_device_pairing_over_test_home(
     on_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver,
     cancel: &watch::Receiver<bool>,
 ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
-    on_progress(coven_replication::sync::JoiningDeviceJoinProgress::WaitingForApproval);
-    let invitation = crate::joining::receive_device_invitation(
-        pairing.offer(),
-        pairing.sealed_request(),
+    let continuation = durable_invitation(
+        pairing,
+        &layout,
         timing,
         clock.clone(),
+        &on_progress,
         cancel,
     )
     .await?;
+    let (pairing, invitation) = match continuation {
+        EnrollmentContinuation::ProviderAccessPending {
+            pairing,
+            invitation,
+        }
+        | EnrollmentContinuation::LibraryInstallationPending {
+            pairing,
+            invitation,
+        } => (pairing, invitation),
+    };
     let invite = DeviceJoinInvite::from_bytes(&invitation)?;
-    let outcome = invitation_test_client(
+    let client = invitation_test_client(
         &invite,
         pairing.request().public_key(),
         layout.clone(),
@@ -373,9 +426,11 @@ pub async fn join_with_device_pairing_over_test_home(
         migrations,
         clock,
         home,
-    )?
-    .join_via_transport(&invite.bundle, timing, on_progress, cancel)
-    .await?;
+    )?;
+    let pairing = pairing.record_library_installation_pending(&layout)?;
+    let outcome = client
+        .join_via_transport(&invite.bundle, timing, on_progress, cancel)
+        .await?;
     pairing.finish(&layout)?;
     Ok(outcome)
 }
@@ -390,6 +445,19 @@ pub enum DeviceJoinTransportOutcome {
     /// The owner cancelled after the Store attempt had started; this device
     /// completed the signed cleanup and removed its partial local Store.
     Cancelled(DeviceJoinCancellation),
+}
+
+async fn publish_once(
+    transport: &DeviceJoinTransport<'_>,
+    published: &mut Vec<DeviceJoinAction>,
+    action: DeviceJoinAction,
+) -> Result<(), coven_replication::sync::DeviceJoinTransportError> {
+    if published.contains(&action) {
+        return Ok(());
+    }
+    transport.publish(&action).await?;
+    published.push(action);
+    Ok(())
 }
 
 impl DeviceJoinClient {
@@ -433,6 +501,7 @@ impl DeviceJoinClient {
         cancel: &watch::Receiver<bool>,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let attempt_id = bundle.offer.attempt_id;
+        let mut published = Vec::new();
 
         // Each pass takes the joiner journal's durable state and performs the
         // one step that follows it — never an earlier step, which the journal
@@ -448,17 +517,23 @@ impl DeviceJoinClient {
                     let request = self
                         .prepare_provider_access_request(bundle.offer.clone())
                         .await?;
-                    transport
-                        .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferProviderAccessRequest(request),
+                    )
+                    .await?;
                 }
                 Some(DeviceJoinStatus::Abandoned { abandonment }) => {
                     return self.accept_abandonment(transport, abandonment).await;
                 }
                 Some(DeviceJoinStatus::AwaitingProviderAdmission { request }) => {
-                    transport
-                        .publish(&DeviceJoinAction::TransferProviderAccessRequest(request))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferProviderAccessRequest(request),
+                    )
+                    .await?;
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::WaitingForProviderAccess,
                     );
@@ -478,27 +553,32 @@ impl DeviceJoinClient {
                         coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
                     );
                     let registration_request = self.prepare_registration_request(approval).await?;
-                    transport
-                        .publish(&DeviceJoinAction::TransferRegistrationRequest(
-                            registration_request,
-                        ))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferRegistrationRequest(registration_request),
+                    )
+                    .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => {
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
                     );
                     let registration_request = self.prepare_registration_request(approval).await?;
-                    transport
-                        .publish(&DeviceJoinAction::TransferRegistrationRequest(
-                            registration_request,
-                        ))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferRegistrationRequest(registration_request),
+                    )
+                    .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingBootstrap { request }) => {
-                    transport
-                        .publish(&DeviceJoinAction::TransferRegistrationRequest(request))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferRegistrationRequest(request),
+                    )
+                    .await?;
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::WaitingForLibrary,
                     );
@@ -511,14 +591,20 @@ impl DeviceJoinClient {
                         cancel,
                     ))
                     .await?;
-                    transport
-                        .publish(&DeviceJoinAction::TransferReadiness(readiness))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferReadiness(readiness),
+                    )
+                    .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                    transport
-                        .publish(&DeviceJoinAction::TransferReadiness(readiness))
-                        .await?;
+                    publish_once(
+                        transport,
+                        &mut published,
+                        DeviceJoinAction::TransferReadiness(readiness),
+                    )
+                    .await?;
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::WaitingForActivation,
                     );

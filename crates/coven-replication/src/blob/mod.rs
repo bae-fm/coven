@@ -5,6 +5,7 @@
 //! database and filesystem errors they preserve.
 
 pub(crate) mod delete;
+pub(crate) mod progress;
 pub(crate) mod retry;
 pub mod transition;
 

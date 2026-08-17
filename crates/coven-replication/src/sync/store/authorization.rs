@@ -94,15 +94,27 @@ impl Store {
         let attempt_namespace = transport::attempt_namespace(offer.attempt_id);
         let context = transport::slot_context(offer.store_root.store_root_hash);
         let mut slots = std::collections::BTreeMap::new();
-        for kind in transport::DeviceJoinTransportKind::ALL {
-            let slot = self
-                .storage
-                .allocate_protocol_slot(
-                    &context,
-                    &transport::semantic_prefix(&attempt_namespace, kind),
-                    ".json",
-                )
-                .await?;
+        let allocations = futures_util::future::join_all(
+            transport::DeviceJoinTransportKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    let context = &context;
+                    let attempt_namespace = &attempt_namespace;
+                    async move {
+                        self.storage
+                            .allocate_protocol_slot(
+                                context,
+                                &transport::semantic_prefix(attempt_namespace, kind),
+                                ".json",
+                            )
+                            .await
+                            .map(|slot| (kind, slot))
+                    }
+                }),
+        )
+        .await;
+        for allocation in allocations {
+            let (kind, slot) = allocation?;
             slots.insert(kind, slot);
         }
         Ok(transport::DeviceJoinOfferBundle {

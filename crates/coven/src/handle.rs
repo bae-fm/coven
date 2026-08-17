@@ -52,6 +52,7 @@ use coven_replication::blob::transition::{MakeLocalError, MakeRemoteError};
 use coven_replication::blob::DrainOutcome;
 use coven_replication::sync::store::blob::{LocalStoreBlobAccess, StoreBlobCache};
 use coven_replication::sync::sync_loop::SyncLoopStatus;
+use coven_replication::sync::EagerCacheFillStatus;
 use coven_replication::sync::{BlobCacheError, BlobStream};
 #[cfg(any(test, feature = "test-utils"))]
 use coven_storage::cloud::ExactCloudHome;
@@ -315,6 +316,15 @@ impl CovenHandle {
     /// complete change stream.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncLoopStatus> {
         self.sync.subscribe_status()
+    }
+
+    /// Subscribe to the post-open CacheEager fill. Enrollment installs rows and
+    /// returns without artwork; the connected library then reports discovery,
+    /// bounded-cadence download progress, completion, cancellation, or failure.
+    pub fn subscribe_eager_cache_fill_status(
+        &self,
+    ) -> tokio::sync::watch::Receiver<EagerCacheFillStatus> {
+        self.sync.subscribe_eager_cache_status()
     }
 
     /// Writes that have shared rows and have not reached a published position.
@@ -1017,7 +1027,6 @@ impl CovenHandle {
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         on_progress: &(dyn Fn(crate::AdmittingDeviceJoinProgress) + Send + Sync),
-        timing: crate::DeviceJoinTransportTiming,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, crate::ApproveDevicePairingError> {
         self.pairing
@@ -1028,7 +1037,6 @@ impl CovenHandle {
                 policy,
                 access_administrator,
                 on_progress,
-                timing,
                 cancel,
             )
             .await
@@ -1037,9 +1045,8 @@ impl CovenHandle {
     pub async fn cancel_device_pairing(
         &self,
         host: &crate::DevicePairingHost,
-        timing: crate::DeviceJoinTransportTiming,
     ) -> Result<(), crate::ApproveDevicePairingError> {
-        self.pairing.cancel(host, timing).await
+        self.pairing.cancel(host).await
     }
 
     pub async fn begin_device_join(

@@ -52,5 +52,7 @@ pub use store::{
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
     ProvisionalDeviceBootstrap,
 };
-pub use store::{BlobCacheError, BlobStream};
+pub use store::{
+    BlobCacheError, BlobStream, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,
+};
 pub use sync_loop::SyncLoopStatus;

@@ -98,6 +98,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             tables.clone(),
             test_migrations(),
             coven_foundation::config::ExactUploadVerification::MetadataHash,
+            coven_protocol::blob::TransferLimits::one_at_a_time(),
             coven_keys::custody::KeyCustody::Keyring,
             coven_keys::identity_custody::IdentityCustody::Keyring,
             coven_storage::oauth::OAuthClients::empty(),

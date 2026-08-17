@@ -13,18 +13,6 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
-    pub(crate) async fn verify_blob_plaintext(
-        &self,
-        authority: &coven_protocol::blob::RowBlobAuthority,
-        stored: &coven_protocol::blob::locator::StoredBlobRef,
-        retain: bool,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<(), crate::sync::store::blob::BlobDownloadFailureCause> {
-        self.blob_source
-            .verify_plaintext(&self.blob_cache, authority, stored, retain, progress)
-            .await
-    }
-
     pub(crate) fn root(&self) -> &StoreRootRef {
         self.history_verifier.verified_root().reference()
     }

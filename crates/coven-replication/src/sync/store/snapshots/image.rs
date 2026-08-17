@@ -290,21 +290,33 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 bytes_total,
             },
         );
-        let progress = std::sync::Arc::clone(&on_progress);
-        let plaintext = history_verifier
-            .load_snapshot_image(
-                &snapshot,
-                std::sync::Arc::new(move |bytes_done| {
-                    progress(
-                        crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
-                            bytes_done,
-                            bytes_total,
-                        },
-                    );
-                }),
-            )
-            .await
-            .map_err(SnapshotError::StoreObject)?;
+        let plaintext = {
+            let mut progress = crate::blob::progress::TransferProgress::new();
+            let download = history_verifier.load_snapshot_image(&snapshot, progress.callback());
+            tokio::pin!(download);
+            let plaintext = loop {
+                tokio::select! {
+                    result = &mut download => break result.map_err(SnapshotError::StoreObject)?,
+                    bytes_done = progress.changed() => {
+                        on_progress(
+                            crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                                bytes_done,
+                                bytes_total,
+                            },
+                        );
+                    }
+                }
+            };
+            if let Some(bytes_done) = progress.finish(bytes_total) {
+                on_progress(
+                    crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                        bytes_done,
+                        bytes_total,
+                    },
+                );
+            }
+            plaintext
+        };
         if coven_protocol::store_commit::ObjectHash::digest(&plaintext)
             != snapshot.meta.image.image_hash
         {
@@ -569,25 +581,6 @@ pub(crate) fn should_create_snapshot(
     }
 
     false
-}
-
-/// The outcome of snapshot blob reconciliation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotBlobReconcile {
-    Complete,
-    Cancelled,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SnapshotBlobReconcileError {
-    #[error("snapshot blob database state: {0}")]
-    Database(#[from] coven_database::DbError),
-    #[error("remote eager blob row has no exact stored reference")]
-    MissingStoredReference,
-    #[error("snapshot blob stored sizes exceed the supported byte count")]
-    StoredSizeOverflow,
-    #[error("snapshot blob download failed: {0}")]
-    Download(#[source] crate::sync::store::pull::BlobDownloadFailures),
 }
 
 #[cfg(test)]

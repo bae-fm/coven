@@ -197,6 +197,7 @@ impl SyncLoopHandle {
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
+        eager_cache_status_tx: tokio::sync::watch::Sender<super::store::EagerCacheFillStatus>,
         runtime: Option<PreparedSyncLoopRuntime>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
@@ -219,6 +220,7 @@ impl SyncLoopHandle {
                 stop_rx,
                 activate_rx,
                 status_tx.clone(),
+                eager_cache_status_tx,
                 Arc::clone(&running),
             ))
         });

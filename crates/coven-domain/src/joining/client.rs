@@ -21,8 +21,7 @@ use coven_keys::keys::{
 };
 use coven_protocol::synced_schema::SyncedTable;
 use coven_replication::sync::store::{
-    MembershipMutationError, PreparedSnapshotBootstrap, PullError, SnapshotBlobReconcile,
-    SnapshotError,
+    MembershipMutationError, PreparedSnapshotBootstrap, PullError, SnapshotError,
 };
 use coven_replication::sync::MemberAdmission;
 use coven_storage::cloud::{CloudHomeError, CloudHomeJoinInfo, ExactCloudHome};
@@ -99,8 +98,6 @@ pub enum BootstrapError {
     },
     #[error("database open: {0}")]
     DatabaseOpen(#[from] coven_database::OpenError),
-    #[error("snapshot blob reconciliation: {0}")]
-    SnapshotBlobReconcile(#[from] coven_replication::sync::store::SnapshotBlobReconcileError),
     #[error("invalid signing key: {0}")]
     InvalidSigningKey(#[from] SigningKeyError),
     /// The caller's cancel signal fired at a phase boundary, so the join or
@@ -208,7 +205,7 @@ impl<'a> BootstrapCleanup<'a> {
         if self.store_dir.exists() {
             warn!(
                 store_dir = %self.store_dir.display(),
-                "clearing a torn bootstrap: a store directory with no saved config, left by a join or restore a crash interrupted before completion"
+                "clearing a torn bootstrap: a store directory with no saved config, left by a restore that a crash interrupted before completion"
             );
             let failures = self.remove();
             if !failures.is_empty() {
@@ -398,6 +395,69 @@ async fn build_cloud_home_for_join(
     }
 }
 
+pub(crate) enum EnrollmentProviderAccess {
+    Supplied(Option<coven_storage::oauth::OAuthTokens>),
+    Stored,
+    #[cfg(any(test, feature = "test-utils"))]
+    InjectedHome,
+}
+
+#[cfg(feature = "oauth-providers")]
+pub(crate) fn enrollment_oauth_tokens(
+    join_info: &CloudHomeJoinInfo,
+    store_keys: &StoreKeys,
+    access: EnrollmentProviderAccess,
+) -> Result<Option<coven_storage::oauth::OAuthTokens>, BootstrapError> {
+    let provider = match join_info {
+        CloudHomeJoinInfo::GoogleDrive { .. } => "Google Drive",
+        CloudHomeJoinInfo::Dropbox { .. } => "Dropbox",
+        CloudHomeJoinInfo::OneDrive { .. } => "OneDrive",
+        CloudHomeJoinInfo::S3 { .. }
+        | CloudHomeJoinInfo::CloudKit
+        | CloudHomeJoinInfo::CloudKitShare { .. } => return Ok(None),
+    };
+    match access {
+        EnrollmentProviderAccess::Supplied(Some(tokens)) => {
+            store_keys.set_cloud_home_oauth_tokens(&tokens)?;
+            Ok(Some(tokens))
+        }
+        EnrollmentProviderAccess::Supplied(None) | EnrollmentProviderAccess::Stored => store_keys
+            .get_cloud_home_oauth_tokens()?
+            .map(Some)
+            .ok_or_else(|| {
+                BootstrapError::Provider(format!(
+                    "{provider} device enrollment requires OAuth authorization"
+                ))
+            }),
+        #[cfg(any(test, feature = "test-utils"))]
+        EnrollmentProviderAccess::InjectedHome => Ok(None),
+    }
+}
+
+#[cfg(not(feature = "oauth-providers"))]
+pub(crate) fn enrollment_oauth_tokens(
+    join_info: &CloudHomeJoinInfo,
+    _store_keys: &StoreKeys,
+    access: EnrollmentProviderAccess,
+) -> Result<Option<coven_storage::oauth::OAuthTokens>, BootstrapError> {
+    match access {
+        EnrollmentProviderAccess::Supplied(tokens) => drop(tokens),
+        EnrollmentProviderAccess::Stored => {}
+        #[cfg(any(test, feature = "test-utils"))]
+        EnrollmentProviderAccess::InjectedHome => {}
+    }
+    match join_info {
+        CloudHomeJoinInfo::GoogleDrive { .. }
+        | CloudHomeJoinInfo::Dropbox { .. }
+        | CloudHomeJoinInfo::OneDrive { .. } => Err(BootstrapError::Provider(
+            "OAuth cloud providers are not supported in this build".to_string(),
+        )),
+        CloudHomeJoinInfo::S3 { .. }
+        | CloudHomeJoinInfo::CloudKit
+        | CloudHomeJoinInfo::CloudKitShare { .. } => Ok(None),
+    }
+}
+
 /// A joining device's local half of the four-transfer admission exchange.
 /// The journal lives outside the incomplete store directory, so every method
 /// can be retried after process termination without losing its exact predecessor.
@@ -408,6 +468,7 @@ pub(crate) struct DeviceJoinClient {
     synced_tables: Vec<SyncedTable>,
     migrations: Vec<Migration>,
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     store_keys: StoreKeys,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
@@ -433,6 +494,7 @@ impl DeviceJoinClient {
         synced_tables: Vec<SyncedTable>,
         migrations: Vec<Migration>,
         exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+        transfer_limits: coven_protocol::blob::TransferLimits,
         key_custody: coven_keys::custody::KeyCustody,
         identity_custody: IdentityCustody,
         oauth_clients: coven_storage::oauth::OAuthClients,
@@ -460,6 +522,7 @@ impl DeviceJoinClient {
             synced_tables,
             migrations,
             exact_upload_verification,
+            transfer_limits,
             store_keys,
             custody,
             identity_custody,
@@ -687,17 +750,13 @@ impl DeviceJoinClient {
                 &store_dir,
                 self.synced_tables.clone(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-                coven_protocol::blob::TransferLimits::one_at_a_time(),
+                self.transfer_limits,
                 device_id,
                 self.clock.clone(),
                 &self.migrations,
                 Some(&routing_encryption),
             )
             .await?;
-        match opened.reconcile_snapshot_blobs(cancel, on_progress).await? {
-            SnapshotBlobReconcile::Complete => {}
-            SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
-        }
         let published_at = self.clock.now().to_rfc3339();
         let mut joining = opened
             .begin_device_join(&pending, offer.as_ref().clone())
@@ -742,7 +801,7 @@ impl DeviceJoinClient {
             &db_path,
             self.synced_tables.clone(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-            coven_protocol::blob::TransferLimits::one_at_a_time(),
+            self.transfer_limits,
             device_id.clone(),
             self.clock.clone(),
             &self.migrations,
@@ -786,10 +845,6 @@ impl DeviceJoinClient {
         self.identity_custody.establish(&signer)?;
         if let Some(credentials) = derive_credentials(&self.admission.join_info) {
             self.store_keys.set_cloud_home_credentials(&credentials)?;
-        }
-        #[cfg(feature = "oauth-providers")]
-        if let Some(tokens) = &self.oauth_tokens {
-            self.store_keys.set_cloud_home_oauth_tokens(tokens)?;
         }
         let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
         let mut config = super::build_config(

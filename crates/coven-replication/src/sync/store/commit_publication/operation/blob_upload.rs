@@ -4,10 +4,6 @@
 //! were created and verified. The transition finalizer flips a root only when all
 //! of its current row journals are Created.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracing::warn;
 
@@ -20,8 +16,6 @@ use coven_protocol::blob::{BlobTransitionObserver, RowBlobRef};
 use crate::blob::{DrainOutcome, UploadFailure, UploadFailureCause, UploadFailures};
 
 use super::AuthorizedWriterOperation;
-
-const PROGRESS_TICK: Duration = Duration::from_millis(300);
 
 struct BlobUploadAttempt<'operation, 'storage, 'authority> {
     writer: &'operation AuthorizedWriterOperation<'storage>,
@@ -530,39 +524,31 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         upload: &RowBlobRef,
     ) -> Result<(StoredBlobRef, std::path::PathBuf), coven_protocol::objects::StorageError> {
         let total = upload.plaintext_size();
-        let consumed = Arc::new(AtomicU64::new(0));
-        let progress: coven_storage::cloud::PreparationProgress = {
-            let consumed = consumed.clone();
-            Arc::new(move |count: u64| consumed.store(count, Ordering::Relaxed))
-        };
+        let mut progress = crate::blob::progress::TransferProgress::new();
+        let callback = progress.callback();
         let prepare =
             self.writer
-                .prepare_blob_upload(locator, self.authority, source_path, progress);
+                .prepare_blob_upload(locator, self.authority, source_path, callback);
         let Some(observer) = self.observer else {
             return prepare.await;
         };
         tokio::pin!(prepare);
-        let mut ticker = tokio::time::interval(PROGRESS_TICK);
-        ticker.tick().await;
-        let mut forwarded = 0;
         let result = loop {
             tokio::select! {
                 result = &mut prepare => break result,
-                _ = ticker.tick() => {
-                    let current = consumed.load(Ordering::Relaxed);
-                    if current != forwarded {
-                        forwarded = current;
-                        observer
-                            .on_blob_preparation_progress(upload, current, total)
-                            .await;
-                    }
+                current = progress.changed() => {
+                    observer
+                        .on_blob_preparation_progress(upload, current, total)
+                        .await;
                 }
             }
         };
-        if result.is_ok() && forwarded != total {
-            observer
-                .on_blob_preparation_progress(upload, total, total)
-                .await;
+        if result.is_ok() {
+            if let Some(total) = progress.finish(total) {
+                observer
+                    .on_blob_preparation_progress(upload, total, total)
+                    .await;
+            }
         }
         result
     }
@@ -574,37 +560,32 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         upload: &RowBlobRef,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         let total = blob.object().stored_size();
-        let sent = Arc::new(AtomicU64::new(0));
-        let progress = {
-            let sent = sent.clone();
-            move |count: u64| sent.store(count, Ordering::Relaxed)
-        };
-        let create =
-            self.writer
-                .create_blob_upload_object(blob, self.authority, spool_path, &progress);
+        let mut progress = crate::blob::progress::TransferProgress::new();
+        let callback = progress.callback();
+        let create = self.writer.create_blob_upload_object(
+            blob,
+            self.authority,
+            spool_path,
+            callback.as_ref(),
+        );
         let Some(observer) = self.observer else {
             return create.await;
         };
         tokio::pin!(create);
-        let mut ticker = tokio::time::interval(PROGRESS_TICK);
-        ticker.tick().await;
-        let mut forwarded = 0;
         let result = loop {
             tokio::select! {
                 result = &mut create => break result,
-                _ = ticker.tick() => {
-                    let current = sent.load(Ordering::Relaxed);
-                    if current != forwarded {
-                        forwarded = current;
-                        observer
-                            .on_blob_upload_progress(upload, current, total)
-                            .await;
-                    }
+                current = progress.changed() => {
+                    observer
+                        .on_blob_upload_progress(upload, current, total)
+                        .await;
                 }
             }
         };
-        if result.is_ok() && forwarded != total {
-            observer.on_blob_upload_progress(upload, total, total).await;
+        if result.is_ok() {
+            if let Some(total) = progress.finish(total) {
+                observer.on_blob_upload_progress(upload, total, total).await;
+            }
         }
         result
     }

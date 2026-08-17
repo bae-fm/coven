@@ -6,7 +6,7 @@
 //! it that enable the `test-utils` feature.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -30,6 +30,10 @@ struct ExactStreamReadGuard {
     inflight: Arc<AtomicUsize>,
 }
 
+struct InflightGuard {
+    inflight: Arc<AtomicUsize>,
+}
+
 #[derive(Clone)]
 struct ProbePause {
     reached: Arc<tokio::sync::Notify>,
@@ -37,6 +41,12 @@ struct ProbePause {
 }
 
 impl Drop for ExactStreamReadGuard {
+    fn drop(&mut self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for InflightGuard {
     fn drop(&mut self) {
         self.inflight.fetch_sub(1, Ordering::SeqCst);
     }
@@ -58,22 +68,32 @@ pub struct InMemoryCloudHome {
     provider_binding: coven_protocol::objects::ResolvedProviderBinding,
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     exact_slot_allocations: Arc<AtomicUsize>,
+    exact_slot_allocation_delay_millis: Arc<AtomicU64>,
+    exact_slot_allocation_inflight: Arc<AtomicUsize>,
+    exact_slot_allocation_max_inflight: Arc<AtomicUsize>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
+    fail_next_exact_stream_reads: Arc<AtomicUsize>,
     sort_listings: Arc<AtomicBool>,
     exact_create_count: Arc<AtomicUsize>,
+    exact_creates: Arc<Mutex<Vec<ObjectSlot>>>,
     fail_exact_create_before: Arc<AtomicUsize>,
     fail_exact_create_after: Arc<AtomicUsize>,
     exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
     probe_pause: Arc<Mutex<Option<ProbePause>>>,
     probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
     exact_full_read_count: Arc<AtomicUsize>,
+    exact_full_read_delay_millis: Arc<AtomicU64>,
+    exact_full_read_inflight: Arc<AtomicUsize>,
+    exact_full_read_max_inflight: Arc<AtomicUsize>,
     exact_stream_read_count: Arc<AtomicUsize>,
     exact_reads: Arc<Mutex<Vec<ObjectSlot>>>,
     exact_stream_read_inflight: Arc<AtomicUsize>,
     exact_stream_read_max_inflight: Arc<AtomicUsize>,
     exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    exact_stream_read_chunk_bytes: Arc<AtomicUsize>,
+    exact_stream_read_chunk_delay_millis: Arc<AtomicU64>,
     exact_delete_count: Arc<AtomicUsize>,
     /// Every ranged exact read this home has served, as `(start, end)` stored
     /// offsets. What a test counts to say a read cost the bytes it asked for and
@@ -114,22 +134,32 @@ impl InMemoryCloudHome {
             },
             writes: Arc::new(Mutex::new(HashMap::new())),
             exact_slot_allocations: Arc::new(AtomicUsize::new(0)),
+            exact_slot_allocation_delay_millis: Arc::new(AtomicU64::new(0)),
+            exact_slot_allocation_inflight: Arc::new(AtomicUsize::new(0)),
+            exact_slot_allocation_max_inflight: Arc::new(AtomicUsize::new(0)),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
+            fail_next_exact_stream_reads: Arc::new(AtomicUsize::new(0)),
             sort_listings: Arc::new(AtomicBool::new(false)),
             exact_create_count: Arc::new(AtomicUsize::new(0)),
+            exact_creates: Arc::new(Mutex::new(Vec::new())),
             fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
             fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
             exact_create_pause: Arc::new(Mutex::new(None)),
             probe_pause: Arc::new(Mutex::new(None)),
             probe_failure: Arc::new(Mutex::new(None)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
+            exact_full_read_delay_millis: Arc::new(AtomicU64::new(0)),
+            exact_full_read_inflight: Arc::new(AtomicUsize::new(0)),
+            exact_full_read_max_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_count: Arc::new(AtomicUsize::new(0)),
             exact_reads: Arc::new(Mutex::new(Vec::new())),
             exact_stream_read_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_max_inflight: Arc::new(AtomicUsize::new(0)),
             exact_stream_read_barrier: Arc::new(Mutex::new(None)),
+            exact_stream_read_chunk_bytes: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_chunk_delay_millis: Arc::new(AtomicU64::new(0)),
             exact_delete_count: Arc::new(AtomicUsize::new(0)),
             exact_range_reads: Arc::new(Mutex::new(Vec::new())),
             fail_exact_delete_on: Arc::new(AtomicUsize::new(0)),
@@ -171,6 +201,26 @@ impl InMemoryCloudHome {
     /// normally.
     pub fn fail_next_range_reads(&self, n: usize) {
         self.fail_next_range_reads.store(n, Ordering::SeqCst);
+    }
+
+    /// Make the next `n` exact streaming reads fail before creating their local
+    /// destination. This drives retry of operations such as snapshot bootstrap
+    /// without changing the durable object stored in the shared test home.
+    pub fn fail_next_exact_stream_reads(&self, n: usize) {
+        self.fail_next_exact_stream_reads.store(n, Ordering::SeqCst);
+    }
+
+    /// Serve exact streaming reads in chunks separated by `delay`. This lets a
+    /// test drive the real streaming progress path instead of calling an
+    /// observer directly.
+    pub fn stream_exact_reads_in_chunks(&self, chunk_bytes: usize, delay: std::time::Duration) {
+        assert!(chunk_bytes > 0, "stream chunk size must be nonzero");
+        self.exact_stream_read_chunk_bytes
+            .store(chunk_bytes, Ordering::SeqCst);
+        self.exact_stream_read_chunk_delay_millis.store(
+            u64::try_from(delay.as_millis()).expect("test stream delay fits u64 milliseconds"),
+            Ordering::SeqCst,
+        );
     }
 
     /// Reset the exact-create counter and fail before the selected call stores bytes.
@@ -223,8 +273,46 @@ impl InMemoryCloudHome {
         self.exact_create_count.load(Ordering::SeqCst)
     }
 
+    pub fn delay_exact_slot_allocations(&self, delay: std::time::Duration) {
+        self.exact_slot_allocation_delay_millis.store(
+            u64::try_from(delay.as_millis()).expect("test allocation delay fits u64 milliseconds"),
+            Ordering::SeqCst,
+        );
+        self.exact_slot_allocation_inflight
+            .store(0, Ordering::SeqCst);
+        self.exact_slot_allocation_max_inflight
+            .store(0, Ordering::SeqCst);
+    }
+
+    pub fn exact_slot_allocation_max_inflight(&self) -> usize {
+        self.exact_slot_allocation_max_inflight
+            .load(Ordering::SeqCst)
+    }
+
+    pub fn exact_creates(&self) -> Vec<ObjectSlot> {
+        self.exact_creates.lock().unwrap().clone()
+    }
+
+    pub fn clear_exact_creates(&self) {
+        self.exact_creates.lock().unwrap().clear();
+    }
+
     pub fn exact_full_read_count(&self) -> usize {
         self.exact_full_read_count.load(Ordering::SeqCst)
+    }
+
+    /// Delay every whole-object exact read and measure their concurrency.
+    pub fn delay_exact_full_reads(&self, delay: std::time::Duration) {
+        self.exact_full_read_delay_millis.store(
+            u64::try_from(delay.as_millis()).expect("test read delay fits u64 milliseconds"),
+            Ordering::SeqCst,
+        );
+        self.exact_full_read_inflight.store(0, Ordering::SeqCst);
+        self.exact_full_read_max_inflight.store(0, Ordering::SeqCst);
+    }
+
+    pub fn exact_full_read_max_inflight(&self) -> usize {
+        self.exact_full_read_max_inflight.load(Ordering::SeqCst)
     }
 
     /// Every ranged exact read served so far, as `(start, end)` stored offsets.
@@ -452,6 +540,7 @@ impl InMemoryCloudHome {
             ));
         }
         let slot = upload.object().slot();
+        self.exact_creates.lock().unwrap().push(slot.clone());
         let key = Self::exact_storage_key(slot)?;
         let call = self.exact_create_count.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_exact_create_before.load(Ordering::SeqCst) == call {
@@ -512,6 +601,16 @@ impl InMemoryCloudHome {
 
     async fn read_exact(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.exact_full_read_count.fetch_add(1, Ordering::SeqCst);
+        let inflight = self.exact_full_read_inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.exact_full_read_max_inflight
+            .fetch_max(inflight, Ordering::SeqCst);
+        let _guard = InflightGuard {
+            inflight: self.exact_full_read_inflight.clone(),
+        };
+        let delay = self.exact_full_read_delay_millis.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         let key = Self::exact_storage_key(slot)?;
         self.exact_reads.lock().unwrap().push(slot.clone());
         self.writes
@@ -528,6 +627,16 @@ impl InMemoryCloudHome {
         destination: &std::path::Path,
         progress: super::DownloadProgress,
     ) -> Result<(), CloudFileReadError> {
+        if self
+            .fail_next_exact_stream_reads
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed exact stream-read failure".into(),
+            )
+            .into());
+        }
         self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);
         self.exact_reads.lock().unwrap().push(slot.clone());
         let inflight = self
@@ -551,7 +660,28 @@ impl InMemoryCloudHome {
             .get(&key)
             .cloned()
             .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
-        let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from(bytes)) });
+        let chunk_bytes = self.exact_stream_read_chunk_bytes.load(Ordering::SeqCst);
+        let chunk_delay = std::time::Duration::from_millis(
+            self.exact_stream_read_chunk_delay_millis
+                .load(Ordering::SeqCst),
+        );
+        let chunks = if chunk_bytes == 0 {
+            vec![bytes::Bytes::from(bytes)]
+        } else {
+            bytes
+                .chunks(chunk_bytes)
+                .map(bytes::Bytes::copy_from_slice)
+                .collect::<Vec<_>>()
+        };
+        let stream = futures_util::StreamExt::then(
+            futures_util::stream::iter(chunks),
+            move |chunk| async move {
+                if !chunk_delay.is_zero() {
+                    tokio::time::sleep(chunk_delay).await;
+                }
+                Ok(chunk)
+            },
+        );
         super::write_cloud_object_stream(destination, Box::pin(stream), progress).await?;
         Ok(())
     }
@@ -773,6 +903,21 @@ impl ExactSlotStorage for InMemoryCloudHome {
     }
 
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        let inflight = self
+            .exact_slot_allocation_inflight
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        self.exact_slot_allocation_max_inflight
+            .fetch_max(inflight, Ordering::SeqCst);
+        let _guard = InflightGuard {
+            inflight: self.exact_slot_allocation_inflight.clone(),
+        };
+        let delay = self
+            .exact_slot_allocation_delay_millis
+            .load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
         match &self.provider_binding.store {
             coven_protocol::objects::StoreProviderBinding::GoogleDrive { .. } => {
                 let allocation = self.exact_slot_allocations.fetch_add(1, Ordering::SeqCst) + 1;

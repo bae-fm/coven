@@ -262,12 +262,12 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
     (
         "crates/coven-domain/src/joining/transport_tests.rs",
         "TransportFixture",
-        "build_with",
+        "build_with_members",
     ),
     (
         "crates/coven/src/handle_tests/join_through_the_facade.rs",
         "FacadeFixture",
-        "build",
+        "build_with_eager_images",
     ),
     (
         "crates/coven-replication/src/sync/store/acknowledgements/tests.rs",
@@ -2707,6 +2707,7 @@ mod tests {
                 "AuthorizedWriterOperation",
                 "CircleEpochAccess",
                 "CloudOutboxLiveQuery",
+                "DevicePairingHost",
                 "HostWriteBlobStaging",
                 "LiveQuery",
                 "PreparedCloudHomeCredentials",

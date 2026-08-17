@@ -1,4 +1,15 @@
 use super::*;
+
+#[test]
+fn interactive_pairing_uses_coven_owned_polling_and_deadline() {
+    assert_eq!(
+        DeviceJoinTransportTiming::interactive(),
+        DeviceJoinTransportTiming {
+            poll: Duration::from_millis(100),
+            deadline: Duration::from_secs(180),
+        }
+    );
+}
 use std::cell::Cell;
 
 fn conflict() -> DeviceJoinTransportError {

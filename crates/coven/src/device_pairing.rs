@@ -113,9 +113,9 @@ impl StoreDevicePairing {
         policy: crate::DeviceJoinApprovalPolicy<'_>,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
         on_progress: &(dyn Fn(crate::AdmittingDeviceJoinProgress) + Send + Sync),
-        timing: crate::DeviceJoinTransportTiming,
         cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::DeviceJoinDriveOutcome, ApproveDevicePairingError> {
+        let timing = crate::DeviceJoinTransportTiming::interactive();
         if let Some(bytes) = host.cancellation_invitation(request)? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync
@@ -163,8 +163,8 @@ impl StoreDevicePairing {
     pub(crate) async fn cancel(
         &self,
         host: &DevicePairingHost,
-        timing: crate::DeviceJoinTransportTiming,
     ) -> Result<(), ApproveDevicePairingError> {
+        let timing = crate::DeviceJoinTransportTiming::interactive();
         if let Some(bytes) = host.cancel()? {
             let invitation = coven_domain::joining::DeviceJoinInvite::from_bytes(&bytes)?;
             self.sync

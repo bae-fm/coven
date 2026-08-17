@@ -12,6 +12,7 @@ use coven_storage::CloudSyncObjectStorage;
 use coven_database::StoreDatabase;
 
 mod cache;
+pub(crate) mod eager_cache;
 #[cfg(test)]
 mod tests;
 
@@ -817,6 +818,28 @@ impl RemoteStoreBlobAccess {
     }
 
     pub(crate) async fn materialize(&self, reference: &RowBlobRef) -> Result<(), BlobCacheError> {
+        self.materialize_with_progress(reference, coven_storage::cloud::no_download_progress())
+            .await
+    }
+
+    pub(crate) async fn is_materialized(
+        &self,
+        reference: &RowBlobRef,
+    ) -> Result<bool, BlobCacheError> {
+        if !matches!(reference.authority(), RowBlobAuthority::Remote(_)) {
+            return Ok(true);
+        }
+        self.remote.validate(reference).await?;
+        let materialized = self.local.cache.has_exact(reference).await?;
+        self.remote.validate(reference).await?;
+        Ok(materialized)
+    }
+
+    pub(crate) async fn materialize_with_progress(
+        &self,
+        reference: &RowBlobRef,
+        progress: coven_storage::cloud::DownloadProgress,
+    ) -> Result<(), BlobCacheError> {
         if !matches!(reference.authority(), RowBlobAuthority::Remote(_)) {
             return self.local.materialize(reference).await;
         }
@@ -831,13 +854,17 @@ impl RemoteStoreBlobAccess {
             stored.locator().locator_hash(),
         )?;
         let staged = self
-            .stage_verified_local_copy(reference, &destination)
+            .stage_verified_local_copy_with_progress(reference, &destination, progress)
             .await?;
         verify_exact_file(staged.path(), reference).await?;
         self.remote.validate(reference).await?;
         self.local
             .cache
             .publish_materialization(staged, reference)
+            .await?;
+        self.local
+            .cache
+            .enforce_budget(&reference.blob().namespace, Some(&destination))
             .await
     }
 
@@ -849,6 +876,20 @@ impl RemoteStoreBlobAccess {
         &self,
         reference: &RowBlobRef,
         destination: &std::path::Path,
+    ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
+        self.stage_verified_local_copy_with_progress(
+            reference,
+            destination,
+            coven_storage::cloud::no_download_progress(),
+        )
+        .await
+    }
+
+    async fn stage_verified_local_copy_with_progress(
+        &self,
+        reference: &RowBlobRef,
+        destination: &std::path::Path,
+        progress: coven_storage::cloud::DownloadProgress,
     ) -> Result<coven_foundation::local_file::AtomicStagedFile, BlobCacheError> {
         self.remote.validate(reference).await?;
         if let Some(hit) = self.local.cache.cached_path(reference, false).await? {
@@ -869,12 +910,7 @@ impl RemoteStoreBlobAccess {
             .map_err(BlobCacheError::File)?;
         let staged = self
             .remote
-            .stage_verified_plaintext(
-                reference.authority(),
-                stored,
-                stage,
-                coven_storage::cloud::no_download_progress(),
-            )
+            .stage_verified_plaintext(reference.authority(), stored, stage, progress)
             .await?;
         self.remote.validate(reference).await?;
         Ok(staged)

@@ -37,6 +37,10 @@ impl StoreSync {
             state: Arc::new(RwLock::new(SyncConnection::Disconnected)),
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+            eager_cache_status_tx: tokio::sync::watch::channel(
+                coven_replication::sync::store::EagerCacheFillStatus::NotRunning,
+            )
+            .0,
             runtime_factory,
             #[cfg(test)]
             stopped_loops: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -415,6 +419,12 @@ impl StoreSync {
 
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<SyncLoopStatus> {
         self.status_tx.subscribe()
+    }
+
+    pub(crate) fn subscribe_eager_cache_status(
+        &self,
+    ) -> watch::Receiver<coven_replication::sync::store::EagerCacheFillStatus> {
+        self.eager_cache_status_tx.subscribe()
     }
 
     pub(crate) fn is_command_configured(&self) -> bool {

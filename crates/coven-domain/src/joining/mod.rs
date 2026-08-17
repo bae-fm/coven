@@ -15,8 +15,8 @@ pub use client::{
     BootstrapCleanupFailure, BootstrapCleanupFailures, BootstrapError, SigningKeyError,
 };
 pub use pairing::{
-    DevicePairingError, DevicePairingOffer, DevicePairingRequest, PreparedDevicePairing,
-    SealedDevicePairingRequest,
+    DevicePairingError, DevicePairingOffer, DevicePairingPhase, DevicePairingRequest,
+    PreparedDevicePairing, SealedDevicePairingRequest,
 };
 pub use pairing_transport::{
     receive_device_invitation, DevicePairingHost, DevicePairingTransportError,

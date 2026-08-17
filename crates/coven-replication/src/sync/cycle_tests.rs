@@ -1628,7 +1628,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         )
         .await
         .expect("verify snapshot-only blob bootstrap");
-    let restored = bootstrap
+    let _restored = bootstrap
         .install(
             &restore_dir,
             tables.clone(),
@@ -1641,49 +1641,15 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         )
         .await
         .expect("install snapshot-only blob bootstrap");
-    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let join_progress = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observed_join_progress = Arc::clone(&join_progress);
-    let observe_join_progress: crate::sync::JoiningDeviceJoinProgressObserver =
-        std::sync::Arc::new(move |progress| {
-            observed_join_progress
-                .lock()
-                .expect("join progress lock")
-                .push(progress)
-        });
-    assert_eq!(
-        restored
-            .reconcile_snapshot_blobs(&cancel_rx, &observe_join_progress)
-            .await
-            .expect("reconcile restored snapshot blob"),
-        crate::sync::store::SnapshotBlobReconcile::Complete,
-    );
-    let stored_size = rejected[0].object().stored_size();
-    {
-        let join_progress = join_progress.lock().expect("join progress lock");
-        assert!(join_progress.contains(
-            &crate::sync::JoiningDeviceJoinProgress::DownloadingLibraryFiles {
-                files_done: 0,
-                files_total: 1,
-                bytes_done: 0,
-                bytes_total: stored_size,
-            }
-        ));
-        assert!(join_progress.contains(
-            &crate::sync::JoiningDeviceJoinProgress::DownloadingLibraryFiles {
-                files_done: 1,
-                files_total: 1,
-                bytes_done: stored_size,
-                bytes_total: stored_size,
-            }
-        ));
-    }
-    assert_eq!(
-        restored
-            .read_local_blob_for_test(&restore_dir, "note_photos", "cover1")
-            .await
-            .expect("read restored snapshot blob"),
-        b"cover".to_vec(),
+    let cache_path = restore_dir
+        .cache_blob_path(
+            rejected[0].locator().namespace(),
+            rejected[0].locator().locator_hash(),
+        )
+        .expect("restored snapshot blob cache path");
+    assert!(
+        !cache_path.exists(),
+        "snapshot installation must return before CacheEager files download",
     );
     drop(restore_temp);
 }

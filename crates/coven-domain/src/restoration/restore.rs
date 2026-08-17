@@ -18,9 +18,7 @@ use coven_keys::encryption::{EncryptionService, MasterKeyring};
 use coven_keys::identity_custody::IdentityCustody;
 use coven_keys::keys::{StoreKeys, UserKeypair};
 use coven_protocol::synced_schema::SyncedTable;
-use coven_replication::sync::store::{
-    PreparedSnapshotBootstrap, SnapshotBlobReconcile, SnapshotError,
-};
+use coven_replication::sync::store::{PreparedSnapshotBootstrap, SnapshotError};
 use coven_storage::cloud::{CloudHomeJoinInfo, ExactCloudHome};
 use coven_storage::oauth::OAuthTokens;
 use coven_storage::{BlobPathScheme, CloudCipher, CloudSyncConnection};
@@ -219,6 +217,7 @@ pub async fn restore_from_cloud(
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     source: RestoreSource,
@@ -373,23 +372,13 @@ pub async fn restore_from_cloud(
                 &store_dir,
                 synced_tables.to_vec(),
                 coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-                coven_protocol::blob::TransferLimits::one_at_a_time(),
+                transfer_limits,
                 device_id.clone(),
                 clock.clone(),
                 migrations,
                 routing_encryption.as_ref(),
             )
             .await?;
-
-        let ignore_join_progress: coven_replication::sync::JoiningDeviceJoinProgressObserver =
-            std::sync::Arc::new(|_| {});
-        match store
-            .reconcile_snapshot_blobs(cancel, &ignore_join_progress)
-            .await?
-        {
-            SnapshotBlobReconcile::Complete => {}
-            SnapshotBlobReconcile::Cancelled => return Err(BootstrapError::Cancelled),
-        }
 
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
@@ -451,6 +440,7 @@ pub async fn restore_from_code(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     exact_upload_verification: coven_foundation::config::ExactUploadVerification,
+    transfer_limits: coven_protocol::blob::TransferLimits,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_clients: coven_storage::oauth::OAuthClients,
@@ -527,6 +517,7 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         migrations,
+        transfer_limits,
         key_custody,
         identity_custody,
         source,
