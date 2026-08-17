@@ -20,6 +20,7 @@ coven-replication = { workspace = true }
 coven-storage = { workspace = true }
 
 hex = { workspace = true }
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,7 +28,6 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-base64 = { workspace = true }
 bytes = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

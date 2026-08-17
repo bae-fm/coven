@@ -308,9 +308,27 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
         .expect("mint the scannable invite");
     let scanned = invite.to_bytes();
     assert!(
-        !invite.invite_code.is_empty(),
-        "the payload carries the invite code the joining device needs for its provider credentials",
+        !String::from_utf8_lossy(&scanned).contains("\"invite_code\""),
+        "the device-invite wire must not nest the superseded plaintext credential code",
     );
+    let preview = invite
+        .inspect(&join_request)
+        .expect("the intended joining identity opens its invitation");
+    assert_eq!(preview.store_id, "facade-device-join");
+    let other_request = crate::generate_join_request(None).expect("generate another request");
+    assert!(matches!(
+        invite.inspect(&other_request),
+        Err(crate::DeviceInviteError::RecipientMismatch)
+    ));
+    let decoded = crate::DeviceJoinInvite::from_bytes(&scanned).expect("decode the scanned invite");
+    assert_eq!(
+        decoded
+            .inspect(&join_request)
+            .expect("the round-tripped invitation opens")
+            .store_id,
+        "facade-device-join",
+    );
+    assert!(crate::DeviceJoinInvite::from_bytes(b"{}").is_err());
 
     let cancel = tokio::sync::watch::channel(false).1;
     let (joined, drove) = tokio::join!(
@@ -368,9 +386,4 @@ async fn run_a_facade_only_host_runs_a_whole_device_join() {
         activation.outcome.attempt().attempt_id,
         invite.bundle.offer.attempt_id,
     );
-
-    // The payload survives the round trip a QR makes it take.
-    let decoded = crate::DeviceJoinInvite::from_bytes(&scanned).expect("decode the scanned invite");
-    assert_eq!(decoded.invite_code, invite.invite_code);
-    assert!(crate::DeviceJoinInvite::from_bytes(b"{}").is_err());
 }

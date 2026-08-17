@@ -1,4 +1,4 @@
-//! Join an existing shared store using an invite code.
+//! Join an existing shared store using a recipient-sealed device invitation.
 //!
 //! Shared across all platforms (macOS, iOS, CLI).
 
@@ -60,12 +60,10 @@ pub enum BootstrapError {
     Key(#[from] KeyError),
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid invite code: {0}")]
-    InviteCode(#[from] crate::joining::JoinCodeError),
+    #[error("device invitation: {0}")]
+    DeviceInvite(#[from] crate::joining::DeviceInviteError),
     #[error("invalid join request code: {0}")]
-    JoinRequestCode(#[source] coven_foundation::code_envelope::EnvelopeError),
-    #[error("invalid device invite JSON: {0}")]
-    DeviceInviteJson(#[source] serde_json::Error),
+    JoinRequest(#[source] coven_foundation::code_envelope::EnvelopeError),
     #[error("device join invite version {0} is not supported")]
     UnsupportedDeviceInviteVersion(u32),
     #[error("invalid store id: {0}")]
@@ -400,7 +398,7 @@ async fn build_cloud_home_for_join(
 /// A joining device's local half of the four-transfer admission exchange.
 /// The journal lives outside the incomplete store directory, so every method
 /// can be retried after process termination without losing its exact predecessor.
-pub struct DeviceJoinClient {
+pub(crate) struct DeviceJoinClient {
     code: MemberInvitation,
     member_pubkey: String,
     layout: StoreLayout,
@@ -425,8 +423,8 @@ struct DeviceJoinStorage {
 
 impl DeviceJoinClient {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        invite_code: &str,
+    pub(crate) fn new(
+        code: MemberInvitation,
         join_request_code: &str,
         layout: StoreLayout,
         synced_tables: Vec<SyncedTable>,
@@ -439,9 +437,8 @@ impl DeviceJoinClient {
         cloudkit_ops: Option<Arc<dyn coven_storage::cloud::cloudkit::CloudKitOps>>,
         clock: coven_foundation::clock::ClockRef,
     ) -> Result<Self, BootstrapError> {
-        let code = crate::joining::decode(invite_code)?;
         let member_pubkey = crate::joining::decode_join_request(join_request_code)
-            .map_err(BootstrapError::JoinRequestCode)?
+            .map_err(BootstrapError::JoinRequest)?
             .public_key;
         coven_storage::cloud::setup::require_exact_slot_capabilities_join_info(
             &code.join_info,
@@ -478,7 +475,7 @@ impl DeviceJoinClient {
         self
     }
 
-    pub async fn prepare_provider_access_request(
+    pub(crate) async fn prepare_provider_access_request(
         &self,
         offer: coven_replication::sync::DeviceJoinOffer,
     ) -> Result<coven_replication::sync::DeviceProviderAccessRequest, BootstrapError> {
@@ -503,7 +500,7 @@ impl DeviceJoinClient {
         Ok(authority.prepare_provider_access_request().await?)
     }
 
-    pub async fn accept_device_join_abandonment(
+    pub(crate) async fn accept_device_join_abandonment(
         &self,
         abandonment: coven_replication::sync::DeviceJoinAbandonment,
     ) -> Result<coven_replication::sync::DeviceJoinAbandonment, BootstrapError> {
@@ -520,7 +517,7 @@ impl DeviceJoinClient {
         Ok(observation.observe_abandonment(abandonment).await?)
     }
 
-    pub fn device_join_status(
+    pub(crate) fn device_join_status(
         &self,
         attempt_id: coven_protocol::DeviceJoinAttemptId,
     ) -> Result<Option<coven_replication::sync::DeviceJoinStatus>, BootstrapError> {
@@ -528,14 +525,14 @@ impl DeviceJoinClient {
         Ok(pending.status(attempt_id)?)
     }
 
-    pub fn resume_device_joins(
+    pub(crate) fn resume_device_joins(
         &self,
     ) -> Result<Vec<coven_replication::sync::DeviceJoinAction>, BootstrapError> {
         let pending = self.open_pending_journal()?;
         Ok(pending.actions()?)
     }
 
-    pub async fn close_pending_device_join(
+    pub(crate) async fn close_pending_device_join(
         &self,
         cancellation: coven_replication::sync::DeviceJoinCancellation,
     ) -> Result<coven_replication::sync::JoinerJoinTerminal, BootstrapError> {
@@ -554,7 +551,7 @@ impl DeviceJoinClient {
         Ok(closure.close(cancellation).await?)
     }
 
-    pub async fn complete_cancelled_device_join(
+    pub(crate) async fn complete_cancelled_device_join(
         &self,
         activation: coven_replication::sync::DeviceJoinCleanupActivation,
     ) -> Result<(), BootstrapError> {
@@ -603,7 +600,7 @@ impl DeviceJoinClient {
         Ok(())
     }
 
-    pub async fn prepare_registration_request(
+    pub(crate) async fn prepare_registration_request(
         &self,
         approval: coven_replication::sync::DeviceProviderAdmissionApproval,
     ) -> Result<coven_replication::sync::DeviceRegistrationRequest, BootstrapError> {
@@ -629,7 +626,7 @@ impl DeviceJoinClient {
         Ok(authority.prepare_registration_request(approval).await?)
     }
 
-    pub async fn bootstrap_pending_device(
+    pub(crate) async fn bootstrap_pending_device(
         &self,
         bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
         on_status: impl Fn(&str),
@@ -704,7 +701,7 @@ impl DeviceJoinClient {
         Ok(joining.bootstrap(bootstrap, &published_at).await?)
     }
 
-    pub async fn complete_device_join(
+    pub(crate) async fn complete_device_join(
         &self,
         activation: coven_replication::sync::DeviceJoinActivation,
         on_status: impl Fn(&str),

@@ -48,8 +48,8 @@ pub use coven_database::{
 };
 pub use coven_database::{Migration, MigrationContext, MigrationError, MigrationStep};
 pub use coven_domain::joining::{
-    abandon_join_request, decode_invite_code_info, decode_join_request, generate_join_request,
-    BootstrapError, DeviceJoinClient, InviteCodeInfo, JoinCodeError, JoinRequestCode,
+    abandon_join_request, decode_join_request, generate_join_request, BootstrapError,
+    DeviceInviteError, DeviceInviteInfo, JoinRequest,
 };
 pub use coven_domain::joining::{
     close_scanned_invite_join, join_with_scanned_invite, DeviceJoinInvite,
@@ -161,4 +161,5 @@ pub use live_query::{
     ReconfigurableLiveQueryCause, ReconfigurableLiveQueryEvent,
 };
 pub use read_handle::CovenReadHandle;
+pub use store_joining::BeginDeviceInviteError;
 pub use store_security::CloudHomeKeyState;

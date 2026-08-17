@@ -45,8 +45,7 @@ pub struct RestoreCode {
     pub ek: Option<String>,
     /// Store display name.
     pub name: String,
-    /// Cloud provider and its connection details. Shared with the invite code
-    /// (`InviteCode::join_info`) — one wire representation for both. A
+    /// Cloud provider and its connection details. A
     /// [`CloudHomeJoinInfo::CloudKitShare`] is never valid here: restore
     /// recovers your own zone, not one shared to you, so
     /// [`decode_restore_code`] rejects it.

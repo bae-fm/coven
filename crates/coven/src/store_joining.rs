@@ -3,6 +3,14 @@ use crate::store_sync::{StoreSync, SyncError};
 use coven_database::StoreDatabase;
 use coven_protocol::membership::MemberRole;
 
+#[derive(Debug, thiserror::Error)]
+pub enum BeginDeviceInviteError {
+    #[error("sync: {0}")]
+    Sync(#[from] SyncError),
+    #[error("device invitation: {0}")]
+    DeviceInvite(#[from] coven_domain::joining::DeviceInviteError),
+}
+
 /// The two parts of device joining that are not a plain sync command: minting
 /// an invite, which pairs a membership invite with the attempt's transport
 /// bundle, and reading the join journal the database holds. Every other step is
@@ -31,16 +39,20 @@ impl StoreJoining {
         &self,
         join_request_code: &str,
         role: MemberRole,
-    ) -> Result<coven_domain::joining::DeviceJoinInvite, SyncError> {
-        let member_pubkey = coven_domain::joining::decode_join_request(join_request_code)
-            .map_err(SyncError::InvalidJoinRequest)?
-            .public_key;
-        let invite_code = self.membership.invite(&member_pubkey, None, role).await?;
-        let bundle = self.sync.begin_device_join_bundle(&member_pubkey).await?;
+    ) -> Result<coven_domain::joining::DeviceJoinInvite, BeginDeviceInviteError> {
+        let request = coven_domain::joining::decode_join_request(join_request_code)
+            .map_err(SyncError::InvalidJoinRequest)?;
+        let invitation = self
+            .membership
+            .admit(&request.public_key, request.email.as_deref(), role)
+            .await?;
+        let bundle = self
+            .sync
+            .begin_device_join_bundle(&request.public_key)
+            .await?;
         Ok(coven_domain::joining::DeviceJoinInvite::new(
-            invite_code,
-            bundle,
-        ))
+            invitation, bundle,
+        )?)
     }
 
     pub(crate) async fn status(

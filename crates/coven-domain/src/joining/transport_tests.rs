@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::test_runtime::on_a_deep_stack;
-use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
@@ -49,7 +48,7 @@ struct TransportFixture {
     owner_store_dir: coven_foundation::store_dir::StoreDir,
     home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
-    invite_code: String,
+    invitation: coven_replication::sync::MemberInvitation,
     join_request: String,
     layout: coven_foundation::store_dir::StoreLayout,
     tables: Vec<coven_protocol::synced_schema::SyncedTable>,
@@ -200,7 +199,7 @@ impl TransportFixture {
             owner_store_dir: owner_db_store_dir,
             home,
             member_pubkey,
-            invite_code: encode(&invite),
+            invitation: invite,
             join_request,
             layout,
             tables,
@@ -241,9 +240,9 @@ impl TransportFixture {
 
     /// A fresh joining client, as a relaunched app would construct it: nothing
     /// but the codes and the on-disk journal carry across.
-    fn client(&self) -> crate::joining::DeviceJoinClient {
-        crate::joining::DeviceJoinClient::new(
-            &self.invite_code,
+    fn client(&self) -> crate::joining::client::DeviceJoinClient {
+        crate::joining::client::DeviceJoinClient::new(
+            self.invitation.clone(),
             &self.join_request,
             self.layout.clone(),
             self.tables.clone(),
@@ -460,6 +459,51 @@ async fn the_offer_bundle_round_trips_through_its_encoded_form() {
     })
     .await
     .expect("offer bundle task");
+}
+
+#[tokio::test]
+async fn the_scanned_invitation_exposes_provider_credentials_only_to_its_requesting_device() {
+    let fixture = TransportFixture::build("sealed-device-invitation").await;
+    let bundle = fixture.begin().await;
+    let mut invitation = fixture.invitation.clone();
+    invitation.join_info = coven_storage::CloudHomeJoinInfo::S3 {
+        bucket: "sealed-bucket".to_string(),
+        region: "sealed-region".to_string(),
+        endpoint: Some("https://sealed.example".to_string()),
+        access_key: "ACCESS-KEY-MUST-STAY-SEALED".to_string(),
+        secret_key: "SECRET-KEY-MUST-STAY-SEALED".to_string(),
+        key_prefix: Some("sealed-prefix".to_string()),
+    };
+    let invite = crate::joining::DeviceJoinInvite::new(invitation, bundle)
+        .expect("seal the invitation for its requesting device");
+
+    let wire = invite.to_bytes();
+    let visible = String::from_utf8(wire.clone()).expect("device invitation is JSON");
+    for secret in [
+        "ACCESS-KEY-MUST-STAY-SEALED",
+        "SECRET-KEY-MUST-STAY-SEALED",
+        "sealed-bucket",
+        "sealed-region",
+        "sealed-prefix",
+    ] {
+        assert!(!visible.contains(secret), "wire exposed {secret}");
+    }
+
+    let decoded = crate::joining::DeviceJoinInvite::from_bytes(&wire)
+        .expect("decode the sealed invitation wire");
+    assert_eq!(
+        decoded
+            .inspect(&fixture.join_request)
+            .expect("requesting device opens the invitation")
+            .store_id,
+        "sealed-device-invitation",
+    );
+    let other_request =
+        crate::joining::generate_join_request(None).expect("generate an unrelated device request");
+    assert!(matches!(
+        decoded.inspect(&other_request),
+        Err(crate::joining::DeviceInviteError::RecipientMismatch)
+    ));
 }
 
 /// The same admission when the joining device is on a different provider

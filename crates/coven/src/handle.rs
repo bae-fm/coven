@@ -994,7 +994,7 @@ impl CovenHandle {
     }
 
     /// Admit the device that generated `join_request_code`, and return the one
-    /// payload that device needs: its invite code and this attempt's transport
+    /// payload that device needs: its sealed invitation and this attempt's transport
     /// bundle.
     ///
     /// The joining device generates its join request first and shows it here —
@@ -1004,7 +1004,7 @@ impl CovenHandle {
         &self,
         join_request_code: &str,
         role: MemberRole,
-    ) -> Result<coven_domain::joining::DeviceJoinInvite, SyncError> {
+    ) -> Result<coven_domain::joining::DeviceJoinInvite, crate::BeginDeviceInviteError> {
         self.joining.begin_invite(join_request_code, role).await
     }
 
@@ -1176,17 +1176,6 @@ impl CovenHandle {
 
     pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
         self.joining.resumable_actions().await
-    }
-
-    pub async fn invite_member(
-        &self,
-        public_key_hex: &str,
-        invitee_email: Option<&str>,
-        role: MemberRole,
-    ) -> Result<String, SyncError> {
-        self.membership
-            .invite(public_key_hex, invitee_email, role)
-            .await
     }
 
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<(), SyncError> {

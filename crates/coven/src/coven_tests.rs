@@ -1549,15 +1549,13 @@ async fn audience_move_publishes_from_precommit_spool_after_source_disappears() 
     // The fabricated destination Circle names its fixed owner in its roster;
     // that identity must be an active Store member or the Circle would be
     // rotation-required and reject new content.
+    let destination_owner =
+        coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair();
+    let join_request =
+        coven_domain::joining::generate_join_request_for_keypair(&destination_owner, None);
     fixture
         .handle
-        .invite_member(
-            &coven_keys::keys::public_key_hex(
-                &coven_protocol::circle_activation_test_fixtures::test_circle_owner_keypair(),
-            ),
-            None,
-            crate::MemberRole::Member,
-        )
+        .begin_device_invite(&join_request, crate::MemberRole::Member)
         .await
         .expect("register the fabricated Circle roster owner as a Store member");
 

@@ -37,18 +37,16 @@ impl StoreMembership {
         self.sync.membership_conflict().await
     }
 
-    pub(crate) async fn invite(
+    pub(crate) async fn admit(
         &self,
         public_key_hex: &str,
         invitee_email: Option<&str>,
         role: MemberRole,
-    ) -> Result<String, SyncError> {
+    ) -> Result<coven_replication::sync::MemberInvitation, SyncError> {
         let _mutation = self.mutations.lock().await;
-        let invite = self
-            .sync
+        self.sync
             .invite_member(public_key_hex, invitee_email, role)
-            .await?;
-        Ok(coven_domain::joining::encode(&invite))
+            .await
     }
 
     pub(crate) async fn remove(&self, public_key_hex: &str) -> Result<(), SyncError> {

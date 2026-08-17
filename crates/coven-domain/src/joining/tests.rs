@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::joining::encode;
 use coven_foundation::clock::SystemClock;
 use coven_keys::encryption::EncryptionService;
 use coven_keys::keys::UserKeypair;
@@ -86,12 +85,11 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .await
         .expect("publish join snapshot acknowledgement");
     let owner_store = owner_device;
-    let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
     let new_client = || {
-        crate::joining::DeviceJoinClient::new(
-            &invite_code,
+        crate::joining::client::DeviceJoinClient::new(
+            invite.clone(),
             &join_request,
             layout.clone(),
             tables.clone(),
