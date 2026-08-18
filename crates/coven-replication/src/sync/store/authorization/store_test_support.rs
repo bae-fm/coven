@@ -626,6 +626,11 @@ impl Store {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn root_ref_for_test(&self) -> &coven_protocol::store_commit::StoreRootRef {
+        self.root.reference()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn pending_device_join_observation_for_test(
         &self,
         pending: &crate::sync::store::DeviceJoinJournalDatabase,
@@ -671,6 +676,7 @@ impl Store {
         let history_verifier = HistoryConstructionAuthority::for_snapshot()
             .bind_verified(self.storage.as_ref(), self.root.clone())
             .await?;
+        let cancel = tokio::sync::watch::channel(false).1;
         crate::sync::store::PreparedSnapshotBootstrap::prepare(
             &self.storage,
             history_verifier,
@@ -679,6 +685,7 @@ impl Store {
             target_path,
             restorer_identity,
             std::sync::Arc::new(|_| {}),
+            &cancel,
         )
         .await
     }

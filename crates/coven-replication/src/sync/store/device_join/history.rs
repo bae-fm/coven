@@ -144,6 +144,71 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             .await
     }
 
+    pub(crate) async fn prepare_same_principal_installation(
+        &mut self,
+        attempt: &DeviceJoinAttempt,
+        outcome: coven_protocol::store_commit::DeviceJoinOutcome,
+        attempt_activation: &StoreBatchCommitRef,
+    ) -> Result<SamePrincipalStoreInstallation, DeviceJoinError> {
+        let root = self.root().reference().clone();
+        if attempt.store_root != root {
+            return Err(DeviceJoinError::AttemptMismatch);
+        }
+        let snapshots = self.database.local_store_snapshots().await?;
+        if snapshots.is_empty() {
+            return Err(DeviceJoinError::Store(
+                "same-provider device join requires a published Store snapshot".to_string(),
+            ));
+        }
+        let selected = self
+            .history
+            .select_maximal_stable_store_snapshot(snapshots)
+            .await
+            .map_err(|error| StorePullError::context("verify same-provider join snapshot", error))?
+            .ok_or_else(|| {
+                DeviceJoinError::Store(
+                    "same-provider device join has no stable Store snapshot".to_string(),
+                )
+            })?;
+        let snapshot = selected.snapshot;
+        let stability = selected.stability;
+        let plan = self
+            .history
+            .prepare_device_join_bootstrap(
+                &attempt.bootstrap_cut,
+                attempt_activation,
+                &attempt.membership,
+            )
+            .await
+            .map_err(|error| {
+                StorePullError::context("prepare same-provider join history", error)
+            })?;
+        let bootstrap = plan.into_closure(&root)?;
+        Ok(SamePrincipalStoreInstallation {
+            store_root: self.root().protocol().clone(),
+            attempt: attempt.clone(),
+            outcome,
+            snapshot: snapshot.reference,
+            metadata: snapshot.meta,
+            stability: stability.into_authority(),
+            bootstrap,
+        })
+    }
+
+    pub(crate) async fn retain_same_principal_join_activation(
+        &mut self,
+        activation: &StoreBatchCommitRef,
+    ) -> Result<(), DeviceJoinError> {
+        let materialization = self
+            .database
+            .retained_merge_materialization(self.root().reference().clone(), activation.clone())
+            .await?;
+        self.history
+            .retain_local_same_principal_join_activation(materialization)
+            .await?;
+        Ok(())
+    }
+
     pub(super) async fn verify_offer(
         &self,
         identity: &UserKeypair,
@@ -201,214 +266,18 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         owner: &StoreDeviceRegistration,
         published_at: &str,
     ) -> Result<DeviceReadinessProof, StoreRegistrationError> {
-        if verified_attempt.semantic_hash != attempt_ref.attempt_hash
-            || verified_attempt.object != attempt_ref.object
-        {
-            return Err(StoreRegistrationError::Invalid(
-                "verified device join attempt differs from its exact reference".to_string(),
-            ));
-        }
-        let database = &self.database;
-        let storage = self.storage;
-        let attempt = verified_attempt.value;
-        let activation_stream = attempt_activation.coord.stream_id.to_string();
-        let verified_activation = bootstrap_plan
-            .verified_commit(&attempt_activation)
-            .cloned()
-            .ok_or_else(|| {
-                StoreRegistrationError::Invalid(
-                    "device join bootstrap omits its attempt activation".to_string(),
-                )
-            })?;
-        Box::pin(
-            database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan),
-        )
-        .await
-        .map_err(registration_database_error)?;
-        if Box::pin(
-            database
-                .exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()),
-        )
-        .await
-        .map_err(registration_database_error)?
-        .as_ref()
-            != Some(&attempt_activation)
-        {
-            return Err(StoreRegistrationError::ActivationRequired);
-        }
-        let activation_commit = verified_activation.value();
-        if verified_activation.author() != owner
-            || activation_commit.author_registration != attempt.owner_registration
-            || !activation_commit
-                .device_join_attempt_decisions()
-                .iter()
-                .any(|decision| {
-                    matches!(
-                        decision,
-                        DeviceJoinAttemptDecisionRef::Attempt(reference)
-                            if reference == &attempt_ref
-                    )
-                })
-            || activation_commit
-                .order
-                .predecessor_cut()
-                .map_err(StoreRegistrationError::from)?
-                != attempt.bootstrap_cut
-            || activation_commit.membership_state != attempt.membership
-        {
-            return Err(StoreRegistrationError::Invalid(
-                "device join attempt is not activated by the named exact Store commit".to_string(),
-            ));
-        }
-        let provider = Box::pin(storage.provider_binding())
-            .await
-            .map_err(StoreObjectError::from)?;
-        if provider.device != attempt.expected_registration.provider {
-            return Err(StoreRegistrationError::Invalid(
-                "joiner provider principal differs from the signed device join attempt".to_string(),
-            ));
-        }
-        let expected_registration = attempt.expected_registration.clone();
-        if expected_registration.author_pubkey != coven_keys::keys::public_key_hex(identity) {
-            return Err(StoreRegistrationError::Invalid(
-                "joiner identity differs from the signed device registration request".to_string(),
-            ));
-        }
-        let existing = Box::pin(database.latest_local_store_device_registration())
-            .await
-            .map_err(registration_database_error)?;
-        if let Some(existing) = existing.as_ref() {
-            if existing.registration_bytes != expected_registration.to_bytes()
-                || existing.prepared.reference().slot() != &attempt.registration_slot
-                || existing.initial_ack.value.store_cut != attempt.bootstrap_cut
-            {
-                return Err(StoreRegistrationError::Invalid(
-                    "local join journal owns different exact registration bytes".to_string(),
-                ));
-            }
-        } else {
-            let registration_prepared = prepare_registration_object(
-                storage,
-                &expected_registration,
-                attempt.registration_slot.clone(),
-            )?;
-            let registration_ref = StoreDeviceRegistrationRef::from_registration(
-                &expected_registration,
-                registration_prepared.reference().clone(),
-            );
-            let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
-                &expected_registration.acknowledgements
-            else {
-                return Err(StoreRegistrationError::Invalid(
-                    "join registration has no acknowledgement anchor".to_string(),
-                ));
-            };
-            let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                attempt.store_root.store_root_hash,
-                ProtocolObjectDomain::StoreAck,
-            );
-            let next_slot = Box::pin(storage.allocate_protocol_slot(
-                &ack_context,
-                &ack_slot_prefix(&expected_registration.device_id.to_string(), 2),
-                ".json",
-            ))
-            .await
-            .map_err(StoreObjectError::from)?;
-            let device_signer = expected_registration
-                .device_signer(identity)
-                .map_err(StoreRegistrationError::from)?;
-            let (device_state, _) =
-                Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
-                    .await
-                    .map_err(registration_database_error)?;
-            let initial_ack = StoreAck::signed(
-                attempt.store_root.store_root_hash,
-                registration_ref.clone(),
-                1,
-                attempt.bootstrap_cut.clone(),
-                device_state,
-                None,
-                StoreAckExclusionState {
-                    proposal_freezes: Vec::new(),
-                },
-                published_at.to_string(),
-                SuccessorLink {
-                    activation: expected_registration
-                        .store_acknowledgement_activation(&registration_ref)
-                        .map_err(StoreRegistrationError::from)?
-                        .activation_id(),
-                    predecessor: None,
-                    next_slot,
-                },
-                &device_signer,
-            )
-            .map_err(StoreRegistrationError::from)?;
-            let ack_prepared = storage
-                .prepare_protocol_object(
-                    &ack_context,
-                    first_slot.clone(),
-                    &ack_slot_prefix(&expected_registration.device_id.to_string(), 1),
-                    initial_ack.to_bytes(),
-                )
-                .map_err(StoreObjectError::from)?;
-            let initial_ack_ref = StoreAckRef {
-                registration: registration_ref,
-                sequence: 1,
-                ack_hash: initial_ack.ack_hash(),
-                object: ack_prepared.reference().clone(),
-            };
-            Box::pin(database.stage_local_store_device_registration(
-                coven_database::ExactProtocolObject {
-                    value: expected_registration.clone(),
-                    bytes: expected_registration.to_bytes(),
-                    prepared: registration_prepared,
-                },
-                initial_ack_ref,
-                coven_database::ExactProtocolObject {
-                    value: initial_ack.clone(),
-                    bytes: initial_ack.to_bytes(),
-                    prepared: ack_prepared,
-                },
-            ))
-            .await
-            .map_err(registration_database_error)?;
-        }
-        super::RegistrationOutbox::new(database.clone(), storage)
-            .drain()
-            .await?;
-        let durable = Box::pin(database.latest_local_store_device_registration())
-            .await
-            .map_err(registration_database_error)?
-            .ok_or(StoreRegistrationError::ActivationRequired)?;
-        if !matches!(
-            durable.state,
-            coven_database::LocalDeviceRegistrationState::Created
-                | coven_database::LocalDeviceRegistrationState::Activated { .. }
-        ) {
-            return Err(StoreRegistrationError::ActivationRequired);
-        }
-        let registration = StoreDeviceRegistration::parse_at(
-            &durable.registration_bytes,
-            &attempt.store_root,
-            durable.device_id,
-        )
-        .map_err(StoreRegistrationError::from)?;
-        let registration_ref = StoreDeviceRegistrationRef::from_registration(
-            &registration,
-            durable.prepared.reference().clone(),
-        );
-        let device_signer = registration
-            .device_signer(identity)
-            .map_err(StoreRegistrationError::from)?;
-        DeviceReadinessProof::signed(
+        bootstrap_pending_device_on(
+            &self.database,
+            self.storage,
+            identity,
             attempt_ref,
-            registration_ref,
-            durable.initial_ack_ref,
-            attempt.bootstrap_cut.clone(),
-            &registration,
-            &device_signer,
+            verified_attempt,
+            bootstrap_plan,
+            attempt_activation,
+            owner,
+            published_at,
         )
-        .map_err(StoreRegistrationError::from)
+        .await
     }
 
     pub(super) async fn create_cross_principal_response(
@@ -429,6 +298,249 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             )
             .await
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn bootstrap_pending_device_on(
+    database: &StoreDatabase,
+    storage: &dyn coven_storage::CloudSyncObjectStorage,
+    identity: &UserKeypair,
+    attempt_ref: DeviceJoinAttemptRef,
+    verified_attempt: coven_protocol::objects::VerifiedObject<DeviceJoinAttempt>,
+    bootstrap_plan: super::DeviceJoinBootstrapPlan,
+    attempt_activation: StoreBatchCommitRef,
+    owner: &StoreDeviceRegistration,
+    published_at: &str,
+) -> Result<DeviceReadinessProof, StoreRegistrationError> {
+    if verified_attempt.semantic_hash != attempt_ref.attempt_hash
+        || verified_attempt.object != attempt_ref.object
+    {
+        return Err(StoreRegistrationError::Invalid(
+            "verified device join attempt differs from its exact reference".to_string(),
+        ));
+    }
+    let attempt = verified_attempt.value;
+    let activation_stream = attempt_activation.coord.stream_id.to_string();
+    let verified_activation = bootstrap_plan
+        .verified_commit(&attempt_activation)
+        .cloned()
+        .ok_or_else(|| {
+            StoreRegistrationError::Invalid(
+                "device join bootstrap omits its attempt activation".to_string(),
+            )
+        })?;
+    let installed_registration_activation = bootstrap_plan
+        .commits
+        .iter()
+        .find(|commit| commit.reference == attempt_activation)
+        .and_then(|commit| {
+            commit.registrations.iter().find(|registration| {
+                registration.value().device_id == attempt.expected_registration.device_id
+            })
+        })
+        .map(|registration| registration.activation().clone());
+    Box::pin(database.install_device_join_bootstrap(attempt.store_root.clone(), bootstrap_plan))
+        .await
+        .map_err(registration_database_error)?;
+    if Box::pin(
+        database.exact_materialized_ref(&activation_stream, attempt_activation.coord.sequence()),
+    )
+    .await
+    .map_err(registration_database_error)?
+    .as_ref()
+        != Some(&attempt_activation)
+    {
+        return Err(StoreRegistrationError::ActivationRequired);
+    }
+    let activation_commit = verified_activation.value();
+    if verified_activation.author() != owner
+        || activation_commit.author_registration != attempt.owner_registration
+        || !activation_commit
+            .device_join_attempt_decisions()
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    DeviceJoinAttemptDecisionRef::Attempt(reference)
+                        if reference == &attempt_ref
+                )
+            })
+        || activation_commit
+            .order
+            .predecessor_cut()
+            .map_err(StoreRegistrationError::from)?
+            != attempt.bootstrap_cut
+        || activation_commit.membership_state != attempt.membership
+    {
+        return Err(StoreRegistrationError::Invalid(
+            "device join attempt is not activated by the named exact Store commit".to_string(),
+        ));
+    }
+    let provider = Box::pin(storage.provider_binding())
+        .await
+        .map_err(StoreObjectError::from)?;
+    if provider.device != attempt.expected_registration.provider {
+        return Err(StoreRegistrationError::Invalid(
+            "joiner provider principal differs from the signed device join attempt".to_string(),
+        ));
+    }
+    let expected_registration = attempt.expected_registration.clone();
+    if expected_registration.author_pubkey != coven_keys::keys::public_key_hex(identity) {
+        return Err(StoreRegistrationError::Invalid(
+            "joiner identity differs from the signed device registration request".to_string(),
+        ));
+    }
+    let existing = Box::pin(database.latest_local_store_device_registration())
+        .await
+        .map_err(registration_database_error)?;
+    if let Some(existing) = existing.as_ref() {
+        if existing.registration_bytes != expected_registration.to_bytes()
+            || existing.prepared.reference().slot() != &attempt.registration_slot
+            || existing.initial_ack.value.store_cut != attempt.bootstrap_cut
+        {
+            return Err(StoreRegistrationError::Invalid(
+                "local join journal owns different exact registration bytes".to_string(),
+            ));
+        }
+    } else {
+        let registration_prepared = prepare_registration_object(
+            storage,
+            &expected_registration,
+            attempt.registration_slot.clone(),
+        )?;
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &expected_registration,
+            registration_prepared.reference().clone(),
+        );
+        let DeviceStreamAnchor::StoreAcknowledgements { first_slot } =
+            &expected_registration.acknowledgements
+        else {
+            return Err(StoreRegistrationError::Invalid(
+                "join registration has no acknowledgement anchor".to_string(),
+            ));
+        };
+        let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            attempt.store_root.store_root_hash,
+            ProtocolObjectDomain::StoreAck,
+        );
+        let next_slot = Box::pin(storage.allocate_protocol_slot(
+            &ack_context,
+            &ack_slot_prefix(&expected_registration.device_id.to_string(), 2),
+            ".json",
+        ))
+        .await
+        .map_err(StoreObjectError::from)?;
+        let device_signer = expected_registration
+            .device_signer(identity)
+            .map_err(StoreRegistrationError::from)?;
+        let (device_state, _) =
+            Box::pin(database.store_device_state_for_history_cut(&attempt.bootstrap_cut))
+                .await
+                .map_err(registration_database_error)?;
+        let initial_ack = StoreAck::signed(
+            attempt.store_root.store_root_hash,
+            registration_ref.clone(),
+            1,
+            attempt.bootstrap_cut.clone(),
+            device_state,
+            None,
+            StoreAckExclusionState {
+                proposal_freezes: Vec::new(),
+            },
+            published_at.to_string(),
+            SuccessorLink {
+                activation: expected_registration
+                    .store_acknowledgement_activation(&registration_ref)
+                    .map_err(StoreRegistrationError::from)?
+                    .activation_id(),
+                predecessor: None,
+                next_slot,
+            },
+            &device_signer,
+        )
+        .map_err(StoreRegistrationError::from)?;
+        let ack_prepared = storage
+            .prepare_protocol_object(
+                &ack_context,
+                first_slot.clone(),
+                &ack_slot_prefix(&expected_registration.device_id.to_string(), 1),
+                initial_ack.to_bytes(),
+            )
+            .map_err(StoreObjectError::from)?;
+        let initial_ack_ref = StoreAckRef {
+            registration: registration_ref,
+            sequence: 1,
+            ack_hash: initial_ack.ack_hash(),
+            object: ack_prepared.reference().clone(),
+        };
+        let exact_registration = coven_database::ExactProtocolObject {
+            value: expected_registration.clone(),
+            bytes: expected_registration.to_bytes(),
+            prepared: registration_prepared,
+        };
+        let exact_ack = coven_database::ExactProtocolObject {
+            value: initial_ack.clone(),
+            bytes: initial_ack.to_bytes(),
+            prepared: ack_prepared,
+        };
+        match installed_registration_activation {
+            Some(authority) => {
+                Box::pin(database.stage_activated_local_store_device_registration(
+                    exact_registration,
+                    initial_ack_ref,
+                    exact_ack,
+                    authority,
+                ))
+                .await
+                .map_err(registration_database_error)?;
+            }
+            None => {
+                Box::pin(database.stage_local_store_device_registration(
+                    exact_registration,
+                    initial_ack_ref,
+                    exact_ack,
+                ))
+                .await
+                .map_err(registration_database_error)?;
+            }
+        }
+    }
+    super::RegistrationOutbox::new(database.clone(), storage)
+        .drain()
+        .await?;
+    let durable = Box::pin(database.latest_local_store_device_registration())
+        .await
+        .map_err(registration_database_error)?
+        .ok_or(StoreRegistrationError::ActivationRequired)?;
+    if !matches!(
+        durable.state,
+        coven_database::LocalDeviceRegistrationState::Created
+            | coven_database::LocalDeviceRegistrationState::Activated { .. }
+    ) {
+        return Err(StoreRegistrationError::ActivationRequired);
+    }
+    let registration = StoreDeviceRegistration::parse_at(
+        &durable.registration_bytes,
+        &attempt.store_root,
+        durable.device_id,
+    )
+    .map_err(StoreRegistrationError::from)?;
+    let registration_ref = StoreDeviceRegistrationRef::from_registration(
+        &registration,
+        durable.prepared.reference().clone(),
+    );
+    let device_signer = registration
+        .device_signer(identity)
+        .map_err(StoreRegistrationError::from)?;
+    DeviceReadinessProof::signed(
+        attempt_ref,
+        registration_ref,
+        durable.initial_ack_ref,
+        attempt.bootstrap_cut.clone(),
+        &registration,
+        &device_signer,
+    )
+    .map_err(StoreRegistrationError::from)
 }
 
 fn registration_database_error(error: coven_database::DbError) -> StoreRegistrationError {

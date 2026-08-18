@@ -60,7 +60,7 @@ impl<'store> StoreRecords<'store> {
         self,
         schema_version: u32,
         routing_hash: ObjectHash,
-        authority: crate::RetainedReplaySnapshotAuthority,
+        authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         self.install_snapshot_replay_baseline_records(schema_version, routing_hash, authority)
     }

@@ -206,6 +206,22 @@ impl CloudSyncConnection {
         .with_blob_chunking(self.blob_chunking)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn connection_for_test_identity_and_home(
+        &self,
+        identity: UserKeypair,
+        home: Arc<dyn ExactCloudHome>,
+    ) -> Self {
+        Self::new(
+            home,
+            self.cipher.read().unwrap().clone(),
+            self.blob_paths,
+            self.store_id.clone(),
+            identity,
+        )
+        .with_blob_chunking(self.blob_chunking)
+    }
+
     pub fn is_plaintext(&self) -> bool {
         self.cipher.read().unwrap().is_plaintext()
     }

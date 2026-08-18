@@ -98,6 +98,15 @@ impl<'a> MergeHistoryVerifier<'a> {
         let state = self
             .verify_snapshot_history_state(frontier, &snapshot.meta.state.membership)
             .await?;
+        self.verify_snapshot_authority_with_state(snapshot, state)
+    }
+
+    fn verify_snapshot_authority_with_state(
+        &self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+        state: VerifiedMergeSnapshotState,
+    ) -> Result<(StoreHistoryCut, VerifiedMergeSnapshotState), StorePullError> {
+        let frontier = &snapshot.meta.coverage.0;
         let expected_device_state = StoreDeviceStateRef::from_resolved(
             snapshot.meta.coverage.clone(),
             &state.common.device_state,
@@ -183,6 +192,14 @@ impl<'a> MergeHistoryVerifier<'a> {
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
     ) -> Result<Vec<VerifiedActivatedStoreAck>, StorePullError> {
         self.verify_refs(frontier.values().cloned()).await?;
+        self.activated_snapshot_acknowledgements_from_verified_history(frontier)
+    }
+
+    fn activated_snapshot_acknowledgements_from_verified_history(
+        &self,
+        frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
+    ) -> Result<Vec<VerifiedActivatedStoreAck>, StorePullError> {
+        verified_merge_commit_closure(&self.history.commits, frontier.values().cloned())?;
         let mut acknowledgements = Vec::new();
         for (activating_commit, commit) in &self.history.commits {
             let Some((reference, value)) = commit.acknowledgement.as_ref() else {
@@ -232,6 +249,23 @@ impl<'a> MergeHistoryVerifier<'a> {
         let acknowledgements = self
             .activated_snapshot_acknowledgements(&accepted_cut.0)
             .await?;
+        self.build_snapshot_stability(
+            snapshot,
+            snapshot_cut,
+            state,
+            accepted_cut,
+            acknowledgements,
+        )
+    }
+
+    fn build_snapshot_stability(
+        &self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+        snapshot_cut: StoreHistoryCut,
+        state: VerifiedMergeSnapshotState,
+        accepted_cut: StoreHistoryCut,
+        acknowledgements: Vec<VerifiedActivatedStoreAck>,
+    ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
         let mut retained_acknowledgements = BTreeMap::new();
         for (device_id, registration) in &state.common.active_registrations {
             let registration_ref = registration.reference();
@@ -264,8 +298,8 @@ impl<'a> MergeHistoryVerifier<'a> {
                 },
             );
         }
-        let founder = self.commit_verifier.load_founder_registration().await?;
-        let authority = coven_database::RetainedReplaySnapshotAuthority {
+        let founder = self.founder.clone();
+        let authority = coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
             store_root: self.root.reference().clone(),
             founder_registration: StoreDeviceRegistrationRef::from_registration(
                 &founder.value,

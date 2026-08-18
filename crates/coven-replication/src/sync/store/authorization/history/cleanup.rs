@@ -188,12 +188,11 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .exact_materialized_ref(&stream_id, sequence)
             .await?
         {
-            if materialized == *reference {
-                return Ok(());
+            if materialized != *reference {
+                return Err(pull::StorePullError::InvalidState(format!(
+                    "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
+                )));
             }
-            return Err(pull::StorePullError::InvalidState(format!(
-                "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
-            )));
         }
         let verified_commit = self.history_verifier.load_ref(reference).await?;
         let commit = verified_commit.value().clone();

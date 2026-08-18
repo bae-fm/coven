@@ -265,6 +265,7 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         &self,
         commit: &StoreBatchCommit,
         loaded: LoadedCommitJoinEvidence,
+        predecessor: &MembershipChain,
     ) -> Result<VerifiedCommitJoinEvidence, StorePullError> {
         if loaded.attempts.is_empty() {
             return Ok(VerifiedCommitJoinEvidence {
@@ -275,27 +276,27 @@ impl<'a> VerifiedMergePredecessorHistory<'a> {
         }
         let mut attempts = BTreeMap::new();
         for (reference, evidence) in loaded.attempts {
-            let access = &evidence.attempt.value.provider_approval.access_grant;
-            let verified = self
-                .find(|candidate, _| candidate == &access.activation)?
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "provider-access activation is outside the accepted Merge predecessor graph"
-                            .to_string(),
-                    )
-                })?;
-            if !predecessor_verifies_provider_administrator(
-                &verified.predecessor_membership,
-                &access.grant.administrator_grant,
-                &verified.verified.value().author_registration,
-                &evidence
-                    .attempt
-                    .value
-                    .provider_approval
-                    .request
-                    .offer
-                    .provider_admin,
-            ) {
+            let approval = &evidence.attempt.value.provider_approval;
+            let provider_admin = &approval.request.offer.provider_admin;
+            let verifies_administrator = match approval.access_grant() {
+                None => predecessor_verifies_provider_administrator(
+                    predecessor,
+                    &provider_admin.grant_id,
+                    &provider_admin.administrator,
+                    provider_admin,
+                ),
+                Some(access) => self
+                    .find(|candidate, _| candidate == &access.activation)?
+                    .is_some_and(|verified| {
+                        predecessor_verifies_provider_administrator(
+                            &verified.predecessor_membership,
+                            &access.grant.administrator_grant,
+                            &verified.verified.value().author_registration,
+                            provider_admin,
+                        )
+                    }),
+            };
+            if !verifies_administrator {
                 return Err(StorePullError::InvalidState(
                     "device join attempt lacks exact Merge provider-administrator authority"
                         .to_string(),

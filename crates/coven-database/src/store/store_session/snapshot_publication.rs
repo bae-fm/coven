@@ -164,6 +164,11 @@ impl StoreSession<'_> {
         load_published_store_snapshot_on(self.conn, &authority)
     }
 
+    fn local_store_snapshots(&mut self) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
+        let authority = self.local_store_authority()?;
+        load_published_store_snapshots_on(self.conn, &authority)
+    }
+
     fn complete_snapshot_publication(&mut self, accepted: StoreSnapshotRef) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
@@ -285,6 +290,11 @@ impl StoreDatabase {
         &self,
     ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
         self.call_store(|session| session.latest_local_store_snapshot())
+            .await
+    }
+
+    pub async fn local_store_snapshots(&self) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
+        self.call_store(|session| session.local_store_snapshots())
             .await
     }
 

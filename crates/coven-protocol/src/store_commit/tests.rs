@@ -1056,50 +1056,26 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
         crate::store_commit::device_join_exchange::DeviceProviderAccessRequest::signed(
             offer,
             provider_admin.provider.clone(),
+            registration.clone(),
+            registration_slot.clone(),
             &joiner,
         )
         .unwrap();
-    let access_grant_id = crate::provider::ProviderAccessGrantId::from_random_bytes(
-        *ObjectHash::digest(b"join provider access grant").as_bytes(),
-    );
-    let access_grant = crate::provider::StoreMemberProviderAccessGrant::signed(
-        access_grant_id,
-        keys::public_key_hex(&joiner),
-        provider_admin.provider.clone(),
-        provider_admin.access.clone(),
-        provider_admin.grant_id.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.root.descriptor.provider,
-        &fixture.registration,
-        &owner_device_signer,
-    )
-    .unwrap();
-    let access_grant_ref = crate::provider::StoreMemberProviderAccessGrantRef::from_grant(
-        &access_grant,
-        exact(
-            provider_access_grant_semantic_prefix(&access_grant.grant_id) + ".json",
-            &access_grant.to_bytes(),
-        ),
-    );
     let verified_root = crate::objects::VerifiedObject {
         value: fixture.root.clone(),
         bytes: fixture.root.to_bytes(),
         semantic_hash: fixture.root_ref.store_root_hash,
         object: fixture.root_ref.object.clone(),
     };
-    let approval = crate::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
-        access_request,
-        crate::provider::ActivatedStoreMemberProviderAccessGrant {
-            grant: access_grant,
-            grant_ref: access_grant_ref,
-            activation: fixture.commit_ref.clone(),
-        },
-        crate::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::SamePrincipal,
-        &verified_root,
-        &fixture.registration,
-        &owner_device_signer,
-    )
-    .unwrap();
+    let approval =
+        crate::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
+            access_request,
+            crate::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal,
+            &verified_root,
+            &fixture.registration,
+            &owner_device_signer,
+        )
+        .unwrap();
     let attempt = DeviceJoinAttempt::signed(
         fixture.root_ref.clone(),
         attempt_id,
@@ -1799,31 +1775,11 @@ fn cleanup_fixture(fixture: &Fixture, joiner: &UserKeypair) -> CleanupFixture {
     let access_request = exchange::DeviceProviderAccessRequest::signed(
         offer,
         provider_admin.provider.clone(),
+        registration.clone(),
+        registration_slot.clone(),
         joiner,
     )
     .unwrap();
-    let access_grant_id = crate::provider::ProviderAccessGrantId::from_random_bytes(
-        *ObjectHash::digest(b"cleanup provider access grant").as_bytes(),
-    );
-    let access_grant = crate::provider::StoreMemberProviderAccessGrant::signed(
-        access_grant_id,
-        keys::public_key_hex(joiner),
-        provider_admin.provider.clone(),
-        provider_admin.access.clone(),
-        provider_admin.grant_id.clone(),
-        fixture.registration_ref.clone(),
-        &fixture.root.descriptor.provider,
-        &fixture.registration,
-        &owner_device_signer,
-    )
-    .unwrap();
-    let access_grant_ref = crate::provider::StoreMemberProviderAccessGrantRef::from_grant(
-        &access_grant,
-        exact(
-            provider_access_grant_semantic_prefix(&access_grant.grant_id) + ".json",
-            &access_grant.to_bytes(),
-        ),
-    );
     let verified_root = crate::objects::VerifiedObject {
         value: fixture.root.clone(),
         bytes: fixture.root.to_bytes(),
@@ -1832,12 +1788,7 @@ fn cleanup_fixture(fixture: &Fixture, joiner: &UserKeypair) -> CleanupFixture {
     };
     let approval = exchange::DeviceProviderAdmissionApproval::signed(
         access_request,
-        crate::provider::ActivatedStoreMemberProviderAccessGrant {
-            grant: access_grant,
-            grant_ref: access_grant_ref,
-            activation: fixture.commit_ref.clone(),
-        },
-        exchange::DeviceProviderAdmissionChallenge::SamePrincipal,
+        exchange::DeviceProviderAdmission::SamePrincipal,
         &verified_root,
         &fixture.registration,
         &owner_device_signer,

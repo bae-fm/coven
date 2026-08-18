@@ -13,10 +13,8 @@ use crate::{
 };
 use coven_protocol::membership::OWNER_PUBKEY_STATE_KEY;
 use coven_protocol::store_commit::{
-    CommitFrontier, ObjectHash, ReferencedStoreDeviceRegistration, ResolvedStoreDeviceState,
-    RetainedVerifiedActivatedAck, SnapshotMeta, StoreBatchCommitRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef, StoreSnapshotRef,
-    VerifiedStoreBatchCommit,
+    CommitFrontier, ObjectHash, RetainedReplaySnapshotAuthority, StoreBatchCommitRef,
+    StoreDeviceRegistrationRef, StoreRootRef,
 };
 
 pub const GENERATION_ZERO: u64 = 0;
@@ -316,171 +314,10 @@ pub struct RetainedReplayGenesisAuthority {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetainedReplaySnapshotAuthority {
-    pub store_root: StoreRootRef,
-    pub founder_registration: StoreDeviceRegistrationRef,
-    pub snapshot: StoreSnapshotRef,
-    pub metadata: SnapshotMeta,
-    pub snapshot_cut: StoreHistoryCut,
-    pub accepted_cut: StoreHistoryCut,
-    pub device_state: ResolvedStoreDeviceState,
-    pub active_registrations:
-        BTreeMap<coven_protocol::store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
-    pub acknowledgements:
-        BTreeMap<coven_protocol::store_commit::StoreDeviceId, RetainedVerifiedActivatedAck>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RetainedReplayAuthority {
     Genesis(RetainedReplayGenesisAuthority),
     StableSnapshot(RetainedReplaySnapshotAuthority),
-}
-
-impl RetainedReplaySnapshotAuthority {
-    pub fn validate(&self) -> Result<(), DbError> {
-        let metadata_bytes = self.metadata.to_bytes();
-        let author = self
-            .active_registrations
-            .get(&self.metadata.author_registration.device_id)
-            .filter(|registration| registration.reference() == &self.metadata.author_registration)
-            .ok_or_else(|| {
-                DbError::Message(
-                    "retained snapshot author is absent from its active registrations".to_string(),
-                )
-            })?;
-        let parsed = SnapshotMeta::parse_at(
-            &metadata_bytes,
-            self.store_root.store_root_hash,
-            &self.snapshot,
-            author.value(),
-        )
-        .map_err(|error| DbError::context("retained snapshot metadata", error))?;
-        if self.metadata.store_root_hash != self.store_root.store_root_hash
-            || self.metadata.generation != self.snapshot.generation
-            || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
-            || self.snapshot.object.verify(&metadata_bytes).is_err()
-            || self.snapshot_cut.frontier() != self.metadata.coverage
-            || !self
-                .accepted_cut
-                .frontier()
-                .covers(&self.snapshot_cut.frontier())
-            || parsed != self.metadata
-            || self.device_state.state_hash != self.metadata.state.devices.state_hash()
-            || self.device_state.recovery != self.metadata.state.devices.recovery()
-        {
-            return Err(DbError::Message(
-                "retained snapshot replay authority differs from its signed snapshot state"
-                    .to_string(),
-            ));
-        }
-        let expected_active = self
-            .device_state
-            .devices
-            .iter()
-            .filter_map(|(device_id, record)| {
-                matches!(
-                    record.status,
-                    coven_protocol::store_commit::StoreDeviceStatus::Active
-                )
-                .then_some((*device_id, &record.registration))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if expected_active.len() != self.active_registrations.len()
-            || expected_active.iter().any(|(device_id, reference)| {
-                self.active_registrations
-                    .get(device_id)
-                    .is_none_or(|registration| registration.reference() != *reference)
-            })
-            || self.acknowledgements.len() != self.active_registrations.len()
-        {
-            return Err(DbError::Message(
-                "retained snapshot replay authority does not exactly cover active devices"
-                    .to_string(),
-            ));
-        }
-        for (device_id, registration) in &self.active_registrations {
-            let bytes = registration.value().to_bytes();
-            registration
-                .reference()
-                .object
-                .verify(&bytes)
-                .map_err(DbError::from)?;
-            let parsed = StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)
-                .map_err(DbError::from)?;
-            if &parsed != registration.value() {
-                return Err(DbError::Message(
-                    "retained snapshot registration is not canonical".to_string(),
-                ));
-            }
-            registration
-                .reference()
-                .verify_registration(registration.value())
-                .map_err(DbError::from)?;
-            let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
-                DbError::Message(
-                    "retained snapshot active device has no acknowledgement".to_string(),
-                )
-            })?;
-            acknowledgement
-                .validate_chain(&self.store_root, registration)
-                .map_err(DbError::from)?;
-            let (acknowledgement_ref, acknowledgement_value) =
-                acknowledgement.latest().ok_or_else(|| {
-                    DbError::Message(
-                        "retained snapshot acknowledgement proof chain is empty".to_string(),
-                    )
-                })?;
-            let commit_bytes = acknowledgement.activating_commit_value.to_bytes();
-            acknowledgement
-                .activating_commit
-                .object
-                .verify(&commit_bytes)
-                .map_err(DbError::from)?;
-            let parsed_commit = VerifiedStoreBatchCommit::parse(
-                &commit_bytes,
-                self.store_root.store_root_hash,
-                &acknowledgement.activating_commit,
-                registration.value(),
-            )
-            .map_err(DbError::from)?;
-            if parsed_commit.value() != &acknowledgement.activating_commit_value
-                || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
-                || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
-                || !history_cut_covers_commit(
-                    &self.accepted_cut,
-                    &acknowledgement.activating_commit,
-                )
-                || !acknowledgement_value
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|acknowledged| {
-                        acknowledged.author_registration == self.metadata.author_registration
-                            && acknowledged.snapshot == self.snapshot
-                    })
-                || acknowledgement_value.device_state != self.metadata.state.devices
-                || !acknowledgement_value
-                    .store_cut
-                    .frontier()
-                    .covers(&self.metadata.coverage)
-            {
-                return Err(DbError::Message(
-                    "retained snapshot acknowledgement differs from its activated commit"
-                        .to_string(),
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommitRef) -> bool {
-    let covered = CommitFrontier(BTreeMap::from([(
-        reference.coord.stream_id,
-        reference.clone(),
-    )]));
-    cut.frontier().covers(&covered)
 }
 
 /// The database image a replay starts from, and the authority that says which

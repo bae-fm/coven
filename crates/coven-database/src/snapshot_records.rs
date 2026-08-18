@@ -19,41 +19,70 @@ pub(crate) fn load_published_store_snapshot_on(
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(generation, reference, successor_slot, bytes)| {
-        let generation = u64::try_from(generation).map_err(|_| {
-            DbError::Message("published Store snapshot generation is negative".to_string())
-        })?;
-        let reference: StoreSnapshotRef = serde_json::from_str(&reference)
-            .map_err(|error| DbError::context("published Store snapshot ref", error))?;
-        if reference.generation != generation {
-            return Err(DbError::Message(
-                "published Store snapshot generation differs from its indexed generation"
-                    .to_string(),
-            ));
-        }
-        let successor_slot = serde_json::from_str(&successor_slot)
-            .map_err(|error| DbError::context("published Store snapshot successor slot", error))?;
-        let author_ref = authority.reference();
-        let author = authority.value();
-        let meta = SnapshotMeta::parse_at(
-            &bytes,
-            author.store_root.store_root_hash,
-            &reference,
-            author,
-        )
-        .map_err(|error| DbError::context("published Store snapshot", error))?;
-        if &meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
-            return Err(DbError::Message(
-                "published Store snapshot differs from its local stream state".to_string(),
-            ));
-        }
-        Ok(PublishedStoreSnapshot {
-            reference,
-            successor_slot,
-            meta,
-        })
-    })
+    .map(|row| parse_published_store_snapshot(row, authority))
     .transpose()
+}
+
+pub(crate) fn load_published_store_snapshots_on(
+    conn: &Connection,
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
+) -> Result<Vec<PublishedStoreSnapshot>, DbError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT generation, snapshot_ref, successor_slot, meta_bytes \
+             FROM published_store_snapshot ORDER BY generation DESC",
+        )
+        .map_err(DbError::from)?;
+    let snapshots = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map_err(DbError::from)?
+        .map(|row| parse_published_store_snapshot(row.map_err(DbError::from)?, authority))
+        .collect();
+    snapshots
+}
+
+fn parse_published_store_snapshot(
+    (generation, reference, successor_slot, bytes): (i64, String, String, Vec<u8>),
+    authority: &coven_protocol::store_commit::ReferencedStoreDeviceRegistration,
+) -> Result<PublishedStoreSnapshot, DbError> {
+    let generation = u64::try_from(generation).map_err(|_| {
+        DbError::Message("published Store snapshot generation is negative".to_string())
+    })?;
+    let reference: StoreSnapshotRef = serde_json::from_str(&reference)
+        .map_err(|error| DbError::context("published Store snapshot ref", error))?;
+    if reference.generation != generation {
+        return Err(DbError::Message(
+            "published Store snapshot generation differs from its indexed generation".to_string(),
+        ));
+    }
+    let successor_slot = serde_json::from_str(&successor_slot)
+        .map_err(|error| DbError::context("published Store snapshot successor slot", error))?;
+    let author_ref = authority.reference();
+    let author = authority.value();
+    let meta = SnapshotMeta::parse_at(
+        &bytes,
+        author.store_root.store_root_hash,
+        &reference,
+        author,
+    )
+    .map_err(|error| DbError::context("published Store snapshot", error))?;
+    if &meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
+        return Err(DbError::Message(
+            "published Store snapshot differs from its local stream state".to_string(),
+        ));
+    }
+    Ok(PublishedStoreSnapshot {
+        reference,
+        successor_slot,
+        meta,
+    })
 }
 
 pub(crate) fn load_outbound_store_snapshot_on(

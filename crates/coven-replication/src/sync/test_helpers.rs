@@ -169,6 +169,56 @@ impl crate::sync::store::DeviceProviderAccessAdministrator for TestDropboxAccess
     }
 }
 
+pub struct CrossPrincipalTestDevice {
+    storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage>,
+    access_administrator: TestDropboxAccessAdministrator,
+}
+
+impl CrossPrincipalTestDevice {
+    pub async fn pending_device_join_observation(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        root: &coven_protocol::store_commit::StoreRootRef,
+        attempt_id: coven_protocol::store_commit::DeviceJoinAttemptId,
+    ) -> Result<crate::sync::store::PendingDeviceJoinObservation<'_>, TestError> {
+        crate::sync::store::PendingDeviceJoinObservation::open(
+            pending,
+            &self.storage,
+            root,
+            attempt_id,
+        )
+        .await
+        .map_err(TestError::from)
+    }
+
+    pub async fn open_pending_device_join(
+        &self,
+        pending: &crate::sync::store::DeviceJoinJournalDatabase,
+        identity: &UserKeypair,
+        offer: coven_protocol::store_commit::device_join_exchange::DeviceJoinOffer,
+    ) -> Result<crate::sync::store::PendingDeviceJoinAuthority<'_>, TestError> {
+        let observation = self
+            .pending_device_join_observation(pending, &offer.store_root, offer.attempt_id)
+            .await?;
+        crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
+            .await
+            .map_err(TestError::from)
+    }
+
+    pub async fn authorize_device_provider_access(
+        &self,
+        owner: &TestDevice,
+        request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
+    ) -> Result<
+        coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+        crate::sync::DeviceJoinError,
+    > {
+        owner
+            .authorize_device_provider_access(request, Some(&self.access_administrator))
+            .await
+    }
+}
+
 pub struct TestStore {
     home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
     storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
@@ -391,13 +441,11 @@ mod test_device {
         pub fn sign_provider_admission_approval_without_shape_validation_for_test(
             &self,
             request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
-            access_grant: coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-            admission: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
+            admission: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission,
         ) -> coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval
         {
             coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed_without_shape_validation_for_test(
                 request,
-                access_grant,
                 admission,
                 &self.device_signer,
             )
@@ -538,6 +586,7 @@ mod test_device {
             storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
         ) -> Result<Self, TestError> {
             let activated_database = joining_database.clone();
+            observer.ensure_device_join_snapshot_for_test().await?;
             let pending_dir = tempfile::tempdir()?;
             let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
                 pending_dir.path().join("pending-device-join.sqlite"),
@@ -553,11 +602,8 @@ mod test_device {
                 .authorize_device_provider_access(access_request, None)
                 .await?;
             let registration_request = pending_join.prepare_registration_request(approval).await?;
-            let provisional = observer
-                .accept_device_registration_request(registration_request)
-                .await?;
-            let provider_ready = observer
-                .publish_device_provider_challenge(provisional)
+            let join = observer
+                .activate_same_principal_join_for_test(registration_request)
                 .await?;
             let mut joining = pending_join
                 .begin_joining_store(joining_database, &joining_store_dir)
@@ -572,12 +618,10 @@ mod test_device {
                     bootstrap_pull.held_positions
                 )));
             }
-            let readiness = joining.bootstrap(provider_ready, published_at).await?;
-            let completion = observer
-                .complete_device_provider_admission(readiness)
+            joining
+                .bootstrap(join.bootstrap.clone(), published_at)
                 .await?;
-            let activation = observer.finalize_device_join(completion).await?;
-            joining.complete(activation).await?;
+            joining.complete(join.activation).await?;
             Self::load_with_database(
                 activated_database,
                 storage,
@@ -586,6 +630,53 @@ mod test_device {
             )
             .await
             .map_err(TestError::from)
+        }
+
+        pub async fn ensure_device_join_snapshot_for_test(&self) -> Result<(), TestError> {
+            if let Some(snapshot) = self.db.latest_local_store_snapshot().await? {
+                let acknowledged = if let Some(published) = self.db.latest_local_store_ack().await?
+                {
+                    let authority = self.device_authority_for_test().await?;
+                    let acknowledgement = self
+                        .load_store_ack_for_test(
+                            &published.reference,
+                            authority.registration.value(),
+                        )
+                        .await?;
+                    acknowledgement.snapshot.as_ref().is_some_and(|locator| {
+                        locator.author_registration == snapshot.meta.author_registration
+                            && locator.snapshot == snapshot.reference
+                            && acknowledgement
+                                .store_cut
+                                .frontier()
+                                .covers(&snapshot.meta.coverage)
+                    })
+                } else {
+                    false
+                };
+                if !acknowledged {
+                    self.publish_acknowledgement(snapshot.meta.coverage.clone())
+                        .await?;
+                }
+                return Ok(());
+            }
+            let image_dir = tempfile::tempdir()?;
+            let root = self.store.root_ref_for_test().clone();
+            let routing_encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+            let image = self
+                .db
+                .capture_snapshot_image_for_test(
+                    root,
+                    image_dir.path().to_path_buf(),
+                    Some(routing_encryption),
+                )
+                .await?;
+            let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+                self.db.materialized_frontier().await?,
+            )?;
+            self.publish_snapshot(image, coverage.clone()).await?;
+            self.publish_acknowledgement(coverage).await?;
+            Ok(())
         }
 
         pub async fn load(
@@ -1335,6 +1426,24 @@ mod test_device {
             crate::sync::DeviceJoinError,
         > {
             self.store.accept_device_registration_request(request).await
+        }
+
+        pub async fn activate_same_principal_join_for_test(
+            &self,
+            request: coven_protocol::store_commit::device_join_exchange::DeviceRegistrationRequest,
+        ) -> Result<
+            coven_protocol::store_commit::device_join_exchange::SamePrincipalDeviceJoin,
+            crate::sync::DeviceJoinError,
+        > {
+            let mut writer = self
+                .store
+                .authorize_writer()
+                .await
+                .map_err(crate::sync::DeviceJoinError::from)?;
+            writer
+                .join_operation()
+                .activate_same_principal_join(request)
+                .await
         }
 
         pub async fn cancel_device_join(
@@ -2790,6 +2899,14 @@ impl TestStore {
         self.home.fail_exact_create_before_call(call);
     }
 
+    pub fn exact_creates(&self) -> Vec<coven_protocol::objects::ObjectSlot> {
+        self.home.exact_creates()
+    }
+
+    pub fn clear_exact_creates(&self) {
+        self.home.clear_exact_creates();
+    }
+
     pub fn fail_exact_create_after_call(&self, call: usize) {
         self.home.fail_exact_create_after_call(call);
     }
@@ -4106,6 +4223,46 @@ impl TestStore {
     }
 
     #[cfg(test)]
+    pub async fn cross_principal_device_for_test(
+        &self,
+        identity: &UserKeypair,
+        peer_account_id: &str,
+    ) -> Result<CrossPrincipalTestDevice, TestError> {
+        let provider_binding =
+            coven_storage::CloudSyncObjectStorage::provider_binding(&*self.storage).await?;
+        let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
+            &provider_binding.store
+        else {
+            return Err(TestError::invariant(
+                "cross-principal test Store is not Dropbox".to_string(),
+            ));
+        };
+        let peer_binding = coven_protocol::objects::ResolvedProviderBinding {
+            store: provider_binding.store.clone(),
+            device: coven_protocol::objects::ProviderDeviceBinding {
+                principal: coven_protocol::objects::ProviderPrincipalId::Dropbox {
+                    account_id: peer_account_id.to_string(),
+                },
+            },
+        };
+        let peer_home: std::sync::Arc<dyn coven_storage::ExactCloudHome> = std::sync::Arc::new(
+            self.home
+                .as_ref()
+                .clone()
+                .with_provider_binding(peer_binding),
+        );
+        Ok(CrossPrincipalTestDevice {
+            storage: std::sync::Arc::new(
+                self.storage
+                    .connection_for_test_identity_and_home(identity.clone(), peer_home),
+            ),
+            access_administrator: TestDropboxAccessAdministrator {
+                namespace_id: namespace_id.clone(),
+            },
+        })
+    }
+
+    #[cfg(test)]
     pub fn install_cross_principal_device<'a>(
         &'a self,
         local_database: coven_database::StoreDatabase,
@@ -4115,66 +4272,24 @@ impl TestStore {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TestError>> + 'a>> {
         Box::pin(async move {
             let observer = self.founder.clone();
-            let provider_binding =
-                coven_storage::CloudSyncObjectStorage::provider_binding(&*self.storage).await?;
-            let coven_protocol::objects::StoreProviderBinding::Dropbox { namespace_id } =
-                &provider_binding.store
-            else {
-                return Err(TestError::invariant(
-                    "cross-principal test Store is not Dropbox".to_string(),
-                ));
-            };
-            let namespace_id = namespace_id.clone();
-            let peer_binding = coven_protocol::objects::ResolvedProviderBinding {
-                store: provider_binding.store.clone(),
-                device: coven_protocol::objects::ProviderDeviceBinding {
-                    principal: coven_protocol::objects::ProviderPrincipalId::Dropbox {
-                        account_id: peer_account_id.to_string(),
-                    },
-                },
-            };
-            let peer_home = std::sync::Arc::new(
-                self.home
-                    .as_ref()
-                    .clone()
-                    .with_provider_binding(peer_binding),
-            );
-            let peer_storage: std::sync::Arc<dyn coven_storage::CloudSyncObjectStorage> =
-                std::sync::Arc::new(coven_storage::CloudSyncConnection::new(
-                    peer_home.clone(),
-                    coven_storage::CloudCipher::Encrypted(
-                        coven_keys::encryption::EncryptionService::from_key([42; 32]),
-                    ),
-                    coven_storage::BlobPathScheme::Hashed,
-                    "cross-principal-test-store",
-                    identity.clone(),
-                ));
+            let peer = self
+                .cross_principal_device_for_test(identity, peer_account_id)
+                .await?;
             let pending_dir = tempfile::tempdir()?;
             let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
                 pending_dir.path().join("pending-device-join.sqlite"),
             )?;
             let offer = observer.begin_device_join(&pubkey_hex(identity)).await?;
-            let join_history =
-                crate::sync::store::HistoryConstructionAuthority::for_pending_device_join()
-                    .open_pinned(peer_storage.as_ref(), &offer.store_root)
-                    .await?;
-            let observation = crate::sync::store::PendingDeviceJoinObservation::new(
-                &pending,
-                &peer_storage,
-                join_history,
-                offer.attempt_id,
-            );
-            let mut pending_join =
-                crate::sync::store::PendingDeviceJoinAuthority::open(observation, identity, offer)
-                    .await?;
+            let mut pending_join = peer
+                .open_pending_device_join(&pending, identity, offer)
+                .await?;
             let access_request = pending_join.prepare_provider_access_request().await?;
-            let access_administrator = TestDropboxAccessAdministrator { namespace_id };
-            let approval = observer
-                .authorize_device_provider_access(access_request, Some(&access_administrator))
+            let approval = peer
+                .authorize_device_provider_access(&observer, access_request)
                 .await?;
             if !matches!(
                 approval.admission,
-                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { .. }
             ) {
                 return Err(
                     TestError::invariant(
@@ -4208,8 +4323,8 @@ impl TestStore {
                 .complete_device_provider_admission(readiness)
                 .await?;
             if !matches!(
-                completion.admission,
-                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal(_)
+                completion,
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion::CrossPrincipal { .. }
             ) {
                 return Err(
                     TestError::invariant(

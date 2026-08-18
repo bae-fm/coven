@@ -780,8 +780,10 @@ impl<'operation> FounderStoreCreation<'operation> {
         };
         let rollback_allowed = match &graph.registration_state {
             coven_database::LocalDeviceRegistrationState::Prepared
+            | coven_database::LocalDeviceRegistrationState::RegistrationPublished
             | coven_database::LocalDeviceRegistrationState::Created => true,
-            coven_database::LocalDeviceRegistrationState::Activated { .. } => false,
+            coven_database::LocalDeviceRegistrationState::RegistrationActivated { .. }
+            | coven_database::LocalDeviceRegistrationState::Activated { .. } => false,
         };
         let mut staged = StagedFounderStoreCreation {
             creation: self,
@@ -918,7 +920,15 @@ impl<'operation> FounderStoreCreation<'operation> {
             coven_database::LocalDeviceRegistrationState::Activated { .. }
         ) {
             database
-                .mark_local_store_device_registration_created(
+                .mark_local_store_device_registration_published(
+                    graph.registration.clone(),
+                    graph.initial_ack_ref.clone(),
+                    graph.initial_ack.clone(),
+                )
+                .await
+                .map_err(StoreProtocolRootError::Database)?;
+            database
+                .mark_local_store_device_ack_published(
                     graph.registration.clone(),
                     graph.initial_ack_ref.clone(),
                     graph.initial_ack.clone(),

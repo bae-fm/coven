@@ -154,6 +154,44 @@ async fn owner_and_member() -> OwnerAndMember {
     }
 }
 
+fn cross_principal_test_home() -> Arc<InMemoryCloudHome> {
+    use coven_protocol::objects::{
+        ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
+    };
+
+    crate::sync::test_helpers::test_cloud_home_with_binding(ResolvedProviderBinding {
+        store: StoreProviderBinding::Dropbox {
+            namespace_id: "shared-namespace".to_string(),
+        },
+        device: ProviderDeviceBinding {
+            principal: ProviderPrincipalId::Dropbox {
+                account_id: "administrator-account".to_string(),
+            },
+        },
+    })
+}
+
+async fn cross_principal_owner_and_member() -> OwnerAndMember {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let (storage, cloud_storage) = cycle_test_store_fixture(
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        cross_principal_test_home(),
+    )
+    .await;
+    OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        cloud_storage,
+        member: UserKeypair::generate(),
+    }
+}
+
 /// Admits `member` into the owner's Store as an ordinary member.
 async fn admit_test_member(
     storage: &TestStore,
@@ -529,12 +567,6 @@ fn exercise_pre_attempt_abandonment<'a>(
 }
 
 #[derive(Clone, Copy)]
-enum JoinerCancellationDisposition {
-    Closure,
-    WriteRevocation,
-}
-
-#[derive(Clone, Copy)]
 enum ExactCreateInterruption {
     BeforeVisibility,
     AfterVisibility,
@@ -565,7 +597,11 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             .await
             .expect("begin exact device join");
         let attempt_id = offer.attempt_id;
-        let pending_join = storage
+        let peer = storage
+            .cross_principal_device_for_test(member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let pending_join = peer
             .open_pending_device_join(&pending, member, offer)
             .await
             .expect("bind pending Store join");
@@ -577,8 +613,8 @@ fn exercise_provider_access_grant_create_interruption<'a>(
             ExactCreateInterruption::BeforeVisibility => storage.fail_exact_create_before_call(1),
             ExactCreateInterruption::AfterVisibility => storage.fail_exact_create_after_call(1),
         }
-        let first = owner_device
-            .authorize_device_provider_access(request.clone(), None)
+        let first = peer
+            .authorize_device_provider_access(&owner_device, request.clone())
             .await;
         let approval = match interruption {
             ExactCreateInterruption::BeforeVisibility => {
@@ -593,8 +629,7 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                         .expect("load provider create status"),
                     Some(DeviceJoinStatus::ProviderAccessGrantCreatePending { .. })
                 ));
-                owner_device
-                    .authorize_device_provider_access(request, None)
+                peer.authorize_device_provider_access(&owner_device, request)
                     .await
                     .expect("resume provider access grant creation")
             }
@@ -602,8 +637,8 @@ fn exercise_provider_access_grant_create_interruption<'a>(
                 first.expect("lost create response settles through provider verification")
             }
         };
-        let retry = owner_device
-            .authorize_device_provider_access((*approval.request).clone(), None)
+        let retry = peer
+            .authorize_device_provider_access(&owner_device, (*approval.request).clone())
             .await
             .expect("retry completed provider access authorization");
         assert_eq!(retry, approval);
@@ -623,7 +658,6 @@ fn exercise_post_attempt_cancellation<'a>(
     storage: &'a TestStore,
     owner: &'a UserKeypair,
     member: &'a UserKeypair,
-    joiner_disposition: JoinerCancellationDisposition,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
         use crate::sync::store::{
@@ -643,7 +677,11 @@ fn exercise_post_attempt_cancellation<'a>(
             .begin_device_join(&pubkey_hex(member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = storage
+        let peer = storage
+            .cross_principal_device_for_test(member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let mut pending_join = peer
             .open_pending_device_join(&pending, member, offer.clone())
             .await
             .expect("bind pending Store join");
@@ -651,17 +689,16 @@ fn exercise_post_attempt_cancellation<'a>(
             .prepare_provider_access_request()
             .await
             .expect("prepare exact provider access request");
-        let approval = owner_device
-            .authorize_device_provider_access(access_request, None)
+        let approval = peer
+            .authorize_device_provider_access(&owner_device, access_request)
             .await
             .expect("authorize exact provider access");
-        let joiner_access_locator = approval.access_grant.grant.locator.clone();
         let registration_request = pending_join
             .prepare_registration_request(approval)
             .await
             .expect("prepare exact registration request");
-        let mut joiner_closure = storage
-            .pending_device_join_observation(&pending, &offer)
+        let mut joiner_closure = peer
+            .pending_device_join_observation(&pending, &offer.store_root, offer.attempt_id)
             .await
             .expect("open joining device closure")
             .authorize_closure(member);
@@ -694,71 +731,16 @@ fn exercise_post_attempt_cancellation<'a>(
             ProviderAdminJoinTerminal::Cancelled(_)
         ));
 
-        let joiner_revocation = ConfirmedWriteRevocation::direct(joiner_access_locator.clone());
-        let joiner_terminal = match joiner_disposition {
-            JoinerCancellationDisposition::Closure => joiner_closure
-                .close(cancellation.clone())
-                .await
-                .expect("close exact joining device"),
-            JoinerCancellationDisposition::WriteRevocation => owner_device
-                .revoke_joining_device_writes(cancellation.clone(), &joiner_revocation)
-                .await
-                .expect("revoke absent joining-device writes"),
-        };
-        if matches!(
-            joiner_disposition,
-            JoinerCancellationDisposition::WriteRevocation
-        ) {
-            let coven_protocol::store_commit::DeviceStreamAnchor::StoreAcknowledgements {
-                first_slot: first_ack,
-            } = &provisional.request.expected_registration.acknowledgements
-            else {
-                panic!("joining registration has a non-Store acknowledgement stream");
-            };
-            let mut expected_slots = vec![
-                provisional.request.registration_slot.clone(),
-                first_ack.clone(),
-            ];
-            if let coven_protocol::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal {
-                response_slot,
-            } = &provisional.request.response
-            {
-                expected_slots.push(response_slot.clone());
-            }
-            assert_eq!(
-                joiner_revocation.requests(),
-                vec![WriteRevocationRequest {
-                    producer: coven_protocol::store_commit::device_join_exchange::DeviceJoinProducer::Joiner,
-                    authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::MemberAccess(
-                        provisional.request.approval.access_grant.grant_ref.clone(),
-                    ),
-                    locator: joiner_access_locator.clone(),
-                    protected_slots: expected_slots,
-                }],
-            );
-        }
-        let joiner_retry = match joiner_disposition {
-            JoinerCancellationDisposition::Closure => joiner_closure
-                .close(cancellation.clone())
-                .await
-                .expect("retry exact joining-device closure"),
-            JoinerCancellationDisposition::WriteRevocation => {
-                let revocation = ConfirmedWriteRevocation::direct(joiner_access_locator);
-                let terminal = owner_device
-                    .revoke_joining_device_writes(cancellation.clone(), &revocation)
-                    .await
-                    .expect("retry absent joining-device write revocation");
-                assert!(revocation.requests().is_empty());
-                terminal
-            }
-        };
+        let joiner_terminal = joiner_closure
+            .close(cancellation.clone())
+            .await
+            .expect("close exact joining device");
+        let joiner_retry = joiner_closure
+            .close(cancellation.clone())
+            .await
+            .expect("retry exact joining-device closure");
         assert_eq!(joiner_retry, joiner_terminal);
-        assert!(match joiner_disposition {
-            JoinerCancellationDisposition::Closure =>
-                matches!(&joiner_terminal, JoinerJoinTerminal::Cancelled(_)),
-            JoinerCancellationDisposition::WriteRevocation =>
-                matches!(&joiner_terminal, JoinerJoinTerminal::WriteRevoked(_)),
-        });
+        assert!(matches!(&joiner_terminal, JoinerJoinTerminal::Cancelled(_)));
         assert!(owner_db
             .device_join_actions()
             .await
@@ -770,19 +752,12 @@ fn exercise_post_attempt_cancellation<'a>(
             ));
         let joiner_action =
             crate::sync::store::DeviceJoinAction::TransferJoinerTerminal(joiner_terminal.clone());
-        match joiner_disposition {
-            JoinerCancellationDisposition::Closure => assert_eq!(
-                pending
-                    .actions()
-                    .expect("enumerate terminal joiner actions"),
-                vec![joiner_action],
-            ),
-            JoinerCancellationDisposition::WriteRevocation => assert!(owner_db
-                .device_join_actions()
-                .await
-                .expect("enumerate replacement joiner terminal")
-                .contains(&joiner_action),),
-        }
+        assert_eq!(
+            pending
+                .actions()
+                .expect("enumerate terminal joiner actions"),
+            vec![joiner_action],
+        );
 
         storage.fail_exact_create_before_call(1);
         let interrupted_cleanup = owner_device
@@ -1041,8 +1016,8 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
             .revoke_device_provider_admission_writes(cancellation.clone(), &revocation)
             .await
             .expect("revoke absent provider-administrator writes");
-        let coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
-            &provisional.request.approval.admission
+        let coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { challenge, .. } =
+            &provisional.request.approval().admission
         else {
             panic!("missing-provider test did not create a cross-principal challenge");
         };
@@ -1053,7 +1028,7 @@ async fn missing_provider_administrator_writes_are_revoked_and_cleaned_up() {
                 authority: coven_protocol::store_commit::device_join_exchange::ProviderWriteAuthorityRef::ProviderAdministrator(
                     provisional
                         .request
-                        .approval
+                        .approval()
                         .request
                         .offer
                         .provider_admin
@@ -4342,6 +4317,14 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
             .await
             .expect("admit unregistered member to hold back package reclamation");
 
+        let generation_before_cycle = store_database(&db)
+            .latest_local_store_snapshot()
+            .await
+            .expect("read Store snapshot before cadence cycle")
+            .expect("the cadence baseline snapshot exists")
+            .reference
+            .generation;
+
         let cycle_device = storage
             .open_into(&db, db_store_dir.clone())
             .await
@@ -4359,7 +4342,9 @@ async fn merge_snapshot_count_cadence_uses_the_local_stream_coverage() {
                 .expect("count cadence publishes a Store snapshot")
                 .reference
                 .generation,
-            1,
+            generation_before_cycle
+                .checked_add(1)
+                .expect("snapshot generation does not overflow"),
         );
     })
     .await
@@ -5144,6 +5129,11 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .authorize_writer()
         .await
         .expect("authorize founder before removal");
+    let snapshot_before_pull = StoreDatabase::new(&founder_db)
+        .latest_local_store_snapshot()
+        .await
+        .expect("read founder snapshot before removal")
+        .map(|snapshot| snapshot.reference);
 
     let custody = TestCustody::default();
     storage
@@ -5168,12 +5158,13 @@ async fn pull_refreshes_snapshot_authority_before_publication() {
         .await
         .expect("evaluate snapshot after pull");
 
-    assert!(
+    assert_eq!(
         StoreDatabase::new(&founder_db)
             .latest_local_store_snapshot()
             .await
             .expect("read founder snapshot state")
-            .is_none(),
+            .map(|snapshot| snapshot.reference),
+        snapshot_before_pull,
         "a removed Owner must not publish from pre-pull membership authority",
     );
 }
@@ -5281,8 +5272,118 @@ impl<'storage> SamePrincipalApprovalFixture<'storage> {
     }
 }
 
+async fn prepare_cross_principal_approval<'storage>(
+    owner_db: &Database,
+    owner_db_store_dir: StoreDir,
+    storage: &TestStore,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+    pending: &crate::sync::store::DeviceJoinJournalDatabase,
+    peer: &'storage CrossPrincipalTestDevice,
+) -> (
+    crate::sync::store::PendingDeviceJoinAuthority<'storage>,
+    TestDevice,
+    coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval,
+) {
+    let owner_device = storage
+        .bind_device_in(owner_db, owner_db_store_dir, owner)
+        .await
+        .expect("bind owner Store");
+    let offer = owner_device
+        .begin_device_join(&pubkey_hex(member))
+        .await
+        .expect("begin exact device join");
+    let pending_join = peer
+        .open_pending_device_join(pending, member, offer)
+        .await
+        .expect("bind pending Store join");
+    let access_request = pending_join
+        .prepare_provider_access_request()
+        .await
+        .expect("prepare exact provider request");
+    let approval = peer
+        .authorize_device_provider_access(&owner_device, access_request)
+        .await
+        .expect("authorize cross-principal provider access");
+    assert!(matches!(
+        approval.admission,
+        coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { .. }
+    ));
+    (pending_join, owner_device, approval)
+}
+
 #[tokio::test]
-async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
+async fn same_principal_admission_reuses_existing_provider_access() {
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        member,
+        ..
+    } = owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([60; 32]),
+    )
+    .await;
+    let owner_device = storage
+        .bind_device_in(&owner_db, owner_db_store_dir, &owner)
+        .await
+        .expect("bind owner Store");
+    let pending_dir = tempfile::tempdir().expect("create join directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open join journal");
+    let offer = owner_device
+        .begin_device_join(&pubkey_hex(&member))
+        .await
+        .expect("begin exact device join");
+    let pending_join = storage
+        .open_pending_device_join(&pending, &member, offer)
+        .await
+        .expect("bind pending Store join");
+    let request = pending_join
+        .prepare_provider_access_request()
+        .await
+        .expect("prepare exact provider request");
+    let position_before = storage
+        .latest_store_position()
+        .await
+        .expect("load Store position before provider admission");
+    storage.clear_exact_creates();
+
+    let approval = owner_device
+        .authorize_device_provider_access(request, None)
+        .await
+        .expect("authorize same-principal provider access");
+
+    assert!(matches!(
+        approval.admission,
+        coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal
+    ));
+    assert!(approval.access_grant().is_none());
+    assert!(
+        storage.exact_creates().is_empty(),
+        "same-principal approval must not publish a provider-access object",
+    );
+    assert_eq!(
+        storage
+            .latest_store_position()
+            .await
+            .expect("load Store position after provider admission"),
+        position_before,
+        "same-principal approval must not activate a provider-access Store commit",
+    );
+}
+
+#[tokio::test]
+async fn owner_accepts_same_principal_approval_covered_by_a_later_predecessor_head() {
     let OwnerAndMember {
         owner,
         owner_db,
@@ -5317,12 +5418,17 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
 
     second
         .owner
-        .accept_device_registration_request(first_registration_request)
+        .ensure_device_join_snapshot_for_test()
         .await
-        .expect("the later predecessor head covers the first access activation");
+        .expect("publish the direct join snapshot");
+    second
+        .owner
+        .activate_same_principal_join_for_test(first_registration_request)
+        .await
+        .expect("the later predecessor head preserves the first approval authority");
 }
 
-/// The owner's registration-acceptance step is single-shot, and it is the
+/// The owner's same-principal activation is single-shot, and it is the
 /// device's own sync loop it has to survive.
 ///
 /// The step composes the join attempt against one exact position on the owner's
@@ -5343,7 +5449,7 @@ async fn owner_accepts_access_activation_covered_by_a_later_predecessor_head() {
 /// re-prepares against the winner — it is the one composer that can lose a
 /// position safely.
 #[tokio::test(start_paused = true)]
-async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_loop() {
+async fn same_principal_activation_holds_its_position_against_the_owners_own_sync_loop() {
     let OwnerAndMember {
         owner,
         owner_db,
@@ -5365,6 +5471,11 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         .prepare_registration_request(approval.approval)
         .await
         .expect("prepare the joining device's registration request");
+    approval
+        .owner
+        .ensure_device_join_snapshot_for_test()
+        .await
+        .expect("publish the direct join snapshot");
 
     // A row of the owner's own, queued as a Store write: the sync loop now
     // holds a head addressed to the same position the acceptance composes
@@ -5405,7 +5516,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
     let accept_store = approval.owner.clone();
     let acceptance = tokio::spawn(async move {
         accept_store
-            .accept_device_registration_request(request)
+            .activate_same_principal_join_for_test(request)
             .await
     });
 
@@ -5463,11 +5574,7 @@ async fn registration_acceptance_holds_its_position_against_the_owners_own_sync_
         .expect("join the sync loop drain task")
         .expect("the sync loop resolves losing the position");
     assert_eq!(
-        accepted
-            .publication_authorization
-            .attempt_activation
-            .coord
-            .sequence(),
+        accepted.activation.outcome_activation.coord.sequence(),
         2,
         "the acceptance activates at the position it read, not one past it",
     );
@@ -5500,7 +5607,7 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .prepare_registration_request(fixture.approval)
         .await
         .expect("prepare exact registration request");
-    let offer = request.approval.request.offer.as_ref();
+    let offer = request.approval().request.offer.as_ref();
     let plan = fixture
         .owner
         .prepare_operation_plan_for_test()
@@ -5512,21 +5619,21 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let mut invalid_approval = request.approval.as_ref().clone();
+    let mut invalid_approval = request.approval().clone();
     invalid_approval.corrupt_signature_for_test();
     let attempt = owner_authority
         .sign_device_join_attempt_for_test(
             offer.store_root.clone(),
             offer.attempt_id,
             offer.attempt_slot.clone(),
-            request.expected_registration.clone(),
-            request.registration_slot.clone(),
+            request.expected_registration().clone(),
+            request.registration_slot().clone(),
             offer.outcome_slot.clone(),
             cut,
             membership,
             offer.provider_admin.grant_id.clone(),
             invalid_approval,
-            request.response.clone(),
+            request.response(),
             offer.owner_grant.clone(),
         )
         .expect("Owner signs the attempt envelope");
@@ -5561,63 +5668,6 @@ async fn owner_signed_attempt_rejects_an_invalid_embedded_provider_approval() {
 }
 
 #[tokio::test]
-async fn owner_rejects_invalid_access_activation_without_consuming_the_join_journal() {
-    let OwnerAndMember {
-        owner,
-        owner_db,
-        owner_db_store_dir,
-        storage,
-        member,
-        ..
-    } = owner_and_member().await;
-    let mut fixture = SamePrincipalApprovalFixture::prepare(
-        &owner_db,
-        owner_db_store_dir.clone(),
-        &storage,
-        &owner,
-        &member,
-    )
-    .await;
-    let valid_request = fixture
-        .pending_join
-        .prepare_registration_request(fixture.approval)
-        .await
-        .expect("prepare exact registration request");
-    let mut invalid_access = valid_request.approval.access_grant.clone();
-    invalid_access.activation.commit_hash =
-        coven_protocol::store_commit::ObjectHash::digest(b"absent provider-access activation");
-    let owner_authority = storage
-        .founder_device_authority()
-        .await
-        .expect("load exact founder authority");
-    let malformed_approval = owner_authority
-        .sign_provider_admission_approval_without_shape_validation_for_test(
-            valid_request.approval.request.as_ref().clone(),
-            invalid_access,
-            valid_request.approval.admission.clone(),
-        );
-    let malformed_request =
-        coven_protocol::store_commit::device_join_exchange::DeviceRegistrationRequest::signed(
-            malformed_approval,
-            valid_request.expected_registration.clone(),
-            valid_request.registration_slot.clone(),
-            valid_request.response.clone(),
-            &member,
-        )
-        .expect("joiner signs malformed remote request fixture");
-    fixture
-        .owner
-        .accept_device_registration_request(malformed_request)
-        .await
-        .expect_err("Owner rejects the absent exact provider-access activation");
-    fixture
-        .owner
-        .accept_device_registration_request(valid_request)
-        .await
-        .expect("valid retry remains possible after rejected activation");
-}
-
-#[tokio::test]
 async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() {
     Box::pin(async {
         let founder = UserKeypair::generate();
@@ -5627,7 +5677,7 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             &founder_db,
             founder_db_store_dir.clone(),
             &founder,
-            crate::sync::test_helpers::test_cloud_home(),
+            cross_principal_test_home(),
         )
         .await;
         let excluding_owner = UserKeypair::generate();
@@ -5694,12 +5744,32 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
         };
 
         let joining_member = UserKeypair::generate();
-        let mut approval = SamePrincipalApprovalFixture::prepare(
+        admit_test_member(
+            &storage,
+            &founder_db,
+            founder_db_store_dir.clone(),
+            &founder,
+            &joining_member,
+            &EncryptionService::from_key([62; 32]),
+        )
+        .await;
+        let pending_dir = tempfile::tempdir().expect("create join directory");
+        let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+            pending_dir.path().join("pending.sqlite"),
+        )
+        .expect("open join journal");
+        let peer = storage
+            .cross_principal_device_for_test(&joining_member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let (mut pending_join, _, approval) = prepare_cross_principal_approval(
             &founder_db,
             founder_db_store_dir.clone(),
             &storage,
             &founder,
             &joining_member,
+            &pending,
+            &peer,
         )
         .await;
 
@@ -5727,9 +5797,8 @@ async fn joiner_rejects_access_commit_beyond_another_streams_exclusion_cutoff() 
             result => panic!("unexpected exclusion outcome result: {result:?}"),
         }
 
-        approval
-            .pending_join
-            .prepare_registration_request(approval.approval)
+        pending_join
+            .prepare_registration_request(approval)
             .await
             .expect_err("the excluded founder suffix cannot authorize provider access");
     })
@@ -5745,32 +5814,76 @@ async fn authenticated_next_head_with_a_missing_commit_body_rejects_provider_acc
         storage,
         cloud_storage,
         member,
-    } = owner_and_member().await;
-    let mut fixture = SamePrincipalApprovalFixture::prepare(
+    } = cross_principal_owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([63; 32]),
+    )
+    .await;
+    let pending_dir = tempfile::tempdir().expect("create join directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open join journal");
+    let peer = storage
+        .cross_principal_device_for_test(&member, "joining-account")
+        .await
+        .expect("bind joining provider principal");
+    let (mut pending_join, _, approval) = prepare_cross_principal_approval(
         &owner_db,
         owner_db_store_dir.clone(),
         &storage,
         &owner,
         &member,
+        &pending,
+        &peer,
     )
     .await;
     let later_member = UserKeypair::generate();
-    let later = SamePrincipalApprovalFixture::prepare(
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &later_member,
+        &EncryptionService::from_key([63; 32]),
+    )
+    .await;
+    let later_pending_dir = tempfile::tempdir().expect("create later join directory");
+    let later_pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        later_pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open later join journal");
+    let later_peer = storage
+        .cross_principal_device_for_test(&later_member, "later-account")
+        .await
+        .expect("bind later provider principal");
+    let _later = prepare_cross_principal_approval(
         &owner_db,
         owner_db_store_dir.clone(),
         &storage,
         &owner,
         &later_member,
+        &later_pending,
+        &later_peer,
     )
     .await;
+    let later_activation = storage
+        .latest_store_position()
+        .await
+        .expect("load latest authenticated Store position")
+        .expect("member admission published a Store position");
     cloud_storage
-        .delete_protocol_object(&later.approval.access_grant.activation.object)
+        .delete_protocol_object(&later_activation.object)
         .await
         .expect("remove the commit body behind its authenticated head");
 
-    fixture
-        .pending_join
-        .prepare_registration_request(fixture.approval)
+    pending_join
+        .prepare_registration_request(approval)
         .await
         .expect_err("an authenticated head cannot hide its missing commit body");
 }
@@ -5784,22 +5897,45 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         storage,
         cloud_storage,
         member,
-    } = owner_and_member().await;
-    let mut fixture = SamePrincipalApprovalFixture::prepare(
+    } = cross_principal_owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([64; 32]),
+    )
+    .await;
+    let pending_dir = tempfile::tempdir().expect("create join directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open join journal");
+    let peer = storage
+        .cross_principal_device_for_test(&member, "joining-account")
+        .await
+        .expect("bind joining provider principal");
+    let (mut pending_join, owner_device, approval) = prepare_cross_principal_approval(
         &owner_db,
         owner_db_store_dir.clone(),
         &storage,
         &owner,
         &member,
+        &pending,
+        &peer,
     )
     .await;
-    let activation = fixture.approval.access_grant.activation.clone();
+    let activation = storage
+        .latest_store_position()
+        .await
+        .expect("load latest authenticated Store position")
+        .expect("member admission published a Store position");
     let owner_authority = storage
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) = fixture
-        .owner
+    let (next_slot, _) = owner_device
         .exact_next_announcement_slot_for_test(
             owner_authority.registration_ref(),
             owner_authority.registration(),
@@ -5827,9 +5963,8 @@ async fn unauthenticated_next_head_does_not_hide_the_prior_accepted_access_commi
         .create_protocol_object(&garbage)
         .await
         .expect("publish unauthenticated next-head bytes");
-    fixture
-        .pending_join
-        .prepare_registration_request(fixture.approval)
+    pending_join
+        .prepare_registration_request(approval)
         .await
         .expect("unauthenticated garbage leaves the prior accepted access commit current");
 }
@@ -5843,22 +5978,45 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         storage,
         cloud_storage,
         member,
-    } = owner_and_member().await;
-    let mut fixture = SamePrincipalApprovalFixture::prepare(
+    } = cross_principal_owner_and_member().await;
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([65; 32]),
+    )
+    .await;
+    let pending_dir = tempfile::tempdir().expect("create join directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending.sqlite"),
+    )
+    .expect("open join journal");
+    let peer = storage
+        .cross_principal_device_for_test(&member, "joining-account")
+        .await
+        .expect("bind joining provider principal");
+    let (mut pending_join, owner_device, approval) = prepare_cross_principal_approval(
         &owner_db,
         owner_db_store_dir.clone(),
         &storage,
         &owner,
         &member,
+        &pending,
+        &peer,
     )
     .await;
-    let activation = fixture.approval.access_grant.activation.clone();
+    let activation = storage
+        .latest_store_position()
+        .await
+        .expect("load latest authenticated Store position")
+        .expect("member admission published a Store position");
     let owner_authority = storage
         .founder_device_authority()
         .await
         .expect("load exact founder authority");
-    let (next_slot, _) = fixture
-        .owner
+    let (next_slot, _) = owner_device
         .exact_next_announcement_slot_for_test(
             owner_authority.registration_ref(),
             owner_authority.registration(),
@@ -5909,9 +6067,8 @@ async fn authenticated_malformed_next_head_rejects_prior_provider_access() {
         .await
         .expect("publish authenticated malformed head");
 
-    fixture
-        .pending_join
-        .prepare_registration_request(fixture.approval)
+    pending_join
+        .prepare_registration_request(approval)
         .await
         .expect_err("an authenticated malformed successor makes current history unverifiable");
 }
@@ -5955,7 +6112,7 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
         storage,
         member,
         ..
-    } = owner_and_member().await;
+    } = cross_principal_owner_and_member().await;
     admit_test_member(
         &storage,
         &owner_db,
@@ -5971,37 +6128,6 @@ async fn post_attempt_device_join_cancellation_closes_and_cleans_up_on_merge() {
         &storage,
         &owner,
         &member,
-        JoinerCancellationDisposition::Closure,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn missing_joiner_writes_are_revoked_and_cleaned_up_on_merge() {
-    let OwnerAndMember {
-        owner,
-        owner_db,
-        owner_db_store_dir,
-        storage,
-        member,
-        ..
-    } = owner_and_member().await;
-    admit_test_member(
-        &storage,
-        &owner_db,
-        owner_db_store_dir.clone(),
-        &owner,
-        &member,
-        &EncryptionService::from_key([46; 32]),
-    )
-    .await;
-    exercise_post_attempt_cancellation(
-        &coven_database::StoreDatabase::new(&owner_db),
-        &owner_db_store_dir,
-        &storage,
-        &owner,
-        &member,
-        JoinerCancellationDisposition::WriteRevocation,
     )
     .await;
 }
@@ -6015,7 +6141,7 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
         storage,
         member,
         ..
-    } = owner_and_member().await;
+    } = cross_principal_owner_and_member().await;
     admit_test_member(
         &storage,
         &owner_db,
@@ -6042,7 +6168,11 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .begin_device_join(&pubkey_hex(&member))
             .await
             .expect("begin exact device join");
-        let mut pending_join = storage
+        let peer = storage
+            .cross_principal_device_for_test(&member, "joining-account")
+            .await
+            .expect("bind joining provider principal");
+        let mut pending_join = peer
             .open_pending_device_join(&pending, &member, offer.clone())
             .await
             .expect("bind pending Store join");
@@ -6050,8 +6180,8 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .prepare_provider_access_request()
             .await
             .expect("prepare exact provider access request");
-        let approval = owner_device
-            .authorize_device_provider_access(access_request, None)
+        let approval = peer
+            .authorize_device_provider_access(&owner_device, access_request)
             .await
             .expect("authorize exact provider access");
         let registration_request = pending_join
@@ -6090,8 +6220,8 @@ async fn cancellation_removes_an_inflight_registration_on_merge() {
             .close_device_provider_admission(cancellation.clone())
             .await
             .expect("close provider admission during late create");
-        let mut cancellation_join = storage
-            .pending_device_join_observation(&pending, &offer)
+        let mut cancellation_join = peer
+            .pending_device_join_observation(&pending, &offer.store_root, offer.attempt_id)
             .await
             .expect("bind concurrent pending Store join")
             .authorize_closure(&member);
@@ -6126,7 +6256,7 @@ async fn provider_access_grant_create_resumes_after_pre_visibility_failure_on_me
         storage,
         member,
         ..
-    } = owner_and_member().await;
+    } = cross_principal_owner_and_member().await;
     admit_test_member(
         &storage,
         &owner_db,
@@ -6156,7 +6286,7 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
         storage,
         member,
         ..
-    } = owner_and_member().await;
+    } = cross_principal_owner_and_member().await;
     admit_test_member(
         &storage,
         &owner_db,
@@ -6179,32 +6309,14 @@ async fn provider_access_grant_create_settles_lost_response_on_merge() {
 
 #[tokio::test]
 async fn cross_principal_device_join_completes_on_the_runtime_stack() {
-    use coven_protocol::objects::{
-        ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding, StoreProviderBinding,
-    };
-
-    let owner = UserKeypair::generate();
-    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
-    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
-    let storage = TestStore::create(
-        &owner_db,
-        owner_db_store_dir.clone(),
-        "cross-principal-test-store",
-        owner.clone(),
-        crate::sync::test_helpers::test_cloud_home_with_binding(ResolvedProviderBinding {
-            store: StoreProviderBinding::Dropbox {
-                namespace_id: "shared-namespace".to_string(),
-            },
-            device: ProviderDeviceBinding {
-                principal: ProviderPrincipalId::Dropbox {
-                    account_id: "administrator-account".to_string(),
-                },
-            },
-        }),
-    )
-    .await
-    .expect("create exact cross-principal test Store");
-    let member = UserKeypair::generate();
+    let OwnerAndMember {
+        owner,
+        owner_db,
+        owner_db_store_dir,
+        storage,
+        member,
+        ..
+    } = cross_principal_owner_and_member().await;
     let encryption = EncryptionService::from_key([43; 32]);
     admit_test_member(
         &storage,

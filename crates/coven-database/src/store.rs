@@ -117,7 +117,7 @@ pub use reclaim::journal::{
 pub(crate) use retained_replay::copy_table_with_conflicts;
 pub use retained_replay::{
     projection_table_names, RetainedReplayAuthority, RetainedReplayBaseline,
-    RetainedReplayGenesisAuthority, RetainedReplaySnapshotAuthority, GENERATION_ZERO,
+    RetainedReplayGenesisAuthority, GENERATION_ZERO,
 };
 pub(crate) use snapshot_image::verify_circle_bootstrap_connection;
 pub use snapshot_image::{

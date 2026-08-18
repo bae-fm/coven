@@ -32,6 +32,20 @@ pub(crate) mod restore;
 pub(crate) mod snapshots;
 use registration_object::prepare_registration_object;
 
+/// A verified same-principal snapshot installation waiting for its device-join
+/// activation to be committed. Its database and proof pieces remain inside the
+/// Store boundary that completes the operation.
+#[doc(hidden)]
+pub struct InstalledDeviceJoinSnapshot {
+    database: coven_database::StoreDatabase,
+    root: coven_protocol::store_commit::StoreRootRef,
+    verified_root:
+        coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::StoreProtocolRoot>,
+    attempt: coven_protocol::store_commit::DeviceJoinAttempt,
+    outcome: coven_protocol::store_commit::DeviceJoinOutcome,
+    bootstrap: coven_database::DeviceJoinBootstrapPlan,
+}
+
 pub use acknowledgements::StoreAckError;
 pub use blob::eager_cache::{EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus};
 pub use blob::{BlobCacheError, BlobStream};
@@ -62,13 +76,16 @@ pub use device_join::{
     DeviceJoinJournalDatabase, DeviceJoinJournalRecord, DeviceJoinOffer, DeviceJoinProducer,
     DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus,
     DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
-    ProvisionalDeviceBootstrap,
+    ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
 };
-pub use device_join::{PendingDeviceJoinAuthority, PendingDeviceJoinObservation};
+pub use device_join::{
+    PendingDeviceJoinAuthority, PendingDeviceJoinObservation,
+    PendingSamePrincipalDeviceJoinCompletion,
+};
 pub use error::StoreError;
 pub(crate) use error::StorePreparationError;
 pub use host_write::HostWriteBlobStaging;
@@ -100,4 +117,6 @@ pub use pull::{PullError, StorePullError, StorePullResult};
 pub(crate) use restore::RestoringStore;
 pub(crate) use snapshots::SnapshotCut;
 #[doc(hidden)]
-pub use snapshots::{PreparedSnapshotBootstrap, SnapshotError, SnapshotSpoolCleanupError};
+pub use snapshots::{
+    PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, SnapshotError, SnapshotSpoolCleanupError,
+};

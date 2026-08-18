@@ -33,7 +33,17 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let owner_db_store_dir = coven_replication::sync::test_helpers::test_store_dir();
     let owner_db = open_test_db(owner_db_store_dir.clone());
     let owner_database = coven_database::StoreDatabase::from_database(owner_db.clone());
-    let home = test_cloud_home();
+    let namespace_id = "device-join-client-shared-namespace";
+    let home = test_cloud_home_with_binding(coven_protocol::ResolvedProviderBinding {
+        store: coven_protocol::StoreProviderBinding::Dropbox {
+            namespace_id: namespace_id.to_string(),
+        },
+        device: coven_protocol::ProviderDeviceBinding {
+            principal: coven_protocol::ProviderPrincipalId::Dropbox {
+                account_id: "owner-provider-account".to_string(),
+            },
+        },
+    });
     let create_store_db = owner_db.clone();
     let create_store_db_store_dir = owner_db_store_dir.clone();
     let create_store_owner = owner.clone();
@@ -54,6 +64,21 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let joining_identity =
         coven_keys::keys::mint_pending_identity().expect("mint pending joining identity");
     let member_pubkey = coven_keys::keys::public_key_hex(&joining_identity);
+    let joiner_home = Arc::new(home.as_ref().clone().with_provider_binding(
+        coven_protocol::ResolvedProviderBinding {
+            store: coven_protocol::StoreProviderBinding::Dropbox {
+                namespace_id: namespace_id.to_string(),
+            },
+            device: coven_protocol::ProviderDeviceBinding {
+                principal: coven_protocol::ProviderPrincipalId::Dropbox {
+                    account_id: "joining-provider-account".to_string(),
+                },
+            },
+        },
+    ));
+    let access_administrator = TestDropboxAccessAdministrator {
+        namespace_id: namespace_id.to_string(),
+    };
     let admission = store
         .admit_member(
             &owner_db,
@@ -107,7 +132,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             Arc::new(SystemClock),
         )
         .expect("construct DeviceJoinClient")
-        .with_test_bootstrap_home(home.clone())
+        .with_test_bootstrap_home(joiner_home.clone())
     };
     let offer = owner_store
         .begin_device_join(&member_pubkey)
@@ -136,7 +161,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         ],
     );
     let approval = owner_store
-        .authorize_device_provider_access(access_request, None)
+        .authorize_device_provider_access(access_request, Some(&access_administrator))
         .await
         .expect("authorize provider access");
     let registration_request = new_client()
@@ -187,7 +212,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     assert!(matches!(
         owner_database
             .device_join_status(
-                completion.readiness.proof.attempt.attempt_id,
+                completion.attempt().attempt_id,
                 coven_replication::sync::DeviceJoinRole::Owner,
             )
         .await
@@ -201,7 +226,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("enumerate Store join actions")
         .contains(
             &coven_replication::sync::DeviceJoinAction::ResumeOperation {
-                attempt_id: completion.readiness.proof.attempt.attempt_id,
+                attempt_id: completion.attempt().attempt_id,
                 role: coven_replication::sync::DeviceJoinRole::Owner,
             }
         ));

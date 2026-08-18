@@ -332,9 +332,9 @@ pub async fn restore_from_cloud(
             }
         };
 
-        // Cancellation is checked between phases, never during a download or
-        // durable write. Every cancellation still exits through this restore's
-        // failure cleanup.
+        // Durable writes remain phase boundaries. The snapshot byte stream also
+        // observes this signal so cancellation does not wait for the provider
+        // response to finish.
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
         }
@@ -352,6 +352,7 @@ pub async fn restore_from_cloud(
             &store_dir.db_path(),
             keypair,
             std::sync::Arc::new(|_| {}),
+            cancel,
         )
         .await?;
 

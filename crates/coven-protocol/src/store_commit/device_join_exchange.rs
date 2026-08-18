@@ -155,6 +155,8 @@ impl DeviceJoinOffer {
 pub struct DeviceProviderAccessRequestBody {
     pub offer: Box<DeviceJoinOffer>,
     pub peer_provider: ProviderDeviceBinding,
+    pub expected_registration: StoreDeviceRegistration,
+    pub registration_slot: ObjectSlot,
 }
 
 impl SignedBody for DeviceProviderAccessRequestBody {
@@ -167,24 +169,26 @@ impl DeviceProviderAccessRequest {
     pub fn signed(
         offer: DeviceJoinOffer,
         peer_provider: ProviderDeviceBinding,
+        expected_registration: StoreDeviceRegistration,
+        registration_slot: ObjectSlot,
         member_signer: &UserKeypair,
     ) -> Result<Self, DeviceJoinExchangeError> {
         if keys::public_key_hex(member_signer) != offer.member_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        peer_provider.validate_for(&offer.provider)?;
-        Ok(Signed::sign(
-            DeviceProviderAccessRequestBody {
-                offer: Box::new(offer),
-                peer_provider,
-            },
-            member_signer,
-        ))
+        let body = DeviceProviderAccessRequestBody {
+            offer: Box::new(offer),
+            peer_provider,
+            expected_registration,
+            registration_slot,
+        };
+        body.validate_shape()?;
+        Ok(Signed::sign(body, member_signer))
     }
 
     pub fn verify(&self, owner: &StoreDeviceRegistration) -> Result<(), DeviceJoinExchangeError> {
         self.offer.verify(owner)?;
-        self.peer_provider.validate_for(&self.offer.provider)?;
+        self.body().validate_shape()?;
         self.verify_by(&self.offer.member_pubkey)
             .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
     }
@@ -207,11 +211,49 @@ impl DeviceProviderAccessRequest {
     }
 }
 
+impl DeviceProviderAccessRequestBody {
+    fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
+        let offer = &self.offer;
+        self.peer_provider.validate_for(&offer.provider)?;
+        if self.expected_registration.store_root != offer.store_root
+            || self.expected_registration.author_pubkey != offer.member_pubkey
+            || self.expected_registration.provider != self.peer_provider
+            || self.registration_slot == offer.attempt_slot
+            || self.registration_slot == offer.outcome_slot
+        {
+            return Err(DeviceJoinExchangeError::RegistrationRequestMismatch);
+        }
+        match &self.expected_registration.origin {
+            crate::store_commit::StoreDeviceRegistrationOrigin::Join {
+                attempt_id,
+                attempt_slot,
+                outcome_slot,
+            } if *attempt_id == offer.attempt_id
+                && attempt_slot == &offer.attempt_slot
+                && outcome_slot == &offer.outcome_slot => {}
+            _ => return Err(DeviceJoinExchangeError::RegistrationRequestMismatch),
+        }
+        let slots = vec![
+            offer.attempt_slot.clone(),
+            offer.outcome_slot.clone(),
+            self.registration_slot.clone(),
+            self.expected_registration
+                .acknowledgements
+                .first_slot()
+                .clone(),
+        ];
+        require_distinct_slots(&slots)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceProviderAdmissionChallenge {
+pub enum DeviceProviderAdmission {
     SamePrincipal,
-    CrossPrincipal(CrossPrincipalProbeChallenge),
+    CrossPrincipal {
+        access_grant: Box<ActivatedStoreMemberProviderAccessGrant>,
+        challenge: CrossPrincipalProbeChallenge,
+    },
 }
 
 /// The wire body of a provider administrator's admission approval.
@@ -219,8 +261,7 @@ pub enum DeviceProviderAdmissionChallenge {
 #[serde(deny_unknown_fields)]
 pub struct DeviceProviderAdmissionApprovalBody {
     pub request: Box<DeviceProviderAccessRequest>,
-    pub access_grant: ActivatedStoreMemberProviderAccessGrant,
-    pub admission: DeviceProviderAdmissionChallenge,
+    pub admission: DeviceProviderAdmission,
 }
 
 impl SignedBody for DeviceProviderAdmissionApprovalBody {
@@ -240,36 +281,40 @@ impl DeviceProviderAdmissionApprovalBody {
             || store_root.value.object_hash() != offer.store_root.store_root_hash
             || store_root.value.descriptor.store_root_id() != offer.store_root.store_root_id
             || store_root.value.descriptor.provider != offer.provider
-            || self.access_grant.grant.member_pubkey != offer.member_pubkey
-            || self.access_grant.grant.provider != self.request.peer_provider
-            || self.access_grant.grant_ref.grant_id != self.access_grant.grant.grant_id
-            || self.access_grant.grant_ref.grant_hash != self.access_grant.grant.grant_hash()
-            || self.access_grant.grant.administrator_grant != offer.provider_admin.grant_id
-            || self.access_grant.grant.administrator != offer.provider_admin.administrator
         {
             return Err(DeviceJoinExchangeError::ApprovalMismatch);
         }
-        self.access_grant
-            .grant
-            .verify(&offer.provider, administrator)?;
         let same_principal = offer.provider_admin.provider == self.request.peer_provider;
-        if same_principal
-            != matches!(
-                self.admission,
-                DeviceProviderAdmissionChallenge::SamePrincipal
-            )
-        {
-            return Err(DeviceJoinExchangeError::ApprovalMismatch);
+        match &self.admission {
+            DeviceProviderAdmission::SamePrincipal if same_principal => {}
+            DeviceProviderAdmission::CrossPrincipal { access_grant, .. }
+                if !same_principal
+                    && access_grant.grant.member_pubkey == offer.member_pubkey
+                    && access_grant.grant.provider == self.request.peer_provider
+                    && access_grant.grant_ref.grant_id == access_grant.grant.grant_id
+                    && access_grant.grant_ref.grant_hash == access_grant.grant.grant_hash()
+                    && access_grant.grant.administrator_grant == offer.provider_admin.grant_id
+                    && access_grant.grant.administrator == offer.provider_admin.administrator =>
+            {
+                access_grant.grant.verify(&offer.provider, administrator)?;
+            }
+            _ => return Err(DeviceJoinExchangeError::ApprovalMismatch),
         }
         Ok(())
     }
 }
 
 impl DeviceProviderAdmissionApproval {
+    pub fn access_grant(&self) -> Option<&ActivatedStoreMemberProviderAccessGrant> {
+        match &self.admission {
+            DeviceProviderAdmission::SamePrincipal => None,
+            DeviceProviderAdmission::CrossPrincipal { access_grant, .. } => Some(access_grant),
+        }
+    }
+
     pub fn signed(
         request: DeviceProviderAccessRequest,
-        access_grant: ActivatedStoreMemberProviderAccessGrant,
-        admission: DeviceProviderAdmissionChallenge,
+        admission: DeviceProviderAdmission,
         store_root: &crate::objects::VerifiedObject<StoreProtocolRoot>,
         administrator: &StoreDeviceRegistration,
         administrator_device_signer: &UserKeypair,
@@ -280,7 +325,6 @@ impl DeviceProviderAdmissionApproval {
         }
         let body = DeviceProviderAdmissionApprovalBody {
             request: Box::new(request),
-            access_grant,
             admission,
         };
         body.validate_shape(store_root, administrator)?;
@@ -302,14 +346,12 @@ impl DeviceProviderAdmissionApproval {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn signed_without_shape_validation_for_test(
         request: DeviceProviderAccessRequest,
-        access_grant: ActivatedStoreMemberProviderAccessGrant,
-        admission: DeviceProviderAdmissionChallenge,
+        admission: DeviceProviderAdmission,
         administrator_device_signer: &UserKeypair,
     ) -> Self {
         Signed::sign(
             DeviceProviderAdmissionApprovalBody {
                 request: Box::new(request),
-                access_grant,
                 admission,
             },
             administrator_device_signer,
@@ -324,109 +366,128 @@ pub enum DeviceProviderResponseReservation {
     CrossPrincipal { response_slot: ObjectSlot },
 }
 
-/// The wire body of a joining device's registration request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeviceRegistrationRequestBody {
+pub struct CrossPrincipalDeviceRegistrationRequestBody {
     pub approval: Box<DeviceProviderAdmissionApproval>,
-    pub expected_registration: StoreDeviceRegistration,
-    pub registration_slot: ObjectSlot,
-    pub response: DeviceProviderResponseReservation,
+    pub response_slot: ObjectSlot,
 }
 
-impl SignedBody for DeviceRegistrationRequestBody {
+impl SignedBody for CrossPrincipalDeviceRegistrationRequestBody {
     const DOMAIN: &'static [u8] = REGISTRATION_REQUEST_DOMAIN;
 }
 
-pub type DeviceRegistrationRequest = Signed<DeviceRegistrationRequestBody>;
+pub type CrossPrincipalDeviceRegistrationRequest =
+    Signed<CrossPrincipalDeviceRegistrationRequestBody>;
 
-impl DeviceRegistrationRequestBody {
-    fn validate_shape(&self) -> Result<(), DeviceJoinExchangeError> {
-        let offer = &self.approval.request.offer;
-        if self.expected_registration.store_root != offer.store_root
-            || self.expected_registration.author_pubkey != offer.member_pubkey
-            || self.expected_registration.provider != self.approval.request.peer_provider
-            || self.registration_slot == offer.attempt_slot
-            || self.registration_slot == offer.outcome_slot
-        {
-            return Err(DeviceJoinExchangeError::RegistrationRequestMismatch);
-        }
-        match (
-            &self.approval.admission,
-            &self.response,
-            &self.expected_registration.origin,
-        ) {
-            (
-                DeviceProviderAdmissionChallenge::SamePrincipal,
-                DeviceProviderResponseReservation::SamePrincipal,
-                crate::store_commit::StoreDeviceRegistrationOrigin::Join {
-                    attempt_id,
-                    attempt_slot,
-                    outcome_slot,
-                },
-            )
-            | (
-                DeviceProviderAdmissionChallenge::CrossPrincipal(_),
-                DeviceProviderResponseReservation::CrossPrincipal { .. },
-                crate::store_commit::StoreDeviceRegistrationOrigin::Join {
-                    attempt_id,
-                    attempt_slot,
-                    outcome_slot,
-                },
-            ) if *attempt_id == offer.attempt_id
-                && attempt_slot == &offer.attempt_slot
-                && outcome_slot == &offer.outcome_slot => {}
-            _ => return Err(DeviceJoinExchangeError::RegistrationRequestMismatch),
-        }
-        let mut slots = vec![
-            offer.attempt_slot.clone(),
-            offer.outcome_slot.clone(),
-            self.registration_slot.clone(),
-            self.expected_registration
-                .acknowledgements
-                .first_slot()
-                .clone(),
-        ];
-        if let DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
-            &self.approval.admission
-        {
-            slots.push(challenge.administrator_object.slot.clone());
-        }
-        if let DeviceProviderResponseReservation::CrossPrincipal { response_slot } = &self.response
-        {
-            slots.push(response_slot.clone());
-        }
-        require_distinct_slots(&slots)?;
-        Ok(())
-    }
+/// A same-provider registration needs no second signature: the joining
+/// device's access request already signed the complete registration. A
+/// cross-provider registration additionally signs the response slot allocated
+/// after the administrator publishes its challenge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeviceRegistrationRequest {
+    SamePrincipal {
+        approval: Box<DeviceProviderAdmissionApproval>,
+    },
+    CrossPrincipal(CrossPrincipalDeviceRegistrationRequest),
 }
 
 impl DeviceRegistrationRequest {
-    pub fn signed(
+    pub fn same_principal(
         approval: DeviceProviderAdmissionApproval,
-        expected_registration: StoreDeviceRegistration,
-        registration_slot: ObjectSlot,
-        response: DeviceProviderResponseReservation,
+    ) -> Result<Self, DeviceJoinExchangeError> {
+        let request = Self::SamePrincipal {
+            approval: Box::new(approval),
+        };
+        request.verify()?;
+        Ok(request)
+    }
+
+    pub fn cross_principal(
+        approval: DeviceProviderAdmissionApproval,
+        response_slot: ObjectSlot,
         member_signer: &UserKeypair,
     ) -> Result<Self, DeviceJoinExchangeError> {
         if keys::public_key_hex(member_signer) != approval.request.offer.member_pubkey {
             return Err(DeviceJoinExchangeError::InvalidSignature);
         }
-        let body = DeviceRegistrationRequestBody {
-            approval: Box::new(approval),
-            expected_registration,
-            registration_slot,
-            response,
-        };
-        body.validate_shape()?;
-        Ok(Signed::sign(body, member_signer))
+        let signed = Signed::sign(
+            CrossPrincipalDeviceRegistrationRequestBody {
+                approval: Box::new(approval),
+                response_slot,
+            },
+            member_signer,
+        );
+        let request = Self::CrossPrincipal(signed);
+        request.verify()?;
+        Ok(request)
     }
 
     pub fn verify(&self) -> Result<(), DeviceJoinExchangeError> {
-        self.body().validate_shape()?;
-        let member_pubkey = self.approval.request.offer.member_pubkey.clone();
-        self.verify_by(&member_pubkey)
-            .map_err(|_| DeviceJoinExchangeError::InvalidSignature)
+        self.approval().request.body().validate_shape()?;
+        match self {
+            Self::SamePrincipal { approval }
+                if matches!(approval.admission, DeviceProviderAdmission::SamePrincipal) =>
+            {
+                Ok(())
+            }
+            Self::CrossPrincipal(request)
+                if matches!(
+                    request.approval.admission,
+                    DeviceProviderAdmission::CrossPrincipal { .. }
+                ) =>
+            {
+                let member_pubkey = request.approval.request.offer.member_pubkey.clone();
+                request
+                    .verify_by(&member_pubkey)
+                    .map_err(|_| DeviceJoinExchangeError::InvalidSignature)?;
+                let mut slots = vec![
+                    request.approval.request.offer.attempt_slot.clone(),
+                    request.approval.request.offer.outcome_slot.clone(),
+                    request.approval.request.registration_slot.clone(),
+                    request
+                        .approval
+                        .request
+                        .expected_registration
+                        .acknowledgements
+                        .first_slot()
+                        .clone(),
+                    request.response_slot.clone(),
+                ];
+                if let DeviceProviderAdmission::CrossPrincipal { challenge, .. } =
+                    &request.approval.admission
+                {
+                    slots.push(challenge.administrator_object.slot.clone());
+                }
+                require_distinct_slots(&slots)
+            }
+            _ => Err(DeviceJoinExchangeError::RegistrationRequestMismatch),
+        }
+    }
+
+    pub fn approval(&self) -> &DeviceProviderAdmissionApproval {
+        match self {
+            Self::SamePrincipal { approval } => approval,
+            Self::CrossPrincipal(request) => &request.approval,
+        }
+    }
+
+    pub fn expected_registration(&self) -> &StoreDeviceRegistration {
+        &self.approval().request.expected_registration
+    }
+
+    pub fn registration_slot(&self) -> &ObjectSlot {
+        &self.approval().request.registration_slot
+    }
+
+    pub fn response(&self) -> DeviceProviderResponseReservation {
+        match self {
+            Self::SamePrincipal { .. } => DeviceProviderResponseReservation::SamePrincipal,
+            Self::CrossPrincipal(request) => DeviceProviderResponseReservation::CrossPrincipal {
+                response_slot: request.response_slot.clone(),
+            },
+        }
     }
 }
 
@@ -469,16 +530,25 @@ pub struct DeviceJoinReadiness {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum DeviceProviderAdmission {
-    SamePrincipal,
-    CrossPrincipal(CrossPrincipalProbeReceipt),
+pub enum DeviceProviderAdmissionCompletion {
+    SamePrincipal {
+        bootstrap: Box<ProviderReadyDeviceBootstrap>,
+    },
+    CrossPrincipal {
+        readiness: Box<DeviceJoinReadiness>,
+        receipt: CrossPrincipalProbeReceipt,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceProviderAdmissionCompletion {
-    pub readiness: Box<DeviceJoinReadiness>,
-    pub admission: DeviceProviderAdmission,
+impl DeviceProviderAdmissionCompletion {
+    pub fn attempt(&self) -> &DeviceJoinAttemptRef {
+        match self {
+            Self::SamePrincipal { bootstrap } => {
+                &bootstrap.bootstrap.publication_authorization.attempt
+            }
+            Self::CrossPrincipal { readiness, .. } => &readiness.proof.attempt,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,6 +556,146 @@ pub struct DeviceProviderAdmissionCompletion {
 pub struct DeviceJoinActivation {
     pub outcome: DeviceJoinOutcomeRef,
     pub outcome_activation: StoreBatchCommitRef,
+}
+
+/// The canonical evidence for one Merge commit required to install a device
+/// join. Every value is re-verified against its exact reference before the
+/// joining database accepts it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinBootstrapCommitClosure {
+    pub reference: StoreBatchCommitRef,
+    pub canonical_commit: Vec<u8>,
+    pub author: ReferencedStoreDeviceRegistration,
+    pub registrations: RetainedStoreDeviceRegistrationActivations,
+    pub device_operations: RetainedStoreDeviceOperations,
+    pub activation_head: StoreDeviceHead,
+    pub activation_object: ExactObjectRef,
+    pub history_evidence: RetainedMergeCommitEvidence,
+}
+
+/// The exact verified history required after the selected snapshot. This is a
+/// transfer representation; the joining database reconstructs its verified
+/// bootstrap plan before mutating any Store state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceJoinBootstrapClosure {
+    pub founder: ReferencedStoreDeviceRegistration,
+    pub genesis: ResolvedStoreDeviceState,
+    pub membership: crate::membership::MembershipFloor,
+    pub commits: Vec<DeviceJoinBootstrapCommitClosure>,
+}
+
+/// The signed snapshot authority and exact Merge closure a same-provider
+/// joining device needs. The snapshot image remains in provider storage and is
+/// the only Store object downloaded after this response arrives.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamePrincipalStoreInstallation {
+    pub store_root: StoreProtocolRoot,
+    pub attempt: DeviceJoinAttempt,
+    pub outcome: DeviceJoinOutcome,
+    pub snapshot: StoreSnapshotRef,
+    pub metadata: SnapshotMeta,
+    pub stability: RetainedReplaySnapshotAuthority,
+    pub bootstrap: DeviceJoinBootstrapClosure,
+}
+
+/// The complete response when the Store and joining device use the same
+/// provider principal. The one activation commit both publishes the attempt
+/// bootstrap and activates the joining registration, so the joiner can install
+/// that exact history and finish without a second transport wait or catch-up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamePrincipalDeviceJoin {
+    pub bootstrap: ProviderReadyDeviceBootstrap,
+    pub activation: DeviceJoinActivation,
+    pub installation: Box<SamePrincipalStoreInstallation>,
+}
+
+impl SamePrincipalDeviceJoin {
+    pub fn verified(
+        bootstrap: ProviderReadyDeviceBootstrap,
+        activation: DeviceJoinActivation,
+        installation: SamePrincipalStoreInstallation,
+    ) -> Result<Self, DeviceJoinExchangeError> {
+        let join = Self {
+            bootstrap,
+            activation,
+            installation: Box::new(installation),
+        };
+        join.verify_shape()?;
+        Ok(join)
+    }
+
+    pub fn verify_shape(&self) -> Result<(), DeviceJoinExchangeError> {
+        let bootstrap = &self.bootstrap;
+        let activation = &self.activation;
+        let installation = &self.installation;
+        bootstrap.bootstrap.request.verify()?;
+        let attempt_reference = &bootstrap.bootstrap.publication_authorization.attempt;
+        let attempt_bytes = installation.attempt.to_bytes();
+        let outcome_bytes = installation.outcome.to_bytes();
+        let registration = match &installation.outcome.disposition {
+            DeviceJoinDisposition::Activated { registration } => registration,
+            DeviceJoinDisposition::Cancelled => {
+                return Err(DeviceJoinExchangeError::AttemptMismatch)
+            }
+        };
+        if !matches!(
+            bootstrap.challenge_publication,
+            DeviceProviderChallengePublication::SamePrincipal
+        ) || activation.outcome.attempt() != attempt_reference
+            || activation.outcome_activation
+                != bootstrap
+                    .bootstrap
+                    .publication_authorization
+                    .attempt_activation
+            || installation.stability.store_root
+                != bootstrap
+                    .bootstrap
+                    .request
+                    .approval()
+                    .request
+                    .offer
+                    .store_root
+            || installation.snapshot != installation.stability.snapshot
+            || installation.metadata != installation.stability.metadata
+            || installation.store_root.descriptor.store_root_id()
+                != installation.stability.store_root.store_root_id
+            || installation.store_root.object_hash()
+                != installation.stability.store_root.store_root_hash
+            || installation.attempt.attempt_hash() != attempt_reference.attempt_hash
+            || installation.attempt.attempt_slot != *attempt_reference.object.slot()
+            || installation.attempt.store_root != installation.stability.store_root
+            || installation.attempt.expected_registration
+                != *bootstrap.bootstrap.request.expected_registration()
+            || installation.attempt.provider_approval != *bootstrap.bootstrap.request.approval()
+            || installation.attempt.provider_response != bootstrap.bootstrap.request.response()
+            || installation.outcome.attempt != *attempt_reference
+            || installation.outcome.store_root_hash
+                != installation.attempt.store_root.store_root_hash
+            || installation.outcome.owner_registration != installation.attempt.owner_registration
+            || installation.outcome.owner_grant != installation.attempt.owner_grant
+            || activation
+                .outcome
+                .verify_outcome(&installation.outcome)
+                .is_err()
+            || attempt_reference.object.verify(&attempt_bytes).is_err()
+            || activation.outcome.object().verify(&outcome_bytes).is_err()
+            || registration
+                .verify_registration(&installation.attempt.expected_registration)
+                .is_err()
+            || registration.object.slot() != bootstrap.bootstrap.request.registration_slot()
+            || registration
+                .object
+                .verify(&installation.attempt.expected_registration.to_bytes())
+                .is_err()
+        {
+            return Err(DeviceJoinExchangeError::AttemptMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -972,7 +1182,7 @@ pub fn validate_terminals(
 ) -> Result<(), DeviceJoinExchangeError> {
     let administrator_cancellation = match administrator {
         ProviderAdminJoinTerminal::Completed(completion) => {
-            if completion.readiness.proof.attempt != *cancellation.attempt() {
+            if completion.attempt() != cancellation.attempt() {
                 return Err(DeviceJoinExchangeError::AttemptMismatch);
             }
             None
@@ -1014,11 +1224,11 @@ pub fn canonical_cleanup_slots(
         &attempt.provider_response,
     ) {
         (
-            DeviceProviderAdmissionChallenge::SamePrincipal,
+            DeviceProviderAdmission::SamePrincipal,
             DeviceProviderResponseReservation::SamePrincipal,
         ) => {}
         (
-            DeviceProviderAdmissionChallenge::CrossPrincipal(challenge),
+            DeviceProviderAdmission::CrossPrincipal { challenge, .. },
             DeviceProviderResponseReservation::CrossPrincipal { response_slot },
         ) => {
             slots.push(challenge.administrator_object.slot.clone());

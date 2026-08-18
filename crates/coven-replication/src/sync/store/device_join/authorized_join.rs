@@ -5,6 +5,7 @@ use coven_protocol::store_commit::device_join_exchange::require_cancelled_outcom
 use coven_protocol::store_commit::{DeviceJoinAbandonmentRef, DeviceJoinCleanupReceiptRef};
 
 mod provider_administrator;
+mod same_principal;
 
 pub use provider_administrator::DeviceProviderAccessAdministrator;
 
@@ -218,6 +219,46 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .ok_or(DeviceJoinError::ProviderAdministratorRequired)
     }
 
+    async fn validate_registration_request(
+        &mut self,
+        request: &DeviceRegistrationRequest,
+    ) -> Result<DeviceJoinOffer, DeviceJoinError> {
+        request.verify()?;
+        let offer = request.approval().request.offer.as_ref().clone();
+        if self.root != offer.store_root {
+            return Err(DeviceJoinError::OfferMismatch);
+        }
+        if !self
+            .local_writer
+            .is_authored_by_registration(&offer.owner_registration)
+        {
+            return Err(DeviceJoinError::OwnerAuthorityRequired);
+        }
+        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
+        if provider_admin != *offer.provider_admin {
+            return Err(DeviceJoinError::ProviderAdministratorRequired);
+        }
+        let administrator = self
+            .join_history()
+            .load_registration(&provider_admin.administrator)
+            .await?
+            .value;
+        self.verify_device_admission_approval(request.approval(), &administrator)?;
+        if let Some(access_grant) = request.approval().access_grant() {
+            self.join_history()
+                .verify_accepted_provider_access_activation(
+                    access_grant,
+                    &provider_admin,
+                    &administrator,
+                )
+                .await?;
+        }
+        if !self.local_writer.is_current_owner(&self.membership) {
+            return Err(DeviceJoinError::OwnerAuthorityRequired);
+        }
+        Ok(offer)
+    }
+
     pub(super) async fn abandon(
         &mut self,
         offer: DeviceJoinOffer,
@@ -269,7 +310,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 journal.advance_to(&current, &intent).await?;
             }
             DeviceJoinRoleProgress::Owner(OwnerJoinProgress::RegistrationRequested(request))
-                if request.approval.request.offer.as_ref() == &offer =>
+                if request.approval().request.offer.as_ref() == &offer =>
             {
                 journal.advance_to(&current, &intent).await?;
             }
@@ -319,39 +360,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         request: DeviceRegistrationRequest,
     ) -> Result<ProvisionalDeviceBootstrap, DeviceJoinError> {
-        request.verify()?;
-        let offer = &request.approval.request.offer;
-        if self.root != offer.store_root {
-            return Err(DeviceJoinError::OfferMismatch);
-        }
-        if !self
-            .local_writer
-            .is_authored_by_registration(&offer.owner_registration)
-        {
-            return Err(DeviceJoinError::OwnerAuthorityRequired);
-        }
-        let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
-        if &provider_admin != offer.provider_admin.as_ref() {
-            return Err(DeviceJoinError::ProviderAdministratorRequired);
-        }
-        let administrator = self
-            .join_history()
-            .load_registration(&provider_admin.administrator)
-            .await?
-            .value;
-        self.verify_device_admission_approval(&request.approval, &administrator)?;
-        self.join_history()
-            .verify_accepted_provider_access_activation(
-                &request.approval.access_grant,
-                &provider_admin,
-                &administrator,
-            )
-            .await?;
-        if !self.local_writer.is_current_owner(&self.membership) {
-            return Err(DeviceJoinError::OwnerAuthorityRequired);
-        }
+        let access_grant = request
+            .approval()
+            .access_grant()
+            .ok_or(DeviceJoinError::ApprovalMismatch)?
+            .clone();
+        let offer = self.validate_registration_request(&request).await?;
         let journal = self.journal(offer.attempt_id);
-        let offered = journal.record(OwnerJoinProgress::Offered(*offer.clone()));
+        let offered = journal.record(OwnerJoinProgress::Offered(offer.clone()));
         let durable = journal.begin(&offered).await?;
         if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) =
             *durable.progress
@@ -372,7 +388,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let cut = plan.predecessor_cut()?;
         if !self
             .join_history()
-            .history_cut_covers(&cut, &request.approval.access_grant.activation)
+            .history_cut_covers(&cut, &access_grant.activation)
             .await?
         {
             return Err(DeviceJoinError::ApprovalActivationMissing);
@@ -387,14 +403,14 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             offer.store_root.clone(),
             offer.attempt_id,
             offer.attempt_slot.clone(),
-            request.expected_registration.clone(),
-            request.registration_slot.clone(),
+            request.expected_registration().clone(),
+            request.registration_slot().clone(),
             offer.outcome_slot.clone(),
             cut,
             plan.membership_state().clone(),
             offer.provider_admin.grant_id.clone(),
-            *request.approval.clone(),
-            request.response.clone(),
+            request.approval().clone(),
+            request.response(),
             offer.owner_grant.clone(),
         )?;
         let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
@@ -561,7 +577,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         &mut self,
         completion: DeviceProviderAdmissionCompletion,
     ) -> Result<DeviceJoinActivation, DeviceJoinError> {
-        let attempt_ref = completion.readiness.proof.attempt.clone();
+        let attempt_ref = completion.attempt().clone();
         let attempt_id = attempt_ref.attempt_id;
         let journal = self.journal(attempt_id);
         let current = journal.current().await?;
@@ -586,7 +602,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }) if durable_completion == &completion => bootstrap.clone(),
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        let offer = &provisional.request.approval.request.offer;
+        let offer = &provisional.request.approval().request.offer;
         if self.root != offer.store_root {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -601,32 +617,33 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             .load_verified_device_join_attempt(&mut self.writer.join_history(), &attempt_ref)
             .await?
             .value;
-        let registration = self
-            .join_history()
-            .load_registration(&completion.readiness.proof.registration)
-            .await?
-            .value;
-        let ack = self
-            .join_history()
-            .load_acknowledgement(&completion.readiness.proof.initial_ack, &registration)
-            .await?
-            .value;
-        completion.readiness.proof.verify(
-            &attempt_ref,
-            &attempt,
-            &registration,
-            &completion.readiness.proof.initial_ack,
-            &ack,
-        )?;
-        match (&attempt.provider_approval.admission, &completion.admission) {
+        match (&attempt.provider_approval.admission, &completion) {
             (
-                DeviceProviderAdmissionChallenge::SamePrincipal,
                 DeviceProviderAdmission::SamePrincipal,
-            ) => {}
+                DeviceProviderAdmissionCompletion::SamePrincipal { bootstrap },
+            ) if bootstrap.bootstrap.publication_authorization.attempt == attempt_ref
+                && bootstrap.bootstrap.as_ref() == &provisional => {}
             (
-                DeviceProviderAdmissionChallenge::CrossPrincipal(challenge),
-                DeviceProviderAdmission::CrossPrincipal(receipt),
+                DeviceProviderAdmission::CrossPrincipal { challenge, .. },
+                DeviceProviderAdmissionCompletion::CrossPrincipal { readiness, receipt },
             ) => {
+                let registration = self
+                    .join_history()
+                    .load_registration(&readiness.proof.registration)
+                    .await?
+                    .value;
+                let ack = self
+                    .join_history()
+                    .load_acknowledgement(&readiness.proof.initial_ack, &registration)
+                    .await?
+                    .value;
+                readiness.proof.verify(
+                    &attempt_ref,
+                    &attempt,
+                    &registration,
+                    &readiness.proof.initial_ack,
+                    &ack,
+                )?;
                 let provider_admin = self.resolve_provider_admin(&offer.provider_admin.grant_id)?;
                 if &provider_admin != offer.provider_admin.as_ref() {
                     return Err(DeviceJoinError::ProviderAdministratorRequired);
@@ -663,10 +680,23 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
         }
+        let registration_prepared = super::prepare_registration_object(
+            self.storage.as_ref(),
+            &attempt.expected_registration,
+            attempt.registration_slot.clone(),
+        )?;
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &attempt.expected_registration,
+            registration_prepared.reference().clone(),
+        );
+        let registration_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            offer.store_root.store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        );
         let outcome = self.local_writer.sign_device_join_outcome(
             attempt_ref.clone(),
             coven_protocol::store_commit::DeviceJoinDisposition::Activated {
-                readiness: completion.readiness.proof.clone(),
+                registration: registration_ref.clone(),
             },
             offer.owner_grant.clone(),
         )?;
@@ -720,6 +750,17 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
             _ => return Err(DeviceJoinError::JournalConflict),
         };
         self.storage
+            .create_verified_protocol_object(
+                &registration_context,
+                &registration_prepared,
+                &coven_protocol::store_commit::registration_semantic_prefix(
+                    &attempt.expected_registration.device_id.to_string(),
+                ),
+                &attempt.expected_registration.to_bytes(),
+            )
+            .await
+            .map_err(DeviceJoinError::Storage)?;
+        self.storage
             .create_verified_protocol_object(&context, &prepared, &prefix, &outcome.to_bytes())
             .await
             .map_err(|error| {
@@ -728,7 +769,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         let activated_registration =
             coven_protocol::store_commit::ActivatedStoreDeviceRegistration::verified(
                 coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
-                    completion.readiness.proof.registration.clone(),
+                    registration_ref,
                     attempt.expected_registration.clone(),
                 )?,
                 coven_protocol::store_commit::StoreDeviceRegistrationActivation::Join {

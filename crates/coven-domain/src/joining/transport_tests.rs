@@ -1,8 +1,7 @@
 //! Device admission driven entirely through the storage-mediated transport.
 //!
-//! The four-transfer join tests hand artifacts between the two sides as
-//! variables. These run the same protocol with that hand-off replaced by the
-//! transport's slots, over an in-memory cloud home both sides share.
+//! These tests run device admission with every cross-device hand-off carried by
+//! the transport's slots, over an in-memory cloud home both sides share.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -445,8 +444,21 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         Box::pin(joiner.join_via_transport(&bundle, timing(), observe_progress, &cancel,)),
         Box::pin(fixture.drive_owner_observing(&bundle, timing(), &observe_owner_progress,)),
     );
-    let config = joined(config);
     let activation = activated(activation);
+    let config = joined(config);
+
+    let registration_prefix =
+        coven_protocol::store_commit::registration_semantic_prefix(&config.device_id);
+    assert_eq!(
+        fixture
+            .home
+            .exact_creates()
+            .iter()
+            .filter(|slot| slot.logical_key().starts_with(&registration_prefix))
+            .count(),
+        1,
+        "the owner publishes the joining registration once; the joiner publishes only its acknowledgement",
+    );
 
     let transport_creates = fixture
         .home
@@ -466,14 +478,7 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
             .ends_with("/provider-admission-completion.json")),
         "one admitting device does not transfer a provider-administrator artifact to its own owner role",
     );
-    for kind in [
-        "provider-access-request",
-        "provider-admission-approval",
-        "registration-request",
-        "provider-ready-bootstrap",
-        "readiness",
-        "activation",
-    ] {
+    for kind in ["provider-access-request", "same-principal-join"] {
         assert_eq!(
             transport_creates
                 .iter()
@@ -481,6 +486,20 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
                 .count(),
             1,
             "the uninterrupted join attempts one create for {kind}",
+        );
+    }
+    for kind in [
+        "provider-admission-approval",
+        "registration-request",
+        "provider-ready-bootstrap",
+        "readiness",
+        "activation",
+    ] {
+        assert!(
+            transport_creates
+                .iter()
+                .all(|slot| !slot.logical_key().ends_with(&format!("/{kind}.json"))),
+            "a same-provider join must not create {kind}",
         );
     }
 
@@ -505,8 +524,9 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
                 bytes_total
             } if bytes_done == bytes_total && *bytes_total > 0
         )));
-        assert!(progress
+        assert!(!progress
             .contains(&coven_replication::sync::JoiningDeviceJoinProgress::WaitingForActivation));
+        assert!(!progress.contains(&coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp));
         assert!(
             progress.contains(&coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary)
         );
@@ -516,8 +536,12 @@ async fn run_transport_carries_a_whole_join_between_two_drivers() {
         &coven_replication::sync::AdmittingDeviceJoinProgress::WaitingForProviderAccessRequest
     ));
     assert!(owner_progress
-        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::WaitingForJoiningDevice));
-    assert!(owner_progress
+        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::RegisteringDevice));
+    assert!(!owner_progress
+        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::GrantingProviderAccess));
+    assert!(!owner_progress
+        .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::PreparingLibrary));
+    assert!(!owner_progress
         .contains(&coven_replication::sync::AdmittingDeviceJoinProgress::ActivatingDevice));
 
     assert!(fixture
@@ -685,7 +709,7 @@ async fn run_transport_carries_a_cross_principal_join() {
         Some(DeviceJoinAction::TransferProviderAdmissionApproval(approval)) => assert!(
             matches!(
                 approval.admission,
-                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { .. }
             ),
             "separate provider accounts must admit through the cross-principal probe",
         ),
@@ -732,10 +756,10 @@ fn one_shot() -> DeviceJoinTransportTiming {
     }
 }
 
-/// Run the join one side at a time, each run a process that dies waiting for
-/// the counterpart that is not running. Every restart resumes from the durable
-/// journal and the slots, republishing what it already published — byte for
-/// byte — and reading back what it already consumed.
+/// Run the same-provider join one side at a time. The joining device dies after
+/// publishing its request, the owner completes admission without another
+/// joining-device round trip, and a fresh joining process consumes the exact
+/// durable response and activation.
 #[test]
 fn each_side_resumes_from_every_artifact_boundary() {
     on_a_deep_stack(run_each_side_resumes_from_every_artifact_boundary);
@@ -757,85 +781,37 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         }
     };
 
-    // The joiner publishes its access request, then dies waiting for an
-    // administrator that is not running.
+    // The joiner publishes its access request, then dies waiting for an owner
+    // that is not running.
     assert_joiner_waited_for(
         Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
+        DeviceJoinTransportKind::SamePrincipalJoin,
     );
     let access_request = fixture
         .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
         .await
         .expect("the access request survived the joiner's death");
 
-    // The administrator approves and dies waiting for the registration request.
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::RegistrationRequest,
+    // The request already carries the exact registration. A same-principal
+    // owner can publish both the library bootstrap and activation without
+    // another response from the joining device.
+    let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+    assert_eq!(
+        activation.outcome.attempt().attempt_id,
+        bundle.offer.attempt_id
     );
-    let approval = fixture
-        .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
+    assert!(fixture
+        .slot_bytes(&bundle, DeviceJoinTransportKind::SamePrincipalJoin)
         .await
-        .expect("the approval survived the driver's death");
-
-    // A relaunched joiner republishes the identical access request, consumes
-    // the approval, and dies waiting for the provider-ready bootstrap.
-    assert_joiner_waited_for(
-        Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::ProviderReadyBootstrap,
-    );
+        .is_some());
     assert_eq!(
         fixture
             .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAccessRequest)
             .await
             .as_ref(),
         Some(&access_request),
-        "a resumed joiner left its first access request's exact bytes in place",
+        "the owner left the joining device's exact request in place",
     );
-
-    // The administrator resumes, republishes the identical approval, publishes
-    // the provider-ready bootstrap, and dies waiting for readiness.
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::Readiness,
-    );
-    assert_eq!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
-            .await
-            .as_ref(),
-        Some(&approval),
-        "a resumed driver left its first approval's exact bytes in place",
-    );
-    // Both admitting roles run on this device, so their handoff stays in this
-    // invocation rather than paying a storage round trip. Restarting after the
-    // provider-ready bootstrap remains safe because that external artifact is
-    // durable.
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProvisionalBootstrap)
-            .await
-            .is_none(),
-        "one admitting device must not publish an artifact to itself",
-    );
-
-    // The joiner bootstraps its store, publishes readiness, and dies waiting
-    // for the activation.
-    assert_joiner_waited_for(
-        Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::Activation,
-    );
-
-    // With every joiner artifact present, the admitting side runs to activation
-    // without waiting for anything.
-    let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
-    assert_eq!(
-        activation.outcome.attempt().attempt_id,
-        bundle.offer.attempt_id
-    );
-    // The provider-administrator and owner are still this same invocation, so
-    // their return handoff also stays local. The activation is the durable
-    // external artifact the joining device resumes from.
     assert!(
         fixture
             .slot_bytes(
@@ -847,7 +823,8 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
         "one admitting device must not publish an artifact to itself",
     );
 
-    // The joiner's last restart consumes the activation and saves the store.
+    // The joiner's restart republishes its identical request, installs the
+    // library, consumes the activation, and saves the store.
     let config = joined(Box::pin(join_once(timing())).await);
     assert!(fixture
         .layout
@@ -862,20 +839,149 @@ async fn run_each_side_resumes_from_every_artifact_boundary() {
     }
 }
 
-/// The owner keeps writing to its own Store while a join is mid-flight, so the
-/// commit that activates the join outcome is not the joining device's bootstrap
-/// commit's successor. The joining device converges over the owner's
-/// intervening history and completes.
-///
-/// An owner whose sync loop is running is the ordinary case, not an unusual
-/// one: `bootstrap_cut` is fixed when the attempt is signed, while the outcome
-/// activation is composed against whatever the owner's frontier has become.
+/// Saving local configuration is a separate durable step after the Store
+/// activation. If that filesystem write fails, a fresh process resumes from
+/// the activated join journal and saves the same library without downloading
+/// or installing the snapshot again.
 #[test]
-fn a_join_completes_across_the_owners_own_commits() {
-    on_a_deep_stack(run_a_join_completes_across_the_owners_own_commits);
+fn config_write_failure_after_snapshot_installation_resumes_without_another_pairing() {
+    on_a_deep_stack(
+        run_config_write_failure_after_snapshot_installation_resumes_without_another_pairing,
+    );
 }
 
-async fn run_a_join_completes_across_the_owners_own_commits() {
+async fn run_config_write_failure_after_snapshot_installation_resumes_without_another_pairing() {
+    let fixture = TransportFixture::build("device-join-config-resume").await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+
+    let first_joiner = fixture.client();
+    assert_joiner_waited_for(
+        Box::pin(first_joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel))
+            .await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+    activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+
+    let config_path = fixture
+        .layout
+        .store_dir("device-join-config-resume")
+        .config_path();
+    let block_config_path = config_path.clone();
+    let block_config_write: coven_replication::sync::JoiningDeviceJoinProgressObserver =
+        Arc::new(move |progress| {
+            if matches!(
+                progress,
+                coven_replication::sync::JoiningDeviceJoinProgress::SavingLibrary
+            ) {
+                std::fs::create_dir(&block_config_path)
+                    .expect("occupy the config path before its atomic write");
+            }
+        });
+    let failed = fixture
+        .client()
+        .join_via_transport(&bundle, timing(), block_config_write, &cancel)
+        .await;
+    assert!(
+        matches!(failed, Err(crate::joining::BootstrapError::Config(_))),
+        "the injected config write failure must reach the caller: {failed:?}",
+    );
+    std::fs::remove_dir(&config_path).expect("remove the config-path blocker");
+
+    let config = joined(
+        fixture
+            .client()
+            .join_via_transport(&bundle, timing(), no_join_progress(), &cancel)
+            .await,
+    );
+    assert_eq!(config.store_id, "device-join-config-resume");
+    assert!(config_path.is_file());
+}
+
+/// Cancelling while the snapshot bytes are arriving stops that transfer,
+/// removes its staged database, and leaves the durable pairing attempt ready
+/// for a fresh process to retry from the beginning of library installation.
+#[test]
+fn snapshot_download_cancellation_is_prompt_and_the_same_pairing_retries() {
+    on_a_deep_stack(run_snapshot_download_cancellation_is_prompt_and_the_same_pairing_retries);
+}
+
+async fn run_snapshot_download_cancellation_is_prompt_and_the_same_pairing_retries() {
+    let fixture = TransportFixture::build("device-join-snapshot-cancel").await;
+    let bundle = fixture.begin().await;
+    let initial_cancel = never_cancelled();
+
+    assert_joiner_waited_for(
+        Box::pin(fixture.client().join_via_transport(
+            &bundle,
+            one_shot(),
+            no_join_progress(),
+            &initial_cancel,
+        ))
+        .await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+    activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+
+    fixture
+        .joiner_home
+        .stream_exact_reads_in_chunks(128, Duration::from_millis(25));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let cancel_on_download: coven_replication::sync::JoiningDeviceJoinProgressObserver =
+        Arc::new(move |progress| {
+            if matches!(
+                progress,
+                coven_replication::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                    bytes_done,
+                    ..
+                } if bytes_done > 0
+            ) {
+                cancel_tx
+                    .send(true)
+                    .expect("snapshot cancellation receiver remains alive");
+            }
+        });
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(2),
+        fixture
+            .client()
+            .join_via_transport(&bundle, timing(), cancel_on_download, &cancel_rx),
+    )
+    .await
+    .expect("snapshot cancellation must interrupt the active storage read");
+    assert!(
+        matches!(cancelled, Err(crate::joining::BootstrapError::Cancelled)),
+        "the caller receives cancellation, got {cancelled:?}",
+    );
+    let store_dir = fixture.layout.store_dir("device-join-snapshot-cancel");
+    assert!(
+        !store_dir.db_path().exists(),
+        "a cancelled snapshot transfer must not leave a database image"
+    );
+
+    fixture
+        .joiner_home
+        .stream_exact_reads_in_chunks(usize::MAX, Duration::ZERO);
+    let config = joined(
+        fixture
+            .client()
+            .join_via_transport(&bundle, timing(), no_join_progress(), &never_cancelled())
+            .await,
+    );
+    assert_eq!(config.store_id, "device-join-snapshot-cancel");
+    assert!(store_dir.config_path().is_file());
+}
+
+/// The owner keeps writing after it activates the joining device but before
+/// that device installs its library. Enrollment opens the exact offered
+/// snapshot without waiting for unrelated newer history; the ordinary sync
+/// loop owns that later commit after the library is usable.
+#[test]
+fn a_join_opens_before_later_owner_commits_are_synced() {
+    on_a_deep_stack(run_a_join_opens_before_later_owner_commits_are_synced);
+}
+
+async fn run_a_join_opens_before_later_owner_commits_are_synced() {
     let fixture = TransportFixture::build("device-join-across-owner-commits").await;
     let bundle = fixture.begin().await;
     let cancel = never_cancelled();
@@ -891,60 +997,33 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
         }
     };
 
-    // Run both sides to the point where the joining device has bootstrapped its
-    // store, published its readiness, and is waiting for the activation.
+    // The joining device publishes the exact registration request. The owner
+    // enrolls it and publishes the library bootstrap and activation.
     assert_joiner_waited_for(
         Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
+        DeviceJoinTransportKind::SamePrincipalJoin,
     );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::RegistrationRequest,
-    );
-    assert_joiner_waited_for(
-        Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::ProviderReadyBootstrap,
-    );
-    assert_owner_waited_for(
-        fixture.drive_owner_with(&bundle, one_shot()).await,
-        DeviceJoinTransportKind::Readiness,
-    );
-    assert_joiner_waited_for(
-        Box::pin(join_once(one_shot())).await,
-        DeviceJoinTransportKind::Activation,
-    );
-
-    // The owner commits work of its own before it activates the outcome, so the
-    // outcome activation's predecessor is a commit the joining device's
-    // bootstrap never covered.
-    let intervening = fixture.publish_owner_row("owner-writes-mid-join").await;
     let activation = activated(fixture.drive_owner_with(&bundle, one_shot()).await);
-    let (_, activation_commit) = fixture
-        .owner_store
-        .load_exact_materialized_commit(
-            &activation.outcome_activation.coord.stream_id.to_string(),
-            activation.outcome_activation.coord.sequence(),
-        )
-        .await
-        .expect("load the outcome activation commit")
-        .expect("the owner materialized its outcome activation");
+
+    // The owner's sync loop commits a row before the joining device resumes.
+    // That row is newer than the enrollment activation and therefore is not in
+    // the offered snapshot.
+    let intervening = fixture.publish_owner_row("owner-writes-mid-join").await;
+    assert_eq!(
+        intervening.coord.stream_id,
+        activation.outcome_activation.coord.stream_id,
+    );
     assert!(
-        activation_commit
-            .order
-            .predecessor_cut()
-            .expect("the outcome activation declares a predecessor cut")
-            .0
-            .values()
-            .any(|reference| reference == &intervening),
-        "the owner's own commit did not land between the attempt and the outcome",
+        intervening.coord.sequence > activation.outcome_activation.coord.sequence,
+        "the owner's row must be newer than the enrollment activation",
     );
 
     let config = joined(Box::pin(join_once(timing())).await);
     let joined_store_dir = fixture.layout.store_dir(&config.store_id);
     assert!(joined_store_dir.config_path().exists());
-    // Completing is not enough: the joining device has to hold the row the
-    // owner's intervening commit carried, which is what converging over that
-    // commit rather than stepping past it means.
+    // Enrollment is not a disguised sync cycle. The later row is absent from
+    // the installed snapshot and will arrive through the opened library's
+    // ordinary sync loop.
     let joined_db = coven_database::DatabaseImageTest::open(&joined_store_dir.db_path())
         .expect("open the joined device's database");
     assert_eq!(
@@ -955,8 +1034,8 @@ async fn run_a_join_completes_across_the_owners_own_commits() {
                 |row| row.get::<_, i64>(0),
             )
             .expect("count the owner's intervening row"),
-        1,
-        "the joining device completed without the row the owner wrote mid-join",
+        0,
+        "enrollment waited for a row outside its signed snapshot cut",
     );
 }
 
@@ -991,13 +1070,12 @@ fn cancelling_mid_join_removes_the_attempts_slots() {
 }
 
 async fn run_cancelling_mid_join_removes_the_attempts_slots() {
-    let fixture = TransportFixture::build("device-join-transport-cancel").await;
+    let fixture = TransportFixture::build_cross_principal("device-join-transport-cancel").await;
     let bundle = fixture.begin().await;
     let cancel = never_cancelled();
 
-    // Advance far enough that both sides hold real state: the joiner has
-    // prepared its registration request, and the owner has activated the
-    // attempt it is about to cancel.
+    // Advance the cross-principal flow far enough that the owner has accepted
+    // the registration and is waiting for the joining device's provider proof.
     let joiner = fixture.client();
     assert_joiner_waited_for(
         Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
@@ -1049,7 +1127,8 @@ fn the_joining_flow_observes_owner_cancellation() {
 }
 
 async fn run_the_joining_flow_observes_owner_cancellation() {
-    let fixture = TransportFixture::build("device-join-transport-live-cancel").await;
+    let fixture =
+        TransportFixture::build_cross_principal("device-join-transport-live-cancel").await;
     let bundle = fixture.begin().await;
     let cancel = never_cancelled();
     let joiner = fixture.client();
@@ -1091,7 +1170,7 @@ async fn run_the_joining_flow_observes_owner_cancellation() {
 }
 
 /// An owner that gives up before the attempt exists publishes its abandonment,
-/// and the joining device — sitting in its wait for the approval — reads that
+/// and the joining device — sitting in its wait for the library — reads that
 /// instead and converges on the same terminal, clearing the namespace behind it.
 #[tokio::test]
 async fn an_abandoned_attempt_reaches_the_joining_device() {
@@ -1109,7 +1188,7 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
     let joiner = fixture.client();
     assert_joiner_waited_for(
         Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
+        DeviceJoinTransportKind::SamePrincipalJoin,
     );
 
     let abandonment = fixture
@@ -1127,7 +1206,7 @@ async fn run_an_abandoned_attempt_reaches_the_joining_device() {
     );
 
     // The joining device's next run finds the abandonment where it would have
-    // found the approval.
+    // found the library bootstrap.
     match Box::pin(fixture.client().join_via_transport(
         &bundle,
         timing(),
@@ -1179,7 +1258,8 @@ fn the_cancellation_unwind_resumes_at_every_boundary() {
 }
 
 async fn run_the_cancellation_unwind_resumes_at_every_boundary() {
-    let fixture = TransportFixture::build("device-join-transport-cancel-resume").await;
+    let fixture =
+        TransportFixture::build_cross_principal("device-join-transport-cancel-resume").await;
     let bundle = fixture.begin().await;
     let cancel = never_cancelled();
     let joiner = fixture.client();
@@ -1318,7 +1398,7 @@ async fn run_auto_approval_refuses_an_attempt_this_device_did_not_issue() {
     let joiner = fixture.client();
     assert_joiner_waited_for(
         Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
+        DeviceJoinTransportKind::SamePrincipalJoin,
     );
 
     // Drop this device's owner journal for the attempt: what is left is exactly
@@ -1335,17 +1415,16 @@ async fn run_auto_approval_refuses_an_attempt_this_device_did_not_issue() {
         ),
         "an attempt this device did not issue must be refused, got {refused:?}",
     );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
-            .await
-            .is_none(),
-        "a refused attempt produces no approval",
-    );
+    for kind in [DeviceJoinTransportKind::SamePrincipalJoin] {
+        assert!(
+            fixture.slot_bytes(&bundle, kind).await.is_none(),
+            "a refused attempt produces no {kind:?}",
+        );
+    }
 }
 
 /// The `Ask` policy hands the request to the host and abides by the answer: a
-/// refusal stops the join before any approval is published.
+/// refusal stops the join before a library bootstrap or activation is published.
 #[tokio::test]
 async fn the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     tokio::spawn(run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join())
@@ -1361,7 +1440,7 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
     let joiner = fixture.client();
     assert_joiner_waited_for(
         Box::pin(joiner.join_via_transport(&bundle, one_shot(), no_join_progress(), &cancel)).await,
-        DeviceJoinTransportKind::ProviderAdmissionApproval,
+        DeviceJoinTransportKind::SamePrincipalJoin,
     );
 
     let asked = std::sync::atomic::AtomicUsize::new(0);
@@ -1395,20 +1474,20 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
         ),
         "a refused request stops the join, got {refused:?}",
     );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
-            .await
-            .is_none(),
-        "a refused request produces no approval",
-    );
+    for kind in [DeviceJoinTransportKind::SamePrincipalJoin] {
+        assert!(
+            fixture.slot_bytes(&bundle, kind).await.is_none(),
+            "a refused request produces no {kind:?}",
+        );
+    }
 
-    // The same request approved by the host proceeds to an approval.
+    // The same request approved by the host produces the library bootstrap and
+    // activation without another joining-device round trip.
     let approve = |_request: &coven_replication::sync::DeviceProviderAccessRequest| {
         asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         coven_replication::sync::DeviceJoinApproval::Approve
     };
-    assert_owner_waited_for(
+    activated(
         fixture
             .owner_store
             .device_join_transport()
@@ -1420,20 +1499,18 @@ async fn run_the_ask_policy_consults_the_host_and_a_refusal_stops_the_join() {
                 one_shot(),
             )
             .await,
-        DeviceJoinTransportKind::RegistrationRequest,
     );
     assert_eq!(
         asked.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "the host was asked again on the next run",
     );
-    assert!(
-        fixture
-            .slot_bytes(&bundle, DeviceJoinTransportKind::ProviderAdmissionApproval)
-            .await
-            .is_some(),
-        "an approved request produces its approval",
-    );
+    for kind in [DeviceJoinTransportKind::SamePrincipalJoin] {
+        assert!(
+            fixture.slot_bytes(&bundle, kind).await.is_some(),
+            "an approved request produces {kind:?}",
+        );
+    }
 }
 
 /// Republishing an artifact already at its slot is the same transfer, not a

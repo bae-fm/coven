@@ -212,6 +212,9 @@ impl LocalStoreWriter {
 
         let registration_activation = match &batch {
             StoreOperationBatch::Outcome { registration, .. } => registration.as_deref().cloned(),
+            StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
+                Some(*registration.clone())
+            }
             _ => None,
         };
         let registration_ref = self.registration.reference().clone();
@@ -259,6 +262,25 @@ impl LocalStoreWriter {
                     device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Attempt(
                         attempt,
                     )],
+                    ..StoreCommitOperationsInput::empty()
+                },
+            ),
+            StoreOperationBatch::SamePrincipalDeviceJoin {
+                attempt,
+                outcome,
+                registration: activated_registration,
+            } => sign_ops(
+                context,
+                write_id,
+                registration_ref,
+                registration,
+                signer,
+                StoreCommitOperationsInput {
+                    device_join_attempt_decisions: vec![DeviceJoinAttemptDecisionRef::Attempt(
+                        attempt,
+                    )],
+                    device_join_outcomes: vec![outcome],
+                    device_registrations: vec![activated_registration.activated_reference()?],
                     ..StoreCommitOperationsInput::empty()
                 },
             ),

@@ -68,6 +68,153 @@ pub struct RetainedVerifiedActivatedAck {
     pub activating_commit_value: StoreBatchCommit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedReplaySnapshotAuthority {
+    pub store_root: StoreRootRef,
+    pub founder_registration: StoreDeviceRegistrationRef,
+    pub snapshot: StoreSnapshotRef,
+    pub metadata: SnapshotMeta,
+    pub snapshot_cut: StoreHistoryCut,
+    pub accepted_cut: StoreHistoryCut,
+    pub device_state: ResolvedStoreDeviceState,
+    #[serde(with = "ordered_map_entries")]
+    pub active_registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
+    #[serde(with = "ordered_map_entries")]
+    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedVerifiedActivatedAck>,
+}
+
+impl RetainedReplaySnapshotAuthority {
+    pub fn validate(&self) -> Result<(), StoreProtocolError> {
+        let metadata_bytes = self.metadata.to_bytes();
+        let author = self
+            .active_registrations
+            .get(&self.metadata.author_registration.device_id)
+            .filter(|registration| registration.reference() == &self.metadata.author_registration)
+            .ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "retained snapshot author is absent from its active registrations".to_string(),
+                )
+            })?;
+        let parsed = SnapshotMeta::parse_at(
+            &metadata_bytes,
+            self.store_root.store_root_hash,
+            &self.snapshot,
+            author.value(),
+        )?;
+        if self.metadata.store_root_hash != self.store_root.store_root_hash
+            || self.metadata.generation != self.snapshot.generation
+            || self.metadata.snapshot_hash() != self.snapshot.snapshot_hash
+            || self.snapshot.object.verify(&metadata_bytes).is_err()
+            || self.snapshot_cut.frontier() != self.metadata.coverage
+            || !self
+                .accepted_cut
+                .frontier()
+                .covers(&self.snapshot_cut.frontier())
+            || parsed != self.metadata
+            || self.device_state.state_hash != self.metadata.state.devices.state_hash()
+            || self.device_state.recovery != self.metadata.state.devices.recovery()
+        {
+            return Err(StoreProtocolError::Malformed(
+                "retained snapshot replay authority differs from its signed snapshot state"
+                    .to_string(),
+            ));
+        }
+        let expected_active = self
+            .device_state
+            .devices
+            .iter()
+            .filter_map(|(device_id, record)| {
+                matches!(record.status, StoreDeviceStatus::Active)
+                    .then_some((*device_id, &record.registration))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if expected_active.len() != self.active_registrations.len()
+            || expected_active.iter().any(|(device_id, reference)| {
+                self.active_registrations
+                    .get(device_id)
+                    .is_none_or(|registration| registration.reference() != *reference)
+            })
+            || self.acknowledgements.len() != self.active_registrations.len()
+        {
+            return Err(StoreProtocolError::Malformed(
+                "retained snapshot replay authority does not exactly cover active devices"
+                    .to_string(),
+            ));
+        }
+        for (device_id, registration) in &self.active_registrations {
+            let bytes = registration.value().to_bytes();
+            registration.reference().object.verify(&bytes)?;
+            let parsed = StoreDeviceRegistration::parse_at(&bytes, &self.store_root, *device_id)?;
+            if &parsed != registration.value() {
+                return Err(StoreProtocolError::Malformed(
+                    "retained snapshot registration is not canonical".to_string(),
+                ));
+            }
+            registration
+                .reference()
+                .verify_registration(registration.value())?;
+            let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
+                StoreProtocolError::Malformed(
+                    "retained snapshot active device has no acknowledgement".to_string(),
+                )
+            })?;
+            acknowledgement.validate_chain(&self.store_root, registration)?;
+            let (acknowledgement_ref, acknowledgement_value) =
+                acknowledgement.latest().ok_or_else(|| {
+                    StoreProtocolError::Malformed(
+                        "retained snapshot acknowledgement proof chain is empty".to_string(),
+                    )
+                })?;
+            let commit_bytes = acknowledgement.activating_commit_value.to_bytes();
+            acknowledgement
+                .activating_commit
+                .object
+                .verify(&commit_bytes)?;
+            let parsed_commit = VerifiedStoreBatchCommit::parse(
+                &commit_bytes,
+                self.store_root.store_root_hash,
+                &acknowledgement.activating_commit,
+                registration.value(),
+            )?;
+            if parsed_commit.value() != &acknowledgement.activating_commit_value
+                || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
+                || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
+                || !history_cut_covers_commit(
+                    &self.accepted_cut,
+                    &acknowledgement.activating_commit,
+                )
+                || !acknowledgement_value
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|acknowledged| {
+                        acknowledged.author_registration == self.metadata.author_registration
+                            && acknowledged.snapshot == self.snapshot
+                    })
+                || acknowledgement_value.device_state != self.metadata.state.devices
+                || !acknowledgement_value
+                    .store_cut
+                    .frontier()
+                    .covers(&self.metadata.coverage)
+            {
+                return Err(StoreProtocolError::Malformed(
+                    "retained snapshot acknowledgement differs from its activated commit"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommitRef) -> bool {
+    let covered = CommitFrontier(BTreeMap::from([(
+        reference.coord.stream_id,
+        reference.clone(),
+    )]));
+    cut.frontier().covers(&covered)
+}
+
 impl RetainedVerifiedActivatedAck {
     pub fn latest(&self) -> Option<&(StoreAckRef, StoreAck)> {
         self.chain

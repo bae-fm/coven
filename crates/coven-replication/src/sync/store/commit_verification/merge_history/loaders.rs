@@ -200,30 +200,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
-        self.commit_verifier.load_founder_registration().await
-    }
-
-    pub(crate) async fn load_snapshot_image(
-        &self,
-        snapshot: &coven_database::PublishedStoreSnapshot,
-        progress: coven_storage::cloud::DownloadProgress,
-    ) -> Result<Vec<u8>, StoreObjectError> {
-        let context = ProtocolObjectContext::store_encrypted(
-            self.root.reference().store_root_hash,
-            ProtocolObjectDomain::StoreSnapshotImage,
-        );
-        let semantic_prefix = coven_protocol::store_commit::snapshot_image_semantic_prefix(
-            &snapshot.meta.author_registration.device_id.to_string(),
-            snapshot.meta.image.image_hash,
-        );
-        self.commit_verifier
-            .read_protocol_object_with_progress(
-                &context,
-                &snapshot.meta.image.object,
-                &semantic_prefix,
-                progress,
-            )
-            .await
+        Ok(self.founder.clone())
     }
 
     pub(crate) async fn load_device_join_attempt_and_owner(
@@ -394,7 +371,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             VerifiedMergePredecessorHistory::new(&self.history.commits, accepted_frontier);
         let loaded = self.load_commit_join_evidence(commit, author).await;
         let loaded = loaded.map_err(StorePullError::from)?;
-        let join_evidence = accepted.verify_commit_join_evidence(commit, loaded)?;
+        let join_evidence = accepted.verify_commit_join_evidence(commit, loaded, membership)?;
         let registrations = self
             .load_commit_registrations(commit, author, Some(membership), &join_evidence, accepted)
             .await;

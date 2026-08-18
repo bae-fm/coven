@@ -209,6 +209,7 @@ impl DeviceJoinAttempt {
         expected: &DeviceJoinAttemptRef,
         owner: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
+        expected.object.verify(bytes)?;
         Self::parse_unverified(bytes)?.verify_at(expected, owner)
     }
 
@@ -246,11 +247,11 @@ impl DeviceJoinAttemptBody {
         }
         match (&self.provider_approval.admission, &self.provider_response) {
             (
-                crate::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::SamePrincipal,
+                crate::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal,
                 crate::store_commit::device_join_exchange::DeviceProviderResponseReservation::SamePrincipal,
             )
             | (
-                crate::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge::CrossPrincipal(_),
+                crate::store_commit::device_join_exchange::DeviceProviderAdmission::CrossPrincipal { .. },
                 crate::store_commit::device_join_exchange::DeviceProviderResponseReservation::CrossPrincipal { .. },
             ) => {}
             _ => return Err(StoreProtocolError::JoinAttemptMismatch),
@@ -351,7 +352,9 @@ impl DeviceReadinessProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinDisposition {
-    Activated { readiness: DeviceReadinessProof },
+    Activated {
+        registration: StoreDeviceRegistrationRef,
+    },
     Cancelled,
 }
 
@@ -399,6 +402,27 @@ impl DeviceJoinOutcome {
 
     pub fn outcome_hash(&self) -> ObjectHash {
         self.hash()
+    }
+
+    pub fn verify_at(
+        &self,
+        expected: &DeviceJoinOutcomeRef,
+        attempt: &DeviceJoinAttempt,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        let bytes = self.to_bytes();
+        expected.object().verify(&bytes)?;
+        expected.verify_outcome(self)?;
+        if &self.attempt != expected.attempt()
+            || self.attempt.attempt_id != attempt.attempt_id
+            || self.store_root_hash != attempt.store_root.store_root_hash
+            || self.owner_registration != attempt.owner_registration
+            || self.owner_grant != attempt.owner_grant
+        {
+            return Err(StoreProtocolError::JoinOutcomeMismatch);
+        }
+        self.owner_registration.verify_registration(owner)?;
+        self.verify_by(&owner.device_signing_pubkey)
     }
 }
 

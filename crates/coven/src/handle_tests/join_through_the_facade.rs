@@ -375,12 +375,13 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
     );
     let owner_timeline = timeline.clone();
     let owner_progress = move |progress| owner_timeline.record("existing device", progress);
+    let admission_started = timeline.started;
     let admitting = async {
         let request = host
             .wait_for_request()
             .await
             .expect("receive signed request");
-        fixture
+        let outcome = fixture
             .handle
             .approve_device_pairing(
                 &host,
@@ -392,12 +393,13 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
                 tokio::sync::watch::channel(false).1,
             )
             .await
+            .expect("existing device completes over live S3");
+        (outcome, admission_started.elapsed())
     };
-    let (joined, admitted) = tokio::join!(Box::pin(joining), Box::pin(admitting));
+    let (joined, (admitted, admission_elapsed)) =
+        tokio::join!(Box::pin(joining), Box::pin(admitting));
     let elapsed = timeline.started.elapsed();
     let joined = joined.expect("joining device completes over live S3");
-    let admitted = admitted.expect("existing device completes over live S3");
-
     assert!(matches!(
         joined,
         crate::DeviceJoinTransportOutcome::Joined(_)
@@ -408,10 +410,14 @@ async fn run_two_devices_pair_end_to_end_over_live_s3_within_the_product_bound()
     ));
     let snapshot_download = timeline.recorded_at("joining device", "DownloadingSnapshot");
     let snapshot_install = timeline.recorded_at("joining device", "InstallingSnapshot");
-    let waiting_for_joiner = timeline.recorded_at("existing device", "WaitingForJoiningDevice");
+    let registration = timeline.recorded_at("existing device", "RegisteringDevice");
     timeline.assert_progress_cadence("joining device", "DownloadingSnapshot");
     assert!(snapshot_download <= snapshot_install);
-    assert!(waiting_for_joiner <= elapsed);
+    assert!(registration <= admission_elapsed);
+    assert!(
+        admission_elapsed <= Duration::from_secs(10),
+        "live S3 device enrollment took {admission_elapsed:.3?}, beyond the ten-second product bound"
+    );
     assert!(
         elapsed <= Duration::from_secs(10),
         "live S3 device pairing took {elapsed:.3?}, beyond the ten-second product bound"
@@ -489,30 +495,23 @@ async fn run_a_failed_snapshot_installation_restarts_from_the_durable_pairing() 
         request = host.wait_for_request() => request.expect("receive signed request"),
         outcome = &mut first_join => panic!("joining finished before approval: {outcome:?}"),
     };
-    let first_join = {
-        let first_approval = fixture.handle.approve_device_pairing(
-            &host,
-            &request,
-            crate::MemberRole::Member,
-            crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
-            None,
-            &|_| {},
-            tokio::sync::watch::channel(false).1,
-        );
-        tokio::pin!(first_approval);
-        tokio::select! {
-            outcome = &mut first_join => outcome,
-            outcome = &mut first_approval => {
-                panic!("approval finished before the injected snapshot failure: {outcome:?}")
-            }
-        }
-    };
-    // Dropping the still-waiting approval future models the existing app being
-    // terminated at the same boundary as the joining app. Neither side writes
-    // a cancellation, so both durable journals remain eligible to resume.
+    let first_approval = fixture.handle.approve_device_pairing(
+        &host,
+        &request,
+        crate::MemberRole::Member,
+        crate::DeviceJoinApprovalPolicy::AutoApproveSelfIssued,
+        None,
+        &|_| {},
+        tokio::sync::watch::channel(false).1,
+    );
+    let (first_join, first_approval) = tokio::join!(Box::pin(first_join), Box::pin(first_approval));
     assert!(matches!(
         first_join,
         Err(crate::BootstrapError::Snapshot(_))
+    ));
+    assert!(matches!(
+        first_approval.expect("owner records the durable activation"),
+        crate::DeviceJoinDriveOutcome::Activated(_)
     ));
     assert!(!fixture
         .layout

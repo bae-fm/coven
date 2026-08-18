@@ -45,12 +45,12 @@ pub use store::{
     DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness, DeviceJoinRole,
     DeviceJoinStatus, DeviceJoinTransportError, DeviceJoinTransportKind, DeviceJoinTransportParams,
     DeviceJoinTransportTiming, DeviceJoinWriteRevocationExecutor,
-    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest, DeviceProviderAdmission,
+    DeviceProviderAccessAdministrator, DeviceProviderAccessRequest,
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceProviderReadiness,
     DeviceRegistrationRequest, JoinedStore, JoinerJoinClosure, JoinerJoinTerminal,
     JoiningDeviceJoinProgress, JoiningDeviceJoinProgressObserver, ProviderAdminJoinClosure,
     ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProviderWriteAuthorityRef,
-    ProvisionalDeviceBootstrap,
+    ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
 };
 pub use store::{
     BlobCacheError, BlobStream, EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus,

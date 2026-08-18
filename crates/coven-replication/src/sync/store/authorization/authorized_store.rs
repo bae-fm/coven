@@ -61,6 +61,8 @@ impl LocalStoreDevice {
                 Some(authority)
             }
             coven_database::LocalDeviceRegistrationState::Prepared
+            | coven_database::LocalDeviceRegistrationState::RegistrationPublished
+            | coven_database::LocalDeviceRegistrationState::RegistrationActivated { .. }
             | coven_database::LocalDeviceRegistrationState::Created => None,
         };
         Ok(Self {

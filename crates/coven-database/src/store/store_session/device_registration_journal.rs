@@ -140,6 +140,7 @@ impl StoreSession<'_> {
     fn stage_local_store_device_registration(
         &mut self,
         record: LocalRegistrationRecord,
+        initial_state: LocalDeviceRegistrationState,
         subject: &str,
     ) -> Result<(), DbError> {
         let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
@@ -170,7 +171,35 @@ impl StoreSession<'_> {
             .optional()
             .map_err(DbError::from)?;
         match existing {
-            Some(existing) if existing == expected => Ok(()),
+            Some(existing) if existing == expected => {
+                let state: String = self
+                    .conn
+                    .query_row(
+                        "SELECT state FROM local_store_device_registration WHERE singleton = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                let state: LocalDeviceRegistrationState = serde_json::from_str(&state)
+                    .map_err(|error| DbError::context("parse local registration state", error))?;
+                let valid = match (&initial_state, &state) {
+                    (LocalDeviceRegistrationState::Prepared, _) => true,
+                    (
+                        LocalDeviceRegistrationState::RegistrationActivated {
+                            authority: expected,
+                        },
+                        LocalDeviceRegistrationState::RegistrationActivated { authority: actual }
+                        | LocalDeviceRegistrationState::Activated { authority: actual },
+                    ) => expected == actual,
+                    _ => false,
+                };
+                if !valid {
+                    return Err(DbError::Message(
+                        "local registration journal has a different publication state".to_string(),
+                    ));
+                }
+                Ok(())
+            }
             Some(_) => Err(DbError::Message(
                 "local registration journal already owns different exact objects".to_string(),
             )),
@@ -190,14 +219,53 @@ impl StoreSession<'_> {
                         expected.4,
                         expected.5,
                         expected.6,
-                        serde_json::to_string(&LocalDeviceRegistrationState::Prepared).map_err(
-                            |error| DbError::context("serialize local registration state", error)
-                        )?,
+                        serde_json::to_string(&initial_state).map_err(|error| {
+                            DbError::context("serialize local registration state", error)
+                        })?,
                     ],
                 )
                 .map(|_| ())
                 .map_err(DbError::from),
         }
+    }
+
+    fn stage_activated_local_store_device_registration(
+        &mut self,
+        record: LocalRegistrationRecord,
+        authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
+        subject: &str,
+    ) -> Result<(), DbError> {
+        let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
+        let root = self
+            .verified_store_authority
+            .required_root_authority_on(records)?;
+        record.require_installed_store_root(&root, subject)?;
+        let installed: (String, Vec<u8>, String, String) = self
+            .conn
+            .query_row(
+                "SELECT registration_hash, registration_bytes, registration_object, \
+                        activation_authority \
+                 FROM store_device_registration_activations WHERE device_id = ?1",
+                [record.device_id()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(DbError::from)?;
+        let expected = (
+            record.reference().registration_hash.to_string(),
+            record.registration.bytes.clone(),
+            encode(record.reference(), subject, "registration ref")?,
+            encode(&authority, subject, "activation authority")?,
+        );
+        if installed != expected {
+            return Err(DbError::Message(
+                "installed activation differs from the local registration graph".to_string(),
+            ));
+        }
+        self.stage_local_store_device_registration(
+            record,
+            LocalDeviceRegistrationState::RegistrationActivated { authority },
+            subject,
+        )
     }
 
     fn install_existing_local_founder_device(
@@ -570,34 +638,18 @@ impl StoreSession<'_> {
         )
     }
 
-    fn mark_local_store_device_registration_created(
-        &mut self,
-        registration: ExactProtocolObject<StoreDeviceRegistration>,
-        initial_ack: StoreAckRef,
-        initial_ack_object: ExactProtocolObject<StoreAck>,
-    ) -> Result<(), DbError> {
-        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
-        let registration_ref = StoreDeviceRegistrationRef::from_registration(
-            &registration.value,
-            registration.prepared.reference().clone(),
-        );
-        if registration_ref.object != *registration.prepared.reference()
-            || initial_ack.object != *initial_ack_object.prepared.reference()
-        {
-            return Err(DbError::Message(
-                "created registration refs differ from their prepared objects".to_string(),
-            ));
-        }
-        let durable: (Vec<u8>, String, String, Vec<u8>, String, String) = tx
+    fn local_registration_state(
+        tx: &rusqlite::Transaction<'_>,
+        record: &LocalRegistrationRecord,
+        subject: &str,
+    ) -> Result<LocalDeviceRegistrationState, DbError> {
+        let expected = record.columns(subject)?;
+        let durable: LocalDeviceRegistrationJournalRow = tx
             .query_row(
-                "SELECT registration_bytes, prepared_object, initial_ack_ref, \
-                    initial_ack_bytes, initial_ack_prepared, state \
-                 FROM local_store_device_registration \
-                 WHERE singleton = 1 AND device_id = ?1 AND registration_hash = ?2",
-                (
-                    registration_ref.device_id.to_string(),
-                    registration_ref.registration_hash.to_string(),
-                ),
+                "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                        initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+                 FROM local_store_device_registration WHERE singleton = 1",
+                [],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -606,68 +658,125 @@ impl StoreSession<'_> {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
                     ))
                 },
             )
             .map_err(DbError::from)?;
-        let stored_registration_prepared: PreparedExactObject = serde_json::from_str(&durable.1)
-            .map_err(|error| DbError::context("stored registration object", error))?;
-        let stored_ack_ref: StoreAckRef = serde_json::from_str(&durable.2)
-            .map_err(|error| DbError::context("stored initial ack ref", error))?;
-        let stored_ack_prepared: PreparedExactObject = serde_json::from_str(&durable.4)
-            .map_err(|error| DbError::context("stored initial ack object", error))?;
-        if registration_ref.object != *stored_registration_prepared.reference()
-            || registration.prepared.reference() != stored_registration_prepared.reference()
-            || registration.prepared.stored_bytes() != stored_registration_prepared.stored_bytes()
-            || registration.bytes != durable.0
-            || initial_ack != stored_ack_ref
-            || initial_ack_object.prepared.reference() != stored_ack_prepared.reference()
-            || initial_ack_object.prepared.stored_bytes() != stored_ack_prepared.stored_bytes()
-            || initial_ack_object.bytes != durable.3
+        if durable.0 != expected.0
+            || durable.1 != expected.1
+            || durable.2 != expected.2
+            || durable.3 != expected.3
+            || durable.4 != expected.4
+            || durable.5 != expected.5
+            || durable.6 != expected.6
         {
-            return Err(DbError::Message(
-                "created registration differs from its complete durable exact objects".to_string(),
-            ));
+            return Err(DbError::Message(format!(
+                "{subject} differs from its durable exact objects"
+            )));
         }
-        let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
-            .map_err(|error| DbError::context("serialize prepared journal", error))?;
-        let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
-            .map_err(|error| DbError::context("serialize created journal", error))?;
-        let updated = tx
-            .execute(
-                "UPDATE local_store_device_registration SET state = ?1 \
-                 WHERE singleton = 1 AND device_id = ?2 AND registration_hash = ?3 \
-                   AND initial_ack_ref = ?4 AND state = ?5",
-                rusqlite::params![
-                    created,
-                    registration_ref.device_id.to_string(),
-                    registration_ref.registration_hash.to_string(),
-                    serde_json::to_string(&initial_ack).map_err(|error| {
-                        DbError::context("serialize initial ack ref", error)
-                    })?,
-                    prepared,
-                ],
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
-            let already: Option<String> = tx
-                .query_row(
-                    "SELECT state FROM local_store_device_registration \
-                     WHERE singleton = 1 AND device_id = ?1 AND registration_hash = ?2",
-                    (
-                        registration_ref.device_id.to_string(),
-                        registration_ref.registration_hash.to_string(),
-                    ),
-                    |row| row.get(0),
+        serde_json::from_str(&durable.7)
+            .map_err(|error| DbError::context(format!("parse {subject} state"), error))
+    }
+
+    fn mark_local_store_device_registration_published(
+        &mut self,
+        record: LocalRegistrationRecord,
+        subject: &str,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let state = Self::local_registration_state(&tx, &record, subject)?;
+        match state {
+            LocalDeviceRegistrationState::Prepared => {
+                tx.execute(
+                    "UPDATE local_store_device_registration SET state = ?1 \
+                     WHERE singleton = 1 AND state = ?2",
+                    rusqlite::params![
+                        encode(
+                            &LocalDeviceRegistrationState::RegistrationPublished,
+                            subject,
+                            "published state",
+                        )?,
+                        encode(
+                            &LocalDeviceRegistrationState::Prepared,
+                            subject,
+                            "prepared state",
+                        )?,
+                    ],
                 )
-                .optional()
                 .map_err(DbError::from)?;
-            if already.as_deref() != Some(created.as_str()) {
+            }
+            LocalDeviceRegistrationState::RegistrationPublished
+            | LocalDeviceRegistrationState::Created
+            | LocalDeviceRegistrationState::Activated { .. } => {}
+            LocalDeviceRegistrationState::RegistrationActivated { .. } => {
                 return Err(DbError::Message(
-                    "local registration journal is absent or differs from the created object"
+                    "activated registration cannot pass through unactivated publication"
                         .to_string(),
                 ));
             }
+        }
+        tx.commit().map_err(DbError::from)
+    }
+
+    fn mark_local_store_device_ack_published(
+        &mut self,
+        record: LocalRegistrationRecord,
+        subject: &str,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        let state = Self::local_registration_state(&tx, &record, subject)?;
+        let target = match state {
+            LocalDeviceRegistrationState::Prepared
+            | LocalDeviceRegistrationState::RegistrationPublished => {
+                LocalDeviceRegistrationState::Created
+            }
+            LocalDeviceRegistrationState::RegistrationActivated { ref authority } => {
+                let published_ack = record.published_ack_columns(subject)?;
+                tx.execute(
+                    "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+                     VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
+                    (&published_ack.0, &published_ack.1),
+                )
+                .map_err(DbError::from)?;
+                let stored_ack: (String, String) = tx
+                    .query_row(
+                        "SELECT ack_ref, successor_slot FROM published_store_acks \
+                         WHERE singleton = 1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(DbError::from)?;
+                if stored_ack != published_ack {
+                    return Err(DbError::Message(
+                        "activated local acknowledgement differs from its exact cloud object"
+                            .to_string(),
+                    ));
+                }
+                crate::set_protocol_state_on(&tx, LOCAL_DEVICE_ID_STATE_KEY, &record.device_id())?;
+                LocalDeviceRegistrationState::Activated {
+                    authority: authority.clone(),
+                }
+            }
+            LocalDeviceRegistrationState::Created
+            | LocalDeviceRegistrationState::Activated { .. } => {
+                tx.commit().map_err(DbError::from)?;
+                return Ok(());
+            }
+        };
+        let current = encode(&state, subject, "current state")?;
+        let updated = tx
+            .execute(
+                "UPDATE local_store_device_registration SET state = ?1 \
+                 WHERE singleton = 1 AND state = ?2",
+                rusqlite::params![encode(&target, subject, "published state")?, current],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(
+                "local registration journal changed during acknowledgement publication".to_string(),
+            ));
         }
         tx.commit().map_err(DbError::from)
     }
@@ -684,7 +793,27 @@ impl StoreDatabase {
         let record =
             LocalRegistrationRecord::checked(registration, initial_ack_ref, initial_ack, SUBJECT)?;
         self.call_store(move |session| {
-            session.stage_local_store_device_registration(record, SUBJECT)
+            session.stage_local_store_device_registration(
+                record,
+                LocalDeviceRegistrationState::Prepared,
+                SUBJECT,
+            )
+        })
+        .await
+    }
+
+    pub async fn stage_activated_local_store_device_registration(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+        authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
+    ) -> Result<(), DbError> {
+        const SUBJECT: &str = "activated local registration staging graph";
+        let record =
+            LocalRegistrationRecord::checked(registration, initial_ack_ref, initial_ack, SUBJECT)?;
+        self.call_store(move |session| {
+            session.stage_activated_local_store_device_registration(record, authority, SUBJECT)
         })
         .await
     }
@@ -756,12 +885,21 @@ impl StoreDatabase {
     pub async fn oldest_unpublished_store_device_registration(
         &self,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
-        self.read_local_store_device_registration(
-            "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+        let registration = self
+            .read_local_store_device_registration(
+                "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
                     initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
-             FROM local_store_device_registration WHERE singleton = 1 AND state = '\"prepared\"'",
-        )
-        .await
+             FROM local_store_device_registration WHERE singleton = 1",
+            )
+            .await?;
+        Ok(registration.filter(|registration| {
+            matches!(
+                registration.state,
+                LocalDeviceRegistrationState::Prepared
+                    | LocalDeviceRegistrationState::RegistrationPublished
+                    | LocalDeviceRegistrationState::RegistrationActivated { .. }
+            )
+        }))
     }
 
     pub async fn read_local_store_device_registration(
@@ -772,18 +910,40 @@ impl StoreDatabase {
             .await
     }
 
-    pub async fn mark_local_store_device_registration_created(
+    pub async fn mark_local_store_device_registration_published(
         &self,
         registration: ExactProtocolObject<StoreDeviceRegistration>,
-        initial_ack: StoreAckRef,
+        initial_ack_ref: StoreAckRef,
         initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
+        const SUBJECT: &str = "published local registration graph";
+        let record = LocalRegistrationRecord::checked(
+            registration,
+            initial_ack_ref,
+            initial_ack_object,
+            SUBJECT,
+        )?;
         self.call_store(move |session| {
-            session.mark_local_store_device_registration_created(
-                registration,
-                initial_ack,
-                initial_ack_object,
-            )
+            session.mark_local_store_device_registration_published(record, SUBJECT)
+        })
+        .await
+    }
+
+    pub async fn mark_local_store_device_ack_published(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack_object: ExactProtocolObject<StoreAck>,
+    ) -> Result<(), DbError> {
+        const SUBJECT: &str = "published local acknowledgement graph";
+        let record = LocalRegistrationRecord::checked(
+            registration,
+            initial_ack_ref,
+            initial_ack_object,
+            SUBJECT,
+        )?;
+        self.call_store(move |session| {
+            session.mark_local_store_device_ack_published(record, SUBJECT)
         })
         .await
     }

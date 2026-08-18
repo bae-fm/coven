@@ -528,37 +528,61 @@ impl DeviceJoinClient {
                     return self.accept_abandonment(transport, abandonment).await;
                 }
                 Some(DeviceJoinStatus::AwaitingProviderAdmission { request }) => {
+                    let same_principal =
+                        request.offer.provider_admin.provider == request.peer_provider;
                     publish_once(
                         transport,
                         &mut published,
                         DeviceJoinAction::TransferProviderAccessRequest(request),
                     )
                     .await?;
-                    on_progress(
-                        coven_replication::sync::JoiningDeviceJoinProgress::WaitingForProviderAccess,
-                    );
-                    // The owner may give up on the attempt while this device
-                    // waits, so the wait watches the abandonment slot alongside
-                    // the approval rather than sitting out its deadline.
-                    let approval = match transport
-                        .await_step::<DeviceProviderAdmissionApproval>(timing)
-                        .await?
-                    {
-                        DeviceJoinStep::Continue(approval) => approval,
-                        DeviceJoinStep::Abandoned(abandonment) => {
-                            return self.accept_abandonment(transport, abandonment).await;
-                        }
-                    };
-                    on_progress(
-                        coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
-                    );
-                    let registration_request = self.prepare_registration_request(approval).await?;
-                    publish_once(
-                        transport,
-                        &mut published,
-                        DeviceJoinAction::TransferRegistrationRequest(registration_request),
-                    )
-                    .await?;
+                    if same_principal {
+                        on_progress(
+                            coven_replication::sync::JoiningDeviceJoinProgress::WaitingForLibrary,
+                        );
+                        let join = match transport
+                            .await_step::<coven_replication::sync::SamePrincipalDeviceJoin>(timing)
+                            .await?
+                        {
+                            DeviceJoinStep::Continue(join) => join,
+                            DeviceJoinStep::Abandoned(abandonment) => {
+                                return self.accept_abandonment(transport, abandonment).await;
+                            }
+                        };
+                        self.record_same_principal_registration_request(
+                            join.bootstrap.bootstrap.request.approval().clone(),
+                        )?;
+                        return self
+                            .finish_same_principal(transport, join, on_progress, cancel)
+                            .await;
+                    } else {
+                        on_progress(
+                            coven_replication::sync::JoiningDeviceJoinProgress::WaitingForProviderAccess,
+                        );
+                        // The owner may give up on the attempt while this device
+                        // waits, so the wait watches the abandonment slot alongside
+                        // the approval rather than sitting out its deadline.
+                        let approval = match transport
+                            .await_step::<DeviceProviderAdmissionApproval>(timing)
+                            .await?
+                        {
+                            DeviceJoinStep::Continue(approval) => approval,
+                            DeviceJoinStep::Abandoned(abandonment) => {
+                                return self.accept_abandonment(transport, abandonment).await;
+                            }
+                        };
+                        on_progress(
+                            coven_replication::sync::JoiningDeviceJoinProgress::RegisteringDevice,
+                        );
+                        let registration_request =
+                            self.prepare_registration_request(approval).await?;
+                        publish_once(
+                            transport,
+                            &mut published,
+                            DeviceJoinAction::TransferRegistrationRequest(registration_request),
+                        )
+                        .await?;
+                    }
                 }
                 Some(DeviceJoinStatus::AwaitingRegistrationRequest { approval }) => {
                     on_progress(
@@ -573,6 +597,10 @@ impl DeviceJoinClient {
                     .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingBootstrap { request }) => {
+                    let same_principal = matches!(
+                        &request,
+                        coven_replication::sync::DeviceRegistrationRequest::SamePrincipal { .. }
+                    );
                     publish_once(
                         transport,
                         &mut published,
@@ -582,9 +610,29 @@ impl DeviceJoinClient {
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::WaitingForLibrary,
                     );
-                    let provider_ready = transport
-                        .await_artifact::<ProviderReadyDeviceBootstrap>(timing)
-                        .await?;
+                    if same_principal {
+                        let join = match transport
+                            .await_step::<coven_replication::sync::SamePrincipalDeviceJoin>(timing)
+                            .await?
+                        {
+                            DeviceJoinStep::Continue(join) => join,
+                            DeviceJoinStep::Abandoned(abandonment) => {
+                                return self.accept_abandonment(transport, abandonment).await;
+                            }
+                        };
+                        return self
+                            .finish_same_principal(transport, join, on_progress, cancel)
+                            .await;
+                    }
+                    let provider_ready = match transport
+                        .await_step::<ProviderReadyDeviceBootstrap>(timing)
+                        .await?
+                    {
+                        DeviceJoinStep::Continue(provider_ready) => provider_ready,
+                        DeviceJoinStep::Abandoned(abandonment) => {
+                            return self.accept_abandonment(transport, abandonment).await;
+                        }
+                    };
                     let readiness = Box::pin(self.bootstrap_pending_device(
                         provider_ready,
                         on_progress,
@@ -599,12 +647,17 @@ impl DeviceJoinClient {
                     .await?;
                 }
                 Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                    publish_once(
-                        transport,
-                        &mut published,
-                        DeviceJoinAction::TransferReadiness(readiness),
-                    )
-                    .await?;
+                    if !matches!(
+                        &readiness.provider,
+                        coven_replication::sync::DeviceProviderReadiness::SamePrincipal
+                    ) {
+                        publish_once(
+                            transport,
+                            &mut published,
+                            DeviceJoinAction::TransferReadiness(readiness),
+                        )
+                        .await?;
+                    }
                     on_progress(
                         coven_replication::sync::JoiningDeviceJoinProgress::WaitingForActivation,
                     );
@@ -670,6 +723,20 @@ impl DeviceJoinClient {
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
     ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
         let config = self.complete_device_join(activation, on_progress).await?;
+        transport.delete_attempt_slots().await?;
+        Ok(DeviceJoinTransportOutcome::Joined(config))
+    }
+
+    async fn finish_same_principal(
+        &self,
+        transport: &DeviceJoinTransport<'_>,
+        join: coven_replication::sync::SamePrincipalDeviceJoin,
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<DeviceJoinTransportOutcome, BootstrapError> {
+        let config = self
+            .install_same_principal_device_join(join, on_progress, cancel)
+            .await?;
         transport.delete_attempt_slots().await?;
         Ok(DeviceJoinTransportOutcome::Joined(config))
     }

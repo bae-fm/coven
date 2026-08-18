@@ -52,6 +52,7 @@ pub use crate::snapshot_objects::{
 };
 pub(crate) use crate::snapshot_records::load_outbound_store_snapshot_on;
 pub(crate) use crate::snapshot_records::load_published_store_snapshot_on;
+pub(crate) use crate::snapshot_records::load_published_store_snapshots_on;
 pub use crate::store_ack_records::store_snapshot_first_slot;
 pub(crate) use crate::store_ack_records::{
     finish_outbound_store_ack_on, load_published_store_ack_on, verify_next_local_store_ack_on,
@@ -263,8 +264,8 @@ pub use store::{
     ReclaimCommitActivation, ReclaimedStorePackage, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
     RetainedReplayAuthority, RetainedReplayBaseline, RetainedReplayGenesisAuthority,
-    RetainedReplaySnapshotAuthority, SnapshotBlobAudience, SnapshotBlobFact, SnapshotDatabaseImage,
-    SnapshotImageError, SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
+    SnapshotBlobAudience, SnapshotBlobFact, SnapshotDatabaseImage, SnapshotImageError,
+    SnapshotImageOperationError, SnapshotPublicationPermit, StoreDatabase,
     StoreReclaimJournalError, StoreRowWrites, StoreWritePreparation, TableSchema,
     ValidatedChangeset, VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, WinningRow,
     GENERATION_ZERO,
@@ -882,7 +883,7 @@ pub struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
     store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-    stability: RetainedReplaySnapshotAuthority,
+    stability: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
     routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     circle_selection: CircleRestoreSelection,

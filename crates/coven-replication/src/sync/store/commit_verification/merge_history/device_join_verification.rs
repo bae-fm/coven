@@ -351,14 +351,30 @@ impl<'a> MergeHistoryVerifier<'a> {
             .load_predecessor_membership(membership_state)
             .await
             .map_err(StorePullError::from)?;
-        let founder = self.commit_verifier.load_founder_registration().await?;
+        let mut pending = history_cut_references(coverage);
+        pending.push(attempt_activation.clone());
+        self.verify_refs(pending.clone()).await?;
+        self.prepare_device_join_bootstrap_from_verified_parts(
+            coverage,
+            attempt_activation,
+            membership_state,
+            membership,
+            pending,
+        )
+    }
+
+    fn prepare_device_join_bootstrap_from_verified_parts(
+        &self,
+        coverage: &StoreHistoryCut,
+        attempt_activation: &StoreBatchCommitRef,
+        membership_state: &StoreMembershipStateRef,
+        membership: MembershipChain,
+        mut pending: Vec<StoreBatchCommitRef>,
+    ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
+        let founder = self.founder.clone();
         let founder_reference =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
         let genesis = self.history.genesis.clone();
-
-        let mut pending = history_cut_references(coverage);
-        pending.push(attempt_activation.clone());
-        self.verify_refs(pending).await?;
         let activation = self
             .history
             .commits
@@ -388,20 +404,31 @@ impl<'a> MergeHistoryVerifier<'a> {
             ));
         }
 
+        let mut required = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            if !required.insert(reference.clone()) {
+                continue;
+            }
+            let verified = self.history.commits.get(&reference).ok_or_else(|| {
+                StorePullError::InvalidState(format!(
+                    "verified device join bootstrap is missing required commit {}/{}",
+                    reference.coord.stream_id, reference.coord.sequence,
+                ))
+            })?;
+            pending.extend(commit_predecessor_references(verified.verified.value()));
+        }
+
         let mut emitted = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(self.history.commits.len());
-        while emitted.len() != self.history.commits.len() {
-            let next = self
-                .history
-                .commits
-                .iter()
-                .find_map(|(reference, verified)| {
-                    (!emitted.contains(reference)
-                        && commit_predecessor_references(verified.verified.value())
-                            .iter()
-                            .all(|dependency| emitted.contains(dependency)))
-                    .then(|| reference.clone())
-                });
+        let mut ordered = Vec::with_capacity(required.len());
+        while emitted.len() != required.len() {
+            let next = required.iter().find_map(|reference| {
+                let verified = &self.history.commits[reference];
+                (!emitted.contains(reference)
+                    && commit_predecessor_references(verified.verified.value())
+                        .iter()
+                        .all(|dependency| emitted.contains(dependency)))
+                .then(|| reference.clone())
+            });
             let Some(reference) = next else {
                 return Err(StorePullError::InvalidState(
                     "verified device join bootstrap history has an unresolved predecessor"
@@ -510,15 +537,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         }
         let mut verified = BTreeMap::new();
         for outcome_ref in commit.device_join_outcomes() {
-            if !accepted
-                .contains_join_attempt(outcome_ref.attempt())
-                .map_err(registration_attempt_error)?
-            {
-                return Err(RegistrationLoadError::Invalid(
-                    "device join outcome names an attempt absent from its predecessor history"
-                        .to_string(),
-                ));
-            }
             let attempt = join_evidence
                 .attempts
                 .get(outcome_ref.attempt())
@@ -527,6 +545,31 @@ impl<'a> MergeHistoryVerifier<'a> {
                         "device join outcome has no verified exact attempt".to_string(),
                     )
                 })?;
+            let attempt_activated_here =
+                commit
+                    .device_join_attempt_decisions()
+                    .iter()
+                    .any(|decision| {
+                        matches!(
+                            decision,
+                            DeviceJoinAttemptDecisionRef::Attempt(reference)
+                                if reference == outcome_ref.attempt()
+                        )
+                    });
+            let accepted_before = accepted
+                .contains_join_attempt(outcome_ref.attempt())
+                .map_err(registration_attempt_error)?;
+            let same_principal_attempt_activated_here = attempt_activated_here
+                && matches!(
+                    attempt.provider_approval.admission,
+                    coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal
+                );
+            if !(accepted_before || same_principal_attempt_activated_here) {
+                return Err(RegistrationLoadError::Invalid(
+                    "device join outcome names an attempt absent from its predecessor history"
+                        .to_string(),
+                ));
+            }
             if attempt.owner_registration != commit.author_registration
                 || outcome_ref.slot() != &attempt.outcome_slot
             {

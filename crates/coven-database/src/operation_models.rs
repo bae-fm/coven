@@ -24,6 +24,10 @@ pub struct OwnerRecoveryPublication {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalDeviceRegistrationState {
     Prepared,
+    RegistrationPublished,
+    RegistrationActivated {
+        authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation,
+    },
     Created,
     Activated {
         authority: coven_protocol::store_commit::StoreDeviceRegistrationActivation,

@@ -417,11 +417,21 @@ impl<'storage> RestoringStore<'storage> {
             registration: prepared_registration,
             initial_ack: prepared_initial_ack,
         } = readiness;
+        let exact_registration = prepared_registration.into_exact();
+        let exact_initial_ack = prepared_initial_ack.into_exact();
         database
-            .mark_local_store_device_registration_created(
-                prepared_registration.into_exact(),
+            .mark_local_store_device_registration_published(
+                exact_registration.clone(),
+                initial_ack_ref.clone(),
+                exact_initial_ack.clone(),
+            )
+            .await
+            .map_err(StoreRegistrationError::from)?;
+        database
+            .mark_local_store_device_ack_published(
+                exact_registration,
                 initial_ack_ref,
-                prepared_initial_ack.into_exact(),
+                exact_initial_ack,
             )
             .await
             .map_err(StoreRegistrationError::from)?;

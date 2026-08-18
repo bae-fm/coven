@@ -130,7 +130,7 @@ pub use coven_replication::sync::{
     DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceJoinTransportError,
     DeviceJoinTransportKind, DeviceJoinTransportParams, DeviceJoinTransportTiming,
     DeviceJoinWriteRevocationExecutor, DeviceProviderAccessAdministrator,
-    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
     EagerCacheFillError, EagerCacheFillProgress, EagerCacheFillStatus, JoinedStore,
     JoinerJoinClosure, JoinerJoinTerminal, JoiningDeviceJoinProgress,

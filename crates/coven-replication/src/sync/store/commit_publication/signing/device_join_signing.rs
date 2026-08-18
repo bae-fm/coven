@@ -226,8 +226,7 @@ impl LocalStoreWriter {
     pub(crate) fn sign_device_admission_approval(
         &self,
         request: coven_protocol::store_commit::device_join_exchange::DeviceProviderAccessRequest,
-        access_grant: coven_protocol::provider::ActivatedStoreMemberProviderAccessGrant,
-        admission: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionChallenge,
+        admission: coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission,
         root: &coven_protocol::objects::VerifiedObject<
             coven_protocol::store_commit::StoreProtocolRoot,
         >,
@@ -237,7 +236,6 @@ impl LocalStoreWriter {
     > {
         coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionApproval::signed(
             request,
-            access_grant,
             admission,
             root,
             self.registration.value(),

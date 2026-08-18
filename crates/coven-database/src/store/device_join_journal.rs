@@ -136,6 +136,12 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
             OwnerJoinProgress::AttemptActivated(_)
         ) | (
             OwnerJoinProgress::RegistrationRequested(_),
+            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
+        ) | (
+            OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. },
+            OwnerJoinProgress::SamePrincipalCompleted { .. }
+        ) | (
+            OwnerJoinProgress::RegistrationRequested(_),
             OwnerJoinProgress::AbandonmentCreateIntent { .. }
         ) | (
             OwnerJoinProgress::AbandonmentCreateIntent { .. },
@@ -172,6 +178,28 @@ fn provider_admin_adjacent(
     previous: &ProviderAdminJoinProgress,
     next: &ProviderAdminJoinProgress,
 ) -> bool {
+    if let (
+        ProviderAdminJoinProgress::AccessRequested(request),
+        ProviderAdminJoinProgress::ApprovalPrepared(approval),
+    ) = (previous, next)
+    {
+        return approval.request.as_ref() == request
+            && matches!(
+                approval.admission,
+                coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission::SamePrincipal
+            );
+    }
+    if let (
+        ProviderAdminJoinProgress::ProviderReady(ready),
+        ProviderAdminJoinProgress::Completed(
+            coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmissionCompletion::SamePrincipal {
+                bootstrap,
+            },
+        ),
+    ) = (previous, next)
+    {
+        return ready == bootstrap.as_ref();
+    }
     matches!(
         (previous, next),
         (

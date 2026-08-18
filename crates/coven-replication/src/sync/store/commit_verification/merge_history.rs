@@ -278,6 +278,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(Self {
             root,
             commit_verifier,
+            founder: founder.clone(),
             history: VerifiedMergeHistory {
                 genesis,
                 commits: BTreeMap::new(),
@@ -388,6 +389,78 @@ impl<'a> MergeHistoryVerifier<'a> {
         commit: VerifiedStoreBatchCommit,
     ) -> Result<(), StoreProtocolError> {
         self.commit_verifier.remember(commit)
+    }
+
+    pub(crate) async fn retain_local_same_principal_join_activation(
+        &mut self,
+        materialization: coven_database::OwnedVerifiedMergeMaterialization,
+    ) -> Result<(), StorePullError> {
+        let reference = materialization.commit_ref().clone();
+        self.verify_refs(commit_predecessor_references(materialization.commit()))
+            .await?;
+        if let Some(existing) = self.history.commits.get(&reference) {
+            if existing.verified.value() == materialization.commit()
+                && existing.verified.author() == materialization.verified_commit().author()
+            {
+                return Ok(());
+            }
+            return Err(StorePullError::InvalidState(
+                "local join activation conflicts with its already-verified Store commit"
+                    .to_string(),
+            ));
+        }
+        let commit = materialization.commit();
+        if commit.control().is_some()
+            || commit.acknowledgement().is_some()
+            || commit.device_join_attempt_decisions().len() != 1
+            || commit.device_join_outcomes().len() != 1
+            || commit.device_registrations().len() != 1
+            || materialization.registrations().len() != 1
+        {
+            return Err(StorePullError::InvalidState(
+                "local same-principal activation is not one exact join operation".to_string(),
+            ));
+        }
+        let predecessor_cut = commit
+            .order
+            .predecessor_cut()
+            .map_err(StorePullError::Protocol)?;
+        let authority = self.verify_merge_history_authority_from_verified_history(
+            &predecessor_cut.0,
+            &commit.membership_state,
+        )?;
+        let predecessor_state = authority.device_state;
+        let registrations = materialization.registrations().to_vec();
+        let operations = materialization.device_operations().clone();
+        let state_after = self
+            .derive_local_post_device_state(
+                commit,
+                predecessor_state.clone(),
+                &registrations,
+                operations.clone(),
+            )
+            .await?;
+        let verified = materialization.verified_commit().clone();
+        let activation_head = materialization.activation_head().clone();
+        let activation_head_object = materialization.activation_head_object().clone();
+        let history_evidence = materialization.history_evidence().clone();
+        self.history.commits.insert(
+            reference,
+            VerifiedMergeHistoryCommit {
+                verified,
+                predecessor_membership: authority.membership,
+                predecessor_state,
+                state_after,
+                registrations,
+                operations,
+                acknowledgement: None,
+                membership_control: None,
+                activation_head,
+                activation_head_object,
+                history_evidence,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn verified_predecessor_state(
@@ -514,31 +587,32 @@ impl<'a> MergeHistoryVerifier<'a> {
         evidence: LoadedDeviceJoinAttemptEvidence,
     ) -> Result<VerifiedObject<store_commit::DeviceJoinAttempt>, StorePullError> {
         let frontier = &evidence.attempt.value.bootstrap_cut.0;
-        self.verify_merge_history_authority(frontier, &evidence.attempt.value.membership)
+        let authority = self
+            .verify_merge_history_authority(frontier, &evidence.attempt.value.membership)
             .await?;
-        let access = &evidence.attempt.value.provider_approval.access_grant;
-        let verified = self
-            .history
-            .commits
-            .get(&access.activation)
-            .ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "provider-access activation is outside the verified Merge bootstrap history"
-                        .to_string(),
-                )
-            })?;
-        if !predecessor_verifies_provider_administrator(
-            &verified.predecessor_membership,
-            &access.grant.administrator_grant,
-            &verified.verified.value().author_registration,
-            &evidence
-                .attempt
-                .value
-                .provider_approval
-                .request
-                .offer
-                .provider_admin,
-        ) {
+        let approval = &evidence.attempt.value.provider_approval;
+        let provider_admin = &approval.request.offer.provider_admin;
+        let verifies_administrator = match approval.access_grant() {
+            None => predecessor_verifies_provider_administrator(
+                &authority.membership,
+                &provider_admin.grant_id,
+                &provider_admin.administrator,
+                provider_admin,
+            ),
+            Some(access) => self
+                .history
+                .commits
+                .get(&access.activation)
+                .is_some_and(|verified| {
+                    predecessor_verifies_provider_administrator(
+                        &verified.predecessor_membership,
+                        &access.grant.administrator_grant,
+                        &verified.verified.value().author_registration,
+                        provider_admin,
+                    )
+                }),
+        };
+        if !verifies_administrator {
             return Err(StorePullError::InvalidState(
                 "device join attempt lacks exact Merge provider-administrator authority"
                     .to_string(),
@@ -553,6 +627,58 @@ impl<'a> MergeHistoryVerifier<'a> {
         membership_state: &StoreMembershipStateRef,
     ) -> Result<VerifiedMergeHistoryAuthority, StorePullError> {
         self.verify_refs(frontier.values().cloned()).await?;
+        let (device_state, verified_membership_activations) =
+            self.verified_merge_history_authority_parts(frontier)?;
+        let membership = match self
+            .cached_verified_membership(membership_state, &verified_membership_activations)
+        {
+            Some(membership) => membership,
+            None => self
+                .load_membership_at_verified_prefix(
+                    &membership_state.heads,
+                    &membership_state.resolutions,
+                    &verified_membership_activations,
+                    None,
+                )
+                .await
+                .map_err(StorePullError::MembershipChain)?,
+        };
+        verified_membership_activations.validate_complete_membership(&membership)?;
+        verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
+        self.remember_verified_membership(verified_membership_activations, membership.clone());
+        Ok(VerifiedMergeHistoryAuthority {
+            device_state,
+            membership,
+        })
+    }
+
+    pub(crate) fn verify_merge_history_authority_from_verified_history(
+        &self,
+        frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
+        membership_state: &StoreMembershipStateRef,
+    ) -> Result<VerifiedMergeHistoryAuthority, StorePullError> {
+        let (device_state, verified_membership_activations) =
+            self.verified_merge_history_authority_parts(frontier)?;
+        let membership = self
+            .cached_verified_membership(membership_state, &verified_membership_activations)
+            .ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "Merge membership authority is absent from the already-verified history"
+                        .to_string(),
+                )
+            })?;
+        verified_membership_activations.validate_complete_membership(&membership)?;
+        verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
+        Ok(VerifiedMergeHistoryAuthority {
+            device_state,
+            membership,
+        })
+    }
+
+    fn verified_merge_history_authority_parts(
+        &self,
+        frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
+    ) -> Result<(ResolvedStoreDeviceState, VerifiedMergeMembershipPrefix), StorePullError> {
         let device_state = if frontier.is_empty() {
             self.history.genesis.clone()
         } else {
@@ -575,29 +701,9 @@ impl<'a> MergeHistoryVerifier<'a> {
             )
             .map_err(StorePullError::Protocol)?
         };
-        let verified_membership_activations =
+        let membership =
             verified_merge_membership_prefix(&self.history.commits, frontier.values().cloned())?;
-        let membership = match self
-            .cached_verified_membership(membership_state, &verified_membership_activations)
-        {
-            Some(membership) => membership,
-            None => self
-                .load_membership_at_verified_prefix(
-                    &membership_state.heads,
-                    &membership_state.resolutions,
-                    &verified_membership_activations,
-                    None,
-                )
-                .await
-                .map_err(StorePullError::MembershipChain)?,
-        };
-        verified_membership_activations.validate_complete_membership(&membership)?;
-        verify_merge_membership_state_ref(membership_state, &membership, &device_state)?;
-        self.remember_verified_membership(verified_membership_activations, membership.clone());
-        Ok(VerifiedMergeHistoryAuthority {
-            device_state,
-            membership,
-        })
+        Ok((device_state, membership))
     }
 }
 
@@ -683,6 +789,7 @@ struct VerifiedMembershipChain {
 pub struct MergeHistoryVerifier<'a> {
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
+    founder: VerifiedObject<StoreDeviceRegistration>,
     history: VerifiedMergeHistory,
     verified_memberships: Vec<VerifiedMembershipChain>,
     /// Exact acknowledgement objects already authenticated under this

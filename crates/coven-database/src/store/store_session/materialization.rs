@@ -302,6 +302,11 @@ impl VerifiedStoreTransaction<'_, '_, '_> {
                     "device join activation coordinate {stream_id}/{sequence} is already occupied by another commit"
                 )));
             }
+            super::record_activated_store_device_registrations_on(
+                tx,
+                verified_commit.value(),
+                &registrations,
+            )?;
             return Ok(());
         }
         let authority = &mut *self.authority;

@@ -715,9 +715,17 @@ impl<'a> MergeHistoryVerifier<'a> {
         heads: &[protocol_membership::MembershipHeadRef],
         owner: Option<&str>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
-        membership::HistoryMembershipActivation::new(self)
+        let membership = membership::HistoryMembershipActivation::new(self)
             .load_exact_anchored_chain(heads, owner)
-            .await
+            .await?;
+        if self.history.commits.is_empty() {
+            let authority = VerifiedMergeMembershipPrefix::default();
+            authority
+                .validate_complete_membership(&membership)
+                .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
+            self.remember_verified_membership(authority, membership.clone());
+        }
+        Ok(membership)
     }
 
     pub(crate) async fn load_membership_at_exact_heads(

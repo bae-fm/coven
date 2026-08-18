@@ -145,18 +145,19 @@ impl StoreSession<'_> {
                 "local Store founder graph changed before publication rollback".to_string(),
             ));
         }
-        match durable.registration_state {
+        match &durable.registration_state {
             LocalDeviceRegistrationState::Prepared => {}
-            LocalDeviceRegistrationState::Created => {
-                let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
-                    .map_err(|error| DbError::context("serialize created journal state", error))?;
+            LocalDeviceRegistrationState::RegistrationPublished
+            | LocalDeviceRegistrationState::Created => {
+                let current = serde_json::to_string(&durable.registration_state)
+                    .map_err(|error| DbError::context("serialize current journal state", error))?;
                 let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
                     .map_err(|error| DbError::context("serialize prepared journal state", error))?;
                 let updated = tx
                     .execute(
                         "UPDATE local_store_device_registration SET state = ?1 \
                          WHERE singleton = 1 AND state = ?2",
-                        (prepared, created),
+                        (prepared, current),
                     )
                     .map_err(DbError::from)?;
                 if updated != 1 {
@@ -165,7 +166,8 @@ impl StoreSession<'_> {
                     ));
                 }
             }
-            LocalDeviceRegistrationState::Activated { .. } => {
+            LocalDeviceRegistrationState::RegistrationActivated { .. }
+            | LocalDeviceRegistrationState::Activated { .. } => {
                 return Err(DbError::Message(
                     "activated founder graph cannot be rolled back".to_string(),
                 ));
@@ -369,7 +371,9 @@ impl StoreSession<'_> {
         let device_id = registration.device_id.to_string();
         let registration_hash = registration.registration_hash.to_string();
         match &graph.registration_state {
-            LocalDeviceRegistrationState::Prepared => {
+            LocalDeviceRegistrationState::Prepared
+            | LocalDeviceRegistrationState::RegistrationPublished
+            | LocalDeviceRegistrationState::RegistrationActivated { .. } => {
                 return Err(DbError::Message(
                     "founder registration and initial acknowledgement are not exact-created"
                         .to_string(),

@@ -98,6 +98,8 @@ pub enum SnapshotError {
     Acknowledgement(#[source] Box<crate::sync::store::StoreAckError>),
     #[error("snapshot spool cleanup: {0}")]
     SpoolCleanup(#[from] SnapshotSpoolCleanupError),
+    #[error("snapshot download was cancelled")]
+    Cancelled,
     #[error("snapshot operation failed: {cause}; spool cleanup also failed: {cleanup}")]
     SpoolCleanupAfterFailure {
         cause: Box<SnapshotError>,
@@ -175,6 +177,257 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
     hex::encode(Sha256::digest(db_image))
 }
 
+async fn download_snapshot_image(
+    storage: &dyn CloudSyncObjectStorage,
+    root: &coven_protocol::store_commit::StoreRootRef,
+    snapshot: &coven_database::PublishedStoreSnapshot,
+    on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<u8>, SnapshotError> {
+    if *cancel.borrow() {
+        return Err(SnapshotError::Cancelled);
+    }
+    let bytes_total = snapshot.meta.image.object.stored_size();
+    on_progress(
+        crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+            bytes_done: 0,
+            bytes_total,
+        },
+    );
+    let context = coven_protocol::objects::ProtocolObjectContext::store_encrypted(
+        root.store_root_hash,
+        coven_protocol::objects::ProtocolObjectDomain::StoreSnapshotImage,
+    );
+    let semantic_prefix = coven_protocol::store_commit::snapshot_image_semantic_prefix(
+        &snapshot.meta.author_registration.device_id.to_string(),
+        snapshot.meta.image.image_hash,
+    );
+    let mut progress = crate::blob::progress::TransferProgress::new();
+    let download = storage.read_protocol_object_with_progress(
+        &context,
+        &snapshot.meta.image.object,
+        &semantic_prefix,
+        progress.callback(),
+    );
+    tokio::pin!(download);
+    let mut cancellation = cancel.clone();
+    let mut cancellation_open = true;
+    let plaintext = loop {
+        tokio::select! {
+            result = &mut download => break result.map_err(coven_protocol::objects::StoreObjectError::from)?,
+            bytes_done = progress.changed() => {
+                on_progress(crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                    bytes_done,
+                    bytes_total,
+                });
+            }
+            changed = cancellation.changed(), if cancellation_open => {
+                match changed {
+                    Ok(()) if *cancellation.borrow() => return Err(SnapshotError::Cancelled),
+                    Ok(()) => {}
+                    Err(_) => cancellation_open = false,
+                }
+            }
+        }
+    };
+    if let Some(bytes_done) = progress.finish(bytes_total) {
+        on_progress(
+            crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
+                bytes_done,
+                bytes_total,
+            },
+        );
+    }
+    if coven_protocol::store_commit::ObjectHash::digest(&plaintext)
+        != snapshot.meta.image.image_hash
+    {
+        return Err(SnapshotError::Parse(
+            "Store snapshot image differs from its exact reference".to_string(),
+        ));
+    }
+    Ok(plaintext)
+}
+
+/// A same-provider join's already-verified installation authority together
+/// with its downloaded database image. Installing it performs no Store-history
+/// discovery and never downloads Circle images.
+pub struct PreparedDeviceJoinSnapshot {
+    database_image: SnapshotDatabaseImage,
+    db_hash: String,
+    root: coven_protocol::objects::VerifiedObject<coven_protocol::store_commit::StoreProtocolRoot>,
+    founder: coven_protocol::objects::VerifiedObject<
+        coven_protocol::store_commit::StoreDeviceRegistration,
+    >,
+    snapshot: coven_database::PublishedStoreSnapshot,
+    stability: coven_database::VerifiedStoreSnapshotStability,
+    membership: coven_database::InitialStoreMembershipAuthority,
+    attempt: coven_protocol::store_commit::DeviceJoinAttempt,
+    outcome: coven_protocol::store_commit::DeviceJoinOutcome,
+    bootstrap: coven_database::DeviceJoinBootstrapPlan,
+}
+
+impl PreparedDeviceJoinSnapshot {
+    pub async fn prepare(
+        storage: &std::sync::Arc<dyn CloudSyncObjectStorage>,
+        installation: coven_protocol::store_commit::device_join_exchange::SamePrincipalStoreInstallation,
+        binary_schema_version: u32,
+        target_path: &Path,
+        on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Self, SnapshotError> {
+        installation.stability.validate()?;
+        if installation.metadata.schema_version > binary_schema_version {
+            return Err(SnapshotError::SchemaTooNew {
+                snapshot_version: installation.metadata.schema_version,
+                supported: binary_schema_version,
+            });
+        }
+        let root_ref = installation.stability.store_root.clone();
+        let root_bytes = installation.store_root.to_bytes();
+        root_ref.object.verify(&root_bytes)?;
+        if installation.store_root.object_hash() != root_ref.store_root_hash
+            || installation.store_root.descriptor.store_root_id() != root_ref.store_root_id
+        {
+            return Err(SnapshotError::BootstrapState(
+                "device join Store root differs from its exact reference".to_string(),
+            ));
+        }
+        let root_value =
+            coven_protocol::store_commit::StoreProtocolRoot::parse_pinned(&root_bytes, &root_ref)?;
+        let root = coven_protocol::objects::VerifiedObject {
+            value: root_value,
+            bytes: root_bytes,
+            semantic_hash: root_ref.store_root_hash,
+            object: root_ref.object.clone(),
+        };
+        let founder_reference = installation.bootstrap.founder.reference().clone();
+        let carried_founder = installation.bootstrap.founder.value().clone();
+        let founder_bytes = carried_founder.to_bytes();
+        founder_reference.object.verify(&founder_bytes)?;
+        let founder_value = coven_protocol::store_commit::StoreDeviceRegistration::parse_at(
+            &founder_bytes,
+            &root_ref,
+            founder_reference.device_id,
+        )?;
+        if founder_value != carried_founder {
+            return Err(SnapshotError::BootstrapState(
+                "device join founder differs from its verified registration".to_string(),
+            ));
+        }
+        let founder = coven_protocol::objects::VerifiedObject {
+            value: founder_value,
+            bytes: founder_bytes,
+            semantic_hash: founder_reference.registration_hash,
+            object: founder_reference.object,
+        };
+        let membership = coven_database::InitialStoreMembershipAuthority {
+            head_refs: installation.bootstrap.membership.0.clone(),
+        };
+        let bootstrap = coven_database::DeviceJoinBootstrapPlan::from_closure(
+            &root_ref,
+            installation.bootstrap,
+        )?;
+        let snapshot = coven_database::PublishedStoreSnapshot {
+            reference: installation.snapshot,
+            successor_slot: installation.metadata.successor.next_slot.clone(),
+            meta: installation.metadata,
+        };
+        let stability =
+            coven_database::VerifiedStoreSnapshotStability::from_authority(installation.stability)?;
+        let plaintext =
+            download_snapshot_image(storage.as_ref(), &root_ref, &snapshot, on_progress, cancel)
+                .await?;
+        let database_image =
+            SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
+        Ok(Self {
+            database_image,
+            db_hash: snapshot_db_hash(&plaintext),
+            root,
+            founder,
+            snapshot,
+            stability,
+            membership,
+            attempt: installation.attempt,
+            outcome: installation.outcome,
+            bootstrap,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn install(
+        self,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: coven_protocol::blob::TransferLimits,
+        device_id: String,
+        clock: coven_foundation::clock::ClockRef,
+        migrations: &[Migration],
+        routing_encryption: &coven_keys::encryption::EncryptionService,
+    ) -> Result<crate::sync::store::InstalledDeviceJoinSnapshot, SnapshotError> {
+        let Self {
+            database_image,
+            db_hash,
+            root,
+            founder,
+            snapshot,
+            stability,
+            membership,
+            attempt,
+            outcome,
+            bootstrap,
+        } = self;
+        let bound_path = database_image.path().to_path_buf();
+        let result = (|| {
+            let database_bytes = std::fs::read(&bound_path)?;
+            if snapshot_db_hash(&database_bytes) != db_hash {
+                return Err(SnapshotError::BootstrapDatabaseChanged);
+            }
+            let root_ref = coven_protocol::store_commit::StoreRootRef {
+                store_root_id: root.value.descriptor.store_root_id(),
+                store_root_hash: root.semantic_hash,
+                object: root.object.clone(),
+            };
+            let install = coven_database::VerifiedSnapshotBootstrapInstall::new(
+                snapshot,
+                root.clone(),
+                founder,
+                stability,
+                membership,
+                Some(routing_encryption),
+            )?
+            .with_circle_installs(Vec::new());
+            let db = Database::open_initialized_store(
+                &bound_path,
+                &install,
+                synced_tables,
+                blob_tombstone_grace,
+                transfer_limits,
+                device_id,
+                clock,
+                migrations,
+            )?;
+            Ok(crate::sync::store::InstalledDeviceJoinSnapshot {
+                database: coven_database::StoreDatabase::from_database(db),
+                root: root_ref,
+                verified_root: root,
+                attempt,
+                outcome,
+                bootstrap,
+            })
+        })();
+        match result {
+            Ok(installed) => {
+                let committed_path = database_image.commit();
+                debug_assert_eq!(committed_path, bound_path);
+                Ok(installed)
+            }
+            Err(cause) => database_image
+                .finish_operation(Err(cause))
+                .map_err(SnapshotError::from),
+        }
+    }
+}
+
 /// Verified authority to open one downloaded snapshot as one store database and
 /// install exactly its signed commit coverage. Its fields are private so callers
 /// cannot transplant coverage into an unrelated database.
@@ -228,6 +481,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
         target_path: &Path,
         restorer_identity: &coven_keys::keys::UserKeypair,
         on_progress: crate::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
         let root = history_verifier.verified_root();
         if root.protocol().descriptor.store_root_id() != root.reference().store_root_id {
@@ -283,47 +537,14 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 supported: binary_schema_version,
             });
         }
-        let bytes_total = snapshot.meta.image.object.stored_size();
-        on_progress(
-            crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
-                bytes_done: 0,
-                bytes_total,
-            },
-        );
-        let plaintext = {
-            let mut progress = crate::blob::progress::TransferProgress::new();
-            let download = history_verifier.load_snapshot_image(&snapshot, progress.callback());
-            tokio::pin!(download);
-            let plaintext = loop {
-                tokio::select! {
-                    result = &mut download => break result.map_err(SnapshotError::StoreObject)?,
-                    bytes_done = progress.changed() => {
-                        on_progress(
-                            crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
-                                bytes_done,
-                                bytes_total,
-                            },
-                        );
-                    }
-                }
-            };
-            if let Some(bytes_done) = progress.finish(bytes_total) {
-                on_progress(
-                    crate::sync::JoiningDeviceJoinProgress::DownloadingSnapshot {
-                        bytes_done,
-                        bytes_total,
-                    },
-                );
-            }
-            plaintext
-        };
-        if coven_protocol::store_commit::ObjectHash::digest(&plaintext)
-            != snapshot.meta.image.image_hash
-        {
-            return Err(SnapshotError::Parse(
-                "Store snapshot image differs from its exact reference".to_string(),
-            ));
-        }
+        let plaintext = download_snapshot_image(
+            storage.as_ref(),
+            history_verifier.verified_root().reference(),
+            &snapshot,
+            &on_progress,
+            cancel,
+        )
+        .await?;
         let founder_registration = history_verifier
             .load_founder_registration()
             .await

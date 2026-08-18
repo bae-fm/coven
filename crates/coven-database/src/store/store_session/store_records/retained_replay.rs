@@ -350,7 +350,7 @@ impl StoreRecords<'_> {
         self,
         schema_version: u32,
         routing_hash: ObjectHash,
-        authority: crate::RetainedReplaySnapshotAuthority,
+        authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
         let prepared = PreparedRetainedReplayBaseline::new(

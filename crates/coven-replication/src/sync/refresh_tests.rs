@@ -571,7 +571,7 @@ async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
         ])
         .await;
     storage
-        .publish_changeset("owner-device", 4, &peer_cs, db_b.schema_version())
+        .publish_changeset("owner-device", 3, &peer_cs, db_b.schema_version())
         .await
         .expect("publish exact owner changeset");
 

@@ -1,6 +1,6 @@
 //! Storage-mediated delivery for the device-join exchange.
 //!
-//! The join protocol owned by [`crate::sync::store::Store`] produces nine signed
+//! The join protocol owned by [`crate::sync::store::Store`] produces signed
 //! artifacts plus the unwind artifacts, and hands each to the host as a
 //! [`DeviceJoinAction`] to deliver however it likes. This module is the delivery
 //! coven ships by default: each artifact travels as one create-once object in
@@ -28,11 +28,13 @@ use crate::sync::store::{
     DeviceJoinReadiness, DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
     DeviceProviderAccessRequest, DeviceProviderAdmissionApproval,
     DeviceProviderAdmissionCompletion, DeviceRegistrationRequest, JoinerJoinTerminal,
-    ProviderAdminJoinTerminal, ProvisionalDeviceBootstrap, Store,
+    ProviderAdminJoinTerminal, ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin, Store,
 };
 use coven_keys::encryption::{EncryptionService, MasterKeyring, SealError};
 use coven_protocol::objects::ObjectSlot;
 use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain, StorageError};
+use coven_protocol::store_commit::device_join_exchange::DeviceProviderAdmission;
+use coven_protocol::store_commit::device_join_exchange::DeviceProviderChallengePublication;
 use coven_protocol::store_commit::{DeviceJoinAttemptId, ObjectHash, STORE_PROTOCOL_VERSION};
 use coven_storage::CloudSyncObjectStorage;
 
@@ -55,6 +57,7 @@ pub enum DeviceJoinTransportKind {
     ProviderReadyBootstrap,
     Readiness,
     ProviderAdmissionCompletion,
+    SamePrincipalJoin,
     Activation,
     Abandonment,
     Cancellation,
@@ -67,7 +70,7 @@ pub enum DeviceJoinTransportKind {
 impl DeviceJoinTransportKind {
     /// Every kind, in protocol order. An attempt's namespace holds one slot per
     /// entry — allocated together, deleted together.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ProviderAccessRequest,
         Self::ProviderAdmissionApproval,
         Self::RegistrationRequest,
@@ -75,6 +78,7 @@ impl DeviceJoinTransportKind {
         Self::ProviderReadyBootstrap,
         Self::Readiness,
         Self::ProviderAdmissionCompletion,
+        Self::SamePrincipalJoin,
         Self::Activation,
         Self::Abandonment,
         Self::Cancellation,
@@ -94,6 +98,7 @@ impl DeviceJoinTransportKind {
             Self::ProviderReadyBootstrap => "provider-ready-bootstrap",
             Self::Readiness => "readiness",
             Self::ProviderAdmissionCompletion => "provider-admission-completion",
+            Self::SamePrincipalJoin => "same-principal-join",
             Self::Activation => "activation",
             Self::Abandonment => "abandonment",
             Self::Cancellation => "cancellation",
@@ -117,6 +122,7 @@ impl DeviceJoinTransportKind {
             | Self::ProviderAdmissionCompletion
             | Self::ProviderAdminTerminal => DeviceJoinRole::ProviderAdministrator,
             Self::ProvisionalBootstrap
+            | Self::SamePrincipalJoin
             | Self::Activation
             | Self::Abandonment
             | Self::Cancellation
@@ -144,6 +150,7 @@ impl DeviceJoinTransportKind {
             DeviceJoinAction::TransferProviderAdmissionCompletion(_) => {
                 Some(Self::ProviderAdmissionCompletion)
             }
+            DeviceJoinAction::TransferSamePrincipalJoin(_) => Some(Self::SamePrincipalJoin),
             DeviceJoinAction::TransferActivation(_) => Some(Self::Activation),
             DeviceJoinAction::TransferAbandonment(_) => Some(Self::Abandonment),
             DeviceJoinAction::TransferCancellation(_) => Some(Self::Cancellation),
@@ -212,6 +219,11 @@ device_join_artifact!(
     DeviceProviderAdmissionCompletion,
     ProviderAdmissionCompletion,
     TransferProviderAdmissionCompletion
+);
+device_join_artifact!(
+    SamePrincipalDeviceJoin,
+    SamePrincipalJoin,
+    TransferSamePrincipalJoin
 );
 device_join_artifact!(DeviceJoinActivation, Activation, TransferActivation);
 device_join_artifact!(DeviceJoinAbandonment, Abandonment, TransferAbandonment);
@@ -923,6 +935,12 @@ impl<'attempt> AttemptTransport<'attempt> {
                 .await?;
             return Ok(DeviceJoinDriveOutcome::Abandoned(abandonment));
         }
+        if let Some(DeviceJoinStatus::SamePrincipalCompleted { join }) = self.owner_status().await?
+        {
+            self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
+                .await?;
+            return Ok(DeviceJoinDriveOutcome::Activated(join.activation));
+        }
 
         // The admitting side produces four artifacts in a fixed order, each after
         // one of the joiner's. Every phase below starts from its role journal's
@@ -930,6 +948,7 @@ impl<'attempt> AttemptTransport<'attempt> {
         // the artifact republishes it (the crash between producing and publishing),
         // and a journal past it does nothing (its artifact was published, which is
         // how the journal got past it).
+        let mut local_registration = None;
         let mut local_completion = None;
         if roles.provider_administrator {
             let approval = match self.admin_status().await? {
@@ -946,6 +965,16 @@ impl<'attempt> AttemptTransport<'attempt> {
                         .await_artifact::<DeviceProviderAccessRequest>(timing)
                         .await?;
                     self.approve_access_request(&request, policy).await?;
+                    if roles.owner && request.offer.provider_admin.provider == request.peer_provider
+                    {
+                        on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
+                        let join = self
+                            .activate_same_principal(request, access_administrator)
+                            .await?;
+                        self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
+                            .await?;
+                        return Ok(DeviceJoinDriveOutcome::Activated(join.activation));
+                    }
                     on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
                     Some(
                         self.store
@@ -955,10 +984,19 @@ impl<'attempt> AttemptTransport<'attempt> {
                 }
             };
             if let Some(approval) = approval {
-                self.publish(DeviceJoinAction::TransferProviderAdmissionApproval(
-                    approval,
-                ))
-                .await?;
+                if roles.owner
+                    && matches!(approval.admission, DeviceProviderAdmission::SamePrincipal)
+                {
+                    local_registration = Some(
+                        DeviceRegistrationRequest::same_principal(approval)
+                            .map_err(DeviceJoinError::from)?,
+                    );
+                } else {
+                    self.publish(DeviceJoinAction::TransferProviderAdmissionApproval(
+                        approval,
+                    ))
+                    .await?;
+                }
             }
         }
 
@@ -979,10 +1017,14 @@ impl<'attempt> AttemptTransport<'attempt> {
                         .await?
                 }),
                 _ => {
-                    on_progress(AdmittingDeviceJoinProgress::WaitingForRegistrationRequest);
-                    let request = self
-                        .await_artifact::<DeviceRegistrationRequest>(timing)
-                        .await?;
+                    let request = match local_registration.take() {
+                        Some(request) => request,
+                        None => {
+                            on_progress(AdmittingDeviceJoinProgress::WaitingForRegistrationRequest);
+                            self.await_artifact::<DeviceRegistrationRequest>(timing)
+                                .await?
+                        }
+                    };
                     on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                     Some(
                         self.store
@@ -1031,24 +1073,40 @@ impl<'attempt> AttemptTransport<'attempt> {
                 }
             };
             if let Some(ready) = ready {
+                if roles.owner
+                    && matches!(
+                        ready.challenge_publication,
+                        DeviceProviderChallengePublication::SamePrincipal
+                    )
+                {
+                    local_completion = Some(
+                        self.store
+                            .complete_same_principal_device_admission(ready.clone())
+                            .await?,
+                    );
+                }
                 self.publish(DeviceJoinAction::TransferProviderReadyBootstrap(ready))
                     .await?;
             }
 
-            let completion = match self.admin_status().await? {
-                Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
-                Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                    self.store
-                        .complete_device_provider_admission(readiness)
-                        .await?
-                }
-                _ => {
-                    on_progress(AdmittingDeviceJoinProgress::WaitingForJoiningDevice);
-                    let readiness = self.await_artifact::<DeviceJoinReadiness>(timing).await?;
-                    on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
-                    self.store
-                        .complete_device_provider_admission(readiness)
-                        .await?
+            let completion = if let Some(completion) = local_completion.clone() {
+                completion
+            } else {
+                match self.admin_status().await? {
+                    Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
+                    Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
+                        self.store
+                            .complete_device_provider_admission(readiness)
+                            .await?
+                    }
+                    _ => {
+                        on_progress(AdmittingDeviceJoinProgress::WaitingForJoiningDevice);
+                        let readiness = self.await_artifact::<DeviceJoinReadiness>(timing).await?;
+                        on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
+                        self.store
+                            .complete_device_provider_admission(readiness)
+                            .await?
+                    }
                 }
             };
             if roles.owner {
@@ -1088,6 +1146,34 @@ impl<'attempt> AttemptTransport<'attempt> {
         self.publish(DeviceJoinAction::TransferActivation(activation.clone()))
             .await?;
         Ok(DeviceJoinDriveOutcome::Activated(activation))
+    }
+
+    /// Admit a device that uses this Store's provider account through one
+    /// authorized writer. Each protocol transition is still journaled before
+    /// the next begins, so a failure resumes through `drive_once`; keeping the
+    /// writer open avoids reconstructing and re-verifying the same Store
+    /// authority between consecutive transitions.
+    async fn activate_same_principal(
+        &self,
+        request: DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
+    ) -> Result<SamePrincipalDeviceJoin, DeviceJoinTransportError> {
+        let mut writer = self
+            .store
+            .authorize_writer()
+            .await
+            .map_err(DeviceJoinError::from)?;
+        let approval = writer
+            .provider_administrator_join()?
+            .authorize_access(request, access_administrator)
+            .await?;
+        let registration =
+            DeviceRegistrationRequest::same_principal(approval).map_err(DeviceJoinError::from)?;
+        writer
+            .join_operation()
+            .activate_same_principal_join(registration)
+            .await
+            .map_err(DeviceJoinTransportError::from)
     }
 
     async fn cancel_once(

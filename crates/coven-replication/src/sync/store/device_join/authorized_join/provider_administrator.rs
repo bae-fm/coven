@@ -36,15 +36,10 @@ impl<'operation, 'storage>
     fn sign_device_admission_approval(
         &self,
         request: DeviceProviderAccessRequest,
-        access_grant: ActivatedStoreMemberProviderAccessGrant,
-        admission: DeviceProviderAdmissionChallenge,
+        admission: DeviceProviderAdmission,
     ) -> Result<DeviceProviderAdmissionApproval, DeviceJoinError> {
-        self.local_writer.sign_device_admission_approval(
-            request,
-            access_grant,
-            admission,
-            &self.verified_root,
-        )
+        self.local_writer
+            .sign_device_admission_approval(request, admission, &self.verified_root)
     }
 
     async fn activate(
@@ -119,7 +114,7 @@ impl<'operation, 'storage>
             .map_err(DeviceJoinError::ProviderProbe)
     }
 
-    pub(super) async fn authorize_access(
+    pub(crate) async fn authorize_access(
         &mut self,
         request: DeviceProviderAccessRequest,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
@@ -146,6 +141,29 @@ impl<'operation, 'storage>
         let journal = self.journal(request.offer.attempt_id);
         let initial = journal.record(ProviderAdminJoinProgress::AccessRequested(request.clone()));
         let durable = journal.begin(&initial).await?;
+        if provider_admin.provider == request.peer_provider {
+            return match &*durable.progress {
+                DeviceJoinRoleProgress::ProviderAdministrator(
+                    ProviderAdminJoinProgress::ApprovalPrepared(approval),
+                ) => Ok(approval.clone()),
+                DeviceJoinRoleProgress::ProviderAdministrator(
+                    ProviderAdminJoinProgress::AccessRequested(durable_request),
+                ) if durable_request == &request => {
+                    let approval = self.sign_device_admission_approval(
+                        request,
+                        DeviceProviderAdmission::SamePrincipal,
+                    )?;
+                    journal
+                        .advance(
+                            &durable,
+                            ProviderAdminJoinProgress::ApprovalPrepared(approval.clone()),
+                        )
+                        .await?;
+                    Ok(approval)
+                }
+                _ => Err(DeviceJoinError::JournalConflict),
+            };
+        }
         let (grant, prepared, prepared_progress) = match &*durable.progress {
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::ApprovalPrepared(approval),
@@ -162,20 +180,16 @@ impl<'operation, 'storage>
             DeviceJoinRoleProgress::ProviderAdministrator(
                 ProviderAdminJoinProgress::AccessRequested(durable_request),
             ) if durable_request == &request => {
-                let locator = if provider_admin.provider == request.peer_provider {
-                    provider_admin.access.clone()
-                } else {
-                    let administrator = access_administrator
-                        .ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
-                    administrator
-                        .grant_member_access(
-                            &request.offer.member_pubkey,
-                            self.membership
-                                .current_member_provider_email(&request.offer.member_pubkey),
-                            &request.peer_provider,
-                        )
-                        .await?
-                };
+                let administrator =
+                    access_administrator.ok_or(DeviceJoinError::ProviderAdministratorRequired)?;
+                let locator = administrator
+                    .grant_member_access(
+                        &request.offer.member_pubkey,
+                        self.membership
+                            .current_member_provider_email(&request.offer.member_pubkey),
+                        &request.peer_provider,
+                    )
+                    .await?;
                 let grant_id = ProviderAccessGrantId::from_random_bytes(
                     *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes())
                         .as_bytes(),
@@ -250,34 +264,31 @@ impl<'operation, 'storage>
                 ),
             )
             .await?;
-        let admission = if provider_admin.provider == request.peer_provider {
-            DeviceProviderAdmissionChallenge::SamePrincipal
-        } else {
-            let challenge_context = request.cross_challenge_context();
-            let probe_id = coven_protocol::provider::ProviderProbeId::from_bytes(
-                *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
-            );
-            DeviceProviderAdmissionChallenge::CrossPrincipal(
-                self.storage
-                    .prepare_cross_principal_challenge(
-                        &database,
-                        probe_id,
-                        &request.offer.provider,
-                        &challenge_context,
-                        self.local_writer.as_ref(),
-                    )
-                    .await
-                    .map_err(DeviceJoinError::ProviderProbe)?,
+        let challenge_context = request.cross_challenge_context();
+        let probe_id = coven_protocol::provider::ProviderProbeId::from_bytes(
+            *ObjectHash::digest(database.new_store_write_id().as_str().as_bytes()).as_bytes(),
+        );
+        let challenge = self
+            .storage
+            .prepare_cross_principal_challenge(
+                &database,
+                probe_id,
+                &request.offer.provider,
+                &challenge_context,
+                self.local_writer.as_ref(),
             )
-        };
+            .await
+            .map_err(DeviceJoinError::ProviderProbe)?;
         let approval = self.sign_device_admission_approval(
             request,
-            ActivatedStoreMemberProviderAccessGrant {
-                grant,
-                grant_ref,
-                activation,
+            DeviceProviderAdmission::CrossPrincipal {
+                access_grant: Box::new(ActivatedStoreMemberProviderAccessGrant {
+                    grant,
+                    grant_ref,
+                    activation,
+                }),
+                challenge,
             },
-            admission,
         )?;
         journal
             .advance(
@@ -288,11 +299,11 @@ impl<'operation, 'storage>
         Ok(approval)
     }
 
-    pub(super) async fn publish_challenge(
+    pub(crate) async fn publish_challenge(
         &mut self,
         bootstrap: ProvisionalDeviceBootstrap,
     ) -> Result<ProviderReadyDeviceBootstrap, DeviceJoinError> {
-        let offer = &bootstrap.request.approval.request.offer;
+        let offer = &bootstrap.request.approval().request.offer;
         if self.require_grant(&offer.provider_admin.grant_id)? != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::OfferMismatch);
         }
@@ -301,13 +312,17 @@ impl<'operation, 'storage>
             .load_registration(&offer.owner_registration)
             .await?
             .value;
-        self.verify_device_admission_approval(&bootstrap.request.approval, &owner)?;
-        let challenge_publication = match &bootstrap.request.approval.admission {
-            DeviceProviderAdmissionChallenge::SamePrincipal => {
+        self.verify_device_admission_approval(bootstrap.request.approval(), &owner)?;
+        let challenge_publication = match &bootstrap.request.approval().admission {
+            DeviceProviderAdmission::SamePrincipal => {
                 DeviceProviderChallengePublication::SamePrincipal
             }
-            DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
-                let context = bootstrap.request.approval.request.cross_challenge_context();
+            DeviceProviderAdmission::CrossPrincipal { challenge, .. } => {
+                let context = bootstrap
+                    .request
+                    .approval()
+                    .request
+                    .cross_challenge_context();
                 let authorization = DeviceJoinChallengePublicationAuthorization {
                     attempt: bootstrap.publication_authorization.attempt.clone(),
                     attempt_activation: bootstrap
@@ -342,7 +357,7 @@ impl<'operation, 'storage>
                 ) if existing == &ready => return Ok(ready),
                 DeviceJoinRoleProgress::ProviderAdministrator(
                     ProviderAdminJoinProgress::ApprovalPrepared(approval),
-                ) if approval == &*ready.bootstrap.request.approval => {
+                ) if approval == ready.bootstrap.request.approval() => {
                     let observed = journal
                         .advance(
                             &current,
@@ -382,7 +397,13 @@ impl<'operation, 'storage>
             ProviderAdminJoinProgress::Completed(existing),
         ) = &*current.progress
         {
-            if *existing.readiness == readiness {
+            if matches!(
+                existing,
+                DeviceProviderAdmissionCompletion::CrossPrincipal {
+                    readiness: durable,
+                    ..
+                } if **durable == readiness
+            ) {
                 return Ok(existing.clone());
             }
             return Err(DeviceJoinError::JournalConflict);
@@ -396,23 +417,18 @@ impl<'operation, 'storage>
         if readiness.proof.attempt != bootstrap.bootstrap.publication_authorization.attempt {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let offer = &bootstrap.bootstrap.request.approval.request.offer;
+        let offer = &bootstrap.bootstrap.request.approval().request.offer;
         let provider_admin = self.require_grant(&offer.provider_admin.grant_id)?;
         if provider_admin != offer.provider_admin.as_ref() {
             return Err(DeviceJoinError::ProviderAdministratorRequired);
         }
-        let admission = match (
-            &bootstrap.bootstrap.request.approval.admission,
-            &bootstrap.bootstrap.request.response,
+        let receipt = match (
+            &bootstrap.bootstrap.request.approval().admission,
+            &bootstrap.bootstrap.request.response(),
             &readiness.provider,
         ) {
             (
-                DeviceProviderAdmissionChallenge::SamePrincipal,
-                DeviceProviderResponseReservation::SamePrincipal,
-                DeviceProviderReadiness::SamePrincipal,
-            ) => DeviceProviderAdmission::SamePrincipal,
-            (
-                DeviceProviderAdmissionChallenge::CrossPrincipal(challenge),
+                DeviceProviderAdmission::CrossPrincipal { challenge, .. },
                 DeviceProviderResponseReservation::CrossPrincipal { response_slot },
                 DeviceProviderReadiness::CrossPrincipal(response),
             ) => {
@@ -420,36 +436,34 @@ impl<'operation, 'storage>
                     challenge: bootstrap
                         .bootstrap
                         .request
-                        .approval
+                        .approval()
                         .request
                         .cross_challenge_context(),
                     expected_registration_hash: bootstrap
                         .bootstrap
                         .request
-                        .expected_registration
+                        .expected_registration()
                         .registration_hash(),
                     response_slot: response_slot.clone(),
                 };
-                DeviceProviderAdmission::CrossPrincipal(
-                    self.storage
-                        .complete_cross_principal_probe(
-                            &database,
-                            challenge,
-                            response,
-                            &context,
-                            &offer.provider,
-                            self.local_writer.as_ref(),
-                            &offer.member_pubkey,
-                        )
-                        .await
-                        .map_err(DeviceJoinError::ProviderProbe)?,
-                )
+                self.storage
+                    .complete_cross_principal_probe(
+                        &database,
+                        challenge,
+                        response,
+                        &context,
+                        &offer.provider,
+                        self.local_writer.as_ref(),
+                        &offer.member_pubkey,
+                    )
+                    .await
+                    .map_err(DeviceJoinError::ProviderProbe)?
             }
             _ => return Err(DeviceJoinError::AttemptMismatch),
         };
-        let completion = DeviceProviderAdmissionCompletion {
+        let completion = DeviceProviderAdmissionCompletion::CrossPrincipal {
             readiness: Box::new(readiness.clone()),
-            admission,
+            receipt,
         };
         let observed = journal
             .advance(
@@ -460,6 +474,62 @@ impl<'operation, 'storage>
         journal
             .advance(
                 &observed,
+                ProviderAdminJoinProgress::Completed(completion.clone()),
+            )
+            .await?;
+        Ok(completion)
+    }
+
+    pub(crate) async fn complete_same_principal(
+        &mut self,
+        bootstrap: ProviderReadyDeviceBootstrap,
+    ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
+        let attempt_id = bootstrap
+            .bootstrap
+            .publication_authorization
+            .attempt
+            .attempt_id;
+        if !matches!(
+            (
+                &bootstrap.bootstrap.request.approval().admission,
+                bootstrap.bootstrap.request.response(),
+                &bootstrap.challenge_publication,
+            ),
+            (
+                DeviceProviderAdmission::SamePrincipal,
+                DeviceProviderResponseReservation::SamePrincipal,
+                DeviceProviderChallengePublication::SamePrincipal,
+            )
+        ) {
+            return Err(DeviceJoinError::AttemptMismatch);
+        }
+        let journal = self.journal(attempt_id);
+        let current = journal.current().await?;
+        if let DeviceJoinRoleProgress::ProviderAdministrator(
+            ProviderAdminJoinProgress::Completed(existing),
+        ) = &*current.progress
+        {
+            return match existing {
+                DeviceProviderAdmissionCompletion::SamePrincipal { bootstrap: durable }
+                    if **durable == bootstrap =>
+                {
+                    Ok(existing.clone())
+                }
+                _ => Err(DeviceJoinError::JournalConflict),
+            };
+        }
+        match &*current.progress {
+            DeviceJoinRoleProgress::ProviderAdministrator(
+                ProviderAdminJoinProgress::ProviderReady(durable),
+            ) if durable == &bootstrap => {}
+            _ => return Err(DeviceJoinError::JournalConflict),
+        }
+        let completion = DeviceProviderAdmissionCompletion::SamePrincipal {
+            bootstrap: Box::new(bootstrap),
+        };
+        journal
+            .advance(
+                &current,
                 ProviderAdminJoinProgress::Completed(completion.clone()),
             )
             .await?;
@@ -522,10 +592,10 @@ impl<'operation, 'storage>
                 | ProviderAdminJoinProgress::ResponseObserved(_),
             ) => {
                 let challenge = match &attempt.value.provider_approval.admission {
-                    DeviceProviderAdmissionChallenge::SamePrincipal => {
+                    DeviceProviderAdmission::SamePrincipal => {
                         ProviderChallengeDisposition::SamePrincipal
                     }
-                    DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
+                    DeviceProviderAdmission::CrossPrincipal { challenge, .. } => {
                         match self
                             .storage
                             .observe_exact_slot(&challenge.administrator_object.slot)
@@ -557,8 +627,9 @@ impl<'operation, 'storage>
             }
             _ => return Err(DeviceJoinError::JournalConflict),
         };
-        if let DeviceProviderAdmissionChallenge::CrossPrincipal(probe) =
-            &attempt.value.provider_approval.admission
+        if let DeviceProviderAdmission::CrossPrincipal {
+            challenge: probe, ..
+        } = &attempt.value.provider_approval.admission
         {
             self.storage
                 .delete_exact_slot_and_verify_absent(&probe.administrator_object.slot)
@@ -608,7 +679,7 @@ impl<'operation, 'storage>
         let executor_admin = self.require_grant(executor_grant)?.clone();
         let (authority, protected_slots, locator) = match producer {
             DeviceJoinProducer::ProviderAdministrator => {
-                let DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) =
+                let DeviceProviderAdmission::CrossPrincipal { challenge, .. } =
                     &attempt.value.provider_approval.admission
                 else {
                     return Err(DeviceJoinError::CleanupMismatch);
@@ -649,17 +720,15 @@ impl<'operation, 'storage>
                 {
                     slots.push(response_slot.clone());
                 }
+                let access_grant = attempt
+                    .value
+                    .provider_approval
+                    .access_grant()
+                    .ok_or(DeviceJoinError::CleanupMismatch)?;
                 (
-                    ProviderWriteAuthorityRef::MemberAccess(
-                        attempt
-                            .value
-                            .provider_approval
-                            .access_grant
-                            .grant_ref
-                            .clone(),
-                    ),
+                    ProviderWriteAuthorityRef::MemberAccess(access_grant.grant_ref.clone()),
                     slots,
-                    &attempt.value.provider_approval.access_grant.grant.locator,
+                    &access_grant.grant.locator,
                 )
             }
         };
@@ -830,6 +899,21 @@ impl Store {
         writer
             .provider_administrator_join()?
             .complete_admission(readiness)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub(crate) async fn complete_same_principal_device_admission(
+        &self,
+        bootstrap: ProviderReadyDeviceBootstrap,
+    ) -> Result<DeviceProviderAdmissionCompletion, DeviceJoinError> {
+        let mut writer = self
+            .authorize_writer()
+            .await
+            .map_err(DeviceJoinError::from)?;
+        writer
+            .provider_administrator_join()?
+            .complete_same_principal(bootstrap)
             .await
     }
 

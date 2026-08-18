@@ -46,20 +46,46 @@ impl<'storage> RegistrationOutbox<'storage> {
                     "durable registration columns differ from its exact signed bytes".to_string(),
                 ));
             }
-            let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
-                store_root.store_root_hash,
-                ProtocolObjectDomain::StoreDeviceRegistration,
-            );
-            let semantic_prefix = registration_semantic_prefix(&outbound.device_id.to_string());
-            self.storage
-                .create_verified_protocol_object(
-                    &context,
-                    &outbound.prepared,
-                    &semantic_prefix,
-                    &outbound.registration_bytes,
-                )
-                .await
-                .map_err(publication_error)?;
+            let exact_registration = coven_protocol::objects::ExactProtocolObject {
+                value: registration.clone(),
+                bytes: outbound.registration_bytes.clone(),
+                prepared: outbound.prepared.clone(),
+            };
+            match &outbound.state {
+                coven_database::LocalDeviceRegistrationState::Prepared => {
+                    let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+                        store_root.store_root_hash,
+                        ProtocolObjectDomain::StoreDeviceRegistration,
+                    );
+                    let semantic_prefix =
+                        registration_semantic_prefix(&outbound.device_id.to_string());
+                    self.storage
+                        .create_verified_protocol_object(
+                            &context,
+                            &outbound.prepared,
+                            &semantic_prefix,
+                            &outbound.registration_bytes,
+                        )
+                        .await
+                        .map_err(publication_error)?;
+                    self.database
+                        .mark_local_store_device_registration_published(
+                            exact_registration.clone(),
+                            outbound.initial_ack_ref.clone(),
+                            outbound.initial_ack.clone(),
+                        )
+                        .await
+                        .map_err(database_error)?;
+                }
+                coven_database::LocalDeviceRegistrationState::RegistrationPublished
+                | coven_database::LocalDeviceRegistrationState::RegistrationActivated { .. } => {}
+                coven_database::LocalDeviceRegistrationState::Created
+                | coven_database::LocalDeviceRegistrationState::Activated { .. } => {
+                    return Err(StoreRegistrationError::Invalid(
+                        "registration outbox selected a completed publication".to_string(),
+                    ));
+                }
+            }
             let ack_context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
                 store_root.store_root_hash,
                 ProtocolObjectDomain::StoreAck,
@@ -74,12 +100,8 @@ impl<'storage> RegistrationOutbox<'storage> {
                 .await
                 .map_err(StoreObjectError::from)?;
             self.database
-                .mark_local_store_device_registration_created(
-                    coven_protocol::objects::ExactProtocolObject {
-                        value: registration,
-                        bytes: outbound.registration_bytes,
-                        prepared: outbound.prepared,
-                    },
+                .mark_local_store_device_ack_published(
+                    exact_registration,
                     outbound.initial_ack_ref,
                     outbound.initial_ack,
                 )

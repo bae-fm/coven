@@ -45,5 +45,8 @@ pub use cleanup::*;
 pub use coven_protocol::store_commit::device_join_exchange::*;
 pub use error::*;
 pub(crate) use joiner::*;
-pub use joiner::{PendingDeviceJoinAuthority, PendingDeviceJoinObservation};
+pub use joiner::{
+    PendingDeviceJoinAuthority, PendingDeviceJoinObservation,
+    PendingSamePrincipalDeviceJoinCompletion,
+};
 pub use journal::*;

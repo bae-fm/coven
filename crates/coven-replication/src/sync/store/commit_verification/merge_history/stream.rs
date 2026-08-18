@@ -290,26 +290,19 @@ impl<'a> MergeHistoryVerifier<'a> {
                         "join outcome signer differs from its exact attempt authority".to_string(),
                     ));
                 }
-                let DeviceJoinDisposition::Activated { readiness } = &outcome_value.disposition
+                let DeviceJoinDisposition::Activated {
+                    registration: outcome_registration,
+                } = &outcome_value.disposition
                 else {
                     return Err(RegistrationLoadError::Invalid(
                         "cancelled device join outcome cannot activate a registration".to_string(),
                     ));
                 };
-                let initial_ack = self
-                    .load_store_ack(&readiness.initial_ack, registration)
-                    .await
-                    .map_err(RegistrationLoadError::Object)?
-                    .value;
-                readiness
-                    .verify(
-                        outcome.attempt(),
-                        attempt,
-                        registration,
-                        &readiness.initial_ack,
-                        &initial_ack,
-                    )
-                    .map_err(RegistrationLoadError::from)?;
+                if outcome_registration != &activated.registration {
+                    return Err(RegistrationLoadError::Invalid(
+                        "join outcome registration differs from its activation".to_string(),
+                    ));
+                }
                 Ok(StoreDeviceRegistrationActivation::Join {
                     attempt_id: *attempt_id,
                     outcome: outcome.clone(),

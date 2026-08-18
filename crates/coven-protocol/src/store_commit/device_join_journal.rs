@@ -13,7 +13,8 @@ use crate::store_commit::device_join_exchange::{
     DeviceProviderAdmissionApproval, DeviceProviderAdmissionCompletion, DeviceRegistrationRequest,
     JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, JoinerResponseDisposition,
     ProviderAdminJoinClosure, ProviderAdminJoinTerminal, ProviderChallengeDisposition,
-    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SlotDisposition,
+    ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap, SamePrincipalDeviceJoin,
+    SlotDisposition,
 };
 
 use super::*;
@@ -35,6 +36,9 @@ pub enum DeviceJoinStatus {
     AwaitingBootstrap {
         request: DeviceRegistrationRequest,
     },
+    SamePrincipalActivationCreatePending {
+        request: DeviceRegistrationRequest,
+    },
     AwaitingChallengePublication {
         bootstrap: ProvisionalDeviceBootstrap,
     },
@@ -49,6 +53,9 @@ pub enum DeviceJoinStatus {
     },
     AwaitingCompletion {
         activation: DeviceJoinActivation,
+    },
+    SamePrincipalCompleted {
+        join: SamePrincipalDeviceJoin,
     },
     Activated {
         store: JoinedStore,
@@ -105,6 +112,7 @@ pub enum DeviceJoinAction {
     TransferProviderReadyBootstrap(ProviderReadyDeviceBootstrap),
     TransferReadiness(DeviceJoinReadiness),
     TransferProviderAdmissionCompletion(DeviceProviderAdmissionCompletion),
+    TransferSamePrincipalJoin(SamePrincipalDeviceJoin),
     TransferActivation(DeviceJoinActivation),
     TransferAbandonment(DeviceJoinAbandonment),
     TransferCancellation(DeviceJoinCancellation),
@@ -131,6 +139,17 @@ pub enum OwnerJoinProgress {
         prepared: PreparedDeviceJoinObject,
     },
     AttemptActivated(ProvisionalDeviceBootstrap),
+    SamePrincipalActivationCreateIntent {
+        request: DeviceRegistrationRequest,
+        bootstrap_cut: StoreHistoryCut,
+        membership: StoreMembershipStateRef,
+        attempt: DeviceJoinAttemptRef,
+        attempt_prepared: PreparedDeviceJoinObject,
+        registration: StoreDeviceRegistrationRef,
+        registration_prepared: PreparedDeviceJoinObject,
+        outcome: DeviceJoinOutcomeRef,
+        outcome_prepared: PreparedDeviceJoinObject,
+    },
     ActivationCreateIntent {
         bootstrap: ProvisionalDeviceBootstrap,
         completion: DeviceProviderAdmissionCompletion,
@@ -145,6 +164,9 @@ pub enum OwnerJoinProgress {
     ActivationPrepared {
         completion: DeviceProviderAdmissionCompletion,
         activation: DeviceJoinActivation,
+    },
+    SamePrincipalCompleted {
+        join: SamePrincipalDeviceJoin,
     },
     Abandoned(DeviceJoinAbandonment),
     Cancelled(DeviceJoinCancellation),
@@ -396,6 +418,12 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
                 request: request.clone(),
             }
         }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalActivationCreateIntent {
+            request,
+            ..
+        }) => DeviceJoinStatus::SamePrincipalActivationCreatePending {
+            request: request.clone(),
+        },
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap))
         | DeviceJoinRoleProgress::ProviderAdministrator(
             ProviderAdminJoinProgress::AttemptObserved(bootstrap),
@@ -427,6 +455,9 @@ pub(crate) fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoin
         )) => DeviceJoinStatus::AwaitingActivation {
             completion: completion.clone(),
         },
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) => {
+            DeviceJoinStatus::SamePrincipalCompleted { join: join.clone() }
+        }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             activation, ..
         })
@@ -537,6 +568,7 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         }
         DeviceJoinRoleProgress::Owner(
             OwnerJoinProgress::RegistrationRequested(_)
+            | OwnerJoinProgress::SamePrincipalActivationCreateIntent { .. }
             | OwnerJoinProgress::AbandonmentCreateIntent { .. }
             | OwnerJoinProgress::ActivationCreateIntent { .. }
             | OwnerJoinProgress::CancellationCreateIntent { .. }
@@ -545,6 +577,9 @@ pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoin
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => Some(
             DeviceJoinAction::TransferProvisionalBootstrap(bootstrap.clone()),
         ),
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::SamePrincipalCompleted { join }) => {
+            Some(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
+        }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             activation, ..
         }) => Some(DeviceJoinAction::TransferActivation(activation.clone())),

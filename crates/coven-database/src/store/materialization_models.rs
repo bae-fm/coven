@@ -1,4 +1,3 @@
-use crate::RetainedReplaySnapshotAuthority;
 use crate::*;
 use coven_protocol::audience_package::AudiencePackage;
 use coven_protocol::circle_activation::VerifiedCircleActivations;
@@ -14,7 +13,8 @@ use coven_protocol::store_commit::{
     StoreDeviceHead, StorePackageRef, VerifiedStoreDeviceOperations,
 };
 use coven_protocol::store_commit::{
-    RetainedMergeCommitEvidence, StoreRootRef, VerifiedStoreBatchCommit,
+    RetainedMergeCommitEvidence, RetainedReplaySnapshotAuthority, StoreRootRef,
+    VerifiedStoreBatchCommit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -667,5 +667,133 @@ impl DeviceJoinBootstrapPlan {
             .iter()
             .find(|commit| &commit.reference == reference)
             .map(|commit| &commit.commit)
+    }
+
+    pub fn into_closure(
+        self,
+        root: &StoreRootRef,
+    ) -> Result<
+        coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
+        DbError,
+    > {
+        if self.founder.store_root != *root || self.founder.to_bytes() != self.founder_bytes {
+            return Err(DbError::Message(
+                "device join bootstrap founder differs from its canonical bytes".to_string(),
+            ));
+        }
+        let founder = coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+            self.founder_reference,
+            self.founder,
+        )
+        .map_err(DbError::from)?;
+        let commits = self
+            .commits
+            .into_iter()
+            .map(|commit| {
+                let value = commit.commit.value();
+                if commit.commit.reference() != &commit.reference
+                    || commit.commit.store_root_hash() != root.store_root_hash
+                {
+                    return Err(DbError::Message(
+                        "device join bootstrap commit differs from its exact reference"
+                            .to_string(),
+                    ));
+                }
+                let author =
+                    coven_protocol::store_commit::ReferencedStoreDeviceRegistration::verified(
+                        value.author_registration.clone(),
+                        commit.commit.author().clone(),
+                    )
+                    .map_err(DbError::from)?;
+                let registrations = RetainedStoreDeviceRegistrationActivations::from_verified(
+                    root,
+                    value,
+                    &commit.registrations,
+                )
+                .map_err(DbError::from)?;
+                Ok(coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapCommitClosure {
+                    reference: commit.reference,
+                    canonical_commit: value.to_bytes(),
+                    author,
+                    registrations,
+                    device_operations: commit.device_operations.to_retained(),
+                    activation_head: commit.activation.head,
+                    activation_object: commit.activation.object,
+                    history_evidence: commit.activation.history_evidence,
+                })
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        Ok(
+            coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure {
+                founder,
+                genesis: self.genesis,
+                membership: coven_protocol::membership::MembershipFloor(self.membership.head_refs),
+                commits,
+            },
+        )
+    }
+
+    pub fn from_closure(
+        root: &StoreRootRef,
+        closure: coven_protocol::store_commit::device_join_exchange::DeviceJoinBootstrapClosure,
+    ) -> Result<Self, DbError> {
+        if closure.founder.value().store_root != *root {
+            return Err(DbError::Message(
+                "device join bootstrap founder belongs to another Store root".to_string(),
+            ));
+        }
+        closure.membership.validate().map_err(|error| {
+            DbError::Message(format!("device join bootstrap membership: {error}"))
+        })?;
+        let founder_reference = closure.founder.reference().clone();
+        let founder = closure.founder.value().clone();
+        let founder_bytes = founder.to_bytes();
+        let commits = closure
+            .commits
+            .into_iter()
+            .map(|commit| {
+                let verified = VerifiedStoreBatchCommit::parse(
+                    &commit.canonical_commit,
+                    root.store_root_hash,
+                    &commit.reference,
+                    commit.author.value(),
+                )
+                .map_err(DbError::from)?;
+                if commit.author.reference() != &verified.value().author_registration {
+                    return Err(DbError::Message(
+                        "device join bootstrap author differs from its exact commit".to_string(),
+                    ));
+                }
+                let registrations = commit
+                    .registrations
+                    .verify_for(root, verified.value())
+                    .map_err(DbError::from)?;
+                let device_operations = commit
+                    .device_operations
+                    .verify_for(root, verified.value())
+                    .map_err(DbError::from)?;
+                Ok(DeviceJoinBootstrapCommit {
+                    reference: commit.reference,
+                    commit: verified,
+                    registrations,
+                    device_operations,
+                    activation: DeviceJoinBootstrapActivation {
+                        head: commit.activation_head,
+                        object: commit.activation_object,
+                        history_evidence: commit.history_evidence,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        Ok(Self {
+            founder_reference,
+            founder,
+            founder_bytes,
+            genesis: closure.genesis,
+            membership: InitialStoreMembershipAuthority {
+                head_refs: closure.membership.0,
+            },
+            commits,
+        })
     }
 }

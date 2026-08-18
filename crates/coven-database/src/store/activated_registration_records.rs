@@ -210,9 +210,18 @@ pub(crate) fn record_activated_store_device_registrations_on(
             authority: authority.clone(),
         };
         match state {
-            LocalDeviceRegistrationState::Prepared => {
+            LocalDeviceRegistrationState::Prepared
+            | LocalDeviceRegistrationState::RegistrationPublished => {
                 return Err(DbError::Message(
                     "Store commit cannot activate a registration before exact creation".to_string(),
+                ));
+            }
+            LocalDeviceRegistrationState::RegistrationActivated {
+                authority: existing,
+            } if existing == *authority => {}
+            LocalDeviceRegistrationState::RegistrationActivated { .. } => {
+                return Err(DbError::Message(
+                    "local registration already has another exact activation authority".to_string(),
                 ));
             }
             LocalDeviceRegistrationState::Created => {

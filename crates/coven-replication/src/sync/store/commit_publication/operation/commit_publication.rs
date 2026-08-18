@@ -142,29 +142,17 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         batch: commit_plan::StoreOperationBatch,
     ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
         let prepared = self.prepare_candidate_borrowed(&plan, batch).await?;
-        match self.publish_prepared(Box::new(prepared), None, None).await? {
-            commit_plan::StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
-            commit_plan::StoreOperationPublicationOutcome::Nonactivated(reference) => {
-                Err(StoreError::InvalidOutbound(format!(
-                    "Store operation candidate {} did not activate",
-                    reference.commit_hash
-                )))
-            }
-            commit_plan::StoreOperationPublicationOutcome::Reprepared => {
-                Err(StoreError::InvalidOutbound(
-                    "Store operation was reprepared during immediate activation".to_string(),
-                ))
-            }
-            commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(_) => {
-                Err(StoreError::InvalidOutbound(
-                    "Store operation adopted a published head for a candidate composed in this call"
-                        .to_string(),
-                ))
-            }
-            commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
-                Err(StoreError::ActivationConflict)
-            }
-        }
+        require_activated_publication(
+            self.publish_prepared(Box::new(prepared), None, None)
+                .await?,
+        )
+    }
+
+    pub(crate) async fn activate_uploaded(
+        &mut self,
+        uploaded: commit_plan::UploadedStoreOperationActivation,
+    ) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
+        require_activated_publication(self.publish_uploaded(uploaded, None, None).await?)
     }
 
     pub(crate) async fn publish_prepared(
@@ -175,56 +163,66 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
         >,
     ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
+        let uploaded = self.upload_prepared(candidate).await?;
+        self.publish_uploaded(uploaded, membership_objects, membership_completion)
+            .await
+    }
+
+    pub(crate) async fn upload_prepared(
+        &mut self,
+        candidate: Box<commit_plan::PreparedStoreOperationCommit>,
+    ) -> Result<commit_plan::UploadedStoreOperationActivation, StoreError> {
         let retained_operation_objects = candidate
             .commit
             .retained_operation_objects()
             .map_err(StoreError::from)?;
-        let head = candidate.head.clone();
-        let head_object = candidate.head_object.clone();
-        let history_evidence = candidate.history_evidence.clone();
-        self.publish(
-            commit_plan::PreparedStoreOperationActivation {
-                candidate,
-                retained_operation_objects,
-            },
-            head,
-            head_object,
-            history_evidence,
-            membership_objects,
-            membership_completion,
-        )
-        .await
-    }
-
-    pub(super) async fn publish(
-        &mut self,
-        mut activation: commit_plan::PreparedStoreOperationActivation,
-        head: coven_protocol::store_commit::StoreDeviceHead,
-        head_object: coven_protocol::objects::ExactObjectRef,
-        history_evidence: coven_protocol::store_commit::RetainedMergeCommitEvidence,
-        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
-        membership_completion: Option<
-            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
-        >,
-    ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
-        let database = self.database.clone();
-        let root = self.store_root().clone();
+        let activation = commit_plan::PreparedStoreOperationActivation {
+            candidate,
+            retained_operation_objects,
+        };
         let reference = activation.candidate.reference.clone();
         let verified_commit = self
             .history
             .authenticate_commit_bytes(&reference, &activation.candidate.commit.to_bytes())
             .await?;
-        let commit = verified_commit.value().clone();
+        let commit = verified_commit.value();
         let circle_activations = if commit.control().is_some() {
             self.history
                 .verify_membership_control(&verified_commit)
                 .await
                 .map_err(StoreError::from)?
         } else {
-            coven_protocol::circle_activation::VerifiedCircleActivations::none(&commit, &reference)
+            coven_protocol::circle_activation::VerifiedCircleActivations::none(commit, &reference)
                 .map_err(StoreError::from)?
         };
         self.upload_commit(&activation.candidate).await?;
+        Ok(commit_plan::UploadedStoreOperationActivation {
+            activation,
+            verified_commit,
+            circle_activations,
+        })
+    }
+
+    pub(crate) async fn publish_uploaded(
+        &mut self,
+        uploaded: commit_plan::UploadedStoreOperationActivation,
+        membership_objects: Option<coven_database::VerifiedMergeMembershipObjects>,
+        membership_completion: Option<
+            coven_protocol::membership_mutation::StoreMembershipJournalCompletion,
+        >,
+    ) -> Result<commit_plan::StoreOperationPublicationOutcome, StoreError> {
+        let commit_plan::UploadedStoreOperationActivation {
+            mut activation,
+            verified_commit,
+            circle_activations,
+        } = uploaded;
+        let database = self.database.clone();
+        let root = self.store_root().clone();
+        let reference = activation.candidate.reference.clone();
+        let commit = verified_commit.value().clone();
+        let head = activation.candidate.head.clone();
+        let head_object = activation.candidate.head_object.clone();
+        let history_evidence = activation.candidate.history_evidence.clone();
         let membership_heads = &commit.membership_state.heads;
         let authorization = self
             .history
@@ -383,6 +381,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                 registration: Some(registration),
                 ..
             } => vec![registration.registration().clone()],
+            commit_plan::StoreOperationBatch::SamePrincipalDeviceJoin { registration, .. } => {
+                vec![registration.registration().clone()]
+            }
             _ => Vec::new(),
         };
         let retained_device_operations = match &batch {
@@ -598,5 +599,33 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         Ok(commit_plan::StoreOperationPublicationOutcome::Nonactivated(
             reference,
         ))
+    }
+}
+
+fn require_activated_publication(
+    outcome: commit_plan::StoreOperationPublicationOutcome,
+) -> Result<coven_protocol::store_commit::StoreBatchCommitRef, StoreError> {
+    match outcome {
+        commit_plan::StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
+        commit_plan::StoreOperationPublicationOutcome::Nonactivated(reference) => {
+            Err(StoreError::InvalidOutbound(format!(
+                "Store operation candidate {} did not activate",
+                reference.commit_hash
+            )))
+        }
+        commit_plan::StoreOperationPublicationOutcome::Reprepared => {
+            Err(StoreError::InvalidOutbound(
+                "Store operation was reprepared during immediate activation".to_string(),
+            ))
+        }
+        commit_plan::StoreOperationPublicationOutcome::RepreparedCandidate(_) => {
+            Err(StoreError::InvalidOutbound(
+                "Store operation adopted a published head for a candidate composed in this call"
+                    .to_string(),
+            ))
+        }
+        commit_plan::StoreOperationPublicationOutcome::NonactivatedCandidate { .. } => {
+            Err(StoreError::ActivationConflict)
+        }
     }
 }
