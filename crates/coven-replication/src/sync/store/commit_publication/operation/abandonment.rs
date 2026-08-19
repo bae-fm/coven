@@ -217,7 +217,8 @@ impl AuthorizedWriterOperation<'_> {
                 return Ok(MergeCandidateAbandonment::Abandoned);
             }
         }
-        self.drain_prepared_store_writes().await?;
+        self.drain_prepared_store_writes_timed("Merge abandonment publication")
+            .await?;
         if !database.merge_candidate_cleanup_pending(&write_id).await? {
             return Err(StoreError::InvalidOutbound(
                 "accepted Merge abandonment has no exact cleanup transition".to_string(),
@@ -243,7 +244,8 @@ impl AuthorizedWriterOperation<'_> {
             }
             coven_database::MergeAbandonmentState::CandidateWon => {
                 database.resume_winning_merge_candidate(write_id).await?;
-                self.drain_prepared_store_writes().await?;
+                self.drain_prepared_store_writes_timed("Merge abandonment publication")
+                    .await?;
                 Ok(MergeCandidateAbandonment::CandidateActivated)
             }
             coven_database::MergeAbandonmentState::Prepared => Err(StoreError::InvalidOutbound(
