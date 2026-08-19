@@ -160,6 +160,21 @@ first. That gap is why pull cost keeps returning.
   change rests on it being the same baseline from the same loader, validated
   once per connection instead of once per call.
 
+- **`owner_anchor` is not a verification memo — checked and closed, no code
+  change.** It guards installation, not verification: `reuses_owner_anchor` tells
+  `install_store_owner_anchor` the anchor is already installed so it can skip
+  writing it again. Skipping the SQL write is the whole job, so "saves only the
+  SQL write" describes the field working, not falling short. The audit swept it
+  up because the name reads like a reuse cache.
+
+  The observation underneath it is real and separately measured:
+  `validated_store_owner` re-derives the founder genesis on every call without
+  consulting the anchor — 35 calls against 2 short-circuits on the two-device
+  fixture, roughly five per cycle. It costs 12 µs, flat across every call,
+  because what it re-derives is one founder record and a small genesis row: a
+  single SQL read, one JSON parse, and a state derivation, none of which grow
+  with history. Not worth a short-circuit.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -170,9 +185,6 @@ first. That gap is why pull cost keeps returning.
 
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a
   clone inside each `VerifiedMergeHistoryCommit`; `load_ref` probes both.
-- **`owner_anchor` memo re-derives its checks on every hit**
-  (`validate_owner_anchor_cache`), so it saves only the SQL write, not the
-  verification.
 - **Snapshot reads are flat but not minimal.** After the snapshot memo landed a
   settled two-device cycle reads ten snapshot objects covering four distinct
   ones, at every history depth. Something outside `load_store_snapshot` re-reads
