@@ -101,7 +101,14 @@ pub(crate) struct StoreCommitVerifier<'a> {
     registrations: std::sync::Mutex<
         BTreeMap<StoreDeviceRegistrationRef, VerifiedObject<StoreDeviceRegistration>>,
     >,
-    founder_registration: std::sync::OnceLock<VerifiedObject<StoreDeviceRegistration>>,
+    /// Which registration is this Store's founder.
+    ///
+    /// The founder is reached by slot from the root descriptor, so it cannot be
+    /// asked for by reference until it has been read once; this remembers the
+    /// reference that read produced. The registration itself lives in
+    /// `registrations` with every other one — this names the entry rather than
+    /// holding a second copy of it.
+    founder_registration: std::sync::OnceLock<StoreDeviceRegistrationRef>,
     verified_heads: std::sync::Mutex<BTreeMap<StoreDeviceHeadRef, VerifiedObject<StoreDeviceHead>>>,
     /// Store acknowledgements authenticated under this verifier's root, keyed by
     /// the exact object that carries them so both ways of asking reach one

@@ -298,13 +298,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 },
             );
         }
-        let founder = self.founder.clone();
         let authority = coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
             store_root: self.root.reference().clone(),
-            founder_registration: StoreDeviceRegistrationRef::from_registration(
-                &founder.value,
-                founder.object,
-            ),
+            founder_registration: self.founder.clone(),
             snapshot: snapshot.reference.clone(),
             metadata: snapshot.meta.clone(),
             snapshot_cut,

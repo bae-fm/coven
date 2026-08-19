@@ -234,20 +234,20 @@ impl<'a> MergeHistoryVerifier<'a> {
             .map_err(StorePullError::Protocol)
     }
 
+    /// Bind a history verifier to its Store root.
+    ///
+    /// Reads the founder once, to confirm it belongs to this root and to derive
+    /// the genesis device state, then keeps only its reference. The registration
+    /// itself stays where every other one does — the commit verifier's
+    /// registration cache — so asking for it later is a lookup, not a copy held
+    /// here as well.
     pub(crate) async fn from_commit_verifier(
         _authority: crate::sync::store::authorization::HistoryConstructionAuthority,
         root: crate::sync::store::protocol_root::VerifiedStoreRoot,
         commit_verifier: StoreCommitVerifier<'a>,
     ) -> Result<Self, StorePullError> {
         let founder = commit_verifier.load_founder_registration().await?;
-        Self::from_commit_verifier_and_founder(root, commit_verifier, &founder)
-    }
-
-    fn from_commit_verifier_and_founder(
-        root: crate::sync::store::protocol_root::VerifiedStoreRoot,
-        commit_verifier: StoreCommitVerifier<'a>,
-        founder: &VerifiedObject<StoreDeviceRegistration>,
-    ) -> Result<Self, StorePullError> {
+        let founder = &founder;
         let verified_root = root.protocol();
         let founder_ref =
             StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
@@ -269,7 +269,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         }
         let genesis = ResolvedStoreDeviceState::founder(
             root.reference(),
-            founder_ref,
+            founder_ref.clone(),
             &verified_root.descriptor.founder_pubkey,
             verified_root.descriptor.founder_grant.clone(),
             &verified_root.descriptor.founder_recovery,
@@ -278,7 +278,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(Self {
             root,
             commit_verifier,
-            founder: founder.clone(),
+            founder: founder_ref,
             history: VerifiedMergeHistory {
                 genesis,
                 commits: BTreeMap::new(),
@@ -866,7 +866,10 @@ struct VerifiedMembershipChain {
 pub struct MergeHistoryVerifier<'a> {
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
     commit_verifier: StoreCommitVerifier<'a>,
-    founder: VerifiedObject<StoreDeviceRegistration>,
+    /// Which registration founded this Store. Established at construction from
+    /// the founder this verifier validated against the root; the registration it
+    /// names is held by `commit_verifier`, not again here.
+    founder: StoreDeviceRegistrationRef,
     history: VerifiedMergeHistory,
     verified_memberships: Vec<VerifiedMembershipChain>,
 }

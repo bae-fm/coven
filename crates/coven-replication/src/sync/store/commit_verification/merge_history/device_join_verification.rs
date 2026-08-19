@@ -361,9 +361,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             membership,
             pending,
         )
+        .await
     }
 
-    fn prepare_device_join_bootstrap_from_verified_parts(
+    async fn prepare_device_join_bootstrap_from_verified_parts(
         &self,
         coverage: &StoreHistoryCut,
         attempt_activation: &StoreBatchCommitRef,
@@ -371,9 +372,10 @@ impl<'a> MergeHistoryVerifier<'a> {
         membership: MembershipChain,
         mut pending: Vec<StoreBatchCommitRef>,
     ) -> Result<DeviceJoinBootstrapPlan, StorePullError> {
-        let founder = self.founder.clone();
-        let founder_reference =
-            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        // The bootstrap carries the founder registration itself, so this is one
+        // of the few places that wants the object rather than its reference.
+        let founder = self.load_founder_registration().await?;
+        let founder_reference = self.founder.clone();
         let genesis = self.history.genesis.clone();
         let activation = self
             .history

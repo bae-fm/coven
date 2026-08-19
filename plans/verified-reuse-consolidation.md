@@ -92,6 +92,21 @@ first. That gap is why pull cost keeps returning.
   when adding coverage here — it is the assertion that does not need the bug to
   be imagined first.
 
+- **The founder registration is held once.** It lives in
+  `StoreCommitVerifier.registrations` with every other registration. The two
+  things that used to be copies of it are now names for it: the `OnceLock`
+  remembers which reference is the founder — needed because the founder is
+  reached by slot from the root descriptor, so it cannot be asked for by
+  reference until it has been read once — and `MergeHistoryVerifier` keeps that
+  reference as the identity it validated against its root at construction.
+
+  Most of what asked for the founder only ever wanted its reference, which is
+  why three copies went unnoticed: the snapshot authority and the device-join
+  bootstrap's `founder_reference` both rebuilt the reference from a cloned
+  object. One caller does want the object — the device-join bootstrap carries
+  the registration itself — and now loads it, which made one private helper
+  async.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -106,9 +121,6 @@ first. That gap is why pull cost keeps returning.
   each call deserializes and revalidates the entire baseline DB image into a
   fresh in-memory SQLite connection. Same class a00088f8 removed from the
   install path.
-- **Founder registration held three ways** in one verifier graph: a
-  `OnceLock`, a force-inserted `registrations` entry, and
-  `MergeHistoryVerifier.founder`.
 - **Registrations represented four ways** across the DB boundary:
   `VerifiedStoreAuthority.registrations`, its per-transaction clone
   (`VerifiedStoreAuthorityTransaction`), the borrow adapter

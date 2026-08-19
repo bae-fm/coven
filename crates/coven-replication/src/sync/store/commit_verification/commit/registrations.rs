@@ -316,8 +316,8 @@ impl<'a> StoreCommitVerifier<'a> {
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
-        if let Some(founder) = self.founder_registration.get() {
-            return Ok(founder.clone());
+        if let Some(reference) = self.founder_registration.get() {
+            return self.load_registration(reference).await;
         }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
@@ -361,15 +361,13 @@ impl<'a> StoreCommitVerifier<'a> {
             semantic_hash: reference.registration_hash,
             object,
         };
-        let founder = self.founder_registration.get_or_init(|| verified).clone();
-        let reference =
-            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
         self.registrations
             .lock()
             .expect("verified registration cache mutex is not poisoned")
-            .entry(reference)
-            .or_insert_with(|| founder.clone());
-        Ok(founder)
+            .entry(reference.clone())
+            .or_insert_with(|| verified.clone());
+        let _ = self.founder_registration.set(reference);
+        Ok(verified)
     }
 
     pub(crate) async fn load_exact_object<T>(

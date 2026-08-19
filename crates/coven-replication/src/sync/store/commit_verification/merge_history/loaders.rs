@@ -170,7 +170,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn load_founder_registration(
         &self,
     ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
-        Ok(self.founder.clone())
+        self.commit_verifier.load_registration(&self.founder).await
     }
 
     pub(crate) async fn load_device_join_attempt_and_owner(
