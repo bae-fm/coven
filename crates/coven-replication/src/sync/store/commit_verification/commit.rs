@@ -132,6 +132,22 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// probes on from its end, so generations already read are not read again
     /// and a generation published since is still found. Same shape as the
     /// accepted announcement path, for the same reason.
+    /// Bytes of every content-addressed protocol object this verifier has read.
+    ///
+    /// `load_exact_object` is the one place a verified object is fetched by
+    /// reference — membership heads and entries, acknowledgements, snapshots,
+    /// commits, registrations, packages all come through it — and it had no
+    /// reuse of any kind, so a cycle paid a provider round trip for every ask.
+    /// A settled two-device cycle makes about fifty of these, twenty-five of
+    /// them membership, which is the six to sixteen seconds a quiet field cycle
+    /// still spent after the retained-history work.
+    ///
+    /// This holds bytes, not verdicts: a hit still runs the caller's
+    /// verification, and the reference carries the semantic hash that
+    /// verification checks, so an answer from here is the answer a read would
+    /// have produced. Objects named this way are immutable, so a verifier's
+    /// lifetime is a safe one to hold them for.
+    exact_objects: std::sync::Mutex<BTreeMap<ExactObjectRef, Vec<u8>>>,
     snapshot_streams: std::sync::Mutex<
         BTreeMap<StoreDeviceRegistrationRef, Vec<coven_database::PublishedStoreSnapshot>>,
     >,
@@ -295,6 +311,7 @@ impl<'a> StoreCommitVerifier<'a> {
             verified_heads: std::sync::Mutex::new(BTreeMap::new()),
             acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
             snapshots: std::sync::Mutex::new(BTreeMap::new()),
+            exact_objects: std::sync::Mutex::new(BTreeMap::new()),
             snapshot_streams: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }

@@ -204,6 +204,33 @@ first. That gap is why pull cost keeps returning.
   snapshots must have its first slot probed on every walk, since an empty stream
   is indistinguishable from one whose first generation just landed.
 
+- **The one funnel for content-addressed reads now has a memo.**
+  `load_exact_object` is where every verified protocol object is fetched by
+  reference — membership heads and entries, acknowledgements, snapshots,
+  commits, registrations, packages — and it had no reuse at all, so a cycle paid
+  a provider round trip per ask. It now remembers bytes keyed by
+  `ExactObjectRef`. Bytes, not verdicts: a hit still runs the caller's
+  verification, and the reference carries the semantic hash that verification
+  checks, so an answer from the memo is the answer a read would have produced.
+
+  Measured on the two-device fixture, settled cycle: 49 provider reads before,
+  39 after, at every depth from 18 to 282 retained rows. Membership, the largest
+  block, went 25 to 15.
+
+- **The retained-history residual does not scale with depth — the fixture is
+  decisive.** A settled two-device cycle reads 45 objects at depth 18, 45 at
+  depth 122, and 49 at depth 282 (the extra four are two more announcement heads
+  and two more snapshot generations, not per-row). The field's 6.6-15.9 s on a
+  quiet store of ~320 rows is those constant reads meeting GCS latency: 49 round
+  trips at 135-325 ms each spans exactly that range. Nothing round-trips per
+  retained row any more.
+
+  Local work does still grow with depth — the settled cycle takes 17.6 ms at
+  depth 18, 99.8 ms at 122, and 506 ms at 282 — but that is a fraction of a
+  second at field scale against seconds of latency. The retained replay cache
+  serves every row (123 rows, 123 hits, 0 loads, about 2 ms a call, four calls a
+  cycle), so the growth is the walking, not re-verification.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -211,6 +238,17 @@ first. That gap is why pull cost keeps returning.
   upload drain already uses.
 
 ## Recorded, not yet scheduled
+
+- **Membership objects are still read three times over.** After the
+  `load_exact_object` memo a settled cycle makes 15 membership reads covering
+  only 5 distinct objects, at every depth. The memo cannot catch them: those
+  reads come in through `read_protocol_slot` (`commit/membership.rs:226`), which
+  addresses a slot rather than an exact object, and a slot's contents are not
+  immutable — one can be empty now and filled later — so remembering a slot read
+  is a cache that can lie. The announcement walk solved the same problem with a
+  verified-prefix memo plus a live probe past its end; membership wants that
+  shape, not a slot cache. Worth roughly ten of the thirty-nine reads a field
+  cycle makes.
 
 - **`read_prepared_protocol_slot` is the one protocol read still ungated.** It
   is the fourth read on the storage trait and reads an artifact from the provider
