@@ -434,7 +434,13 @@ macro_rules! coven_tables {
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
-    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot))
+    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
+    -- What that acknowledgement asserted, and the commit that carried it, so the
+    -- next cycle can tell whether it still holds. NULL on the acknowledgements
+    -- installed while bootstrapping a device, which computed no assertion of
+    -- their own: the first cycle after one of those has no basis to skip, so it
+    -- acknowledges and records what it said.
+    standing TEXT CHECK (standing IS NULL OR json_valid(standing))
 "
         );
         $visit!(

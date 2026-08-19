@@ -439,13 +439,15 @@ pub(crate) async fn bootstrap_pending_device_on(
                 .map_err(registration_database_error)?;
         let initial_ack = StoreAck::signed(
             attempt.store_root.store_root_hash,
-            registration_ref.clone(),
             1,
-            attempt.bootstrap_cut.clone(),
-            device_state,
-            None,
-            StoreAckExclusionState {
-                proposal_freezes: Vec::new(),
+            coven_protocol::store_commit::StoreAckAssertion {
+                registration: registration_ref.clone(),
+                store_cut: attempt.bootstrap_cut.clone(),
+                device_state,
+                snapshot: None,
+                exclusions: StoreAckExclusionState {
+                    proposal_freezes: Vec::new(),
+                },
             },
             published_at.to_string(),
             SuccessorLink {

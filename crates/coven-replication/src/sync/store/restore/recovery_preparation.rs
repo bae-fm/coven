@@ -218,13 +218,15 @@ impl<'storage> RestoringStore<'storage> {
                     .map_err(StoreObjectError::from)?;
                 let ack = StoreAck::signed(
                     root.store_root_hash,
-                    registration_ref.clone(),
                     1,
-                    store_cut,
-                    device_state,
-                    None,
-                    StoreAckExclusionState {
-                        proposal_freezes: Vec::new(),
+                    coven_protocol::store_commit::StoreAckAssertion {
+                        registration: registration_ref.clone(),
+                        store_cut,
+                        device_state,
+                        snapshot: None,
+                        exclusions: StoreAckExclusionState {
+                            proposal_freezes: Vec::new(),
+                        },
                     },
                     published_at.to_string(),
                     SuccessorLink {

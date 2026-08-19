@@ -14,6 +14,7 @@ use coven_protocol::objects::{ProtocolObjectContext, ProtocolObjectDomain};
 use coven_protocol::store_commit::{ack_slot_prefix, CommitFrontier, StoreAck, SuccessorLink};
 use coven_storage::CloudSyncObjectStorage;
 use std::sync::Arc;
+use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreAckError {
@@ -89,9 +90,9 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .map_err(|error| {
                 SyncCycleFailure::operation("shape Store acknowledgement frontier", error)
             })?;
-        Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
-            .await
-            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
+        // Circle acknowledgements first: an outbound Store acknowledgement is what
+        // carries them to the cloud, so the Store one below has to know whether
+        // any are waiting before it decides it has nothing to say.
         Box::pin(
             self.writer
                 .circles()
@@ -99,17 +100,38 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         )
         .await
         .map_err(|error| SyncCycleFailure::operation("stage Circle acknowledgements", error))?;
+        Box::pin(self.stage_acknowledgement(frontier.clone(), sync_time.to_owned()))
+            .await
+            .map_err(|error| SyncCycleFailure::operation("stage Store acknowledgement", error))?;
         Box::pin(self.drain_acknowledgements())
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
         Ok(())
     }
 
+    /// Stage this device's acknowledgement of `frontier`, unless the one it
+    /// already published still says the same thing.
+    ///
+    /// Publishing an acknowledgement appends a commit, so an acknowledgement that
+    /// asserts nothing new still lands in every device's history, every retained
+    /// materialization, and every snapshot taken afterwards. Without a guard the
+    /// device acknowledges its own acknowledgement and a Store where nothing is
+    /// happening grows one commit per device per sync cycle, without end.
+    ///
+    /// [`StoreAckAssertion`] is what an acknowledgement claims; the rest of it —
+    /// the sequence, the wall clock, the links to its neighbours — differs by
+    /// construction and says nothing. The one subtlety is the frontier: an
+    /// acknowledgement cannot cover the commit that carries it, so the standing
+    /// state records that commit and the comparison treats it as covered.
+    /// Anything else in the frontier having moved is new material to acknowledge.
+    ///
+    /// Returns the acknowledgement it staged, or `None` when the standing one
+    /// still holds.
     pub(crate) async fn stage_acknowledgement(
         &mut self,
         frontier: CommitFrontier,
         sync_time: String,
-    ) -> Result<StoreAck, StoreAckError> {
+    ) -> Result<Option<StoreAck>, StoreAckError> {
         let commits = frontier.commits();
         let device_id = self.writer.local_device_id().to_string();
         let root = self.writer.store_root().clone();
@@ -132,6 +154,25 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             ));
         }
         let previous = self.database.latest_local_store_ack().await?;
+        let assertion = self.local_writer.device_acknowledgement_assertion(
+            history_cut,
+            device_state,
+            snapshot,
+            exclusions,
+        );
+        // A queued Circle acknowledgement travels to the cloud inside the Store
+        // acknowledgement's commit, so one waiting is reason enough to publish
+        // even when this device has nothing of its own left to say.
+        let carries_circle_acknowledgements = self.database.outbound_circle_acks_pending().await?;
+        if !carries_circle_acknowledgements
+            && previous
+                .as_ref()
+                .and_then(|previous| previous.standing.as_ref())
+                .is_some_and(|standing| standing.still_holds(&assertion))
+        {
+            debug!("skip Store acknowledgement: the standing one still holds");
+            return Ok(None);
+        }
         let (sequence, predecessor, current_slot) = match previous {
             Some(previous) => (
                 previous.reference.sequence.checked_add(1).ok_or_else(|| {
@@ -174,10 +215,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .sign_device_acknowledgement(
                 root.store_root_hash,
                 sequence,
-                history_cut,
-                device_state,
-                snapshot,
-                exclusions,
+                assertion,
                 sync_time,
                 SuccessorLink {
                     activation,
@@ -198,7 +236,7 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
         self.database
             .stage_store_ack(acknowledgement.clone(), prepared)
             .await?;
-        Ok(acknowledgement)
+        Ok(Some(acknowledgement))
     }
 
     pub(crate) async fn drain_acknowledgements(&mut self) -> Result<u64, StoreAckError> {
@@ -210,16 +248,19 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
                 .activated_store_ack(&outbound.reference.registration)
                 .await?
             {
-                if activated == outbound.reference {
+                if activated.reference == outbound.reference {
                     self.database
-                        .complete_outbound_store_ack(outbound.reference)
+                        .complete_outbound_store_ack(
+                            outbound.reference,
+                            activated.activating_commit,
+                        )
                         .await?;
                     published = published
                         .checked_add(1)
                         .ok_or(StoreAckError::PublishCountExhausted)?;
                     continue;
                 }
-                if activated.sequence >= outbound.reference.sequence {
+                if activated.reference.sequence >= outbound.reference.sequence {
                     return Err(StoreAckError::InvalidOutbound(
                         "queued Store acknowledgement differs from the activated exact ref"
                             .to_string(),
@@ -319,9 +360,9 @@ impl<'operation, 'storage> AuthorizedAcknowledgements<'operation, 'storage> {
             .await?;
             match publication
             {
-                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(_) => {
+                crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Activated(activating_commit) => {
                     self.database
-                        .complete_outbound_store_ack(outbound.reference)
+                        .complete_outbound_store_ack(outbound.reference, activating_commit)
                         .await?;
                 }
                 crate::sync::store::commit_publication::operation::commit_plan::StoreOperationPublicationOutcome::Nonactivated(_) => {}

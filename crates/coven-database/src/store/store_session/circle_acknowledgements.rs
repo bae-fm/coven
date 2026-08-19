@@ -178,6 +178,20 @@ impl StoreSession<'_> {
         }))
     }
 
+    /// Whether any Circle acknowledgement is waiting to be published.
+    ///
+    /// A Store acknowledgement is what carries them to the cloud, so it stages
+    /// itself when any are queued even if it has nothing of its own to say.
+    fn outbound_circle_acks_pending(&self) -> Result<bool, DbError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM outbound_circle_acks)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DbError::from)
+    }
+
     fn stage_circle_ack(
         &mut self,
         ack: CircleAck,
@@ -331,6 +345,11 @@ impl StoreDatabase {
         circle_id: CircleId,
     ) -> Result<Option<PublishedCircleAck>, DbError> {
         self.call_store(move |session| session.latest_published_circle_ack(circle_id))
+            .await
+    }
+
+    pub async fn outbound_circle_acks_pending(&self) -> Result<bool, DbError> {
+        self.call_store(|session| session.outbound_circle_acks_pending())
             .await
     }
 

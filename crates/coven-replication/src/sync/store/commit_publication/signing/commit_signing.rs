@@ -15,14 +15,30 @@ impl LocalStoreWriter {
             .await
     }
 
-    pub(crate) fn sign_device_acknowledgement(
+    /// What this device would assert about `history_cut` right now, ahead of
+    /// signing anything: the caller compares it against the acknowledgement it
+    /// already stands behind and signs only if it says something new.
+    pub(crate) fn device_acknowledgement_assertion(
         &self,
-        store_root_hash: coven_protocol::store_commit::ObjectHash,
-        sequence: u64,
         history_cut: coven_protocol::store_commit::StoreHistoryCut,
         device_state: coven_protocol::store_commit::StoreDeviceStateRef,
         snapshot: Option<coven_protocol::store_commit::StoreSnapshotLocator>,
         exclusions: coven_protocol::store_commit::StoreAckExclusionState,
+    ) -> coven_protocol::store_commit::StoreAckAssertion {
+        coven_protocol::store_commit::StoreAckAssertion {
+            registration: self.registration.reference().clone(),
+            store_cut: history_cut,
+            device_state,
+            snapshot,
+            exclusions,
+        }
+    }
+
+    pub(crate) fn sign_device_acknowledgement(
+        &self,
+        store_root_hash: coven_protocol::store_commit::ObjectHash,
+        sequence: u64,
+        assertion: coven_protocol::store_commit::StoreAckAssertion,
         sync_time: String,
         successor: coven_protocol::store_commit::SuccessorLink,
     ) -> Result<
@@ -31,12 +47,8 @@ impl LocalStoreWriter {
     > {
         coven_protocol::store_commit::StoreAck::signed(
             store_root_hash,
-            self.registration.reference().clone(),
             sequence,
-            history_cut,
-            device_state,
-            snapshot,
-            exclusions,
+            assertion,
             sync_time,
             successor,
             &self.device_signer,

@@ -216,6 +216,7 @@ fn bookkeeping_json_columns_are_classified_by_payload_shape() {
         ("outbound_store_acks", "activation".to_string()),
         ("published_store_acks", "ack_ref".to_string()),
         ("published_store_acks", "successor_slot".to_string()),
+        ("published_store_acks", "standing".to_string()),
         ("outbound_circle_acks", "ack_ref".to_string()),
         ("published_circle_acks", "ack_ref".to_string()),
         ("published_circle_acks", "successor_slot".to_string()),

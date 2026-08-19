@@ -378,6 +378,25 @@ async fn acknowledgement_predecessor_and_reserved_successor_form_one_exact_chain
         .await
         .expect("read first acknowledgement")
         .expect("first acknowledgement exists");
+    // Something for the second acknowledgement to say. Without it the standing
+    // one still holds — a device does not acknowledge its own acknowledgement —
+    // and there would be no second link to check the chain against.
+    db.execute_test_host_write(
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('chain-1', 'chain', NULL, 1, '0000000001000-0000-chain', '2026-07-16')",
+    )
+    .await;
+    assert!(device
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare the write the second acknowledgement covers"));
+    assert_eq!(
+        device
+            .drain_store_writes()
+            .await
+            .expect("publish the write the second acknowledgement covers"),
+        1
+    );
     let second = device
         .stage_current_acknowledgement("2026-07-16T00:00:00Z")
         .await
@@ -648,7 +667,8 @@ async fn losing_activation_inerts_the_uploaded_acknowledgement() {
         store_database(&db)
             .activated_store_ack(&outbound.reference.registration)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|activated| activated.reference),
         Some(outbound.reference.clone())
     );
 }
@@ -847,7 +867,8 @@ async fn alternate_head_for_the_same_ack_candidate_is_adopted() {
         store_database(&db)
             .activated_store_ack(&outbound.reference.registration)
             .await
-            .unwrap(),
+            .unwrap()
+            .map(|activated| activated.reference),
         Some(outbound.reference)
     );
 }

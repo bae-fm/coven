@@ -705,7 +705,7 @@ impl Store {
         frontier: coven_protocol::store_commit::CommitFrontier,
         sync_time: String,
     ) -> Result<
-        coven_protocol::store_commit::StoreAck,
+        Option<coven_protocol::store_commit::StoreAck>,
         crate::sync::store::acknowledgements::StoreAckError,
     > {
         let mut writer = self
