@@ -21,6 +21,7 @@ mod pull_tests;
 mod refresh_tests;
 #[cfg(test)]
 mod scoped_write_routing_tests;
+pub(crate) mod stage_timing;
 pub(crate) mod status;
 #[cfg(test)]
 mod store_history_checkpoint_tests;

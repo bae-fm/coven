@@ -7,6 +7,7 @@ use tracing::{debug, error, info};
 
 use super::{SyncCommand, SyncLoopFailure, SyncLoopHandleInner, SyncLoopStatus};
 use crate::sync::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
+use crate::sync::stage_timing::StageTimings;
 
 struct RuntimeSlotState {
     loop_thread: Option<SyncLoopThread>,
@@ -227,8 +228,13 @@ impl SyncLoopThread {
 
         let mut consecutive_failures = 0;
         while self.running.load(Ordering::Acquire) && !*self.stop_rx.borrow() {
+            // Everything between two idle waits, so the gap between cycles is
+            // accounted for even when the cycle itself was not the slow part.
+            let mut timings = StageTimings::start("sync loop iteration");
             self.status_tx.send_replace(SyncLoopStatus::CheckingStorage);
-            let reachable = self.inner.components.probe_storage().await;
+            let reachable = timings
+                .stage("probe storage", self.inner.components.probe_storage())
+                .await;
             let (decision, status) = match reachable {
                 Err(error) => {
                     let error = Arc::new(error);
@@ -241,9 +247,11 @@ impl SyncLoopThread {
                 }
                 Ok(_) => {
                     self.status_tx.send_replace(SyncLoopStatus::Publishing);
-                    self.run_reachable_cycle(consecutive_failures).await
+                    self.run_reachable_cycle(consecutive_failures, &mut timings)
+                        .await
                 }
             };
+            timings.report();
             consecutive_failures = decision.consecutive_failures;
             self.status_tx.send_replace(status);
             if !self
@@ -309,21 +317,29 @@ impl SyncLoopThread {
     async fn run_reachable_cycle(
         &self,
         consecutive_failures: u32,
+        timings: &mut StageTimings,
     ) -> (loop_policy::SyncLoopDecision, SyncLoopStatus) {
-        let (decision, cycle_went_offline) = match self.inner.run_single_cycle().await {
-            Ok(result) => (loop_policy::after_success(result), false),
-            Err(error) => {
-                let offline = error.is_offline();
-                let failure = SyncLoopFailure::Cycle(Arc::new(error));
-                (
-                    loop_policy::after_failure(failure, consecutive_failures, 300),
-                    offline,
-                )
-            }
-        };
+        let (decision, cycle_went_offline) =
+            match timings.stage("cycle", self.inner.run_single_cycle()).await {
+                Ok(result) => (loop_policy::after_success(result), false),
+                Err(error) => {
+                    let offline = error.is_offline();
+                    let failure = SyncLoopFailure::Cycle(Arc::new(error));
+                    (
+                        loop_policy::after_failure(failure, consecutive_failures, 300),
+                        offline,
+                    )
+                }
+            };
         let status = match &decision.report {
             SyncLoopReport::Success(success) => {
-                match self.inner.components.pending_blocked_writes().await {
+                match timings
+                    .stage(
+                        "read blocked writes",
+                        self.inner.components.pending_blocked_writes(),
+                    )
+                    .await
+                {
                     Ok(writes) => current_success_status(writes, success.clone()),
                     Err(error) => SyncLoopStatus::Failed {
                         error: SyncLoopFailure::PendingWrites(Arc::new(error)),

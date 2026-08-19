@@ -1,3 +1,5 @@
+use coven_foundation::clock::Stopwatch;
+
 use super::*;
 
 fn held_protocol_error(error: StoreProtocolError) -> HeldStorePositionReason {
@@ -63,6 +65,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let mut latest_head = accepted.commits.last().map(|(_, head, _, _)| head.clone());
         let mut commits = accepted.commits;
         let mut block = None;
+        let mut reads = MergeStreamReadTiming::default();
 
         loop {
             if maximum_sequence.is_some_and(|maximum| sequence > maximum) {
@@ -75,11 +78,13 @@ impl<'a> MergeHistoryVerifier<'a> {
             }
             let semantic_prefix =
                 store_commit::head_slot_prefix(&registration.device_id.to_string(), sequence);
-            let (bytes, object) = match self
+            let head_read = Stopwatch::start();
+            let opened = self
                 .commit_verifier
                 .read_protocol_slot(&context, &slot, &semantic_prefix)
-                .await
-            {
+                .await;
+            reads.heads = reads.heads.saturating_add(head_read.elapsed());
+            let (bytes, object) = match opened {
                 Ok(opened) => opened,
                 Err(StorageError::NotFound(_)) => break,
                 Err(error) => return Err(StoreObjectError::Storage(error).into()),
@@ -147,7 +152,10 @@ impl<'a> MergeHistoryVerifier<'a> {
                     break;
                 }
             };
-            let commit = match self.load_ref(&unverified.commit).await {
+            let commit_read = Stopwatch::start();
+            let loaded = self.load_ref(&unverified.commit).await;
+            reads.commits = reads.commits.saturating_add(commit_read.elapsed());
+            let commit = match loaded {
                 Ok(verified)
                     if verified.value().author_registration == *registration_ref
                         && verified.author() == registration =>
@@ -213,6 +221,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             latest_head,
             commits,
             block,
+            reads,
         })
     }
 
