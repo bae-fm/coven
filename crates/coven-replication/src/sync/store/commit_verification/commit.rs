@@ -123,6 +123,18 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// the whole history keeps naming, so without this the same few objects were
     /// read once per acknowledging commit.
     snapshots: std::sync::Mutex<BTreeMap<StoreSnapshotRef, SnapshotMeta>>,
+    /// Each device's snapshot stream as far as this verifier has walked it.
+    ///
+    /// A stream is read by walking one slot per generation until a slot is
+    /// absent, so re-walking costs a read per generation every time — and a
+    /// cycle walks each stream several times, from publication, from history
+    /// loading, and from reclaim. The walk resumes from the prefix here and
+    /// probes on from its end, so generations already read are not read again
+    /// and a generation published since is still found. Same shape as the
+    /// accepted announcement path, for the same reason.
+    snapshot_streams: std::sync::Mutex<
+        BTreeMap<StoreDeviceRegistrationRef, Vec<coven_database::PublishedStoreSnapshot>>,
+    >,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
@@ -283,6 +295,7 @@ impl<'a> StoreCommitVerifier<'a> {
             verified_heads: std::sync::Mutex::new(BTreeMap::new()),
             acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
             snapshots: std::sync::Mutex::new(BTreeMap::new()),
+            snapshot_streams: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }
     }

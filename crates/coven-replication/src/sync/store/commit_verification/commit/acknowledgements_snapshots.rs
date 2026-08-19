@@ -196,23 +196,32 @@ impl<'a> StoreCommitVerifier<'a> {
         Vec<coven_database::PublishedStoreSnapshot>,
         crate::sync::store::snapshots::SnapshotError,
     > {
-        let mut slot = match &registration.snapshots {
-            DeviceStreamAnchor::StoreSnapshots { first_slot } => first_slot.clone(),
-            _ => {
-                return Err(
-                    crate::sync::store::snapshots::SnapshotError::PublicationState(
-                        "local Store registration has no snapshot stream anchor".to_string(),
-                    ),
-                );
-            }
+        let DeviceStreamAnchor::StoreSnapshots { first_slot } = &registration.snapshots else {
+            return Err(
+                crate::sync::store::snapshots::SnapshotError::PublicationState(
+                    "local Store registration has no snapshot stream anchor".to_string(),
+                ),
+            );
         };
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );
-        let mut generation = 0_u64;
-        let mut predecessor = None;
-        let mut snapshots = Vec::new();
+        // Resume from what this verifier has already walked of this stream. The
+        // walk below still probes on from the end, so a generation published
+        // since the last walk is found; only the ones already read are skipped.
+        let mut snapshots = self
+            .snapshot_streams
+            .lock()
+            .expect("verified snapshot stream cache poisoned")
+            .get(registration_ref)
+            .cloned()
+            .unwrap_or_default();
+        let mut generation = snapshots.len() as u64;
+        let mut predecessor = snapshots.last().map(|entry| entry.reference.clone());
+        let mut slot = snapshots
+            .last()
+            .map_or_else(|| first_slot.clone(), |entry| entry.successor_slot.clone());
         loop {
             let prefix = snapshot_slot_prefix(&registration.device_id.to_string(), generation);
             let (bytes, object) = match self
@@ -271,6 +280,10 @@ impl<'a> StoreCommitVerifier<'a> {
                 )
             })?;
         }
+        self.snapshot_streams
+            .lock()
+            .expect("verified snapshot stream cache poisoned")
+            .insert(registration_ref.clone(), snapshots.clone());
         Ok(snapshots)
     }
 

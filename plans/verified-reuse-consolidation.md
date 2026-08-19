@@ -185,6 +185,25 @@ first. That gap is why pull cost keeps returning.
   plain name alone left an alias that anything could reach for. Method patterns
   match exactly, so every spelling has to be named.
 
+- **The snapshot stream walk resumes instead of restarting.**
+  `load_store_snapshot_stream` had no memo: it walked from generation zero to the
+  first absent slot on every call, and a settled cycle walks each device's stream
+  four times — from publication, from history loading, and from reclaim. It now
+  resumes from the prefix this verifier has already walked and probes on from its
+  end, so a generation published since the last walk is still found. Same shape
+  as the accepted announcement prefix, for the same reason.
+
+  Measured on the two-device fixture: ten snapshot reads a settled cycle before,
+  eight after. Stated plainly, that is the whole demonstrated gain — the fixture
+  holds four snapshot generations whether it runs four rounds or twelve, so it
+  cannot show the part that actually matters, which is that a walk was
+  O(generations) per call and is now O(new generations). That claim rests on the
+  shape of the loop, not on a measurement.
+
+  What remains is a constant this fixture cannot reduce: a device with no
+  snapshots must have its first slot probed on every walk, since an empty stream
+  is indistinguishable from one whose first generation just landed.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -207,14 +226,6 @@ first. That gap is why pull cost keeps returning.
 
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a
   clone inside each `VerifiedMergeHistoryCommit`; `load_ref` probes both.
-- **Snapshot reads are flat but not minimal.** After the snapshot memo landed a
-  settled two-device cycle reads ten snapshot objects covering four distinct
-  ones, at every history depth. Something outside `load_store_snapshot` re-reads
-  them within one cycle — `load_store_snapshot_stream` is the likely path, since
-  it walks a device's snapshot anchor rather than asking by reference. Does not
-  scale with retained history, so it was not part of the 119-192 s; it is a
-  plain within-cycle duplicate of the class every "Reuse verified X" commit
-  removed.
 - **Live remeasure of the retained-history and acknowledgement fixes is still
   open.** The mac app is booted with sync locked (screen-lock keychain refusal),
   so the field numbers for `prepare retained history` after `e3e5740f` land once
