@@ -175,6 +175,16 @@ first. That gap is why pull cost keeps returning.
   single SQL read, one JSON parse, and a state derivation, none of which grow
   with history. Not worth a short-circuit.
 
+- **The boundary covers slot reads and the progress alias.** `read_protocol_slot`
+  is the call the announcement walk makes per head — half the measured
+  retained-history cost, and outside the gate the entire time it was being paid.
+  Six new homes, exactly the ones the entry predicted.
+
+  `read_protocol_object_with_progress` went in with it at no cost: its one caller
+  was already a home, and it is the same read with a callback, so gating the
+  plain name alone left an alias that anything could reach for. Method patterns
+  match exactly, so every spelling has to be named.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -183,17 +193,16 @@ first. That gap is why pull cost keeps returning.
 
 ## Recorded, not yet scheduled
 
-- **The boundary does not cover slot reads.** It gates `read_protocol_object`
-  only. `read_protocol_slot` fetches verification artifacts just as directly — it
-  is the call the announcement walk makes per head, which was half the
-  retained-history cost and stayed invisible to the gate throughout. Thirteen
-  production files name it, six of them already homes for object reads, so
-  adding it needs six more: `authorization.rs`,
-  `circles/authorized_writer/epoch_close.rs`,
-  `commit_verification/commit/announcements.rs`,
-  `commit_verification/merge_history/stream.rs`, `device_join/transport.rs`, and
-  `merge_conflict/observation.rs`. Kept out of the shrink so a widening of what
-  is gated does not ride inside a narrowing of where it is allowed.
+- **`read_prepared_protocol_slot` is the one protocol read still ungated.** It
+  is the fourth read on the storage trait and reads an artifact from the provider
+  like the three now gated, keeping the stored representation for a durable retry
+  journal. Its callers lean toward write-confirmation rather than verification —
+  reading back a slot the caller just prepared — which is why it was left for a
+  decision rather than folded in. Adding it needs six homes beyond the current
+  thirty-one: `acknowledgements/mod.rs`,
+  `authorization/history/construction.rs`, `authorization/registration.rs`,
+  `circles/authorized_writer/commands.rs`, `device_exclusion/mod.rs`, and
+  `restore/recovery_preparation.rs`.
 
 
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a

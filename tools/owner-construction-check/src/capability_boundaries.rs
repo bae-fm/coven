@@ -291,10 +291,24 @@ const FILESYSTEM_HOMES: &[&str] = &[
 /// shipping. Consolidation of these homes toward one owner is
 /// `plans/verified-reuse-consolidation.md`.
 pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCapability {
-    kind: "verification-artifact storage read (read_protocol_object; see plans/verified-reuse-consolidation.md)",
+    kind: "verification-artifact storage read (read_protocol_object / _with_progress / read_protocol_slot; see plans/verified-reuse-consolidation.md)",
     crates: &[],
-    path_patterns: &[&["read_protocol_object"]],
-    method_patterns: &["read_protocol_object"],
+    path_patterns: &[
+        &["read_protocol_object"],
+        &["read_protocol_object_with_progress"],
+        &["read_protocol_slot"],
+    ],
+    // Matched exactly, so each way of asking the provider for a protocol
+    // artifact has to be named. `read_protocol_object_with_progress` is the same
+    // read with a callback — gating one without the other leaves the alias open
+    // to anything the gate would otherwise stop. `read_protocol_slot` is how the
+    // announcement walk fetches a head, which is where half the measured
+    // retained-history cost was, unseen by this boundary the whole time.
+    method_patterns: &[
+        "read_protocol_object",
+        "read_protocol_object_with_progress",
+        "read_protocol_slot",
+    ],
     allowed: VERIFICATION_ARTIFACT_HOMES,
 }];
 
@@ -310,23 +324,29 @@ const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
     "crates/coven-storage/src/cloud_object_storage.rs",
     "crates/coven-storage/src/remote/storage_impl.rs",
     "crates/coven-replication/src/sync/store/acknowledgements/circle.rs",
+    "crates/coven-replication/src/sync/store/authorization.rs",
     "crates/coven-replication/src/sync/store/authorization/keyring.rs",
     "crates/coven-replication/src/sync/store/circles/activation/access.rs",
     "crates/coven-replication/src/sync/store/circles/activation/epoch_close.rs",
     "crates/coven-replication/src/sync/store/circles/activation/heads.rs",
     "crates/coven-replication/src/sync/store/circles/activation/metadata.rs",
     "crates/coven-replication/src/sync/store/circles/activation/roster.rs",
+    "crates/coven-replication/src/sync/store/circles/authorized_writer/epoch_close.rs",
     "crates/coven-replication/src/sync/store/circles/exact_object.rs",
     "crates/coven-replication/src/sync/store/circles/packages.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/acknowledgements_snapshots.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/announcements.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/commits.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/device_lifecycle.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/membership.rs",
     "crates/coven-replication/src/sync/store/commit_verification/commit/registrations.rs",
     "crates/coven-replication/src/sync/store/commit_verification/merge_history/device_join_verification.rs",
     "crates/coven-replication/src/sync/store/commit_verification/merge_history/membership_control.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/merge_history/stream.rs",
     "crates/coven-replication/src/sync/store/device_join/authorized_join.rs",
     "crates/coven-replication/src/sync/store/device_join/joiner.rs",
+    "crates/coven-replication/src/sync/store/device_join/transport.rs",
+    "crates/coven-replication/src/sync/store/merge_conflict/observation.rs",
     "crates/coven-replication/src/sync/store/protocol_root.rs",
     "crates/coven-replication/src/sync/store/reclaim/candidates.rs",
     "crates/coven-replication/src/sync/store/reclaim/claims.rs",
