@@ -163,6 +163,17 @@ pub(crate) struct StoreDatabaseRuntime {
     /// Serializes the full durable-intent to filesystem-deletion to
     /// intent-removal operation across every clone of this database.
     local_blob_cleanup: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Serializes draining the blob upload queue: reading the pending entries
+    /// and running every attempt admitted from that read.
+    ///
+    /// The queue has two drainers — the sync cycle's and the host's explicit
+    /// one — and an entry is only claimed by the compare-and-set that hands off
+    /// its prepared object. Everything before that handoff is unguarded, so two
+    /// drainers reading the same pending row both sealed the whole blob, both
+    /// wrote a spool, and both reported preparation progress for it, with only
+    /// the loser's work thrown away at the end. Held across the read and the
+    /// attempts it admits, one entry cannot be in two attempts at once.
+    blob_upload_drain: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl StoreDatabaseRuntime {
@@ -175,6 +186,7 @@ impl StoreDatabaseRuntime {
             snapshot_publication: Default::default(),
             own_stream_authorship: Default::default(),
             local_blob_cleanup: Default::default(),
+            blob_upload_drain: Default::default(),
         }
     }
 
@@ -219,6 +231,12 @@ impl StoreDatabaseRuntime {
             _guard: self.local_blob_cleanup.clone().lock_owned().await,
         }
     }
+
+    pub(crate) async fn blob_upload_drain_permit(&self) -> BlobUploadDrainPermit {
+        BlobUploadDrainPermit {
+            _guard: self.blob_upload_drain.clone().lock_owned().await,
+        }
+    }
 }
 
 pub struct MembershipLoadPermit {
@@ -240,6 +258,16 @@ pub struct DeviceExclusionPermit {
 /// This device's exclusive turn to author its own next Store commit, held from
 /// reading the position through publishing the head that takes it.
 pub struct OwnStreamAuthorship {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// This drain's exclusive turn over the blob upload queue, held from reading
+/// the pending entries through the last attempt admitted from that read.
+///
+/// A caller that waits for it reads the queue afterwards and so sees what the
+/// drain ahead of it left, rather than a second view of entries already being
+/// uploaded.
+pub struct BlobUploadDrainPermit {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 

@@ -39,12 +39,25 @@ impl AuthorizedWriterOperation<'_> {
     /// pending Store write activates their normal locator bindings. A cancelled root
     /// exact-deletes each created object and its spool before removing the journal;
     /// restarting during cleanup resets that exact journal to Pending.
+    ///
+    /// This is the only place the queue is drained, and every caller reaches it —
+    /// the sync cycle directly, the host's explicit drain and its retry-now
+    /// through the loop handle. Whoever arrives second waits here and reads the
+    /// queue afterwards, so it admits what the drain ahead of it left rather
+    /// than a second view of entries already being uploaded.
     pub(crate) async fn drain_uploads(
         &self,
         clock: &dyn coven_foundation::clock::Clock,
         routing_encryption: Option<&EncryptionService>,
         observer: Option<&dyn BlobTransitionObserver>,
     ) -> Result<DrainOutcome, DbError> {
+        // Taken before the queue is read, because reading it is what decides
+        // which entries this pass will run: an entry is otherwise claimed only
+        // by the compare-and-set that hands off its prepared object, which is
+        // after the seal, the spool write, and the preparation progress an
+        // observer has already been told about. Held to the end of the pass, so
+        // it also covers the attempts still in flight when admission stops.
+        let _drain = self.database.blob_upload_drain_permit().await;
         self.database
             .validate_store_write_routing(routing_encryption)?;
         let registration = self.database.local_blob_write_authority().await?;

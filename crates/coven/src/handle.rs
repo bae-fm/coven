@@ -522,13 +522,13 @@ impl CovenHandle {
     /// but start no background loop — the caller drives sync itself.
     ///
     /// The loop-started connect and an explicit
-    /// [`drain_uploads`](Self::drain_uploads) are two drainers of one queue. Both
-    /// see the same rows, both succeed, and whichever loses reports an empty
-    /// queue — a host asserting on its own drain's count reads that as "nothing
-    /// was queued" and fails intermittently. Here no cycle exists to race: the
-    /// host's `drain_uploads` is the only drain, its count is the whole truth,
-    /// and [`is_syncing`](Self::is_syncing) stays `false` for the connection's
-    /// whole life.
+    /// [`drain_uploads`](Self::drain_uploads) are two drainers of one queue. They
+    /// take turns rather than overlap, so whichever runs second drains only what
+    /// the first left — a host asserting on its own drain's count reads that as
+    /// "nothing was queued" and fails intermittently. Here no cycle exists to
+    /// share the queue with: the host's `drain_uploads` is the only drain, its
+    /// count is the whole truth, and [`is_syncing`](Self::is_syncing) stays
+    /// `false` for the connection's whole life.
     ///
     /// Everything a connected store can do is available — `make_remote`,
     /// `make_local`, the drain, membership — because none of it needs the loop
@@ -965,11 +965,19 @@ impl CovenHandle {
     ///
     /// The [`DrainOutcome`] says what the pass found, not just how much it moved:
     /// an empty queue, a queue held entirely in retry backoff, and a paused one
-    /// are each their own answer rather than a zero count. A host that connects
-    /// with a running loop has *two* drainers of one queue and gets whichever
-    /// answer the race leaves it; `connect_sync_with_test_home_caller_driven`
+    /// are each their own answer rather than a zero count.
+    ///
+    /// A host that connects with a running loop shares the queue with the
+    /// cycle's drain. The two never run at once — the queue is drained under an
+    /// exclusive turn, so one entry is never in two uploads — but they do divide
+    /// the work: this call may wait for a cycle's drain and then find the
+    /// entries it wanted already uploaded, and answer `QueueEmpty`. The outcome
+    /// describes this pass, never the queue's whole history, so a host that
+    /// needs the latter should watch
+    /// [`subscribe_cloud_outbox`](Self::subscribe_cloud_outbox) rather than
+    /// count one drain's return. `connect_sync_with_test_home_caller_driven`
     /// (test builds only) connects without a loop, so this call is the only
-    /// drain.
+    /// drain and its count is the whole truth.
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
         self.sync.drain_uploads().await
     }

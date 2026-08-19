@@ -408,6 +408,10 @@ impl DatabaseConnection {
         self.context.store_runtime.author_own_stream().await
     }
 
+    pub(crate) async fn blob_upload_drain_permit(&self) -> crate::store::BlobUploadDrainPermit {
+        self.context.store_runtime.blob_upload_drain_permit().await
+    }
+
     pub(crate) async fn snapshot_publication_permit(
         &self,
     ) -> crate::store::SnapshotPublicationPermit {

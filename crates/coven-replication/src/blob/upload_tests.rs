@@ -835,6 +835,74 @@ async fn corrupt_upload_backoff_timestamp_fails_before_remote_effects() {
     );
 }
 
+/// The queue has two drainers — the sync cycle's and the host's explicit one —
+/// and before they took turns both could read the same pending entry and run a
+/// full attempt on it. An entry is claimed only by the compare-and-set that
+/// hands off its prepared object, so the loser had already sealed the whole
+/// blob, written a spool, and reported preparation progress for it. A host
+/// observer watching one blob's preparation saw two interleaved streams and a
+/// byte count that went backwards.
+///
+/// Both assertions below are that regression, from the two directions it was
+/// visible: no blob is prepared twice, and no blob's reported preparation ever
+/// goes backwards.
+#[tokio::test]
+async fn concurrent_drains_never_prepare_one_entry_twice() {
+    let fixture = UploadFixture::new(4).await;
+    let ids = fixture.seed_uploads(6).await;
+    let observer = RecordingObserver::new();
+
+    // The drain ahead awaits the filesystem and the provider throughout, so the
+    // one behind is polled well inside it — before taking turns, deep enough to
+    // read the same queue and admit the same entries.
+    let clock = fixed_clock(T0);
+    let (first, second) = tokio::join!(
+        fixture.drain(&clock, Some(&observer)),
+        fixture.drain(&clock, Some(&observer)),
+    );
+    first.expect("first drain");
+    second.expect("second drain");
+
+    let events = observer.events();
+    let mut prepared = events
+        .iter()
+        .filter_map(|event| match event {
+            ObsEvent::Preparing(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    prepared.sort();
+    let mut once = prepared.clone();
+    once.dedup();
+    assert_eq!(
+        prepared, once,
+        "a blob was admitted by both drains and prepared twice: {prepared:?}",
+    );
+    assert_eq!(
+        once.len(),
+        ids.len(),
+        "every queued blob is prepared exactly once across both drains",
+    );
+
+    for id in &ids {
+        let mut reported = 0;
+        for event in &events {
+            let ObsEvent::PreparationProgress(event_id, done, total) = event else {
+                continue;
+            };
+            if event_id != id {
+                continue;
+            }
+            assert!(
+                *done >= reported,
+                "preparation progress for {id} regressed: previous {reported}, \
+                 received {done} of {total}",
+            );
+            reported = *done;
+        }
+    }
+}
+
 #[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
     let fixture = UploadFixture::new(1).await;

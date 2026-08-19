@@ -223,6 +223,16 @@ impl StoreDatabase {
         self.database.author_own_store_stream().await
     }
 
+    /// Wait for this drain's exclusive turn over the blob upload queue.
+    ///
+    /// Taken before the queue is read and held for the whole pass, so the
+    /// entries a drain admits are entries no other drain is already running.
+    /// Never taken twice in one call chain: an upload attempt performs no
+    /// second drain.
+    pub async fn blob_upload_drain_permit(&self) -> BlobUploadDrainPermit {
+        self.database.blob_upload_drain_permit().await
+    }
+
     pub async fn snapshot_publication_permit(&self) -> SnapshotPublicationPermit {
         self.database.snapshot_publication_permit().await
     }
