@@ -599,12 +599,14 @@ impl<'operation> FounderStoreCreation<'operation> {
             .activation_id();
         let initial_ack_value = StoreAck::signed(
             root_hash,
-            registration_ref.clone(),
             1,
-            frontier,
-            device_state,
-            None,
-            exclusions,
+            coven_protocol::store_commit::StoreAckAssertion {
+                registration: registration_ref.clone(),
+                store_cut: frontier,
+                device_state,
+                snapshot: None,
+                exclusions,
+            },
             founder_timestamp.to_string(),
             SuccessorLink {
                 activation: acknowledgement_activation,

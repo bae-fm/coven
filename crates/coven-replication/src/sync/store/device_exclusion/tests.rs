@@ -124,7 +124,8 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
     let acknowledgement = reopened_store
         .stage_acknowledgement(frontier, "2026-07-18T00:00:00Z".to_string())
         .await
-        .expect("stage exclusion acknowledgement");
+        .expect("stage exclusion acknowledgement")
+        .expect("the reopened device has published no acknowledgement yet");
     let StoreAckExclusionState { proposal_freezes } = acknowledgement.exclusions.clone();
     assert!(proposal_freezes.is_empty());
     assert_eq!(
@@ -154,6 +155,26 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         });
         candidate_staged.notified().await;
 
+        // The competing acknowledgement needs something to acknowledge: a device
+        // does not acknowledge its own acknowledgement, so without a write ahead
+        // of it the standing one still holds and nothing races the cancellation.
+        reopened
+            .execute_test_host_write(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('race-1', 'race', NULL, 1, '0000000001000-0000-race', '2026-07-18')",
+            )
+            .await;
+        assert!(reopened_store
+            .prepare_pending_store_write()
+            .await
+            .expect("prepare the write the competing acknowledgement covers"));
+        assert_eq!(
+            reopened_store
+                .drain_store_writes()
+                .await
+                .expect("publish the write the competing acknowledgement covers"),
+            1
+        );
         let frontier = coven_protocol::store_commit::CommitFrontier::from_refs(
             store_database(&reopened)
                 .materialized_frontier()
@@ -164,7 +185,8 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
         reopened_store
             .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
             .await
-            .expect("stage competing acknowledgement");
+            .expect("stage competing acknowledgement")
+            .expect("the published write is new, so it is acknowledged");
         assert_eq!(
             reopened_store
                 .drain_acknowledgements()
@@ -172,6 +194,17 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
                 .expect("publish competing acknowledgement"),
             1
         );
+        // Where the competing acknowledgement left this device's stream. The
+        // cancellation was prepared before it and has to re-prepare behind it,
+        // landing at the next position rather than the one it first claimed.
+        let competing_sequence = reopened_store
+            .latest_local_store_position()
+            .await
+            .expect("read competing acknowledgement position")
+            .expect("the competing acknowledgement activated")
+            .coord
+            .sequence();
+        assert!(competing_sequence > base_sequence);
         resume_candidate.notify_one();
         let cancellation = cancellation_task
             .await
@@ -182,7 +215,7 @@ async fn uploaded_proposal_resumes_after_restart_without_freezing_the_target() {
             StoreDeviceExclusionResult::OutcomeActivated {
                 outcome: StoreDeviceExclusionOutcomeRef::Cancelled(_),
                 commit,
-            } if commit.coord.sequence() == base_sequence + 2
+            } if commit.coord.sequence() == competing_sequence + 1
         ));
         assert!(store_database(&reopened)
             .store_device_exclusion_freezes()
@@ -521,7 +554,8 @@ async fn device_join_bootstrap_records_exclusion_replayed_after_snapshot() {
             let acknowledgement = device
                 .stage_acknowledgement(snapshot_coverage.clone(), timestamp.to_string())
                 .await
-                .expect("stage pre-exclusion snapshot acknowledgement");
+                .expect("stage pre-exclusion snapshot acknowledgement")
+                .expect("the snapshot is newly named, so it is acknowledged");
             let locator = acknowledgement
                 .snapshot
                 .clone()

@@ -3200,35 +3200,40 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     );
 
     // Cycle 2 has no host write. The applied row must not create a local data
-    // commit because apply bypasses the host write ledger.
+    // commit because apply bypasses the host write ledger — and having already
+    // acknowledged A's commit in cycle 1, M has nothing left to say, so the
+    // cycle appends nothing at all.
     let before = device_m
         .latest_local_store_position()
         .await
-        .expect("read local Store position before the empty cycle");
+        .expect("read local Store position before the empty cycle")
+        .expect("cycle 1 published M's acknowledgement of A's commit");
     run_cycle_in_task(cycle_storage, device_m.clone())
         .await
         .expect("M's empty cycle succeeds");
     let after = device_m
         .latest_local_store_position()
         .await
-        .expect("read local Store position after the empty cycle")
-        .expect("the empty cycle publishes its acknowledgement");
+        .expect("read local Store position after the empty cycle");
+    assert_eq!(
+        after.as_ref(),
+        Some(&before),
+        "an empty cycle over an applied changeset appends no commit",
+    );
     let registration = coven_database::StoreDatabase::new(&db_m)
         .local_blob_write_authority()
         .await
         .expect("load local Store registration");
     let commit = device_m
-        .load_commit_for_test(&after)
+        .load_commit_for_test(&before)
         .await
-        .expect("load empty-cycle acknowledgement commit");
+        .expect("load M's acknowledgement commit");
     assert_eq!(commit.author(), registration.value());
-    assert_eq!(
-        commit.order.predecessor(),
-        before.as_ref(),
-        "the acknowledgement directly extends the previous local position",
-    );
     assert!(commit.acknowledgement().is_some());
-    assert!(commit.store_package().is_none());
+    assert!(
+        commit.store_package().is_none(),
+        "applying A's rows created no data commit of M's own",
+    );
 }
 
 #[tokio::test]

@@ -96,13 +96,15 @@ impl Fixture {
     fn signed_ack(&self, last_sync: &str) -> StoreAck {
         StoreAck::signed(
             self.root_ref.store_root_hash,
-            self.registration_ref.clone(),
             1,
-            StoreHistoryCut(BTreeMap::new()),
-            self.commit.device_state.clone(),
-            None,
-            StoreAckExclusionState {
-                proposal_freezes: Vec::new(),
+            StoreAckAssertion {
+                registration: self.registration_ref.clone(),
+                store_cut: StoreHistoryCut(BTreeMap::new()),
+                device_state: self.commit.device_state.clone(),
+                snapshot: None,
+                exclusions: StoreAckExclusionState {
+                    proposal_freezes: Vec::new(),
+                },
             },
             last_sync.to_string(),
             SuccessorLink {
@@ -1143,13 +1145,15 @@ fn readiness_rejects_a_bootstrap_cut_other_than_the_signed_attempt_cut() {
     let device_signer = registration.device_signer(&joiner).unwrap();
     let ack = StoreAck::signed(
         fixture.root_ref.store_root_hash,
-        registration_ref.clone(),
         1,
-        other_cut.clone(),
-        other_device_state,
-        None,
-        StoreAckExclusionState {
-            proposal_freezes: Vec::new(),
+        StoreAckAssertion {
+            registration: registration_ref.clone(),
+            store_cut: other_cut.clone(),
+            device_state: other_device_state,
+            snapshot: None,
+            exclusions: StoreAckExclusionState {
+                proposal_freezes: Vec::new(),
+            },
         },
         "2026-07-16T00:00:00Z".to_string(),
         SuccessorLink {
@@ -1950,4 +1954,171 @@ fn a_write_revocation_with_unsorted_protected_slots_is_refused() {
         reordered.verify(&fixture.registration).is_err(),
         "a revocation whose protected slots are not in canonical order must not verify",
     );
+}
+
+/// A standing acknowledgement forgives exactly one advance in the Store's
+/// history: the commit that published it. Everything else is news.
+mod standing_acknowledgement {
+    use super::*;
+
+    fn commit(stream: &str, sequence: u64) -> StoreBatchCommitRef {
+        let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(stream.as_bytes()));
+        let commit_hash = ObjectHash::digest(format!("{stream}/{sequence}").as_bytes());
+        StoreBatchCommitRef {
+            coord: StoreCommitCoord {
+                stream_id,
+                sequence,
+            },
+            commit_hash,
+            object: exact(
+                format!("store-v1/commits/{stream}/{sequence}.json"),
+                format!("{stream}/{sequence}").as_bytes(),
+            ),
+        }
+    }
+
+    fn cut(commits: &[StoreBatchCommitRef]) -> StoreHistoryCut {
+        StoreHistoryCut(
+            commits
+                .iter()
+                .map(|commit| (commit.coord.stream_id, commit.clone()))
+                .collect(),
+        )
+    }
+
+    /// A device that acknowledged `mine@1` and `theirs@1`, whose acknowledgement
+    /// landed at `mine@2`.
+    fn standing(fixture: &Fixture) -> StandingStoreAck {
+        StandingStoreAck {
+            assertion: StoreAckAssertion {
+                registration: fixture.registration_ref.clone(),
+                store_cut: cut(&[commit("mine", 1), commit("theirs", 1)]),
+                device_state: fixture.commit.device_state.clone(),
+                snapshot: None,
+                exclusions: StoreAckExclusionState {
+                    proposal_freezes: Vec::new(),
+                },
+            },
+            activating_commit: Some(commit("mine", 2)),
+        }
+    }
+
+    fn assertion_over(
+        standing: &StandingStoreAck,
+        store_cut: StoreHistoryCut,
+    ) -> StoreAckAssertion {
+        StoreAckAssertion {
+            store_cut,
+            ..standing.assertion.clone()
+        }
+    }
+
+    #[test]
+    fn holds_when_the_only_new_commit_is_the_one_that_published_it() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        assert!(standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 2), commit("theirs", 1)]),
+        )));
+    }
+
+    #[test]
+    fn does_not_hold_once_this_device_commits_anything_further() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        assert!(!standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 3), commit("theirs", 1)]),
+        )));
+    }
+
+    #[test]
+    fn does_not_hold_once_another_device_commits() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        assert!(!standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 2), commit("theirs", 2)]),
+        )));
+    }
+
+    #[test]
+    fn does_not_hold_once_a_new_device_appears_in_the_history() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        assert!(!standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 2), commit("theirs", 1), commit("third", 1)]),
+        )));
+    }
+
+    /// The case reclamation depends on. A snapshot becomes stable only once every
+    /// active device has an acknowledgement naming it, so a device that has
+    /// nothing else to say still has to say this — otherwise a snapshot published
+    /// onto a quiet Store never stabilizes and nothing is ever reclaimed.
+    #[test]
+    fn does_not_hold_once_there_is_a_snapshot_to_name() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        let snapshot = StoreSnapshotLocator {
+            author_registration: fixture.registration_ref.clone(),
+            snapshot: StoreSnapshotRef {
+                generation: 1,
+                snapshot_hash: ObjectHash::digest(b"snapshot"),
+                object: exact("store-v1/snapshots/mine/1.json".to_string(), b"snapshot"),
+            },
+        };
+        assert!(!standing.still_holds(&StoreAckAssertion {
+            store_cut: cut(&[commit("mine", 2), commit("theirs", 1)]),
+            snapshot: Some(snapshot),
+            ..standing.assertion.clone()
+        }));
+    }
+
+    #[test]
+    fn does_not_hold_once_an_exclusion_proposal_is_frozen() {
+        let fixture = fixture();
+        let standing = standing(&fixture);
+        let freeze = StoreDeviceProposalAck {
+            proposal: StoreDeviceExclusionProposalRef {
+                proposal_id: StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+                    b"exclusion proposal",
+                )),
+                target: fixture.registration_ref.clone(),
+                proposal_hash: ObjectHash::digest(b"exclusion proposal body"),
+                object: exact(
+                    "store-v1/exclusions/proposal.json".to_string(),
+                    b"exclusion proposal body",
+                ),
+            },
+            target_cut: cut(&[commit("theirs", 1)]),
+        };
+        assert!(!standing.still_holds(&StoreAckAssertion {
+            store_cut: cut(&[commit("mine", 2), commit("theirs", 1)]),
+            exclusions: StoreAckExclusionState {
+                proposal_freezes: vec![freeze],
+            },
+            ..standing.assertion.clone()
+        }));
+    }
+
+    /// An acknowledgement that activated no commit — it lost the race to another
+    /// device's — forgives nothing at all.
+    #[test]
+    fn a_losing_acknowledgement_forgives_no_commit() {
+        let fixture = fixture();
+        let standing = StandingStoreAck {
+            activating_commit: None,
+            ..standing(&fixture)
+        };
+        assert!(standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 1), commit("theirs", 1)]),
+        )));
+        assert!(!standing.still_holds(&assertion_over(
+            &standing,
+            cut(&[commit("mine", 2), commit("theirs", 1)]),
+        )));
+    }
 }

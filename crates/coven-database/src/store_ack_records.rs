@@ -98,13 +98,20 @@ pub(crate) fn load_published_store_ack_on(
     conn: &Connection,
 ) -> Result<Option<PublishedStoreAck>, DbError> {
     conn.query_row(
-        "SELECT ack_ref, successor_slot FROM published_store_acks WHERE singleton = 1",
+        "SELECT ack_ref, successor_slot, standing FROM published_store_acks \
+         WHERE singleton = 1",
         [],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(reference, successor_slot)| {
+    .map(|(reference, successor_slot, standing)| {
         let reference: StoreAckRef = serde_json::from_str(&reference)
             .map_err(|error| DbError::context("published Store acknowledgement ref", error))?;
         if reference.sequence == 0 {
@@ -117,6 +124,12 @@ pub(crate) fn load_published_store_ack_on(
             successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
                 DbError::context("published Store acknowledgement successor slot", error)
             })?,
+            standing: standing
+                .map(|state| {
+                    serde_json::from_str(&state)
+                        .map_err(|error| DbError::context("standing Store acknowledgement", error))
+                })
+                .transpose()?,
         })
     })
     .transpose()
@@ -126,6 +139,7 @@ pub(crate) fn finish_outbound_store_ack_on(
     conn: &Connection,
     reference: &StoreAckRef,
     successor_slot: &coven_protocol::objects::ObjectSlot,
+    standing: &coven_protocol::store_commit::StandingStoreAck,
 ) -> Result<(), DbError> {
     let removed = conn
         .execute(
@@ -142,16 +156,20 @@ pub(crate) fn finish_outbound_store_ack_on(
     let successor_slot = serde_json::to_string(successor_slot).map_err(|error| {
         DbError::context("serialize Store acknowledgement successor slot", error)
     })?;
+    let standing = serde_json::to_string(standing)
+        .map_err(|error| DbError::context("serialize standing Store acknowledgement", error))?;
     conn.execute(
-        "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
-         VALUES (1, ?1, ?2) \
+        "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot, standing) \
+         VALUES (1, ?1, ?2, ?3) \
          ON CONFLICT(singleton) DO UPDATE SET \
-           ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
+           ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot, \
+           standing = excluded.standing",
         (
             serde_json::to_string(reference).map_err(|error| {
                 DbError::context("serialize published Store acknowledgement ref", error)
             })?,
             successor_slot,
+            standing,
         ),
     )
     .map(|_| ())

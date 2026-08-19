@@ -330,7 +330,18 @@ impl StoreSession<'_> {
             [commit_id, head_id],
             "nonactivating acknowledgement",
         )?;
-        finish_outbound_store_ack_on(&tx, expected, &outbound.ack.value.successor.next_slot)?;
+        // A losing acknowledgement activated no commit, so the standing state
+        // names none: the next cycle compares its assertion against a history
+        // this device added nothing to.
+        finish_outbound_store_ack_on(
+            &tx,
+            expected,
+            &outbound.ack.value.successor.next_slot,
+            &coven_protocol::store_commit::StandingStoreAck {
+                assertion: outbound.ack.value.assertion(),
+                activating_commit: None,
+            },
+        )?;
         tx.commit().map_err(DbError::from)
     }
 }

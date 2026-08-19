@@ -310,4 +310,17 @@ pub enum OutboundStoreAckActivation {
 pub struct PublishedStoreAck {
     pub reference: StoreAckRef,
     pub successor_slot: coven_protocol::objects::ObjectSlot,
+    /// What that acknowledgement said, so the next cycle can tell whether it
+    /// still holds. `None` on an acknowledgement installed while bootstrapping
+    /// the device, which computed no assertion of its own: the first cycle after
+    /// one of those has no basis to skip, so it acknowledges and records what it
+    /// said.
+    pub standing: Option<coven_protocol::store_commit::StandingStoreAck>,
+}
+
+/// An acknowledgement a device has activated, and the commit that activated it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivatedStoreAck {
+    pub reference: StoreAckRef,
+    pub activating_commit: StoreBatchCommitRef,
 }

@@ -807,7 +807,8 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                         "registration {} has not acknowledged exclusion proposal {}",
                         record.registration.device_id, proposal_ref.proposal_id
                     ))
-                })?;
+                })?
+                .reference;
             let registration = database
                 .activated_store_device_registration(record.registration.clone())
                 .await?;

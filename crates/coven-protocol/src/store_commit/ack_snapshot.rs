@@ -22,6 +22,116 @@ impl SignedBody for StoreAckBody {
     const DOMAIN: &'static [u8] = ACK_DOMAIN;
 }
 
+/// What a Store acknowledgement asserts, apart from the bookkeeping every
+/// acknowledgement carries fresh: its sequence, the wall clock it was written
+/// at, and its links to the neighbours in the device's acknowledgement chain.
+///
+/// Two acknowledgements with equal assertions tell every reader the same thing.
+/// That matters because publishing an acknowledgement appends a commit, and a
+/// commit that says nothing new still lands in every device's history, every
+/// retained materialization, and every snapshot — a store that is doing nothing
+/// grows one commit per device per cycle, forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreAckAssertion {
+    pub registration: StoreDeviceRegistrationRef,
+    pub store_cut: StoreHistoryCut,
+    pub device_state: StoreDeviceStateRef,
+    pub snapshot: Option<StoreSnapshotLocator>,
+    pub exclusions: StoreAckExclusionState,
+}
+
+/// The acknowledgement a device currently stands behind: what it asserted, and
+/// the commit that carried it.
+///
+/// Kept so the next cycle can ask whether that acknowledgement still says
+/// everything true, instead of publishing another one to find out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StandingStoreAck {
+    pub assertion: StoreAckAssertion,
+    /// The commit that published it, when it activated one.
+    ///
+    /// An acknowledgement cannot cover the commit that carries it — that commit
+    /// does not exist until the acknowledgement is signed. So this is the one
+    /// position in the Store's history the assertion leaves behind on purpose,
+    /// and the one advance that is not a reason to acknowledge again. Without it
+    /// a device acknowledges its own acknowledgement, cycle after cycle, forever.
+    pub activating_commit: Option<StoreBatchCommitRef>,
+}
+
+impl StandingStoreAck {
+    /// Whether `assertion` says exactly what this acknowledgement already said.
+    ///
+    /// Destructured exhaustively for the same reason [`StoreAckBody::assertion`]
+    /// is: a field added to the assertion has to be compared here, or the
+    /// acknowledgement could change without anything noticing.
+    pub fn still_holds(&self, assertion: &StoreAckAssertion) -> bool {
+        let StoreAckAssertion {
+            registration,
+            store_cut,
+            device_state,
+            snapshot,
+            exclusions,
+        } = assertion;
+        if registration != &self.assertion.registration
+            || snapshot != &self.assertion.snapshot
+            || exclusions != &self.assertion.exclusions
+        {
+            return false;
+        }
+        // A device-state reference names both the device set and the cut it was
+        // read at. The cut half moves with `store_cut` and is compared there; the
+        // device set is what this reference actually asserts.
+        if device_state.state_hash() != self.assertion.device_state.state_hash()
+            || device_state.recovery() != self.assertion.device_state.recovery()
+        {
+            return false;
+        }
+        *store_cut == self.covered_cut()
+    }
+
+    /// The Store history this acknowledgement leaves behind it: what it asserted,
+    /// plus the commit that carried it. A frontier equal to this one holds
+    /// nothing the standing acknowledgement has not already accounted for.
+    fn covered_cut(&self) -> StoreHistoryCut {
+        let mut cut = self.assertion.store_cut.0.clone();
+        if let Some(commit) = &self.activating_commit {
+            cut.insert(commit.coord.stream_id, commit.clone());
+        }
+        StoreHistoryCut(cut)
+    }
+}
+
+impl StoreAckBody {
+    /// The assertion this body makes.
+    ///
+    /// Destructured exhaustively on purpose: a field added to the body has to be
+    /// classified here as asserted or as bookkeeping, or this stops compiling. A
+    /// silently unclassified field would be one an acknowledgement could change
+    /// without anything noticing it had changed.
+    pub fn assertion(&self) -> StoreAckAssertion {
+        let Self {
+            store_root_hash: _,
+            registration,
+            sequence: _,
+            store_cut,
+            device_state,
+            snapshot,
+            exclusions,
+            last_sync: _,
+            successor: _,
+        } = self;
+        StoreAckAssertion {
+            registration: registration.clone(),
+            store_cut: store_cut.clone(),
+            device_state: device_state.clone(),
+            snapshot: snapshot.clone(),
+            exclusions: exclusions.clone(),
+        }
+    }
+}
+
 pub type StoreAck = Signed<StoreAckBody>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -83,17 +193,20 @@ pub struct StoreDeviceProposalAck {
 impl StoreAck {
     pub fn signed(
         store_root_hash: ObjectHash,
-        registration: StoreDeviceRegistrationRef,
         sequence: u64,
-        store_cut: StoreHistoryCut,
-        device_state: StoreDeviceStateRef,
-        snapshot: Option<StoreSnapshotLocator>,
-        exclusions: StoreAckExclusionState,
+        assertion: StoreAckAssertion,
         last_sync: String,
         successor: SuccessorLink,
         device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_successor_sequence(sequence, &successor)?;
+        let StoreAckAssertion {
+            registration,
+            store_cut,
+            device_state,
+            snapshot,
+            exclusions,
+        } = assertion;
         validate_ack_state(
             store_root_hash,
             &registration,

@@ -2284,7 +2284,8 @@ mod test_device {
             let acknowledgement = self
                 .stage_acknowledgement(frontier, "2026-07-18T00:01:00Z".to_string())
                 .await
-                .expect("stage owner exclusion acknowledgement");
+                .expect("stage owner exclusion acknowledgement")
+                .expect("the exclusion freeze is new, so it is acknowledged");
             let coven_protocol::store_commit::StoreAckExclusionState { proposal_freezes } =
                 acknowledgement.exclusions.clone();
             assert_eq!(proposal_freezes, freezes);
@@ -2567,7 +2568,7 @@ mod test_device {
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
             sync_time: String,
-        ) -> Result<coven_protocol::store_commit::StoreAck, TestError> {
+        ) -> Result<Option<coven_protocol::store_commit::StoreAck>, TestError> {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
                 .await
@@ -2598,7 +2599,7 @@ mod test_device {
             &self,
             frontier: coven_protocol::store_commit::CommitFrontier,
             sync_time: String,
-        ) -> Result<coven_protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
+        ) -> Result<Option<coven_protocol::store_commit::StoreAck>, crate::sync::store::StoreAckError>
         {
             self.store
                 .stage_acknowledgement_for_test(frontier, sync_time)
@@ -2616,11 +2617,28 @@ mod test_device {
             .map_err(crate::sync::store::StoreAckError::Protocol)
         }
 
+        /// Stage this device's acknowledgement of what it has materialized, and
+        /// fail if there was nothing new to say — the tests that use this are
+        /// testing what an acknowledgement does, so one has to be staged.
+        /// [`Self::stage_current_acknowledgement_if_new`] is for the tests about
+        /// whether one is staged at all.
         #[cfg(test)]
         pub async fn stage_current_acknowledgement(
             &self,
             sync_time: &str,
         ) -> Result<coven_protocol::store_commit::StoreAck, crate::sync::store::StoreAckError>
+        {
+            Ok(self
+                .stage_current_acknowledgement_if_new(sync_time)
+                .await?
+                .expect("the standing acknowledgement no longer holds"))
+        }
+
+        #[cfg(test)]
+        pub async fn stage_current_acknowledgement_if_new(
+            &self,
+            sync_time: &str,
+        ) -> Result<Option<coven_protocol::store_commit::StoreAck>, crate::sync::store::StoreAckError>
         {
             let frontier = self.acknowledgement_frontier().await?;
             self.stage_acknowledgement_exact(frontier, sync_time.to_string())

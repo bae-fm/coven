@@ -1407,3 +1407,79 @@ async fn a_retained_row_costs_the_same_at_every_sequence() {
         "a row with no acknowledgement stopped being a fixed size: {plain:?}",
     );
 }
+
+/// A Store where nothing is happening stops growing.
+///
+/// Publishing an acknowledgement appends a commit, and that commit moves the
+/// frontier the next acknowledgement would name — so a device that acknowledges
+/// whatever it currently sees acknowledges its own acknowledgement, and an idle
+/// Store gains a commit per device per cycle without end. The live store this
+/// was found on carried 385 commits behind 16 host writes.
+#[tokio::test]
+async fn an_idle_cycle_appends_no_commit() {
+    let fixture = AcknowledgedHistory::publish(2).await;
+    // The fixture's last round leaves this device with the peer's commit to
+    // acknowledge. This cycle says that; every cycle after it has nothing to add.
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("settle the cycle");
+    let settled = fixture.retained_history().await.len();
+
+    for cycle in 1..=4 {
+        fixture
+            .device
+            .run_cycle(None)
+            .await
+            .expect("run an idle cycle");
+        assert_eq!(
+            fixture.retained_history().await.len(),
+            settled,
+            "idle cycle {cycle} appended a commit to a Store where nothing happened",
+        );
+    }
+}
+
+/// And starts again the moment there is something to say. The guard withholds an
+/// acknowledgement that repeats itself, never one that carries news.
+#[tokio::test]
+async fn a_cycle_with_something_to_say_acknowledges_it() {
+    let fixture = AcknowledgedHistory::publish(2).await;
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("settle the cycle");
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("confirm the settled cycle is idle");
+    let settled = fixture.retained_history().await.len();
+
+    HistoryPublisher::new(&fixture.peer_db, &fixture.peer)
+        .publish_note(99)
+        .await;
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("pull and acknowledge the peer's commit");
+    assert_eq!(
+        fixture.retained_history().await.len(),
+        settled + 2,
+        "the peer's commit and this device's acknowledgement of it both land",
+    );
+
+    fixture
+        .device
+        .run_cycle(None)
+        .await
+        .expect("run an idle cycle again");
+    assert_eq!(
+        fixture.retained_history().await.len(),
+        settled + 2,
+        "and the Store settles again once the news is acknowledged",
+    );
+}

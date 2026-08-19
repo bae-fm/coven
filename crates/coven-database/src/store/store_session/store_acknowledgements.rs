@@ -1,5 +1,7 @@
 use crate::*;
-use coven_protocol::store_commit::{StoreAck, StoreAckRef, StoreDeviceRegistrationRef};
+use coven_protocol::store_commit::{
+    StoreAck, StoreAckRef, StoreBatchCommitRef, StoreDeviceRegistrationRef,
+};
 use rusqlite::OptionalExtension;
 
 use super::*;
@@ -13,16 +15,16 @@ impl StoreSession<'_> {
     fn activated_store_ack(
         &self,
         registration: &StoreDeviceRegistrationRef,
-    ) -> Result<Option<StoreAckRef>, DbError> {
+    ) -> Result<Option<ActivatedStoreAck>, DbError> {
         self.conn
             .query_row(
-                "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
+                "SELECT ack_ref, activating_commit FROM activated_store_acks WHERE device_id = ?1",
                 [registration.device_id.to_string()],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(DbError::from)?
-            .map(|raw| {
+            .map(|(raw, activating_commit)| {
                 let reference: StoreAckRef = serde_json::from_str(&raw).map_err(|error| {
                     DbError::context("activated Store acknowledgement ref", error)
                 })?;
@@ -31,7 +33,17 @@ impl StoreSession<'_> {
                         "activated Store acknowledgement names another registration".to_string(),
                     ));
                 }
-                Ok(reference)
+                Ok(ActivatedStoreAck {
+                    reference,
+                    activating_commit: serde_json::from_str(&activating_commit).map_err(
+                        |error| {
+                            DbError::context(
+                                "activated Store acknowledgement activating commit",
+                                error,
+                            )
+                        },
+                    )?,
+                })
             })
             .transpose()
     }
@@ -166,7 +178,11 @@ impl StoreSession<'_> {
         load_outbound_store_ack_on(self.conn, &authority)
     }
 
-    fn complete_outbound_store_ack(&mut self, accepted: &StoreAckRef) -> Result<(), DbError> {
+    fn complete_outbound_store_ack(
+        &mut self,
+        accepted: &StoreAckRef,
+        activating_commit: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
         let authority = self.local_store_authority()?;
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         let outbound = load_expected_outbound_store_ack_on(
@@ -175,7 +191,15 @@ impl StoreSession<'_> {
             accepted,
             "accepted Store acknowledgement differs from the prepared exact object",
         )?;
-        finish_outbound_store_ack_on(&tx, accepted, &outbound.ack.value.successor.next_slot)?;
+        finish_outbound_store_ack_on(
+            &tx,
+            accepted,
+            &outbound.ack.value.successor.next_slot,
+            &coven_protocol::store_commit::StandingStoreAck {
+                assertion: outbound.ack.value.assertion(),
+                activating_commit: Some(activating_commit.clone()),
+            },
+        )?;
         for circle in &outbound.circle_acknowledgements {
             let circle_id = circle.reference.circle_id.to_string();
             let removed = tx
@@ -231,7 +255,7 @@ impl StoreDatabase {
     pub async fn activated_store_ack(
         &self,
         registration: &StoreDeviceRegistrationRef,
-    ) -> Result<Option<StoreAckRef>, DbError> {
+    ) -> Result<Option<ActivatedStoreAck>, DbError> {
         let registration = registration.clone();
         self.call_store(move |session| session.activated_store_ack(&registration))
             .await
@@ -263,8 +287,14 @@ impl StoreDatabase {
             .await
     }
 
-    pub async fn complete_outbound_store_ack(&self, accepted: StoreAckRef) -> Result<(), DbError> {
-        self.call_store(move |session| session.complete_outbound_store_ack(&accepted))
-            .await
+    pub async fn complete_outbound_store_ack(
+        &self,
+        accepted: StoreAckRef,
+        activating_commit: StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.complete_outbound_store_ack(&accepted, &activating_commit)
+        })
+        .await
     }
 }

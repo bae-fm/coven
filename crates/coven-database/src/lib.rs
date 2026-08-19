@@ -288,13 +288,13 @@ pub use store_authority_records::{
     DurableFounderGraph, DurableFounderMembership, FounderMembershipRefs, StoreOwnerAnchor,
 };
 pub use write_models::{
-    AuthorExclusionActivationLocator, BlockedMergeCandidate, CompletePreparedStoreWriteOutcome,
-    InitialStoreMembershipAuthority, MergeAbandonmentState, MergeReplayWriteOverlay,
-    OutboundStoreAck, OutboundStoreAckActivation, PreparedMergeAbandonmentCandidates,
-    PreparedStoreWrite, PreparedStoreWriteCommit, PreparedStoreWritePartitions, PublishedStoreAck,
-    StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts, StoreWriteBlobMoveDestination,
-    StoreWriteRemoteBlob, StoreWriteRouting, TerminalCandidateAuthority,
-    TerminalCandidateCleanupVerification,
+    ActivatedStoreAck, AuthorExclusionActivationLocator, BlockedMergeCandidate,
+    CompletePreparedStoreWriteOutcome, InitialStoreMembershipAuthority, MergeAbandonmentState,
+    MergeReplayWriteOverlay, OutboundStoreAck, OutboundStoreAckActivation,
+    PreparedMergeAbandonmentCandidates, PreparedStoreWrite, PreparedStoreWriteCommit,
+    PreparedStoreWritePartitions, PublishedStoreAck, StoreWriteBase, StoreWriteBlobFact,
+    StoreWriteBlobFacts, StoreWriteBlobMoveDestination, StoreWriteRemoteBlob, StoreWriteRouting,
+    TerminalCandidateAuthority, TerminalCandidateCleanupVerification,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
