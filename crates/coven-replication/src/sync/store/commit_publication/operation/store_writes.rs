@@ -1,5 +1,6 @@
 use super::*;
 use crate::sync::stage_timing::StageTimings;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
@@ -368,9 +369,60 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))
     }
 
+    /// Create every prepared outbound object this write carries: its audience
+    /// packages, and any blob whose upload this write is the one to perform.
+    ///
+    /// Runs up to `transfer_limits().uploads` at once. Each object is
+    /// independent — its own bytes, its own create, its own durable mark — and a
+    /// release publishes one package per audience plus a blob per file, so on a
+    /// twenty-two file release this was forty serial provider round trips, nine
+    /// of the eleven seconds a live publication took.
+    ///
+    /// The barrier is at the end, not between objects: the caller creates the
+    /// commit and then the head only after this returns, because a commit names
+    /// packages that must already exist. Concurrency here does not weaken that —
+    /// it only stops the packages waiting on each other.
+    ///
+    /// A failure lets the objects already in flight finish before surfacing.
+    /// Each object's create and durable mark stand on their own, so more of them
+    /// landing is more progress carried into the retry, and the first error in
+    /// queue order is the one returned.
     pub(super) async fn publish_prepared_remote_objects(
         &self,
         write_id: &coven_protocol::write::WriteId,
+    ) -> Result<(), StoreError> {
+        let prepared = self.database.prepared_remote_objects(write_id).await?;
+        let limit = self.database.transfer_limits().uploads.get();
+        let mut pending = prepared.into_iter().enumerate();
+        let mut inflight = FuturesUnordered::new();
+        let mut failures: Vec<(usize, StoreError)> = Vec::new();
+        loop {
+            while inflight.len() < limit {
+                let Some((position, prepared)) = pending.next() else {
+                    break;
+                };
+                inflight.push(async move {
+                    (
+                        position,
+                        self.publish_prepared_remote_object(prepared).await,
+                    )
+                });
+            }
+            match inflight.next().await {
+                Some((position, Err(error))) => failures.push((position, error)),
+                Some((_, Ok(()))) => {}
+                None => break,
+            }
+        }
+        match failures.into_iter().min_by_key(|(position, _)| *position) {
+            Some((_, error)) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn publish_prepared_remote_object(
+        &self,
+        prepared: coven_database::PreparedRemoteObject,
     ) -> Result<(), StoreError> {
         use coven_protocol::objects::{
             BlobWriteAuthority, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain,
@@ -383,152 +435,150 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         let database = &self.database;
         let storage = self.storage.as_ref();
         let store_root_hash = self.store_root().store_root_hash;
-        for prepared in database.prepared_remote_objects(write_id).await? {
-            let remote = prepared.closed;
-            let prepared_state = match &*remote {
-                coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) => {
-                    matches!(
-                        record.state,
-                        coven_protocol::remote_object::CandidateCommitState::Prepared
-                    )
-                }
-                coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) => {
-                    matches!(
-                        record.state,
-                        coven_protocol::remote_object::CandidateObjectState::Prepared { .. }
-                    )
-                }
-                coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) => {
-                    matches!(
-                        record.state,
-                        coven_protocol::remote_object::OwnedObjectState::Prepared { .. }
-                    )
-                }
-                coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
-            };
-            match remote.payloads() {
-                coven_protocol::remote_object::RemoteObjectPayloads::SpooledInline => {
-                    let object = remote.object();
-                    let semantic_bytes = remote.semantic_bytes().ok_or_else(|| {
-                        StoreError::InvalidOutbound(format!(
-                            "prepared outbound object {} names no plaintext",
-                            remote.object_id()
-                        ))
-                    })?;
-                    let stored_bytes = remote.stored_bytes().ok_or_else(|| {
-                        StoreError::InvalidOutbound(format!(
-                            "prepared outbound object {} names no ciphertext",
-                            remote.object_id()
-                        ))
-                    })?;
-                    let package =
-                        coven_protocol::audience_package::AudiencePackage::parse(semantic_bytes)
-                            .map_err(StoreError::from)?;
-                    let stream_id = package.commit_coord().stream_id.to_string();
-                    let sequence = package.commit_coord().sequence;
-                    let (context, prefix) = match package.audience() {
-                        coven_protocol::audience_package::PackageAudience::Store => (
-                            ProtocolObjectContext::store_encrypted(
+        let remote = prepared.closed;
+        let prepared_state = match &*remote {
+            coven_protocol::remote_object::RemoteObjectRecord::CandidateCommit(record) => {
+                matches!(
+                    record.state,
+                    coven_protocol::remote_object::CandidateCommitState::Prepared
+                )
+            }
+            coven_protocol::remote_object::RemoteObjectRecord::CandidateExclusive(record) => {
+                matches!(
+                    record.state,
+                    coven_protocol::remote_object::CandidateObjectState::Prepared { .. }
+                )
+            }
+            coven_protocol::remote_object::RemoteObjectRecord::SharedLiveSet(record) => {
+                matches!(
+                    record.state,
+                    coven_protocol::remote_object::OwnedObjectState::Prepared { .. }
+                )
+            }
+            coven_protocol::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
+        };
+        match remote.payloads() {
+            coven_protocol::remote_object::RemoteObjectPayloads::SpooledInline => {
+                let object = remote.object();
+                let semantic_bytes = remote.semantic_bytes().ok_or_else(|| {
+                    StoreError::InvalidOutbound(format!(
+                        "prepared outbound object {} names no plaintext",
+                        remote.object_id()
+                    ))
+                })?;
+                let stored_bytes = remote.stored_bytes().ok_or_else(|| {
+                    StoreError::InvalidOutbound(format!(
+                        "prepared outbound object {} names no ciphertext",
+                        remote.object_id()
+                    ))
+                })?;
+                let package =
+                    coven_protocol::audience_package::AudiencePackage::parse(semantic_bytes)
+                        .map_err(StoreError::from)?;
+                let stream_id = package.commit_coord().stream_id.to_string();
+                let sequence = package.commit_coord().sequence;
+                let (context, prefix) = match package.audience() {
+                    coven_protocol::audience_package::PackageAudience::Store => (
+                        ProtocolObjectContext::store_encrypted(
+                            store_root_hash,
+                            ProtocolObjectDomain::StorePackage,
+                        ),
+                        package_semantic_prefix(
+                            package.candidate_family(),
+                            &stream_id,
+                            sequence,
+                            ObjectHash::digest(semantic_bytes),
+                        ),
+                    ),
+                    coven_protocol::audience_package::PackageAudience::Circle {
+                        circle_id,
+                        control,
+                        ..
+                    } => {
+                        let access = database
+                            .circle_publication_context(*circle_id, control.clone())
+                            .await?;
+                        (
+                            access.protocol_context(
                                 store_root_hash,
-                                ProtocolObjectDomain::StorePackage,
+                                ProtocolObjectDomain::CirclePackage,
                             ),
-                            package_semantic_prefix(
+                            circle_package_semantic_prefix(
+                                *circle_id,
                                 package.candidate_family(),
                                 &stream_id,
                                 sequence,
                                 ObjectHash::digest(semantic_bytes),
                             ),
-                        ),
-                        coven_protocol::audience_package::PackageAudience::Circle {
-                            circle_id,
-                            control,
-                            ..
-                        } => {
-                            let access = database
-                                .circle_publication_context(*circle_id, control.clone())
-                                .await?;
-                            (
-                                access.protocol_context(
-                                    store_root_hash,
-                                    ProtocolObjectDomain::CirclePackage,
-                                ),
-                                circle_package_semantic_prefix(
-                                    *circle_id,
-                                    package.candidate_family(),
-                                    &stream_id,
-                                    sequence,
-                                    ObjectHash::digest(semantic_bytes),
-                                ),
-                            )
-                        }
-                    };
-                    let exact = PreparedExactObject::new(object.clone(), stored_bytes.to_vec())
-                        .map_err(StoreObjectError::from)?;
+                        )
+                    }
+                };
+                let exact = PreparedExactObject::new(object.clone(), stored_bytes.to_vec())
+                    .map_err(StoreObjectError::from)?;
+                storage
+                    .verify_prepared_protocol_object(&context, &exact, &prefix, semantic_bytes)
+                    .await
+                    .map_err(StoreError::prepared_object)?;
+                if prepared_state {
                     storage
-                        .verify_prepared_protocol_object(&context, &exact, &prefix, semantic_bytes)
+                        .create_protocol_object(&exact)
                         .await
-                        .map_err(StoreError::prepared_object)?;
-                    if prepared_state {
-                        storage
-                            .create_protocol_object(&exact)
-                            .await
-                            .map_err(StoreObjectError::from)?;
-                    }
+                        .map_err(StoreObjectError::from)?;
                 }
-                coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { locator_bytes } => {
-                    let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
-                        .map_err(StoreError::from)?;
-                    let uploader = locator.uploader().clone();
-                    let registration = database
-                        .activated_store_device_registration(uploader.clone())
-                        .await?;
-                    let authority = BlobWriteAuthority::new(&registration);
-                    let blob = coven_protocol::blob::locator::StoredBlobRef::new(
-                        locator,
-                        remote.object().clone(),
-                    )
+            }
+            coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { locator_bytes } => {
+                let locator = coven_protocol::blob::locator::BlobLocator::parse(locator_bytes)
                     .map_err(StoreError::from)?;
-                    if prepared_state {
-                        let path = prepared.spool_path.as_deref().ok_or_else(|| {
-                            StoreError::InvalidOutbound(format!(
-                                "prepared blob {} awaiting upload has no local spool",
-                                remote.object_id()
-                            ))
-                        })?;
-                        storage
-                            .create_blob_object_from_file(
-                                &blob,
-                                &authority,
-                                path,
-                                &coven_storage::cloud::no_progress(),
-                            )
-                            .await
-                            .map_err(|source| StoreError::BlobStorage {
-                                namespace: blob.locator().namespace().to_string(),
-                                id: blob.locator().blob_id().to_string(),
-                                source,
-                            })?;
-                    }
-                    storage.verify_blob_object(&blob).await.map_err(|source| {
-                        StoreError::BlobStorage {
+                let uploader = locator.uploader().clone();
+                let registration = database
+                    .activated_store_device_registration(uploader.clone())
+                    .await?;
+                let authority = BlobWriteAuthority::new(&registration);
+                let blob = coven_protocol::blob::locator::StoredBlobRef::new(
+                    locator,
+                    remote.object().clone(),
+                )
+                .map_err(StoreError::from)?;
+                if prepared_state {
+                    let path = prepared.spool_path.as_deref().ok_or_else(|| {
+                        StoreError::InvalidOutbound(format!(
+                            "prepared blob {} awaiting upload has no local spool",
+                            remote.object_id()
+                        ))
+                    })?;
+                    storage
+                        .create_blob_object_from_file(
+                            &blob,
+                            &authority,
+                            path,
+                            &coven_storage::cloud::no_progress(),
+                        )
+                        .await
+                        .map_err(|source| StoreError::BlobStorage {
                             namespace: blob.locator().namespace().to_string(),
                             id: blob.locator().blob_id().to_string(),
                             source,
-                        }
-                    })?;
+                        })?;
                 }
-                coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal => {
-                    return Err(StoreError::InvalidOutbound(format!(
-                        "prepared outbound object {} has no locally stored representation",
-                        remote.object_id()
-                    )));
-                }
+                storage.verify_blob_object(&blob).await.map_err(|source| {
+                    StoreError::BlobStorage {
+                        namespace: blob.locator().namespace().to_string(),
+                        id: blob.locator().blob_id().to_string(),
+                        source,
+                    }
+                })?;
             }
-            if prepared_state {
-                database
-                    .mark_remote_object_uploaded(remote.into_record())
-                    .await?;
+            coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal => {
+                return Err(StoreError::InvalidOutbound(format!(
+                    "prepared outbound object {} has no locally stored representation",
+                    remote.object_id()
+                )));
             }
+        }
+        if prepared_state {
+            database
+                .mark_remote_object_uploaded(remote.into_record())
+                .await?;
         }
         Ok(())
     }
