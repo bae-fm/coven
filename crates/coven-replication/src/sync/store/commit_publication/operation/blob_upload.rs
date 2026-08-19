@@ -214,7 +214,7 @@ impl AuthorizedWriterOperation<'_> {
         blob: &StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         spool_path: &std::path::Path,
-        progress: &coven_storage::cloud::UploadProgress<'_>,
+        progress: &coven_storage::cloud::UploadProgress,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.storage
             .create_blob_object_from_file(blob, authority, spool_path, progress)
@@ -562,12 +562,9 @@ impl<'operation, 'storage, 'authority> BlobUploadAttempt<'operation, 'storage, '
         let total = blob.object().stored_size();
         let mut progress = crate::blob::progress::TransferProgress::new();
         let callback = progress.callback();
-        let create = self.writer.create_blob_upload_object(
-            blob,
-            self.authority,
-            spool_path,
-            callback.as_ref(),
-        );
+        let create =
+            self.writer
+                .create_blob_upload_object(blob, self.authority, spool_path, &callback);
         let Some(observer) = self.observer else {
             return create.await;
         };

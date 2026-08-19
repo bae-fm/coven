@@ -302,7 +302,7 @@ impl ExactSlotStorage for CloudKitCloudHome {
     async fn create_at(
         &self,
         upload: &crate::cloud::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<crate::cloud::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,

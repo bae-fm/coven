@@ -759,10 +759,10 @@ async fn write_reports_progress_per_chunk_record() {
     let ticks = Arc::new(AtomicU64::new(0));
     let last2 = last.clone();
     let ticks2 = ticks.clone();
-    let sink = move |n: u64| {
+    let sink: UploadProgress = Arc::new(move |n: u64| {
         last2.store(n, Ordering::Relaxed);
         ticks2.fetch_add(1, Ordering::Relaxed);
-    };
+    });
     ch.write("chunked.bin", BlobBody::from_bytes(data), &sink)
         .await
         .unwrap();

@@ -5339,7 +5339,7 @@ where
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &std::path::Path,
-        progress: &coven_storage::cloud::UploadProgress<'_>,
+        progress: &coven_storage::cloud::UploadProgress,
     ) -> Result<(), coven_protocol::objects::StorageError> {
         self.interceptor.before_blob_create(blob).await?;
         self.inner

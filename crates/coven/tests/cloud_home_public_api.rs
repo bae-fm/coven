@@ -316,7 +316,7 @@ impl ExactSlotStorage for ExternalProvider {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &coven::UploadProgress<'_>,
+        progress: &coven::UploadProgress,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         let slot = upload.object().slot();
         assert_eq!(slot.logical_key(), "objects/default-create");
@@ -397,7 +397,7 @@ async fn external_provider_can_name_and_implement_the_full_cloud_home_surface() 
     let created_upload =
         ExactUpload::from_bytes(&created_object, created_bytes).expect("valid exact upload");
     provider
-        .create_at(&created_upload, &|_| {})
+        .create_at(&created_upload, &coven::no_progress())
         .await
         .expect("provider creates the exact slot");
     assert_eq!(created.logical_key(), "objects/default-create");

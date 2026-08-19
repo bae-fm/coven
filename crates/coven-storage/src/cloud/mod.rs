@@ -65,7 +65,7 @@ pub(crate) async fn create_exact_bytes(
     storage: &dyn ExactSlotStorage,
     slot: &ObjectSlot,
     bytes: &[u8],
-    progress: &UploadProgress<'_>,
+    progress: &UploadProgress,
 ) -> Result<ExactCreateOutcome, CloudHomeError> {
     let object = coven_protocol::objects::ExactObjectRef::new(
         slot.clone(),
@@ -529,7 +529,7 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<ExactCreateOutcome, CloudHomeError>;
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
@@ -620,7 +620,7 @@ pub trait CloudHome: Send + Sync {
         &self,
         key: &str,
         body: BlobBody,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<(), CloudHomeError> {
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;

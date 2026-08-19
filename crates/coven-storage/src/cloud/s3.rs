@@ -322,6 +322,7 @@ impl S3CloudHome {
                             size,
                             &payload_hash,
                             now,
+                            super::no_progress(),
                         )
                         .await
                         .map_err(|error| match error {
@@ -369,6 +370,7 @@ impl S3CloudHome {
         source: GoogleUploadSource,
         size: u64,
         payload_hash: String,
+        progress: UploadProgress,
     ) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
         let google_xml = self.google_xml.clone().ok_or_else(|| {
@@ -398,6 +400,7 @@ impl S3CloudHome {
                         size,
                         &payload_hash,
                         now,
+                        progress,
                     )
                     .await
             })
@@ -421,7 +424,7 @@ impl S3CloudHome {
         key: &str,
         body: BlobBody,
         exact_sha256: Option<String>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<(), CloudHomeError> {
         if body.len() <= self.multipart_threshold() {
             let data = body.collect().await?;
@@ -441,7 +444,7 @@ impl S3CloudHome {
         slot: &ObjectSlot,
         body: BlobBody,
         exact_sha256: Option<String>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("S3")
             .map_err(CloudHomeError::from)?;
@@ -1524,7 +1527,7 @@ impl ExactSlotStorage for S3CloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         let checksum = matches!(
             self.exact_upload_verification,
@@ -1559,9 +1562,13 @@ impl ExactSlotStorage for S3CloudHome {
                         source,
                         upload.object().stored_size(),
                         hex::encode(upload.object().stored_hash().as_bytes()),
+                        progress.clone(),
                     )
                     .await;
                 if result.is_ok() {
+                    // The body already reported every chunk it handed over; this
+                    // settles the count on the exact stored size once the
+                    // provider has acknowledged the whole object.
                     progress(upload.object().stored_size());
                 }
                 result

@@ -760,5 +760,7 @@ async fn create_exact_bytes(
 ) -> Result<ExactCreateOutcome, CloudHomeError> {
     let object = ExactObjectRef::new(slot.clone(), bytes.len() as u64, ObjectHash::digest(bytes));
     let upload = ExactUpload::from_bytes(&object, bytes).map_err(CloudHomeError::from)?;
-    storage.create_at(&upload, &|_| {}).await
+    storage
+        .create_at(&upload, &crate::cloud::no_progress())
+        .await
 }

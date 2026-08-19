@@ -804,7 +804,7 @@ impl GoogleDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         body: BlobBody,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<(), CloudHomeError> {
         let file_id = self.validate_slot(slot)?.to_string();
         if body.len() <= self.multipart_threshold() {

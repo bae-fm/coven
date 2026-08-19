@@ -1,10 +1,18 @@
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
 
 use super::s3_backend_failure;
-use crate::cloud::CloudHomeError;
+use crate::cloud::{CloudHomeError, UploadProgress};
 use coven_protocol::objects::StorageBackendFailure;
+
+/// How much of the request body is read, and reported, at a time.
+///
+/// Small enough that a large blob reports hundreds of times over a slow link,
+/// large enough that neither the reads nor the reporting is the bottleneck.
+const BODY_CHUNK: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub(super) struct GoogleCloudStorageXml {
@@ -17,20 +25,81 @@ pub(super) enum GoogleUploadSource {
 }
 
 impl GoogleUploadSource {
-    async fn into_body(self) -> Result<reqwest::Body, CloudHomeError> {
-        match self {
-            Self::Bytes(bytes) => Ok(reqwest::Body::from(bytes)),
-            Self::File(path) => tokio::fs::File::open(&path)
-                .await
-                .map(reqwest::Body::from)
-                .map_err(|error| {
+    /// The request body, reporting bytes into `progress` as the HTTP client
+    /// takes them.
+    ///
+    /// Google Cloud Storage's create-only precondition
+    /// (`x-goog-if-generation-match: 0`) is a header on a single request, so an
+    /// exact object goes up as one streaming PUT instead of through the
+    /// multipart path the other S3 endpoints take. There are no part
+    /// acknowledgements here to count, so what the body counts is bytes the
+    /// client has pulled from the source and handed to the connection. The
+    /// client pulls the next chunk only when it has room to write, so the count
+    /// follows the network rather than the disk, and it can lead what the socket
+    /// has actually flushed by at most one chunk — which the exact total the
+    /// caller reports after a successful response then settles. Without this a
+    /// multi-hundred-megabyte blob reported nothing at all until the whole PUT
+    /// returned.
+    async fn into_body(self, progress: UploadProgress) -> Result<reqwest::Body, CloudHomeError> {
+        let source = match self {
+            Self::Bytes(bytes) => ChunkSource::Bytes(bytes),
+            Self::File(path) => {
+                ChunkSource::File(tokio::fs::File::open(&path).await.map_err(|error| {
                     CloudHomeError::Local(coven_foundation::atomic_file::FileError::at(
                         "open exact Google Cloud Storage upload source",
                         path,
                         error,
                     ))
-                }),
+                })?)
+            }
+        };
+        Ok(reqwest::Body::wrap_stream(futures_util::stream::unfold(
+            ReportedBody {
+                source: Some(source),
+                sent: 0,
+                progress,
+            },
+            |mut body| async move { body.next_chunk().await.map(|chunk| (chunk, body)) },
+        )))
+    }
+}
+
+enum ChunkSource {
+    Bytes(Vec<u8>),
+    File(tokio::fs::File),
+}
+
+struct ReportedBody {
+    /// Taken on the last chunk, on end of file, and on a read failure, so the
+    /// stream reports its end exactly once however it finished.
+    source: Option<ChunkSource>,
+    sent: u64,
+    progress: UploadProgress,
+}
+
+impl ReportedBody {
+    async fn next_chunk(&mut self) -> Option<std::io::Result<Bytes>> {
+        let chunk = match self.source.take()? {
+            ChunkSource::Bytes(bytes) if bytes.is_empty() => return None,
+            ChunkSource::Bytes(bytes) => Ok(Bytes::from(bytes)),
+            ChunkSource::File(mut file) => {
+                let mut buffer = vec![0u8; BODY_CHUNK];
+                match file.read(&mut buffer).await {
+                    Ok(0) => return None,
+                    Ok(read) => {
+                        buffer.truncate(read);
+                        self.source = Some(ChunkSource::File(file));
+                        Ok(Bytes::from(buffer))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        if let Ok(bytes) = &chunk {
+            self.sent = self.sent.saturating_add(bytes.len() as u64);
+            (self.progress)(self.sent);
         }
+        Some(chunk)
     }
 }
 
@@ -58,6 +127,7 @@ impl GoogleCloudStorageXml {
         size: u64,
         payload_hash: &str,
         now: DateTime<Utc>,
+        progress: UploadProgress,
     ) -> Result<(), CloudHomeError> {
         let signed = SignedGooglePut::new(
             endpoint,
@@ -78,7 +148,7 @@ impl GoogleCloudStorageXml {
             .header("x-goog-date", signed.timestamp)
             .header("x-goog-if-generation-match", "0")
             .header(reqwest::header::CONTENT_LENGTH, size)
-            .body(source.into_body().await?)
+            .body(source.into_body(progress).await?)
             .send()
             .await
             .map_err(|error| {
@@ -332,6 +402,68 @@ mod tests {
             .contains("SignedHeaders=host;x-goog-content-sha256;x-goog-date;x-goog-if-generation-match,Signature="));
     }
 
+    /// A file body large enough to span several chunks reports as it streams,
+    /// not once at the end: this is the only signal Google Cloud Storage's
+    /// single-PUT create-only path can give, and without it a several-hundred-
+    /// megabyte blob showed zero bytes uploaded for its whole transfer.
+    #[tokio::test]
+    async fn a_streamed_file_body_reports_bytes_as_the_request_consumes_them() {
+        let stored = Arc::new(Mutex::new(None));
+        let (endpoint, shutdown) = crate::cloud::test_server::spawn_test_server(
+            Router::new()
+                .fallback(create_only_endpoint)
+                .with_state(CreateOnlyState {
+                    stored: stored.clone(),
+                }),
+        )
+        .await;
+        let source = tempfile::NamedTempFile::new().expect("upload source file");
+        let bytes: Vec<u8> = (0..BODY_CHUNK * 3 + 17).map(|index| index as u8).collect();
+        std::fs::write(source.path(), &bytes).expect("write upload source");
+        let reported = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let recorder = Arc::clone(&reported);
+        let progress: crate::cloud::UploadProgress =
+            Arc::new(move |sent| recorder.lock().expect("lock reports").push(sent));
+
+        GoogleCloudStorageXml {
+            client: reqwest::Client::new(),
+        }
+        .create_only(
+            &endpoint,
+            "travel-maps",
+            "us-central1",
+            "GOOG-ACCESS-ID",
+            "secret",
+            "maps/new york.png",
+            GoogleUploadSource::File(source.path().to_path_buf()),
+            bytes.len() as u64,
+            &sha256_hex(&bytes),
+            DateTime::parse_from_rfc3339("2019-11-02T04:35:30Z")
+                .expect("fixed timestamp")
+                .with_timezone(&Utc),
+            progress,
+        )
+        .await
+        .expect("create absent object");
+
+        let reports = reported.lock().expect("lock reports").clone();
+        assert!(
+            reports.len() > 1,
+            "a multi-chunk body reports more than once, got {reports:?}"
+        );
+        assert!(
+            reports.windows(2).all(|pair| pair[0] < pair[1]),
+            "reports are cumulative and advancing, got {reports:?}"
+        );
+        assert_eq!(reports.last().copied(), Some(bytes.len() as u64));
+        assert_eq!(
+            stored.lock().expect("lock stored object").as_deref(),
+            Some(bytes.as_slice()),
+            "the streamed body arrives whole and unmodified"
+        );
+        shutdown.send(()).expect("stop fake Google endpoint");
+    }
+
     #[tokio::test]
     async fn create_only_sends_the_signed_payload_hash_and_rejects_replacement() {
         let stored = Arc::new(Mutex::new(None));
@@ -364,6 +496,7 @@ mod tests {
                 bytes.len() as u64,
                 &hash,
                 now,
+                crate::cloud::no_progress(),
             )
             .await
             .expect("create absent object");
@@ -379,6 +512,7 @@ mod tests {
                 bytes.len() as u64,
                 &hash,
                 now,
+                crate::cloud::no_progress(),
             )
             .await
             .expect_err("create-only request cannot replace the object");

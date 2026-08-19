@@ -269,7 +269,7 @@ impl OneDriveCloudHome {
         &self,
         slot: &ObjectSlot,
         mut body: BlobBody,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<(), CloudHomeError> {
         slot.require_logical_key_for("OneDrive")?;
         let full_logical_key = slot.logical_key();
@@ -713,7 +713,7 @@ impl ExactSlotStorage for OneDriveCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,

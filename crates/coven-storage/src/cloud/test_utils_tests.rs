@@ -31,10 +31,10 @@ async fn write_reports_progress_in_chunks_reaching_the_total() {
     let ticks = Arc::new(AtomicU64::new(0));
     let last2 = last.clone();
     let ticks2 = ticks.clone();
-    let sink = move |n: u64| {
+    let sink: UploadProgress = Arc::new(move |n: u64| {
         last2.store(n, Ordering::Relaxed);
         ticks2.fetch_add(1, Ordering::Relaxed);
-    };
+    });
     h.write("big", BlobBody::from_bytes(vec![0u8; len]), &sink)
         .await
         .unwrap();

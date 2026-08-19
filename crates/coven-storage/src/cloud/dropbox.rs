@@ -1240,7 +1240,7 @@ impl ExactSlotStorage for DropboxCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if matches!(
             self.exact_upload_verification,

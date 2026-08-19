@@ -532,7 +532,7 @@ impl InMemoryCloudHome {
     async fn create_at_slot(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
@@ -936,7 +936,7 @@ impl ExactSlotStorage for InMemoryCloudHome {
     async fn create_at(
         &self,
         upload: &super::ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<super::ExactCreateOutcome, CloudHomeError> {
         InMemoryCloudHome::create_at_slot(self, upload, progress).await
     }

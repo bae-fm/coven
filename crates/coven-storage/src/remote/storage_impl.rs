@@ -801,7 +801,7 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         blob: &coven_protocol::blob::locator::StoredBlobRef,
         authority: &coven_protocol::objects::BlobWriteAuthority<'_>,
         stored_file: &Path,
-        progress: &crate::cloud::UploadProgress<'_>,
+        progress: &crate::cloud::UploadProgress,
     ) -> Result<(), StorageError> {
         let locator = blob.locator();
         let object = blob.object();

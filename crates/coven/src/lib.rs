@@ -140,6 +140,7 @@ pub use coven_replication::sync::{
 };
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::fetch_account_email;
+pub use coven_storage::no_progress;
 #[cfg(feature = "oauth-providers")]
 pub use coven_storage::oauth::OAuthError;
 #[cfg(feature = "oauth-providers")]

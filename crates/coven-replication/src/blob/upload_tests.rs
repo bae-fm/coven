@@ -185,7 +185,7 @@ impl ExactSlotStorage for InstrumentedHome {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.create_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_creates.load(Ordering::SeqCst) {

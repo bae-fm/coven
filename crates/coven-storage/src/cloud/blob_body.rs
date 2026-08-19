@@ -4,7 +4,12 @@ use super::*;
 /// Called with the cumulative byte count as the body uploads; backends that
 /// can't observe sub-call progress call it once at the end with the full size.
 /// The count is of the bytes handed to `write` (the encrypted payload).
-pub type UploadProgress<'a> = dyn Fn(u64) + Send + Sync + 'a;
+///
+/// Owned and shareable, like [`DownloadProgress`] and [`PreparationProgress`].
+/// A provider that runs its request on Coven's cloud runtime hands the request
+/// body a clone of this handle so the body can report as it streams; a borrowed
+/// callback could not outlive the call that started the request.
+pub type UploadProgress = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
 
 /// Reports how many bytes of a cloud object have arrived from the provider.
 /// The count is cumulative and advances once per received stream buffer.
@@ -25,8 +30,8 @@ pub(crate) const PROGRESS_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// A progress sink that discards its reports. For `write` calls whose payload
 /// is a small control file (head pointers, the snapshot) where no per-file
 /// progress bar is driven — only the blob outbox surfaces progress.
-pub fn no_progress() -> impl Fn(u64) + Send + Sync {
-    |_| {}
+pub fn no_progress() -> UploadProgress {
+    std::sync::Arc::new(|_| {})
 }
 
 pub fn no_preparation_progress() -> PreparationProgress {
@@ -304,7 +309,7 @@ pub(crate) struct MultipartUpload<'sink, 'progress> {
     key: String,
     body: BlobBody,
     sink: BoxPartSink<'sink>,
-    progress: &'progress UploadProgress<'progress>,
+    progress: &'progress UploadProgress,
 }
 
 impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
@@ -312,7 +317,7 @@ impl<'sink, 'progress> MultipartUpload<'sink, 'progress> {
         key: &str,
         body: BlobBody,
         sink: BoxPartSink<'sink>,
-        progress: &'progress UploadProgress<'progress>,
+        progress: &'progress UploadProgress,
     ) -> Self {
         Self {
             key: key.to_string(),

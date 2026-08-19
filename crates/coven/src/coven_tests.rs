@@ -2684,7 +2684,7 @@ impl ExactSlotStorage for GateCloudHome {
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,
-        progress: &UploadProgress<'_>,
+        progress: &UploadProgress,
     ) -> Result<ExactCreateOutcome, CloudHomeError> {
         self.gate().await;
         ExactSlotStorage::create_at(&self.inner, upload, progress).await

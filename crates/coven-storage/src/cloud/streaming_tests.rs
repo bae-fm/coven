@@ -3,7 +3,7 @@ use coven_keys::encryption::EncryptionService;
 const CHUNK_SIZE: usize = DEFAULT_BLOB_CHUNK_SIZE.get() as usize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 fn service() -> EncryptionService {
     EncryptionService::from_key([7u8; 32])
@@ -262,8 +262,9 @@ impl CloudHome for RecordingHome {
 async fn write_blob_streams_large_blob_with_monotonic_progress() {
     let home = RecordingHome::new(8 * 1024 * 1024);
     let data: Vec<u8> = (0..20_000_003u32).map(|i| (i % 251) as u8).collect();
-    let ticks = Mutex::new(Vec::<u64>::new());
-    let progress = |n: u64| ticks.lock().unwrap().push(n);
+    let ticks = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let recorded = Arc::clone(&ticks);
+    let progress: UploadProgress = Arc::new(move |n: u64| recorded.lock().unwrap().push(n));
 
     home.write("k", BlobBody::from_bytes(data.clone()), &progress)
         .await
@@ -431,8 +432,9 @@ async fn write_blob_aborts_and_preserves_cleanup_failure_when_a_part_fails() {
 async fn write_blob_uses_put_object_below_threshold() {
     let home = RecordingHome::new(8 * 1024 * 1024);
     let data = vec![3u8; 1024];
-    let total = Mutex::new(0u64);
-    let progress = |n: u64| *total.lock().unwrap() = n;
+    let total = Arc::new(Mutex::new(0u64));
+    let recorded = Arc::clone(&total);
+    let progress: UploadProgress = Arc::new(move |n: u64| *recorded.lock().unwrap() = n);
 
     home.write("small", BlobBody::from_bytes(data.clone()), &progress)
         .await
