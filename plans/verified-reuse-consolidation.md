@@ -183,6 +183,19 @@ first. That gap is why pull cost keeps returning.
 
 ## Recorded, not yet scheduled
 
+- **The boundary does not cover slot reads.** It gates `read_protocol_object`
+  only. `read_protocol_slot` fetches verification artifacts just as directly — it
+  is the call the announcement walk makes per head, which was half the
+  retained-history cost and stayed invisible to the gate throughout. Thirteen
+  production files name it, six of them already homes for object reads, so
+  adding it needs six more: `authorization.rs`,
+  `circles/authorized_writer/epoch_close.rs`,
+  `commit_verification/commit/announcements.rs`,
+  `commit_verification/merge_history/stream.rs`, `device_join/transport.rs`, and
+  `merge_conflict/observation.rs`. Kept out of the shrink so a widening of what
+  is gated does not ride inside a narrowing of where it is allowed.
+
+
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a
   clone inside each `VerifiedMergeHistoryCommit`; `load_ref` probes both.
 - **Snapshot reads are flat but not minimal.** After the snapshot memo landed a
@@ -229,3 +242,9 @@ storage reads that fetch verification artifacts to the one module that owns
 the durable verified-artifact store. Any other module calling those reads
 fails the pre-commit hook. The read-counter test fixture stays as the
 behavioral backstop (the boundary proves who reads, not how often).
+
+The homes are named file by file, not by directory. The directory form let
+thirty-nine files that read nothing sit inside an allowance meant for the
+twenty-one that do, so a new reader could appear in any of them without the gate
+noticing — which is the whole thing the gate exists to stop. Twenty-five files
+is a longer list that says what is true.

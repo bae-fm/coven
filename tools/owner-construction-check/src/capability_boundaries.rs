@@ -304,15 +304,34 @@ pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCap
 /// shrinks; a new home means a new unverified-read path and needs the design
 /// conversation in the plan above.
 const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
-    "crates/coven-storage/src/",
-    "crates/coven-replication/src/sync/store/commit_verification/",
-    "crates/coven-replication/src/sync/store/circles/",
-    "crates/coven-replication/src/sync/store/device_join/",
-    "crates/coven-replication/src/sync/store/acknowledgements/",
+    // The object store itself: the trait's own read and the one provider that
+    // overrides it. Providers implement the byte-level reads beneath these, not
+    // these, so this pair does not grow when a provider is added.
+    "crates/coven-storage/src/cloud_object_storage.rs",
+    "crates/coven-storage/src/remote/storage_impl.rs",
+    "crates/coven-replication/src/sync/store/acknowledgements/circle.rs",
     "crates/coven-replication/src/sync/store/authorization/keyring.rs",
+    "crates/coven-replication/src/sync/store/circles/activation/access.rs",
+    "crates/coven-replication/src/sync/store/circles/activation/epoch_close.rs",
+    "crates/coven-replication/src/sync/store/circles/activation/heads.rs",
+    "crates/coven-replication/src/sync/store/circles/activation/metadata.rs",
+    "crates/coven-replication/src/sync/store/circles/activation/roster.rs",
+    "crates/coven-replication/src/sync/store/circles/exact_object.rs",
+    "crates/coven-replication/src/sync/store/circles/packages.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/acknowledgements_snapshots.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/commits.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/device_lifecycle.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/membership.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/commit/registrations.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/merge_history/device_join_verification.rs",
+    "crates/coven-replication/src/sync/store/commit_verification/merge_history/membership_control.rs",
+    "crates/coven-replication/src/sync/store/device_join/authorized_join.rs",
+    "crates/coven-replication/src/sync/store/device_join/joiner.rs",
     "crates/coven-replication/src/sync/store/protocol_root.rs",
-    "crates/coven-replication/src/sync/store/reclaim/",
-    "crates/coven-replication/src/sync/store/snapshots/",
+    "crates/coven-replication/src/sync/store/reclaim/candidates.rs",
+    "crates/coven-replication/src/sync/store/reclaim/claims.rs",
+    "crates/coven-replication/src/sync/store/snapshots/circle.rs",
+    "crates/coven-replication/src/sync/store/snapshots/image.rs",
 ];
 
 pub(crate) struct CapabilityBoundaryViolation {
