@@ -107,6 +107,36 @@ first. That gap is why pull cost keeps returning.
   the registration itself — and now loads it, which made one private helper
   async.
 
+- **Registrations are not represented four ways — checked and closed, no code
+  change.** The four names turn out to be one store, one isolation copy, one
+  borrow, and one different artifact:
+
+  - `VerifiedStoreAuthority.registrations` is the durable-side store: registrations
+    verified from stored rows, for this connection's life.
+  - `VerifiedStoreAuthorityTransaction` copies it to stage verification beside a
+    SQL transaction. That copy is load-bearing, not sprawl: a registration read
+    during a transaction that then rolls back must not stay in the connection's
+    cache, or the cache would answer for a row that no longer exists.
+  - `CachedVerifiedRegistrations` holds no registrations at all. It is a borrow
+    adapter, so `replay_inputs_on` can take `&mut self.retained_replay` and
+    `&mut self.registrations` in one call.
+  - `StoreCommitVerifier.registrations` is the other artifact class: read from the
+    provider, keyed with its bytes, per cycle. Same name, different thing.
+
+  Both halves were measured rather than argued. Registrations number one per
+  device — two on the fixture — so the per-transaction copy of that map is
+  nothing. The `RetainedReplayCache` cloned beside it is the part that grows with
+  history, and it costs about 2.4 µs per retained entry per transaction (48 µs
+  for twenty, debug build), roughly 420 µs per transaction at the field's 174
+  rows. Against the tens of seconds this plan is about, that is not a cost worth
+  a redesign of the transaction authority — which is what removing the copy would
+  take, since a delta would have to borrow the connection maps and the
+  transaction is moved out of its SQL closure on commit.
+
+  Provider-side registration reads are flat: two per settled cycle on a
+  two-device store at every history depth, already pinned by
+  `retained_history_depth_does_not_repeat_exact_registration_reads`.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -121,10 +151,6 @@ first. That gap is why pull cost keeps returning.
   each call deserializes and revalidates the entire baseline DB image into a
   fresh in-memory SQLite connection. Same class a00088f8 removed from the
   install path.
-- **Registrations represented four ways** across the DB boundary:
-  `VerifiedStoreAuthority.registrations`, its per-transaction clone
-  (`VerifiedStoreAuthorityTransaction`), the borrow adapter
-  `CachedVerifiedRegistrations`, and `StoreCommitVerifier.registrations`.
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a
   clone inside each `VerifiedMergeHistoryCommit`; `load_ref` probes both.
 - **`owner_anchor` memo re-derives its checks on every hit**
