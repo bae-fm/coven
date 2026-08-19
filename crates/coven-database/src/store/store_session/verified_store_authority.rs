@@ -502,30 +502,6 @@ impl VerifiedStoreAuthority {
             .replay_inputs_on(records, &root, &mut registrations)
     }
 
-    pub(super) fn retained_replay_inputs_with_verified_commits_on(
-        &mut self,
-        records: crate::store::store_session::StoreRecords<'_>,
-        expected_root: &StoreRootRef,
-        verified: &BTreeMap<
-            coven_protocol::store_commit::StoreBatchCommitRef,
-            coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        >,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        let root = self.required_root_authority_on(records)?;
-        if &root != expected_root {
-            return Err(DbError::Message(
-                "retained replay request belongs to another Store root".to_string(),
-            ));
-        }
-        let mut registrations = CachedVerifiedRegistrations::new(&mut self.registrations);
-        self.retained_replay.replay_inputs_with_verified_commits_on(
-            records,
-            &root,
-            &mut registrations,
-            verified,
-        )
-    }
-
     pub(super) fn retained_history_checkpoint_on(
         &mut self,
         records: crate::store::store_session::StoreRecords<'_>,

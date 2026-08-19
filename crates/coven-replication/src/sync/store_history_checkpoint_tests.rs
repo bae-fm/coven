@@ -1020,3 +1020,102 @@ async fn conflict_resolution_authorization_reads_retained_checkpoints_not_store_
         "conflict-resolution authorization reread historical Store commit/head slots: {reread:?}",
     );
 }
+
+/// The pull-side twin of
+/// `conflict_resolution_authorization_reads_retained_checkpoints_not_store_history`.
+///
+/// Every other reuse assertion in this file is scoped `within_a_cycle` — they
+/// prove one cycle never reads the same object twice, which was already true
+/// while every cycle still re-read the whole retained history once. This is the
+/// across-cycle claim: a pull over retained history the device already verified
+/// reaches the provider for none of it, on the first cycle and on every cycle
+/// after, and the count does not grow with how much history is retained.
+async fn retained_object_reads_per_pull(history_length: u64, cycles: u32) -> Vec<(usize, usize)> {
+    let fixture = PublishedHistory::publish(history_length).await;
+    let retained = fixture.retained_history().await;
+    let retained_slots = retained
+        .iter()
+        .flat_map(|entry| {
+            [
+                entry.commit_ref().object.slot().clone(),
+                entry.activation_head_object().slot().clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let mut per_cycle = Vec::new();
+    for _ in 0..cycles {
+        fixture.home.clear_exact_reads();
+        fixture
+            .device
+            .run_cycle(None)
+            .await
+            .expect("pull retained history");
+        let reads = fixture.home.exact_reads();
+        let retained_reads = reads
+            .iter()
+            .filter(|slot| retained_slots.contains(slot))
+            .count();
+        per_cycle.push((retained_reads, reads.len()));
+    }
+    per_cycle
+}
+
+#[tokio::test]
+async fn repeated_pulls_over_unchanged_retained_history_read_none_of_it() {
+    let deep = retained_object_reads_per_pull(24, 3).await;
+
+    assert!(
+        deep.iter().all(|(retained, _)| *retained == 0),
+        "pulls re-read retained Store commit/head objects the device had already verified: \
+         (retained_reads, total_reads) per cycle = {deep:?}",
+    );
+}
+
+#[tokio::test]
+async fn retained_history_depth_does_not_change_what_a_pull_reads() {
+    let shallow = retained_object_reads_per_pull(1, 2).await;
+    let deep = retained_object_reads_per_pull(24, 2).await;
+
+    assert_eq!(
+        shallow.iter().map(|(_, total)| *total).collect::<Vec<_>>(),
+        deep.iter().map(|(_, total)| *total).collect::<Vec<_>>(),
+        "a pull's provider reads grew with retained history depth: one retained commit read \
+         {shallow:?}, twenty-four read {deep:?}",
+    );
+}
+
+/// Seeding the verifier from retained rows must cover exactly what is retained
+/// and not one slot more. The announcement walk resumes at the first sequence
+/// the accepted path does not cover, so that slot is still probed on every
+/// cycle — this is how a commit another device published gets discovered, and
+/// losing it would make the device silently stop pulling.
+#[tokio::test]
+async fn a_pull_over_retained_history_still_probes_the_next_announcement_slot() {
+    let fixture = PublishedHistory::publish(6).await;
+
+    for cycle in 1..=2 {
+        // Read the probe target fresh: a cycle publishes its own acknowledgement
+        // commits, so each cycle retains more history and probes further along.
+        let next_slot = fixture
+            .retained_history()
+            .await
+            .last()
+            .expect("published history has a last retained commit")
+            .activation_head()
+            .successor
+            .next_slot
+            .clone();
+        fixture.home.clear_exact_reads();
+        fixture
+            .device
+            .run_cycle(None)
+            .await
+            .expect("pull retained history");
+        assert!(
+            fixture.home.exact_reads().contains(&next_slot),
+            "cycle {cycle} stopped probing the announcement slot after its retained history \
+             ({next_slot:?})",
+        );
+    }
+}

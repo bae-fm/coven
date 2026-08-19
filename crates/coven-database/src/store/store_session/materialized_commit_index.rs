@@ -5,7 +5,7 @@ use coven_protocol::store_commit::StoreDeviceRegistration;
 use coven_protocol::store_commit::{
     ActivatedStoreDeviceRegistration, CommitFrontier, ReferencedStoreDeviceRegistration,
     ResolvedStoreDeviceState, StoreBatchCommitRef, StoreDeviceProposalAck,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, VerifiedStoreBatchCommit,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::BTreeMap;
@@ -31,19 +31,6 @@ impl StoreSession<'_> {
     fn retained_merge_materialization_refs(&mut self) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         crate::store::store_session::StoreRecords::new(self.conn, self.store_dir)
             .retained_merge_materialization_refs()
-    }
-
-    fn retained_merge_replay_inputs_with_verified_commits(
-        &mut self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.verified_store_authority
-            .retained_replay_inputs_with_verified_commits_on(
-                crate::store::store_session::StoreRecords::new(self.conn, self.store_dir),
-                &root,
-                &verified,
-            )
     }
 
     fn retained_merge_materialization(
@@ -285,17 +272,6 @@ impl StoreDatabase {
     ) -> Result<Vec<StoreBatchCommitRef>, DbError> {
         self.call_store(|session| session.retained_merge_materialization_refs())
             .await
-    }
-
-    pub async fn retained_merge_replay_inputs_with_verified_commits(
-        &self,
-        root: coven_protocol::store_commit::StoreRootRef,
-        verified: BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.call_store(move |session| {
-            session.retained_merge_replay_inputs_with_verified_commits(root, verified)
-        })
-        .await
     }
 
     pub async fn retained_merge_materialization(

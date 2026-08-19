@@ -391,6 +391,82 @@ impl<'a> MergeHistoryVerifier<'a> {
         self.commit_verifier.remember(commit)
     }
 
+    /// Admit the commits, announcement heads, and accepted announcement path
+    /// this device has already verified, from the retained materialization rows
+    /// that recorded them.
+    ///
+    /// The verifier's reuse memos (`commits`, `verified_heads`,
+    /// `accepted_announcements`) exist so one cycle never reads the same
+    /// protocol object twice, and they work — but they are built fresh with the
+    /// verifier, which every cycle rebuilds. Retained history therefore paid one
+    /// provider read per commit and one per activation head on every single
+    /// cycle, for commits this device verified and materialized long ago.
+    ///
+    /// The durable half of that reuse already exists one layer down: a retained
+    /// materialization row holds the commit's canonical bytes and its activation
+    /// head's, pinned by an input hash, written by the transaction that verified
+    /// and applied them, and re-parsed and signature-checked against the
+    /// activated registration every time the row is opened. This seeds the
+    /// per-cycle memos from that durable authority, so the verification below
+    /// runs unchanged and reaches the provider only for what this device has not
+    /// already verified.
+    ///
+    /// Nothing here is taken on trust: every value admitted came back through
+    /// the same signature check a provider read would have run, and the
+    /// `remember_*` entry points reject a value that disagrees with its
+    /// reference or with an entry already admitted.
+    pub(crate) fn admit_retained_history(
+        &mut self,
+        retained: &[coven_database::OwnedVerifiedMergeMaterialization],
+    ) -> Result<(), StorePullError> {
+        let mut announced = BTreeMap::<StoreDeviceRegistrationRef, u64>::new();
+        for materialization in retained {
+            let commit = materialization.commit();
+            let commit_ref = materialization.commit_ref();
+            self.commit_verifier
+                .remember(materialization.verified_commit().clone())
+                .map_err(StorePullError::Protocol)?;
+            let head = materialization.activation_head();
+            let head_ref = StoreDeviceHeadRef {
+                head_hash: head.head_hash(),
+                object: materialization.activation_head_object().clone(),
+            };
+            self.commit_verifier
+                .remember_verified_head(
+                    &head_ref,
+                    VerifiedObject {
+                        value: head.clone(),
+                        bytes: head.to_bytes(),
+                        semantic_hash: head_ref.head_hash,
+                        object: head_ref.object.clone(),
+                    },
+                )
+                .map_err(StorePullError::Protocol)?;
+            // The accepted path is a dense sequence from one, and a snapshot
+            // truncates retained rows below its cut. Admit each stream's
+            // contiguous prefix and leave the rest to the discovery walk, which
+            // resumes at the first sequence the path does not cover.
+            let sequence = commit_ref.coord.sequence();
+            let expected = announced
+                .get(&commit.author_registration)
+                .map_or(1, |previous| previous.saturating_add(1));
+            if sequence != expected {
+                continue;
+            }
+            self.commit_verifier
+                .remember_accepted_announcement(
+                    &commit.author_registration,
+                    sequence,
+                    commit_ref.clone(),
+                    head_ref,
+                    head.successor.next_slot.clone(),
+                )
+                .map_err(StorePullError::Protocol)?;
+            announced.insert(commit.author_registration.clone(), sequence);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn retain_local_same_principal_join_activation(
         &mut self,
         materialization: coven_database::OwnedVerifiedMergeMaterialization,
@@ -481,16 +557,6 @@ impl<'a> MergeHistoryVerifier<'a> {
         predecessors: impl IntoIterator<Item = StoreBatchCommitRef>,
     ) -> Result<VerifiedMergeMembershipPrefix, StorePullError> {
         verified_merge_membership_prefix(&self.history.commits, predecessors)
-    }
-
-    pub(crate) fn retained_commit_proofs(
-        &self,
-    ) -> BTreeMap<StoreBatchCommitRef, VerifiedStoreBatchCommit> {
-        self.history
-            .commits
-            .iter()
-            .map(|(reference, verified)| (reference.clone(), verified.verified.clone()))
-            .collect()
     }
 
     pub(crate) fn verified_pull_candidate(

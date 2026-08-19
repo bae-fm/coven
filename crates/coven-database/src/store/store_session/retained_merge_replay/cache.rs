@@ -60,16 +60,6 @@ impl VerifiedStoreLookup for ReplayVerifiedStoreLookup<'_, '_> {
     }
 }
 
-enum RetainedCommitAuthorities<'a> {
-    StoredBytes,
-    Operation(
-        &'a BTreeMap<
-            coven_protocol::store_commit::StoreBatchCommitRef,
-            coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        >,
-    ),
-}
-
 impl RetainedReplayCache {
     pub(super) fn commit_installed_baseline(&mut self, baseline: RetainedReplayBaseline) {
         match &self.baseline {
@@ -222,77 +212,33 @@ impl RetainedReplayCache {
         )))
     }
 
+    /// Retained materializations, each opened from its own stored canonical
+    /// bytes.
+    ///
+    /// A retained row is the durable record that this device verified the
+    /// commit: the row was written by the transaction that verified and applied
+    /// it, its bytes are pinned by the stored input hash, and opening it
+    /// re-parses the commit and re-checks its signature against the activated
+    /// registration. So this answers from local state alone, and the entries it
+    /// keeps are memos over content-addressed rows rather than remembered
+    /// verdicts.
     pub(super) fn replay_inputs_on(
         &mut self,
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.replay_inputs_with_authorities_on(
-            records,
-            root,
-            registrations,
-            RetainedCommitAuthorities::StoredBytes,
-        )
-    }
-
-    pub(super) fn replay_inputs_with_verified_commits_on(
-        &mut self,
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        verified: &BTreeMap<
-            coven_protocol::store_commit::StoreBatchCommitRef,
-            coven_protocol::store_commit::VerifiedStoreBatchCommit,
-        >,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
-        self.replay_inputs_with_authorities_on(
-            records,
-            root,
-            registrations,
-            RetainedCommitAuthorities::Operation(verified),
-        )
-    }
-
-    fn replay_inputs_with_authorities_on(
-        &mut self,
-        records: StoreRecords<'_>,
-        root: &coven_protocol::store_commit::StoreRootRef,
-        registrations: &mut dyn VerifiedRegistrationLookup,
-        authorities: RetainedCommitAuthorities<'_>,
-    ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = records.retained_materialization_rows()?;
-
-        self.replay_inputs_from_rows(rows, authorities, |authority, row| match authority {
-            RetainedCommitAuthorities::StoredBytes => {
-                StoreDatabase::load_retained_merge_materialization_on(
-                    records,
-                    root,
-                    registrations,
-                    &row.0,
-                    row.1,
-                    &row.2,
-                    &row.3,
-                )
-            }
-            RetainedCommitAuthorities::Operation(operation_verified) => {
-                let commit = operation_verified.get(&row.2).ok_or_else(|| {
-                    DbError::Message(format!(
-                        "retained Merge commit {:?} is absent from the operation-verified history",
-                        row.2
-                    ))
-                })?;
-                StoreDatabase::load_retained_merge_materialization_with_verified_commit_on(
-                    records,
-                    root,
-                    registrations,
-                    &row.0,
-                    row.1,
-                    &row.2,
-                    &row.3,
-                    commit,
-                )
-            }
+        self.replay_inputs_from_rows(rows, |row| {
+            StoreDatabase::load_retained_merge_materialization_on(
+                records,
+                root,
+                registrations,
+                &row.0,
+                row.1,
+                &row.2,
+                &row.3,
+            )
         })
     }
 
@@ -303,32 +249,23 @@ impl RetainedReplayCache {
         registrations: &mut dyn VerifiedRegistrationLookup,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
         let rows = records.retained_materialization_rows()?;
-        self.replay_inputs_from_rows(
-            rows,
-            RetainedCommitAuthorities::StoredBytes,
-            |authority, row| match authority {
-                RetainedCommitAuthorities::StoredBytes => records.load_retained_materialization(
-                    root,
-                    registrations,
-                    &row.0,
-                    row.1,
-                    &row.2,
-                    &row.3,
-                    None,
-                ),
-                RetainedCommitAuthorities::Operation(_) => {
-                    unreachable!("transaction replay loads durable retained commit authority")
-                }
-            },
-        )
+        self.replay_inputs_from_rows(rows, |row| {
+            records.load_retained_materialization(
+                root,
+                registrations,
+                &row.0,
+                row.1,
+                &row.2,
+                &row.3,
+                None,
+            )
+        })
     }
 
     fn replay_inputs_from_rows(
         &mut self,
         rows: Vec<(String, i64, String, String)>,
-        authorities: RetainedCommitAuthorities<'_>,
         mut load: impl FnMut(
-            &RetainedCommitAuthorities<'_>,
             &(String, u64, StoreBatchCommitRef, String),
         ) -> Result<OwnedVerifiedMergeMaterialization, DbError>,
     ) -> Result<Vec<OwnedVerifiedMergeMaterialization>, DbError> {
@@ -368,15 +305,12 @@ impl RetainedReplayCache {
                     )
                 }
                 _ => (
-                    load(
-                        &authorities,
-                        &(
-                            stream_id.clone(),
-                            sequence,
-                            commit_ref.clone(),
-                            encoded_input_hash.clone(),
-                        ),
-                    )?,
+                    load(&(
+                        stream_id.clone(),
+                        sequence,
+                        commit_ref.clone(),
+                        encoded_input_hash.clone(),
+                    ))?,
                     false,
                 ),
             };

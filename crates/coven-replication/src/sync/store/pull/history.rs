@@ -297,17 +297,34 @@ impl<'operation, 'storage> PullHistory<'operation, 'storage> {
         .await
     }
 
+    /// The retained history this pull replays, and the verified commit graph it
+    /// verifies new candidates against.
+    ///
+    /// The durable rows come first and the verification runs over them: the
+    /// database opens each retained materialization from its own canonical
+    /// bytes, re-parsing and signature-checking the commit against its activated
+    /// registration, and those verified values seed the history verifier's reuse
+    /// memos. `verify_refs` then runs exactly as it always has, reaching the
+    /// provider only for what those memos do not already cover.
+    ///
+    /// Ordering it the other way — verify from the provider first, then hand the
+    /// proofs to the database — is what made every cycle re-read the whole
+    /// retained history: it made the durable authority depend on a fresh remote
+    /// verification instead of being that authority.
     pub(crate) async fn prepare_retained_history(
         &mut self,
     ) -> Result<Vec<coven_database::OwnedVerifiedMergeMaterialization>, StorePullError> {
-        let retained_refs = self.database.retained_merge_materialization_refs().await?;
-        self.history.verify_refs(retained_refs).await?;
-        let retained_commit_proofs = self.history.retained_commit_proofs();
         let retained = self
             .database
-            .retained_merge_replay_inputs_with_verified_commits(
-                self.history.verified_root().reference().clone(),
-                retained_commit_proofs,
+            .retained_merge_replay_inputs(self.history.verified_root().reference().clone())
+            .await?;
+        self.history.admit_retained_history(&retained)?;
+        self.history
+            .verify_refs(
+                retained
+                    .iter()
+                    .map(|materialization| materialization.commit_ref().clone())
+                    .collect::<Vec<_>>(),
             )
             .await?;
         self.resume_merge_retraction_cleanups().await?;
