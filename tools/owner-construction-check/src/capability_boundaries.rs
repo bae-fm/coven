@@ -25,6 +25,11 @@ pub(crate) struct GatedCapability {
     pub(crate) kind: &'static str,
     pub(crate) crates: &'static [&'static str],
     pub(crate) path_patterns: &'static [&'static [&'static str]],
+    /// Method names whose receiver-call form (`x.name(...)`) is gated. Plain
+    /// path references to the same name are caught by a one-segment
+    /// `path_patterns` entry; this covers the method-call syntax `syn` does
+    /// not surface as a path.
+    pub(crate) method_patterns: &'static [&'static str],
     pub(crate) allowed: &'static [&'static str],
 }
 
@@ -41,12 +46,14 @@ pub(crate) const NETWORK_BOUNDARY: &[GatedCapability] = &[
         kind: "HTTP client (reqwest)",
         crates: &["reqwest"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: NETWORK_HOMES,
     },
     GatedCapability {
         kind: "HTTP server (axum)",
         crates: &["axum"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: NETWORK_HOMES,
     },
     GatedCapability {
@@ -62,12 +69,14 @@ pub(crate) const NETWORK_BOUNDARY: &[GatedCapability] = &[
             "smithy_transport_reqwest",
         ],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &["crates/coven-storage/src/cloud/"],
     },
     GatedCapability {
         kind: "browser opener (open)",
         crates: &["open"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &["crates/coven-storage/src/oauth.rs"],
     },
 ];
@@ -79,6 +88,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         kind: "signing keys (ed25519-dalek)",
         crates: &["ed25519_dalek"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/keys/",
             "crates/coven-keys/src/identity_custody.rs",
@@ -88,12 +98,14 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         kind: "sealed-box keys (crypto_box / x25519-dalek)",
         crates: &["crypto_box", "x25519_dalek"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &["crates/coven-keys/src/keys/"],
     },
     GatedCapability {
         kind: "AEAD cipher (chacha20poly1305)",
         crates: &["chacha20poly1305"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/encryption.rs",
             "crates/coven-keys/src/envelope.rs",
@@ -103,6 +115,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         kind: "passphrase KDF (argon2)",
         crates: &["argon2"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/custody.rs",
             "crates/coven-keys/src/envelope.rs",
@@ -113,6 +126,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         kind: "key derivation (hkdf)",
         crates: &["hkdf"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/encryption.rs",
             "crates/coven-protocol/src/circle.rs",
@@ -122,6 +136,7 @@ pub(crate) const CRYPTO_BOUNDARY: &[GatedCapability] = &[
         kind: "keyed MAC (hmac)",
         crates: &["hmac"],
         path_patterns: &[],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-protocol/src/circle.rs",
             "crates/coven-protocol/src/circle_control.rs",
@@ -144,6 +159,7 @@ pub(crate) const KEYRING_BOUNDARY: &[GatedCapability] = &[GatedCapability {
         "security_framework",
     ],
     path_patterns: &[],
+    method_patterns: &[],
     allowed: &[
         "crates/coven-keys/src/keys/",
         "crates/coven-keys/src/keyring_backend.rs",
@@ -168,6 +184,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
             &["Builder", "new_current_thread"],
             &["Builder", "new_multi_thread"],
         ],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-replication/src/sync/sync_loop.rs",
             "crates/coven-replication/src/sync/sync_loop/",
@@ -179,6 +196,7 @@ pub(crate) const RUNTIME_BOUNDARY: &[GatedCapability] = &[
         kind: "ambient runtime acquisition",
         crates: &[],
         path_patterns: &[&["Handle", "current"], &["Handle", "try_current"]],
+        method_patterns: &[],
         allowed: &[
             "crates/coven/src/store_sync/blobs.rs",
             "crates/coven-database/src/database_connection.rs",
@@ -194,12 +212,14 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
         kind: "ambient wall clock",
         crates: &[],
         path_patterns: &[&["SystemTime", "now"], &["Instant", "now"], &["Utc", "now"]],
+        method_patterns: &[],
         allowed: &["crates/coven-foundation/src/clock.rs"],
     },
     GatedCapability {
         kind: "ambient randomness",
         crates: &["rand"],
         path_patterns: &[&["OsRng"], &["thread_rng"], &["ThreadRng"]],
+        method_patterns: &[],
         allowed: &[
             "crates/coven-keys/src/keys/",
             "crates/coven-keys/src/encryption.rs",
@@ -214,6 +234,7 @@ pub(crate) const AMBIENT_BOUNDARY: &[GatedCapability] = &[
         kind: "ambient identifier generation (uuid)",
         crates: &[],
         path_patterns: &[&["Uuid", "new_v4"]],
+        method_patterns: &[],
         allowed: &["crates/coven-foundation/src/id_provider.rs"],
     },
 ];
@@ -224,6 +245,7 @@ pub(crate) const FILESYSTEM_BOUNDARY: &[GatedCapability] = &[GatedCapability {
     kind: "raw filesystem access",
     crates: &["tempfile"],
     path_patterns: &[&["std", "fs"], &["tokio", "fs"]],
+    method_patterns: &[],
     allowed: FILESYSTEM_HOMES,
 }];
 
@@ -259,6 +281,38 @@ const FILESYSTEM_HOMES: &[&str] = &[
     "crates/coven-replication/src/sync/store/commit_publication/operation/blob_preparation.rs",
     "crates/coven-replication/src/sync/store/snapshots/mod.rs",
     "crates/coven-replication/src/sync/store/snapshots/image.rs",
+];
+
+/// Verification artifacts (commits, registrations, heads, acknowledgements,
+/// membership entries, protocol roots) are immutable once verified; fetching
+/// them from cloud storage belongs to the owners that record the verification
+/// durably. A new caller of the raw protocol-object read is how a
+/// re-download-and-re-verify path gets written, so it fails here instead of
+/// shipping. Consolidation of these homes toward one owner is
+/// `plans/verified-reuse-consolidation.md`.
+pub(crate) const VERIFICATION_ARTIFACT_BOUNDARY: &[GatedCapability] = &[GatedCapability {
+    kind: "verification-artifact storage read (read_protocol_object; see plans/verified-reuse-consolidation.md)",
+    crates: &[],
+    path_patterns: &[&["read_protocol_object"]],
+    method_patterns: &["read_protocol_object"],
+    allowed: VERIFICATION_ARTIFACT_HOMES,
+}];
+
+/// Reviewed homes for raw protocol-object reads: the storage implementations
+/// whose subject is the object store itself, and the verification owners that
+/// pair each read with the durable record of its outcome. This list only
+/// shrinks; a new home means a new unverified-read path and needs the design
+/// conversation in the plan above.
+const VERIFICATION_ARTIFACT_HOMES: &[&str] = &[
+    "crates/coven-storage/src/",
+    "crates/coven-replication/src/sync/store/commit_verification/",
+    "crates/coven-replication/src/sync/store/circles/",
+    "crates/coven-replication/src/sync/store/device_join/",
+    "crates/coven-replication/src/sync/store/acknowledgements/",
+    "crates/coven-replication/src/sync/store/authorization/keyring.rs",
+    "crates/coven-replication/src/sync/store/protocol_root.rs",
+    "crates/coven-replication/src/sync/store/reclaim/",
+    "crates/coven-replication/src/sync/store/snapshots/",
 ];
 
 pub(crate) struct CapabilityBoundaryViolation {
@@ -351,6 +405,20 @@ impl CapabilityBoundaryVisitor<'_> {
 }
 
 impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let name = node.method.to_string();
+        for capability in self.gated {
+            if capability
+                .method_patterns
+                .iter()
+                .any(|pattern| *pattern == name)
+            {
+                self.record(capability, node.method.span());
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
         if node.path().is_ident("doc") {
             return;

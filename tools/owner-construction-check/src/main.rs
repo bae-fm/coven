@@ -18,7 +18,7 @@ use owner_dependency_boundary::{
 use capability_boundaries::{
     find_capability_boundary_violations, CapabilityBoundaryViolation, GatedCapability,
     AMBIENT_BOUNDARY, CRYPTO_BOUNDARY, FILESYSTEM_BOUNDARY, KEYRING_BOUNDARY, NETWORK_BOUNDARY,
-    RUNTIME_BOUNDARY,
+    RUNTIME_BOUNDARY, VERIFICATION_ARTIFACT_BOUNDARY,
 };
 
 const CAPABILITY_TYPES: &[&str] = &[
@@ -950,6 +950,10 @@ const CAPABILITY_BOUNDARY_FLAGS: &[(&str, &[GatedCapability])] = &[
     ("--runtime-boundary", RUNTIME_BOUNDARY),
     ("--ambient-boundary", AMBIENT_BOUNDARY),
     ("--filesystem-boundary", FILESYSTEM_BOUNDARY),
+    (
+        "--verification-artifact-boundary",
+        VERIFICATION_ARTIFACT_BOUNDARY,
+    ),
 ];
 
 fn main() {
@@ -1228,7 +1232,7 @@ fn main() {
 
 fn print_usage_and_exit() -> ! {
     eprintln!(
-        "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--module-dependencies] [root]\n       owner-construction-check --owner-dependency-only [--rust-root path]... [--capability-type Type]... [--allowed-capability-output Type]... [root]"
+        "usage: owner-construction-check [--database-boundary] [--owner-dependency-boundary] [--retained-service-returns] [--retained-service-construction] [--retained-capability-parameters] [--transient-component-bundles] [--network-boundary] [--crypto-boundary] [--keyring-boundary] [--runtime-boundary] [--ambient-boundary] [--filesystem-boundary] [--verification-artifact-boundary] [--module-dependencies] [root]\n       owner-construction-check --owner-dependency-only [--rust-root path]... [--capability-type Type]... [--allowed-capability-output Type]... [root]"
     );
     std::process::exit(2);
 }
