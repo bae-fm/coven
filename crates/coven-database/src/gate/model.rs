@@ -510,6 +510,93 @@ impl<'schema> GateModelConstruction<'schema> {
     }
 }
 
+/// Whether a table's gate is *derived* from other rows rather than declared on
+/// the row itself. A root (gated, scoped, or remote) carries its own decision
+/// about whether its rows leave the device; a descendant and an ancestor both
+/// read theirs off the FK graph. Only a derived gate is extended by closure.
+fn gate_is_derived(gate: Option<&TableGate>) -> bool {
+    matches!(
+        gate,
+        Some(TableGate::Child { .. } | TableGate::Parent { .. })
+    )
+}
+
+/// The rows the gate shares, as a set you can ask about, over one live database.
+///
+/// Two relations decide membership, and they answer different questions.
+///
+/// **Keep** ([`Gates::row_kept`]) decides what the gate *elects* to share: a root
+/// row iff its gate column is true, a descendant iff its selected gate-parent is
+/// kept, an ancestor iff some inferred keep-child still references it.
+///
+/// **Closure** decides what those elections *oblige*. A shared row lands on a
+/// receiver that replays the published commits into an empty database, so every
+/// foreign key the row carries has to resolve there — and a row's foreign keys
+/// run along every FK it declares, not only the one its gate was inherited
+/// through. So a row is shared iff it is kept, or some shared row references it.
+///
+/// The gap between the two is not hypothetical. An ancestor's keep-children
+/// exclude the join-table back-edge, because a child that inherits its gate from
+/// an ancestor cannot also be a reason to keep that ancestor alive — that is the
+/// circular fixpoint [`Gates::from_tables`] refuses. But excluding the back-edge
+/// from *keep* is not license to exclude it from *closure*: such a child's other
+/// foreign keys can name ancestor rows nothing keeps. bae's `work_parts` names
+/// two `works` rows, inherits its gate from one, and the other — a container work
+/// with no recording and no credit of its own — is kept by nothing. Sharing the
+/// join row without it puts a foreign key on the wire no receiver can resolve,
+/// and the receiver's replay holds on it forever.
+///
+/// Closure never crosses into a **root**. A root's gate (or audience) column is
+/// the host's own decision about whether the row leaves the device, and a
+/// reference from elsewhere must not overturn it. A shared row that names a
+/// gate-false root is a gate inconsistency, refused where the write is captured
+/// rather than quietly published.
+pub(crate) struct SharedRows<'a> {
+    gates: &'a Gates,
+    conn: &'a Connection,
+    referrers: HashMap<String, Vec<GatedChildEdge>>,
+}
+
+impl SharedRows<'_> {
+    /// Whether the live row `(table, id)` is shared: kept outright, or reached by
+    /// closure from a shared row that references it.
+    pub(crate) fn contains(&self, table: &str, id: &str) -> Result<bool, GateError> {
+        self.contains_guarded(table, id, &mut HashSet::new())
+    }
+
+    /// The closure walk descends from a row to the rows referencing it, stopping
+    /// at the first kept one. Kept rows are the common case and short-circuit
+    /// immediately, so the descent only ever runs over rows the gate did not
+    /// elect. `visiting` guards a reference cycle, which resolves to not-shared
+    /// for the same reason [`Gates::keep_clause`] resolves one to `FALSE`: a row
+    /// shared only by way of itself is shared by nothing.
+    fn contains_guarded(
+        &self,
+        table: &str,
+        id: &str,
+        visiting: &mut HashSet<(String, String)>,
+    ) -> Result<bool, GateError> {
+        if !visiting.insert((table.to_string(), id.to_string())) {
+            return Ok(false);
+        }
+        if self.gates.row_kept(self.conn, table, id)? {
+            return Ok(true);
+        }
+        if !gate_is_derived(self.gates.tables.get(table)) {
+            return Ok(false);
+        }
+        let Some(edges) = self.referrers.get(table) else {
+            return Ok(false);
+        };
+        for (referrer, referrer_id) in child_rows(self.conn, edges, table, id)? {
+            if self.contains_guarded(&referrer, &referrer_id, visiting)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 thread_local! {
     static FROM_TABLES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -677,33 +764,94 @@ impl Gates {
     /// FK model) keeps a single definition of what the gate excludes.
     ///
     /// Each gated table — root, descendant, or ancestor — resolves its own keep
-    /// by a fully-inlined clause that bottoms out at root truthy columns. The
-    /// prune is monotonic: a `DELETE` removes only rows that fail their *own*
-    /// keep, and a kept row's keep references only rows that are themselves kept
-    /// (never deleted), so deleting gated-false rows can never flip a kept row to
-    /// not-kept. The final row set is therefore independent of deletion order.
+    /// by a fully-inlined clause that bottoms out at root truthy columns, and
+    /// then survives anyway if a row that already survived still references it
+    /// (the closure half of the shared set — see [`SharedRows`]).
+    ///
+    /// That closure test is why the deletion order is load-bearing, not merely
+    /// FK-safe. Walking strictly child-first means every table holding a foreign
+    /// key into `tbl` has already been pruned by the time `tbl` is, so a
+    /// *surviving* referrer is exactly a *shared* referrer and the test needs no
+    /// recursion. Running the tables in any other order would consult rows that
+    /// have not yet been decided.
     ///
     pub(crate) fn delete_gated_false(&self, conn: &Connection) -> Result<(), GateError> {
         self.delete_gated_false_conn(conn)
     }
 
     fn delete_gated_false_conn(&self, conn: &Connection) -> Result<(), GateError> {
-        // The final row set is order-independent (the prune is monotonic, above).
-        // The only caller is the snapshot scope, whose copy connection opens with
-        // `foreign_keys` OFF, so no FK would reject deleting a parent before its
-        // child here. We still delete child-first — the reverse of the
-        // FK-topological apply order — so this stays correct under
-        // `foreign_keys=ON` too: a parent FK without `ON DELETE CASCADE` would
-        // otherwise reject deleting a parent a child still references. Child-first
-        // is order-safe regardless of the copy's FK setting.
+        // Child-first — the reverse of the FK-topological apply order. It is what
+        // makes the surviving-referrer test below exact (above), and it also keeps
+        // the prune correct under `foreign_keys=ON`: a parent FK without
+        // `ON DELETE CASCADE` would otherwise reject deleting a parent a child
+        // still references. The only caller is the snapshot scope, whose copy
+        // connection opens with `foreign_keys` OFF, so neither depends on the
+        // other.
         let mut order = self.gated_tables_parent_first(conn)?;
         order.reverse();
+        let referrers = gated_fk_child_edges(conn, &self.tables)?;
         for tbl in order {
             let keep = self.keep_clause(&tbl)?;
-            let sql = format!("DELETE FROM {} WHERE NOT ({keep})", quote_ident(&tbl));
+            let predicate = match self.referenced_by_surviving_clause(&referrers, &tbl) {
+                Some(referenced) => format!("({keep}) OR ({referenced})"),
+                None => keep,
+            };
+            let sql = format!("DELETE FROM {} WHERE NOT ({predicate})", quote_ident(&tbl));
             execute_batch(conn, &sql)?;
         }
         Ok(())
+    }
+
+    /// A SQL boolean that is true for rows of `tbl` some already-pruned table
+    /// still references — the closure half of the shared set, expressed against
+    /// the child-first prune order that has already settled every referrer.
+    ///
+    /// `None` when nothing references `tbl`, or when `tbl` is a root: a root's
+    /// gate (or audience) column is the host's own decision about whether the row
+    /// leaves the device, and a reference from elsewhere never overrides it.
+    fn referenced_by_surviving_clause(
+        &self,
+        referrers: &HashMap<String, Vec<GatedChildEdge>>,
+        tbl: &str,
+    ) -> Option<String> {
+        if !gate_is_derived(self.tables.get(tbl)) {
+            return None;
+        }
+        let edges = referrers.get(tbl)?;
+        if edges.is_empty() {
+            return None;
+        }
+        Some(
+            edges
+                .iter()
+                .map(|edge| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM {child} WHERE {child}.{fk} = {tbl}.{parent})",
+                        child = quote_ident(&edge.child_table),
+                        fk = quote_ident(&edge.child_column),
+                        tbl = quote_ident(tbl),
+                        parent = quote_ident(&edge.parent_column),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR "),
+        )
+    }
+
+    /// The gate's shared row set over the live database in `conn`.
+    ///
+    /// Building one scans the FK graph once, so a pass that asks about many rows
+    /// builds a single set and queries it rather than re-deriving the graph per
+    /// row.
+    pub(crate) fn shared_rows<'a>(
+        &'a self,
+        conn: &'a Connection,
+    ) -> Result<SharedRows<'a>, GateError> {
+        Ok(SharedRows {
+            gates: self,
+            conn,
+            referrers: gated_fk_child_edges(conn, &self.tables)?,
+        })
     }
 
     /// A SQL boolean that is true for rows of `tbl` the gate keeps. The shape

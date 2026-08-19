@@ -2359,3 +2359,346 @@ fn asset_marker_excludes_a_child_the_back_edge_would_keep() {
         ".asset() excludes the image from artists' keep-children"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The container work: where the gate's two relations come apart.
+//
+// `work_parts` names two `works` rows. It inherits its gate from one of them, so
+// keep answers for that one and says nothing about the other — while the row it
+// puts on the wire carries a foreign key to both. bae hit this with a container
+// work ("The Real Book") that no recording and no credit names: every device's
+// replay held on the missing parent forever.
+// ---------------------------------------------------------------------------
+
+fn work_part_tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new(
+            "releases",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("managed"),
+        SyncedTable::new(
+            "tracks",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "works",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by_descendants(),
+        SyncedTable::new(
+            "track_works",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+        SyncedTable::new(
+            "work_parts",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+    ]
+}
+
+fn create_work_part_schema(c: &Connection) {
+    c.execute_test_sql(
+        "CREATE TABLE releases (
+                id TEXT PRIMARY KEY,
+                managed INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE tracks (
+                id TEXT PRIMARY KEY,
+                release_id TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE
+             ) STRICT;
+             CREATE TABLE works (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE track_works (
+                id TEXT PRIMARY KEY,
+                track_id TEXT NOT NULL,
+                work_id TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (track_id) REFERENCES tracks (id) ON DELETE CASCADE,
+                FOREIGN KEY (work_id) REFERENCES works (id) ON DELETE CASCADE
+             ) STRICT;
+             CREATE TABLE work_parts (
+                id TEXT PRIMARY KEY,
+                parent_work_id TEXT NOT NULL,
+                child_work_id TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (parent_work_id) REFERENCES works (id) ON DELETE CASCADE,
+                FOREIGN KEY (child_work_id) REFERENCES works (id) ON DELETE CASCADE
+             ) STRICT;",
+    );
+}
+
+/// One release, one track, and two works: `W_PART` is what the track records,
+/// `W_WHOLE` is the collection it belongs to. Only `W_PART` is reachable from the
+/// release; `W_WHOLE` is named by nothing but the join row.
+fn seed_work_part_rows(c: &Connection, managed: u8) {
+    c.execute_test_sql(&format!(
+        "INSERT INTO releases (id, managed, _updated_at) VALUES ('R', {managed}, '0000000001000-0000-dev1');
+         INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T', 'R', '0000000001000-0000-dev1');
+         INSERT INTO works (id, title, _updated_at) VALUES ('W_PART', 'It Don''t Mean a Thing', '0000000001000-0000-dev1');
+         INSERT INTO works (id, title, _updated_at) VALUES ('W_WHOLE', 'The Real Book', '0000000001000-0000-dev1');
+         INSERT INTO track_works (id, track_id, work_id, _updated_at) VALUES ('TW', 'T', 'W_PART', '0000000001000-0000-dev1');
+         INSERT INTO work_parts (id, parent_work_id, child_work_id, _updated_at) VALUES ('WP', 'W_WHOLE', 'W_PART', '0000000001000-0000-dev1');"
+    ));
+}
+
+#[test]
+fn a_work_part_inherits_from_its_child_work_and_keeps_no_work_alive() {
+    let c = conn();
+    create_work_part_schema(&c);
+    let gates = Gates::from_tables(&c, &work_part_tables()).expect("gates");
+
+    assert_eq!(
+        downward_parent(&gates, "work_parts"),
+        ("works".to_string(), "child_work_id".to_string()),
+        "the join row inherits its gate through exactly one of its two works FKs",
+    );
+    assert_eq!(
+        inferred_children(&gates, "works"),
+        vec![("track_works".to_string(), "work_id".to_string())],
+        "work_parts is excluded from the keep-children as the back-edge, so no \
+         work is kept by being some other work's container",
+    );
+}
+
+#[test]
+fn sharing_a_work_part_shares_the_container_work_nothing_keeps() {
+    let c = conn();
+    create_work_part_schema(&c);
+    seed_work_part_rows(&c, 0);
+
+    let tables = work_part_tables();
+    let bytes = capture_and_gate(
+        &c,
+        &tables,
+        &["UPDATE releases SET managed = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+    );
+    let changes = walk(&bytes).expect("walk gated changeset");
+
+    assert!(
+        has_row(&changes, "work_parts", "WP"),
+        "the join row is shared: its child work is recorded by a managed release",
+    );
+    assert!(
+        has_row(&changes, "works", "W_PART"),
+        "the recorded work is kept outright",
+    );
+    assert!(
+        has_row(&changes, "works", "W_WHOLE"),
+        "the container work is shared by closure — the join row names it, and \
+         nothing else in the gate would ever bring it along",
+    );
+
+    // The claim that matters is not which rows appear but that a receiver can
+    // apply them. A peer materializes the Store by replaying published commits
+    // into an empty database, so replay it into one.
+    let peer = conn();
+    create_work_part_schema(&peer);
+    peer.apply_test_changeset(&bytes, &tables);
+    assert_eq!(
+        query_int(&peer, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        0,
+        "the shared set a peer receives resolves every foreign key it carries",
+    );
+    assert!(
+        peer.test_row_exists("SELECT 1 FROM work_parts WHERE id = 'WP'"),
+        "the join row survives on the peer rather than being rejected",
+    );
+}
+
+#[test]
+fn the_snapshot_prune_keeps_the_container_work_too() {
+    let c = conn();
+    create_work_part_schema(&c);
+    seed_work_part_rows(&c, 1);
+
+    let gates = Gates::from_tables(&c, &work_part_tables()).expect("gates");
+    gates
+        .delete_gated_false(&c)
+        .expect("prune the snapshot copy");
+
+    assert!(
+        c.test_row_exists("SELECT 1 FROM works WHERE id = 'W_WHOLE'"),
+        "a device restoring from the snapshot needs the container work for the \
+         same reason a device replaying the commits does",
+    );
+    assert!(c.test_row_exists("SELECT 1 FROM work_parts WHERE id = 'WP'"));
+    assert_eq!(
+        query_int(&c, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        0,
+        "the pruned snapshot resolves every foreign key it keeps",
+    );
+}
+
+#[test]
+fn the_snapshot_prune_drops_a_container_work_no_shared_row_names() {
+    let c = conn();
+    create_work_part_schema(&c);
+    seed_work_part_rows(&c, 0);
+
+    let gates = Gates::from_tables(&c, &work_part_tables()).expect("gates");
+    gates
+        .delete_gated_false(&c)
+        .expect("prune the snapshot copy");
+
+    assert!(
+        !c.test_row_exists("SELECT 1 FROM works WHERE id = 'W_WHOLE'"),
+        "closure adds a row a shared row names, never one nothing shared names",
+    );
+    assert!(!c.test_row_exists("SELECT 1 FROM works WHERE id = 'W_PART'"));
+    assert!(!c.test_row_exists("SELECT 1 FROM work_parts WHERE id = 'WP'"));
+}
+
+#[test]
+fn retracting_the_release_retracts_the_container_work_with_it() {
+    let c = conn();
+    create_work_part_schema(&c);
+    seed_work_part_rows(&c, 1);
+
+    let tables = work_part_tables();
+    let bytes = capture_and_gate(
+        &c,
+        &tables,
+        &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R'"],
+    );
+    let changes = walk(&bytes).expect("walk gated changeset");
+
+    let deleted = |table: &str, pk: &str| {
+        changes
+            .iter()
+            .any(|c| c.table == table && c.pk() == Some(pk) && c.op == ChangeOp::Delete)
+    };
+    assert!(deleted("work_parts", "WP"), "the join row leaves");
+    assert!(deleted("works", "W_PART"), "the recorded work leaves");
+    assert!(
+        deleted("works", "W_WHOLE"),
+        "the container work leaves with the row that dragged it in — retract is \
+         the mirror of the emission, over the same set",
+    );
+}
+
+#[test]
+fn retracting_one_release_spares_a_container_work_another_still_names() {
+    // The retract mirror. `W_WHOLE` is kept by nothing either way, so a filter
+    // that asks whether it is *kept* deletes it off every peer while `WP2` — a
+    // row those peers still hold — goes on naming it.
+    let c = conn();
+    create_work_part_schema(&c);
+    c.execute_test_sql(
+        "INSERT INTO releases (id, managed, _updated_at) VALUES ('R1', 1, '0000000001000-0000-dev1');
+         INSERT INTO releases (id, managed, _updated_at) VALUES ('R2', 1, '0000000001000-0000-dev1');
+         INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T1', 'R1', '0000000001000-0000-dev1');
+         INSERT INTO tracks (id, release_id, _updated_at) VALUES ('T2', 'R2', '0000000001000-0000-dev1');
+         INSERT INTO works (id, title, _updated_at) VALUES ('W_PART1', 'Part One', '0000000001000-0000-dev1');
+         INSERT INTO works (id, title, _updated_at) VALUES ('W_PART2', 'Part Two', '0000000001000-0000-dev1');
+         INSERT INTO works (id, title, _updated_at) VALUES ('W_WHOLE', 'The Real Book', '0000000001000-0000-dev1');
+         INSERT INTO track_works (id, track_id, work_id, _updated_at) VALUES ('TW1', 'T1', 'W_PART1', '0000000001000-0000-dev1');
+         INSERT INTO track_works (id, track_id, work_id, _updated_at) VALUES ('TW2', 'T2', 'W_PART2', '0000000001000-0000-dev1');
+         INSERT INTO work_parts (id, parent_work_id, child_work_id, _updated_at) VALUES ('WP1', 'W_WHOLE', 'W_PART1', '0000000001000-0000-dev1');
+         INSERT INTO work_parts (id, parent_work_id, child_work_id, _updated_at) VALUES ('WP2', 'W_WHOLE', 'W_PART2', '0000000001000-0000-dev1');",
+    );
+
+    let tables = work_part_tables();
+    let bytes = capture_and_gate(
+        &c,
+        &tables,
+        &["UPDATE releases SET managed = 0, _updated_at = '0000000002000-0000-dev1' WHERE id = 'R1'"],
+    );
+    let changes = walk(&bytes).expect("walk gated changeset");
+    let deleted = |table: &str, pk: &str| {
+        changes
+            .iter()
+            .any(|c| c.table == table && c.pk() == Some(pk) && c.op == ChangeOp::Delete)
+    };
+
+    assert!(
+        deleted("work_parts", "WP1"),
+        "the retracted release's join row leaves"
+    );
+    assert!(
+        deleted("works", "W_PART1"),
+        "the work only it recorded leaves"
+    );
+    assert!(
+        !deleted("works", "W_WHOLE"),
+        "the container work stays: WP2 is still shared and still names it",
+    );
+    assert!(!deleted("work_parts", "WP2"));
+}
+
+#[test]
+fn a_shared_row_naming_a_gate_false_root_is_refused_at_the_write() {
+    // Two roots, and a join row whose gate is inherited from one of them while
+    // its other foreign key names the other. Closure cannot rescue this: a root's
+    // gate column is the host's own decision about whether the row leaves the
+    // device, so sharing the join row would leak the unshared release instead.
+    let c = conn();
+    c.execute_test_sql(
+        "CREATE TABLE playlists (
+                id TEXT PRIMARY KEY,
+                published INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE releases (
+                id TEXT PRIMARY KEY,
+                managed INTEGER NOT NULL DEFAULT 0,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE playlist_items (
+                id TEXT PRIMARY KEY,
+                playlist_id TEXT NOT NULL,
+                release_id TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (playlist_id) REFERENCES playlists (id) ON DELETE CASCADE,
+                FOREIGN KEY (release_id) REFERENCES releases (id) ON DELETE CASCADE
+             ) STRICT;",
+    );
+    let tables = vec![
+        SyncedTable::new(
+            "playlists",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("published"),
+        SyncedTable::new(
+            "releases",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        )
+        .gated_by("managed"),
+        SyncedTable::new(
+            "playlist_items",
+            coven_protocol::synced_schema::RowIdentity::SharedKey,
+        ),
+    ];
+    let gates = Gates::from_tables(&c, &tables).expect("gates");
+    assert_eq!(
+        downward_parent(&gates, "playlist_items").0,
+        "playlists",
+        "the join row inherits from the playlist, so the release FK is unguarded",
+    );
+
+    c.execute_test_sql(
+        "INSERT INTO playlists (id, published, _updated_at) VALUES ('P', 0, '0000000001000-0000-dev1');
+         INSERT INTO releases (id, managed, _updated_at) VALUES ('R', 0, '0000000001000-0000-dev1');
+         INSERT INTO playlist_items (id, playlist_id, release_id, _updated_at) VALUES ('PI', 'P', 'R', '0000000001000-0000-dev1');",
+    );
+    let captured = capture(
+        &c,
+        &tables,
+        &["UPDATE playlists SET published = 1, _updated_at = '0000000002000-0000-dev1' WHERE id = 'P'"],
+    );
+
+    let error = match partition_outbound(&c, &captured, &RoutingChanges::empty(), &gates) {
+        Ok(_) => panic!("a write that shares an unresolvable foreign key must be refused"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("playlist_items.PI") && error.contains("releases.R"),
+        "the refusal names the row and the parent it cannot resolve: {error}",
+    );
+}

@@ -5,9 +5,11 @@ pub(crate) fn captured_deleted_audiences(
     conn: &Connection,
     deleted: &HashMap<(String, String), ChangeRow>,
     gates: &Gates,
+    shared: &SharedRows<'_>,
 ) -> Result<BTreeMap<(String, String), Audience>, GateError> {
     let mut audiences = BTreeMap::new();
-    let mut resolution = DeletedAudiences::new(conn, gates, deleted, UnresolvedAudience::Rejected);
+    let mut resolution =
+        DeletedAudiences::new(conn, gates, shared, deleted, UnresolvedAudience::Rejected);
     for key in deleted
         .keys()
         .filter(|(table, _)| gates.tables.contains_key(table))

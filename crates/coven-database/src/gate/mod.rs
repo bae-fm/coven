@@ -25,6 +25,18 @@
 //! host-provided blob; see the replication layer's blob concept tree for the blob-side
 //! vocabulary.
 //!
+//! Keep is what the gate *elects* to share. What those elections *oblige* is a
+//! second relation: a shared row lands on a receiver that rebuilds the Store by
+//! replaying the published commits into an empty database, so every foreign key
+//! the row carries has to resolve there — along *every* FK it declares, not only
+//! the one its gate was inherited through. So the shared set is closed under
+//! FK-parent: a row is shared iff it is kept, or some shared row references it.
+//! [`model::SharedRows`] is that set, and the two relations must not be
+//! conflated — an ancestor's keep-children exclude the join-table back-edge (a
+//! child cannot be a reason to keep its own gate-parent alive), which is right
+//! for keep and wrong for closure, and is exactly how a container row nothing
+//! keeps ends up named by a row everything ships.
+//!
 //! [`gate_outbound`] is the one entry point. Given the changeset a cycle
 //! captured, it returns a new changeset with gated-false rows cut, plus — when a
 //! root's gate flips false→true this cycle — full-state INSERTs for that root's
@@ -235,6 +247,12 @@ pub enum GateError {
     NoGatedDescendants(String),
     /// The gated tables form an FK cycle, so no parent-first apply order exists.
     FkCycle(Vec<String>),
+    /// A captured write would share a row whose foreign key names a row the gate
+    /// does not share. Every device rebuilds the Store by replaying the published
+    /// commits into an empty database, so publishing this puts a reference on the
+    /// wire that no device can resolve and every replay holds on forever. Boxed:
+    /// it names five strings, and `DbError` travels in every database `Result`.
+    UnsharedForeignKeyParent(Box<UnsharedForeignKeyParent>),
     CreateTableSchema(crate::CreateTableSchemaError),
     Sql(String, rusqlite::Error),
     Cleanup {
@@ -345,6 +363,26 @@ impl std::fmt::Display for GateError {
             GateError::FkCycle(tables) => {
                 write!(f, "gated tables form an FK cycle: {}", tables.join(", "))
             }
+            GateError::UnsharedForeignKeyParent(unshared) => match &unshared.parent_id {
+                Some(parent_id) => write!(
+                    f,
+                    "shared row {table}.{row_id} names {parent}.{parent_id} through {column}, \
+                     which the gate does not share",
+                    table = unshared.table,
+                    row_id = unshared.row_id,
+                    parent = unshared.parent,
+                    column = unshared.column,
+                ),
+                None => write!(
+                    f,
+                    "shared row {table}.{row_id} names a {parent} row through {column} that the \
+                     database does not hold",
+                    table = unshared.table,
+                    row_id = unshared.row_id,
+                    parent = unshared.parent,
+                    column = unshared.column,
+                ),
+            },
             GateError::CreateTableSchema(error) => error.fmt(f),
             GateError::Sql(op, err) => write!(f, "{op} failed: {err}"),
             GateError::Cleanup { operation, cleanup } => {
@@ -374,6 +412,23 @@ impl std::error::Error for GateError {
             _ => None,
         }
     }
+}
+
+/// The row a captured write would share, and the foreign key on it the gate does
+/// not resolve. Carried behind a `Box` in
+/// [`GateError::UnsharedForeignKeyParent`].
+#[derive(Debug)]
+pub struct UnsharedForeignKeyParent {
+    /// The table and id of the row that would be shared.
+    pub table: String,
+    pub row_id: String,
+    /// The foreign-key column on that row, and the table it points into.
+    pub column: String,
+    pub parent: String,
+    /// The parent row the foreign key names, or `None` when it names a key no
+    /// row in `parent` carries at all — the local database is already
+    /// inconsistent, which is a different fault worth telling apart.
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

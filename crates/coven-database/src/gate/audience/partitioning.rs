@@ -45,6 +45,7 @@ pub(crate) fn partition_outbound(
     gates: &Gates,
 ) -> Result<PartitionedAudienceWrite, GateError> {
     unsafe {
+        let shared = gates.shared_rows(conn)?;
         let mut groups = AudiencePartitionGroups::new(conn, gates);
         let audience_moves = audience_moves(conn, changeset, gates)?;
         let destination_materialized_rows = audience_moves
@@ -56,7 +57,8 @@ pub(crate) fn partition_outbound(
         let mut ancestor_deletes = HashSet::new();
         let captured_deletes = collect_deletes(changeset)?;
         let mut non_local_deletes = HashSet::new();
-        let deleted_audiences = captured_deleted_audiences(conn, &captured_deletes, gates)?;
+        let deleted_audiences =
+            captured_deleted_audiences(conn, &captured_deletes, gates, &shared)?;
         let store_changeset = gate_store_outbound(conn, changeset, gates)?;
         let mut store_rows = HashSet::new();
         for_each_change(&store_changeset, |iter, row| {
@@ -121,7 +123,7 @@ pub(crate) fn partition_outbound(
             &captured_deletes,
             &non_local_deletes,
         )? {
-            if !gates.row_kept(conn, &table, &id)? {
+            if !shared.contains(&table, &id)? {
                 ancestor_deletes.insert((table, id));
             }
         }
@@ -136,7 +138,7 @@ pub(crate) fn partition_outbound(
                 && audience_move.destination == Audience::Local
             {
                 for (table, id) in ancestors {
-                    if !gates.row_kept(conn, &table, &id)? {
+                    if !shared.contains(&table, &id)? {
                         ancestor_deletes.insert((table, id));
                     }
                 }
@@ -185,11 +187,133 @@ pub(crate) fn partition_outbound(
             })?;
         }
         let partitions = groups.finish()?;
+        validate_store_partition_foreign_key_closure(conn, gates, &shared, &partitions)?;
         Ok(PartitionedAudienceWrite {
             partitions,
             moves: audience_moves,
         })
     }
+}
+
+/// Refuse a captured write whose Store rows carry a foreign key the shared set
+/// does not resolve.
+///
+/// Every device materializes the Store by replaying its published commits into
+/// an empty database, so a shared row's foreign keys have to name rows that are
+/// themselves shared. [`SharedRows`] makes that true by construction, and this
+/// says so out loud at the one place it still can: the host's own write
+/// transaction, before the partition becomes a package, a commit, and an object
+/// in the cloud. Past that point the wrong state is durable and no device can
+/// apply it — the replay holds on the missing parent, makes no progress, and
+/// fails, cycle after cycle, with nothing on any device able to supply the row.
+///
+/// A parent counts as resolved if this same write carries it or the shared set
+/// already holds it. The second half leans on the emission being complete rather
+/// than on publication order: `reemit_subtrees` emits a flipped root's whole
+/// connected shared component, so a shared parent was published no later than the
+/// row that names it.
+///
+/// Only the Store partition is checked here. A Circle partition's parents are a
+/// question about audiences rather than about sharing, answered by
+/// [`validate_scoped_foreign_key_audiences`] before the write is captured at all.
+///
+/// # Safety
+/// `changeset` iteration reads raw session bytes; each partition's changeset came
+/// from a changegroup built on this connection's schema.
+unsafe fn validate_store_partition_foreign_key_closure(
+    conn: &Connection,
+    gates: &Gates,
+    shared: &SharedRows<'_>,
+    partitions: &[AudiencePartition],
+) -> Result<(), GateError> {
+    let Some(store) = partitions
+        .iter()
+        .find(|partition| partition.audience == Audience::Store)
+    else {
+        return Ok(());
+    };
+
+    // A row this write itself carries resolves a reference to it, so collect the
+    // partition's own rows before testing any of them. Only a gated row can be a
+    // gated row's parent, which is also why an ungated table needs no entry.
+    let mut carried: HashSet<(String, String)> = HashSet::new();
+    for_each_change(&store.changeset, |_iter, row| {
+        if row.op == ffi::SQLITE_DELETE || !gates.tables.contains_key(&row.table) {
+            return Ok(());
+        }
+        if let Some(id) = row.pk() {
+            carried.insert((row.table.clone(), id.to_string()));
+        }
+        Ok(())
+    })?;
+
+    // The foreign keys each table holds into a gated table, read once per table
+    // rather than once per row: a release publishes hundreds of rows over a
+    // handful of tables.
+    let mut gated_parents: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    for_each_change(&store.changeset, |_iter, row| {
+        // A DELETE carries no reference of its own. The mirror obligation — never
+        // retracting a row something shared still names — is the retract path's
+        // shared-set filter, not a property of these bytes.
+        if row.op == ffi::SQLITE_DELETE {
+            return Ok(());
+        }
+        let edges = match gated_parents.entry(row.table.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let edges = foreign_keys(conn, &row.table)?
+                    .into_iter()
+                    .filter(|(_, parent, _)| gates.tables.contains_key(parent))
+                    .collect::<Vec<_>>();
+                entry.insert(edges)
+            }
+        };
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let Some(row_id) = row.pk().map(str::to_string) else {
+            return Err(GateError::MissingChangesetPrimaryKey(row.table.clone()));
+        };
+        for (fk_column, parent, parent_column) in edges.clone() {
+            let parent_id = match fk_parent_row(
+                conn,
+                &row.table,
+                &row_id,
+                &fk_column,
+                &parent,
+                &parent_column,
+            )? {
+                FkParentRow::Found(parent_id) => parent_id,
+                FkParentRow::NullForeignKey | FkParentRow::RowAbsent => continue,
+                FkParentRow::ParentAbsent => {
+                    return Err(GateError::UnsharedForeignKeyParent(Box::new(
+                        UnsharedForeignKeyParent {
+                            table: row.table.clone(),
+                            row_id,
+                            column: fk_column,
+                            parent,
+                            parent_id: None,
+                        },
+                    )))
+                }
+            };
+            if carried.contains(&(parent.clone(), parent_id.clone()))
+                || shared.contains(&parent, &parent_id)?
+            {
+                continue;
+            }
+            return Err(GateError::UnsharedForeignKeyParent(Box::new(
+                UnsharedForeignKeyParent {
+                    table: row.table.clone(),
+                    row_id,
+                    column: fk_column,
+                    parent,
+                    parent_id: Some(parent_id),
+                },
+            )));
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn validate_scoped_foreign_key_audiences(

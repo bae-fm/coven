@@ -6,13 +6,18 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
-use super::model::{fk_column_ref, foreign_keys, rows_referencing, truthy, Gates, TableGate};
+use super::model::{
+    fk_column_ref, foreign_keys, rows_referencing, truthy, Gates, SharedRows, TableGate,
+};
 use super::outbound::{
     deleted_or_live_parent, fk_parent_row, full_state_diff, gate_store_outbound,
     query_column_present, query_column_text, row_id_for_column_value, DeletedAudiences,
     DeletedParent, FkParentRow, FullStateDirection, UnresolvedAudience,
 };
-use super::{all_row_ids, query_mapped_rows, query_row_optional, CircleControlFailure, GateError};
+use super::{
+    all_row_ids, query_mapped_rows, query_row_optional, CircleControlFailure, GateError,
+    UnsharedForeignKeyParent,
+};
 use crate::quote_ident;
 use coven_protocol::circle::{
     row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey,
