@@ -23,9 +23,15 @@ struct LocalBlobDropRequest {
 }
 
 impl AuthorizedWriterOperation<'_> {
-    pub(super) async fn prepare_store_write(&mut self) -> Result<bool, StoreError> {
+    pub(super) async fn prepare_store_write(
+        &mut self,
+        timings: &mut crate::sync::stage_timing::StageTimings,
+    ) -> Result<bool, StoreError> {
         let database = self.database.clone();
-        let Some(pending) = database.prepare_store_write().await? else {
+        let Some(pending) = timings
+            .stage("read pending write", database.prepare_store_write())
+            .await?
+        else {
             return Ok(false);
         };
         let stream_id = self.announcement_stream_id();
@@ -55,8 +61,11 @@ impl AuthorizedWriterOperation<'_> {
                 predecessor: previous.clone(),
                 dependencies,
             };
-            let authorization = self
-                .authorize_retained_outbound(&order, membership.head_refs())
+            let authorization = timings
+                .stage(
+                    "authorize outbound",
+                    self.authorize_retained_outbound(&order, membership.head_refs()),
+                )
                 .await
                 .map_err(StoreError::from)?;
             let membership_authority = self.membership_authority(&authorization.membership)?;
@@ -69,12 +78,16 @@ impl AuthorizedWriterOperation<'_> {
                 {
                     continue;
                 }
-                let present = self
-                    .store_dir
-                    .local_blob_path_if_present(
-                        &fact.blob.namespace,
-                        &fact.blob.id,
-                        fact.plaintext_size,
+                // One filesystem stat per host-provided blob in the write, so a
+                // release carrying dozens of them pays for each.
+                let present = timings
+                    .stage(
+                        "scan local blobs",
+                        self.store_dir.local_blob_path_if_present(
+                            &fact.blob.namespace,
+                            &fact.blob.id,
+                            fact.plaintext_size,
+                        ),
                     )
                     .await
                     .map_err(|error| {
@@ -126,34 +139,42 @@ impl AuthorizedWriterOperation<'_> {
             let mut prepared_packages = Vec::new();
             if let Some(partition) = partitions.store {
                 prepared_packages.push(
-                    self.prepare_partition_package(
-                        candidate_family,
-                        &write_id,
-                        &coord,
-                        db.schema_version(),
-                        stream_id.to_string(),
-                        seq,
-                        partition,
-                        &blob_facts,
-                        &active_store_members,
-                    )
-                    .await?,
+                    timings
+                        .stage(
+                            "seal packages",
+                            self.prepare_partition_package(
+                                candidate_family,
+                                &write_id,
+                                &coord,
+                                db.schema_version(),
+                                stream_id.to_string(),
+                                seq,
+                                partition,
+                                &blob_facts,
+                                &active_store_members,
+                            ),
+                        )
+                        .await?,
                 );
             }
             for partition in partitions.circles {
                 prepared_packages.push(
-                    self.prepare_partition_package(
-                        candidate_family,
-                        &write_id,
-                        &coord,
-                        db.schema_version(),
-                        stream_id.to_string(),
-                        seq,
-                        partition,
-                        &blob_facts,
-                        &active_store_members,
-                    )
-                    .await?,
+                    timings
+                        .stage(
+                            "seal packages",
+                            self.prepare_partition_package(
+                                candidate_family,
+                                &write_id,
+                                &coord,
+                                db.schema_version(),
+                                stream_id.to_string(),
+                                seq,
+                                partition,
+                                &blob_facts,
+                                &active_store_members,
+                            ),
+                        )
+                        .await?,
                 );
             }
             let storage = self.storage.as_ref();
@@ -168,8 +189,11 @@ impl AuthorizedWriterOperation<'_> {
             let device_id = self.local_device_id().to_string();
             let head_prefix = head_slot_prefix(&device_id, seq);
             let next_head_prefix = head_slot_prefix(&device_id, successor_store_sequence(seq)?);
-            let next_head_slot = storage
-                .allocate_protocol_slot(&head_context, &next_head_prefix, ".json")
+            let next_head_slot = timings
+                .stage(
+                    "allocate slots",
+                    storage.allocate_protocol_slot(&head_context, &next_head_prefix, ".json"),
+                )
                 .await
                 .map_err(StoreObjectError::from)?;
 
@@ -231,8 +255,11 @@ impl AuthorizedWriterOperation<'_> {
                 seq,
                 commit.commit_hash(),
             );
-            let commit_slot = storage
-                .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
+            let commit_slot = timings
+                .stage(
+                    "allocate slots",
+                    storage.allocate_protocol_slot(&commit_context, &commit_prefix, ".json"),
+                )
                 .await
                 .map_err(StoreObjectError::from)?;
             let commit_prepared = storage
@@ -253,16 +280,19 @@ impl AuthorizedWriterOperation<'_> {
                 )
                 .map_err(StoreError::from)?;
             let commit_ref = commit.reference().clone();
-            let successor = self
-            .prepare_merge_history_successor(
-                &commit,
-                &authorization.membership,
-                None,
-                authorization.device_state.clone(),
-                crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
-            )
-            .await
-            .map_err(StoreError::from)?;
+            let successor = timings
+                .stage(
+                    "prepare history successor",
+                    self.prepare_merge_history_successor(
+                        &commit,
+                        &authorization.membership,
+                        None,
+                        authorization.device_state.clone(),
+                        crate::sync::store::commit_verification::merge_history::MergeHistorySuccessorEvidence::none(),
+                    ),
+                )
+                .await
+                .map_err(StoreError::from)?;
             let storage = self.storage.as_ref();
             let activation = self
                 .writer
@@ -324,7 +354,12 @@ impl AuthorizedWriterOperation<'_> {
                 return Err(error);
             }
         };
-        database.prepare_store_write_commit(preparation).await?;
+        timings
+            .stage(
+                "commit preparation",
+                database.prepare_store_write_commit(preparation),
+            )
+            .await?;
         Ok(true)
     }
 }

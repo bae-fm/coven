@@ -92,11 +92,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn prepare_pending_store_write(&mut self) -> Result<bool, StoreError> {
-        self.prepare_store_write().await
+        let mut timings = crate::sync::stage_timing::StageTimings::start("test Store write");
+        let outcome = self.prepare_store_write(&mut timings).await;
+        timings.report();
+        outcome
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn drain_store_writes(&mut self) -> Result<u64, StoreError> {
-        self.drain_prepared_store_writes().await
+        self.drain_prepared_store_writes_timed("test Store write publication")
+            .await
     }
 }

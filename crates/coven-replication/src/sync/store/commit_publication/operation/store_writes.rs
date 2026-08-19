@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::stage_timing::StageTimings;
 
 impl<'storage> AuthorizedWriterOperation<'storage> {
     pub(crate) fn local_device_id(&self) -> &coven_protocol::store_commit::StoreDeviceId {
@@ -19,7 +20,10 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
-    pub(super) async fn drain_prepared_store_writes(&mut self) -> Result<u64, StoreError> {
+    pub(super) async fn drain_prepared_store_writes(
+        &mut self,
+        timings: &mut StageTimings,
+    ) -> Result<u64, StoreError> {
         let operation = self;
         let database = &operation.database;
         // Each candidate here takes a position on this device's own stream by
@@ -29,7 +33,9 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
         // else can, so they must not be the ones to take it out from under an
         // operation that is mid-activation.
         let _authorship = database.author_own_stream().await;
-        database.retire_uploaded_blob_spools().await?;
+        timings
+            .stage("retire blob spools", database.retire_uploaded_blob_spools())
+            .await?;
         let Some(first) = database.oldest_prepared_store_write().await? else {
             return Ok(0);
         };
@@ -57,8 +63,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     commit.body,
                     coven_protocol::store_commit::StoreCommitBody::AbandonCandidates { .. }
                 ) {
-                    operation.publish_prepared_remote_objects(&write_id).await?;
-                    database.retire_uploaded_blob_spools().await?;
+                    timings
+                        .stage(
+                            "publish packages",
+                            operation.publish_prepared_remote_objects(&write_id),
+                        )
+                        .await?;
+                    timings
+                        .stage("retire blob spools", database.retire_uploaded_blob_spools())
+                        .await?;
                 }
                 let head = &batch.head.value;
                 let stream_id = head.commit.coord.stream_id.to_string();
@@ -72,12 +85,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     commit.seq(),
                     commit.commit_hash(),
                 );
-                storage
-                    .create_verified_protocol_object(
-                        &commit_context,
-                        &batch.commit.prepared,
-                        &commit_prefix,
-                        &batch.commit.bytes,
+                timings
+                    .stage(
+                        "publish commit",
+                        storage.create_verified_protocol_object(
+                            &commit_context,
+                            &batch.commit.prepared,
+                            &commit_prefix,
+                            &batch.commit.bytes,
+                        ),
                     )
                     .await
                     .map_err(StoreError::prepared_object)?;
@@ -100,7 +116,13 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     &head.author_registration.device_id.to_string(),
                     commit.seq(),
                 );
-                if let Err(error) = storage.create_protocol_object(&batch.head.prepared).await {
+                let head_create = timings
+                    .stage(
+                        "publish head",
+                        storage.create_protocol_object(&batch.head.prepared),
+                    )
+                    .await;
+                if let Err(error) = head_create {
                     if !matches!(error, StorageError::SlotCollision(_)) {
                         return Err(StoreObjectError::from(error).into());
                     }
@@ -171,12 +193,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                         .await?;
                     return Ok::<bool, StoreError>(false);
                 }
-                let observation = operation
-                    .observe_occupied_merge_head(
-                        head,
-                        commit,
-                        batch.head.prepared.reference().slot(),
-                        &head_prefix,
+                let observation = timings
+                    .stage(
+                        "read back head",
+                        operation.observe_occupied_merge_head(
+                            head,
+                            commit,
+                            batch.head.prepared.reference().slot(),
+                            &head_prefix,
+                        ),
                     )
                     .await?;
                 if observation.winner() != head
@@ -208,8 +233,15 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                     write_id: write_id.clone(),
                 })
                 .await;
-                match database
-                    .complete_prepared_store_write(root, head.commit.clone(), nonactivations)
+                match timings
+                    .stage(
+                        "complete write",
+                        database.complete_prepared_store_write(
+                            root,
+                            head.commit.clone(),
+                            nonactivations,
+                        ),
+                    )
                     .await?
                 {
                     coven_database::CompletePreparedStoreWriteOutcome::Published => {}
@@ -239,17 +271,35 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     pub(crate) async fn publish_pending_store_writes(&mut self) -> Result<u64, SyncCycleFailure> {
+        // Publishing one release's worth of host writes was the slowest stage of
+        // a live cycle. Each commit it publishes costs several provider round
+        // trips — two slot allocations while preparing, then the packages, the
+        // commit, the head, and the read-back that confirms the head — on top of
+        // sealing a package per audience. The stage totals say which of those
+        // the time went to, and they accumulate across every commit the loop
+        // publishes so a slow cycle is described by one line however many
+        // commits it drained. Reported on every exit path, including failures.
+        let mut timings = StageTimings::start("Store write publication");
+        let outcome = Box::pin(self.publish_pending_store_writes_timed(&mut timings)).await;
+        timings.report();
+        outcome
+    }
+
+    async fn publish_pending_store_writes_timed(
+        &mut self,
+        timings: &mut StageTimings,
+    ) -> Result<u64, SyncCycleFailure> {
         let mut published = 0_u64;
         loop {
             if !self
-                .prepare_store_write()
+                .prepare_store_write(timings)
                 .await
                 .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))?
             {
                 return Ok(published);
             }
             let drained = self
-                .drain_prepared_store_writes()
+                .drain_prepared_store_writes(timings)
                 .await
                 .map_err(|error| SyncCycleFailure::operation("publish Store write", error))?;
             published = published.checked_add(drained).ok_or_else(|| {
@@ -262,9 +312,21 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
     }
 
     pub(crate) async fn publish_prepared_store_writes(&mut self) -> Result<u64, SyncCycleFailure> {
-        self.drain_prepared_store_writes()
+        self.drain_prepared_store_writes_timed("prepared Store write publication")
             .await
             .map_err(|error| SyncCycleFailure::operation("publish Store write", error))
+    }
+
+    /// Drain under a timing run of its own, for the callers that publish outside
+    /// the cycle's own publication stage. `run` names which one in the line.
+    pub(super) async fn drain_prepared_store_writes_timed(
+        &mut self,
+        run: &'static str,
+    ) -> Result<u64, StoreError> {
+        let mut timings = StageTimings::start(run);
+        let outcome = Box::pin(self.drain_prepared_store_writes(&mut timings)).await;
+        timings.report();
+        outcome
     }
 
     pub(crate) async fn reclaim_packages(
