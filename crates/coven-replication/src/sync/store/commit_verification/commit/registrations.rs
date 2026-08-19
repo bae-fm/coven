@@ -381,10 +381,26 @@ impl<'a> StoreCommitVerifier<'a> {
     where
         T: Send + 'static,
     {
-        let bytes = self
-            .storage
-            .read_protocol_object(context, object, semantic_prefix)
-            .await?;
+        let remembered = self
+            .exact_objects
+            .lock()
+            .expect("verified exact object cache poisoned")
+            .get(object)
+            .cloned();
+        let bytes = match remembered {
+            Some(bytes) => bytes,
+            None => {
+                let bytes = self
+                    .storage
+                    .read_protocol_object(context, object, semantic_prefix)
+                    .await?;
+                self.exact_objects
+                    .lock()
+                    .expect("verified exact object cache poisoned")
+                    .insert(object.clone(), bytes.clone());
+                bytes
+            }
+        };
         let verify_bytes = bytes.clone();
         let value = run_blocking_object_verification(
             semantic_prefix,
