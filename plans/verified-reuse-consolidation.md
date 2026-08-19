@@ -190,6 +190,19 @@ first. That gap is why pull cost keeps returning.
   `acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads` as a
   case rather than in a new one-off test.
 
+- **References below a snapshot cut have almost no coverage.** The whole
+  672-test replication suite reaches
+  `load_retained_merge_history_checkpoint_on`'s snapshot branch exactly once, so
+  the path that resolves a predecessor the retained rows no longer hold rests on
+  a single incidental hit. That is the branch a store enters as snapshots
+  accumulate and retained history is truncated behind them — the shape the field
+  store is heading into, not an edge case.
+
+  It needs a fixture that publishes past a snapshot cut and then walks a frontier
+  whose predecessors fall below it. `AcknowledgedHistory` already builds the
+  two-device history and runs the cycles that produce snapshots, so it is the
+  place to grow one. Queued after the allowlist shrink; blocking nothing.
+
 ## Direction
 
 One reuse mechanism per artifact class, at the lifetime its immutability
