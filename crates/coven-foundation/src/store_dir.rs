@@ -1124,7 +1124,7 @@ impl StoreOpenGuard {
             .map_err(|source| {
                 StoreOpenGuardError::File(FileError::at("open store lock", &lock_path, source))
             })?;
-        match file.try_lock() {
+        match Self::try_lock_exclusive(&file) {
             Ok(()) => Ok(Self { _file: file }),
             Err(std::fs::TryLockError::WouldBlock) => Err(StoreOpenGuardError::AlreadyOpen {
                 store_dir: dir.to_path_buf(),
@@ -1133,6 +1133,27 @@ impl StoreOpenGuard {
                 FileError::at("lock store", lock_path, source),
             )),
         }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn try_lock_exclusive(file: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+        file.try_lock()
+    }
+
+    /// std's `File::try_lock` is an `Unsupported` stub on Android — its cfg
+    /// list carries `linux` but not `android` — so take the same
+    /// `flock(LOCK_EX | LOCK_NB)` std takes on Linux, via rustix.
+    #[cfg(target_os = "android")]
+    fn try_lock_exclusive(file: &std::fs::File) -> Result<(), std::fs::TryLockError> {
+        rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |errno| {
+                if errno == rustix::io::Errno::WOULDBLOCK {
+                    std::fs::TryLockError::WouldBlock
+                } else {
+                    std::fs::TryLockError::Error(errno.into())
+                }
+            },
+        )
     }
 
     /// Acquire the guard for a test, panicking on refusal.
