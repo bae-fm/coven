@@ -137,6 +137,29 @@ first. That gap is why pull cost keeps returning.
   two-device store at every history depth, already pinned by
   `retained_history_depth_does_not_repeat_exact_registration_reads`.
 
+- **The baseline read-path bypass is closed** —
+  `load_retained_merge_history_checkpoint_on` now takes the baseline its caller
+  already holds, and the caller reads it once from
+  `VerifiedStoreAuthority::retained_replay_baseline_on`, which is the memo. Same
+  move a00088f8 made on the install path, now on the read path.
+
+  The second site the entry named (`:640-645`) turned out not to be a bypass: it
+  is `generation_zero_replay_baseline_on`, the loader `RetainedReplayCache::
+  baseline_on` calls to fill the memo, so it is the one place that should load.
+  Its public wrapper on `StoreDatabase` has only test callers.
+
+  Measured before changing anything: loading a baseline costs 8.5-14 ms, all of
+  it deserializing the image into a fresh in-memory connection and revalidating
+  it — so the per-call cost the entry claimed is real. The site is cold, though:
+  one hit across the whole 672-test replication suite, because it only fires for
+  a reference below a snapshot cut. Fixed anyway, since it is fifteen
+  milliseconds a call on the one path that gets busier as snapshots accumulate,
+  and the fix is a parameter rather than a redesign.
+
+  Thin coverage, stated plainly: the suite exercises this path once, so the
+  change rests on it being the same baseline from the same loader, validated
+  once per connection instead of once per call.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -145,12 +168,6 @@ first. That gap is why pull cost keeps returning.
 
 ## Recorded, not yet scheduled
 
-- **Baseline cache bypass on the read path.**
-  `materialization_io.rs:447` and `:640-645` call the generation-zero
-  baseline loaders directly instead of `RetainedReplayCache::baseline_on`;
-  each call deserializes and revalidates the entire baseline DB image into a
-  fresh in-memory SQLite connection. Same class a00088f8 removed from the
-  install path.
 - **Verified commit bytes stored twice**: `StoreCommitVerifier.commits` and a
   clone inside each `VerifiedMergeHistoryCommit`; `load_ref` probes both.
 - **`owner_anchor` memo re-derives its checks on every hit**

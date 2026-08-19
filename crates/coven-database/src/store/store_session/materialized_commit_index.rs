@@ -60,6 +60,9 @@ impl StoreSession<'_> {
         let records = crate::store::store_session::StoreRecords::new(self.conn, self.store_dir);
         let authority = &mut *self.verified_store_authority;
         let retained = authority.retained_replay_inputs_on(records, &root)?;
+        // Read once from the connection's verified baseline; every reference the
+        // walk finds below the snapshot cut resolves against this same one.
+        let baseline = authority.retained_replay_baseline_on(records)?.clone();
         let by_reference = retained
             .iter()
             .map(|materialization| (materialization.commit_ref().clone(), materialization))
@@ -86,7 +89,7 @@ impl StoreSession<'_> {
                         .push(authority.retained_history_checkpoint_on(records, &reference)?);
                 }
                 None => checkpoints.push(StoreDatabase::load_retained_merge_history_checkpoint_on(
-                    records, &root, authority, &reference,
+                    records, &root, authority, &baseline, &reference,
                 )?),
             }
         }

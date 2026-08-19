@@ -423,10 +423,19 @@ impl StoreDatabase {
         )
     }
 
+    /// The checkpoint a reference resolves to when no retained row holds it —
+    /// which means a snapshot covers it, so the baseline's summary is its
+    /// authority.
+    ///
+    /// `baseline` is supplied rather than loaded because loading one deserializes
+    /// the whole baseline database image into a fresh in-memory connection and
+    /// revalidates it, about fifteen milliseconds a call. The connection already
+    /// holds a verified baseline; this reads that.
     pub(crate) fn load_retained_merge_history_checkpoint_on(
         records: StoreRecords<'_>,
         root: &coven_protocol::store_commit::StoreRootRef,
         registrations: &mut dyn VerifiedRegistrationLookup,
+        baseline: &RetainedReplayBaseline,
         reference: &StoreBatchCommitRef,
     ) -> Result<crate::RetainedMergeHistoryCheckpoint, DbError> {
         let StoreCommitCoord {
@@ -444,12 +453,7 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
                 ));
             }
-            let baseline = load_generation_zero_replay_baseline_on(records)?.ok_or_else(|| {
-                DbError::Message(
-                    "snapshot Merge checkpoint has no retained replay baseline".to_string(),
-                )
-            })?;
-            let RetainedReplayAuthority::StableSnapshot(authority) = baseline.authority else {
+            let RetainedReplayAuthority::StableSnapshot(authority) = &baseline.authority else {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint has genesis replay authority".to_string(),
                 ));
