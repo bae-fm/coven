@@ -118,6 +118,22 @@ first. That gap is why pull cost keeps returning.
 - **`owner_anchor` memo re-derives its checks on every hit**
   (`validate_owner_anchor_cache`), so it saves only the SQL write, not the
   verification.
+- **Snapshot reads are flat but not minimal.** After the snapshot memo landed a
+  settled two-device cycle reads ten snapshot objects covering four distinct
+  ones, at every history depth. Something outside `load_store_snapshot` re-reads
+  them within one cycle — `load_store_snapshot_stream` is the likely path, since
+  it walks a device's snapshot anchor rather than asking by reference. Does not
+  scale with retained history, so it was not part of the 119-192 s; it is a
+  plain within-cycle duplicate of the class every "Reuse verified X" commit
+  removed.
+- **Live remeasure of the retained-history and acknowledgement fixes is still
+  open.** The mac app is booted with sync locked (screen-lock keychain refusal),
+  so the field numbers for `prepare retained history` after `e3e5740f` land once
+  the user unlocks. The fixture says a settled cycle's provider reads no longer
+  move with retained depth; if the live cycle disagrees, the disagreement is the
+  finding, and it belongs in
+  `acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads` as a
+  case rather than in a new one-off test.
 
 ## Direction
 
