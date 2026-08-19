@@ -235,18 +235,42 @@ first. That gap is why pull cost keeps returning.
   `acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads` as a
   case rather than in a new one-off test.
 
-- **References below a snapshot cut have almost no coverage.** The whole
-  672-test replication suite reaches
-  `load_retained_merge_history_checkpoint_on`'s snapshot branch exactly once, so
-  the path that resolves a predecessor the retained rows no longer hold rests on
-  a single incidental hit. That is the branch a store enters as snapshots
-  accumulate and retained history is truncated behind them — the shape the field
-  store is heading into, not an edge case.
+- **References below a snapshot cut still have almost no coverage, and the
+  obvious fixture does not reach them.** The suite hits
+  `load_retained_merge_history_checkpoint_on`'s snapshot branch exactly once —
+  `circles::tests::rotation_required::post_close_circle_store_snapshot_restores_and_converges`,
+  found by bisecting the suite with a probe on the branch.
 
-  It needs a fixture that publishes past a snapshot cut and then walks a frontier
-  whose predecessors fall below it. `AcknowledgedHistory` already builds the
-  two-device history and runs the cycles that produce snapshots, so it is the
-  place to grow one. Queued after the allowlist shrink; blocking nothing.
+  An attempt to build a plain fixture for it failed, and what it established
+  narrows the next one considerably. Each of these was verified, not assumed:
+
+  - Publishing and acknowledging a snapshot does **not** prune the publisher's
+    retained rows. `retain_snapshot_replay_inputs` runs against the snapshot
+    *image*, so pruning is what a device does when it **installs** one.
+  - Restoring from the snapshot does prune: the covered commit's retained row is
+    gone on the restored device.
+  - But a restored device that pulls re-materializes the covered history and
+    gives it retained rows again, so every checkpoint comes back `Commit`.
+  - And a restored device that has not pulled has an empty materialized
+    frontier, while the publisher's frontier — captured either side of the
+    snapshot — has no `snapshot_coverage` row on it, so the walk falls through to
+    `retained_materialization_identity` and fails with `QueryReturnedNoRows`.
+
+  So the branch needs two conditions at once, which ordinary restored history
+  does not meet: the reference must have a `snapshot_coverage` row and be a tip
+  of the snapshot summary's signed frontier, *and* it must not have been
+  re-materialized. The one test that gets there does so because a Circle
+  successor bootstrap covers old-epoch content the restored device never
+  materializes. Reclaimed remote objects would be the other way in.
+
+  The next attempt should start from that test's shape rather than from
+  `AcknowledgedHistory`. The scaffolding it needs and that does work:
+  `capture_snapshot_cut` → `push_snapshot_cut` → `stage_acknowledgement` →
+  `drain_acknowledgements` to publish an acknowledged snapshot, then
+  `prepare_snapshot_bootstrap` → `install` into a fresh temp directory to
+  restore. `RestoringStore` needs test hooks for
+  `retained_merge_replay_inputs` and `retained_merge_history_frontier`; it has
+  neither today.
 
 ## Direction
 
