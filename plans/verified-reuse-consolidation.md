@@ -10,15 +10,57 @@ connection-lifetime state on `DatabaseCore.verified_store_authority`
 `..._within_a_cycle` and nothing asserts a second cycle reads less than the
 first. That gap is why pull cost keeps returning.
 
-## In flight
+## Landed
 
-- Pull's `prepare_retained_history` re-verifies the whole retained merge
-  history from the cloud every cycle (measured 34-38 s per cycle on a small
-  two-device store over GCS). Fix underway: recover predecessor membership
-  from durable retained checkpoints the way `authorize_retained_outbound`
-  already does (zero cloud reads), stop feeding retained refs through
-  `verify_refs`, and add the missing test class: a second cycle over an
-  unchanged retained history performs no cloud reads for retained commits.
+- **Pull's retained history is served from its durable rows.** Measured with a
+  read-counting fixture: one provider read per retained commit and one per its
+  activation head, on every cycle, unchanged on the second and third cycle —
+  the per-cycle memos deduplicated perfectly within a cycle and carried nothing
+  across one. A pull over twenty-four retained commits made 75 provider reads;
+  it now makes 27, the same count as one retained commit, and none of them
+  touch a retained commit or head.
+
+  What kept the two tiers apart was the order `prepare_retained_history` asked
+  in: it verified every retained ref from the cloud first and passed the
+  resulting proofs down to the database, so the durable authority depended on a
+  fresh remote verification rather than being it. Reading the durable rows
+  first and seeding `StoreCommitVerifier`'s `commits`, `verified_heads`, and
+  `accepted_announcements` from them inverts that. Seeding the accepted
+  announcement path also ends the head-slot re-walk, which is why the remaining
+  count is flat rather than merely smaller.
+
+  `RetainedCommitAuthorities::Operation` was the API that demanded those proofs
+  and is deleted, along with its `replay_inputs_with_verified_commits_on` and
+  `retained_merge_replay_inputs_with_verified_commits` entry points and
+  `MergeHistoryVerifier::retained_commit_proofs`. `RetainedCommitAuthority`
+  (singular) stays: the write path really has just verified the commit it
+  retains.
+
+  Divergence from the direction above, deliberate: `verify_refs` still runs
+  over the retained refs, now entirely out of the seeded memos. Removing that
+  call as well would mean rebuilding each retained commit's
+  `predecessor_membership`, `predecessor_state`, `state_after`, `registrations`,
+  `operations`, `acknowledgement`, and `membership_control` from checkpoints —
+  and the candidate path's own `verify_refs` walks into retained predecessors,
+  so they must be in `history.commits` either way. The remaining cost is CPU
+  only: re-parsing and re-checking signatures over local bytes, a few
+  milliseconds for twenty-four commits against the 36 s of provider latency
+  that is gone. Worth doing when the per-commit CPU starts to show; not worth
+  the divergence risk to do blind.
+
+  New test class, the one the family lacked: `repeated_pulls_over_unchanged_
+  retained_history_read_none_of_it` and `retained_history_depth_does_not_
+  change_what_a_pull_reads` assert across cycles, not within one.
+  `a_pull_over_retained_history_still_probes_the_next_announcement_slot` guards
+  the failure mode seeding could introduce — a device that silently stops
+  discovering what its peers publish.
+
+  No home left the verification-artifact allowlist: `commit_verification/`
+  still fetches, because commits this device has *not* verified still come from
+  the provider. That is the boundary working as intended — it separates the
+  first verification from the repeat, and only the repeat went away.
+
+## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
   being added inside the publish path; likely fix is the bounded fan-out the
@@ -50,10 +92,6 @@ first. That gap is why pull cost keeps returning.
 - **`owner_anchor` memo re-derives its checks on every hit**
   (`validate_owner_anchor_cache`), so it saves only the SQL write, not the
   verification.
-- **`RetainedCommitAuthorities::Operation` requires a complete proofs map it
-  never reads on the cache-hit path** (`retained_merge_replay/cache.rs:257-296`
-  vs `:360-370`) — the API contract taxes callers for proofs the hit path
-  ignores. (Being fixed as part of the pull change if it falls out naturally.)
 
 ## Direction
 
