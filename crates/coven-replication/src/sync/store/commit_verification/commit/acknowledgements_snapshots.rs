@@ -1,21 +1,67 @@
 use super::*;
 
 impl<'a> StoreCommitVerifier<'a> {
+    /// An acknowledgement this verifier has authenticated, by reference.
+    ///
+    /// A cache hit still checks the whole reference, not just the object it is
+    /// keyed by: the reference names the registration, sequence, and semantic
+    /// hash, so an entry that matches it is the same bytes verified under the
+    /// same author.
+    pub(crate) fn remembered_acknowledgement(&self, reference: &StoreAckRef) -> Option<StoreAck> {
+        self.acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned")
+            .get(&reference.object)
+            .filter(|(cached, _)| cached == reference)
+            .map(|(_, value)| value.clone())
+    }
+
+    /// Admit an acknowledgement this verifier did not read itself, from a source
+    /// that authenticated it under the same root — a retained materialization
+    /// row's activated-ack evidence. Rejects a value that disagrees with its
+    /// reference or with an entry already admitted, so nothing enters the cache
+    /// that reading the object would have refused.
+    pub(crate) fn remember_acknowledgement(
+        &self,
+        reference: &StoreAckRef,
+        value: &StoreAck,
+    ) -> Result<(), StoreProtocolError> {
+        if value.registration != reference.registration
+            || value.sequence != reference.sequence
+            || value.ack_hash() != reference.ack_hash
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store acknowledgement differs from its exact reference".to_string(),
+            ));
+        }
+        let mut acknowledgements = self
+            .acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned");
+        match acknowledgements.get(&reference.object) {
+            Some((cached, cached_value)) if cached == reference && cached_value == value => {}
+            Some(_) => {
+                return Err(StoreProtocolError::Malformed(
+                    "one exact Store acknowledgement object produced different values".to_string(),
+                ))
+            }
+            None => {
+                acknowledgements
+                    .insert(reference.object.clone(), (reference.clone(), value.clone()));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn load_store_ack(
         &self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
+    ) -> Result<StoreAck, StoreObjectError> {
         let registration_matches = reference.registration.device_id == registration.device_id
             && reference.registration.registration_hash == registration.registration_hash();
         if registration_matches {
-            let cached = self
-                .acknowledgements
-                .lock()
-                .expect("authenticated acknowledgement cache poisoned")
-                .get(reference)
-                .cloned();
-            if let Some(acknowledgement) = cached {
+            if let Some(acknowledgement) = self.remembered_acknowledgement(reference) {
                 return Ok(acknowledgement);
             }
         }
@@ -42,8 +88,11 @@ impl<'a> StoreCommitVerifier<'a> {
         self.acknowledgements
             .lock()
             .expect("authenticated acknowledgement cache poisoned")
-            .insert(reference.clone(), acknowledgement.clone());
-        Ok(acknowledgement)
+            .insert(
+                reference.object.clone(),
+                (reference.clone(), acknowledgement.value.clone()),
+            );
+        Ok(acknowledgement.value)
     }
 
     pub(crate) async fn predecessor_activates_acknowledgement(
@@ -98,6 +147,15 @@ impl<'a> StoreCommitVerifier<'a> {
                 )),
             });
         }
+        let cached = self
+            .snapshots
+            .lock()
+            .expect("authenticated snapshot cache poisoned")
+            .get(reference)
+            .cloned();
+        if let Some(metadata) = cached {
+            return Ok((reference.clone(), metadata));
+        }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
@@ -123,6 +181,10 @@ impl<'a> StoreCommitVerifier<'a> {
                 },
             )
             .await?;
+        self.snapshots
+            .lock()
+            .expect("authenticated snapshot cache poisoned")
+            .insert(reference.clone(), opened.value.clone());
         Ok((reference.clone(), opened.value))
     }
 
@@ -322,12 +384,18 @@ impl<'a> StoreCommitVerifier<'a> {
         })
     }
 
+    /// The acknowledgement one sequence below `successor`, from the cache when
+    /// this verifier already holds it and from the provider otherwise.
+    ///
+    /// Consulting the cache here is what keeps a chain walk from re-reading the
+    /// whole history: every ack a walk passes through is remembered, so a later
+    /// walk over an overlapping prefix stops at the first entry it already has.
     pub(crate) async fn load_store_ack_predecessor(
         &self,
         successor_ref: &StoreAckRef,
         successor: &StoreAck,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Option<(StoreAckRef, VerifiedObject<StoreAck>)>, StoreObjectError> {
+    ) -> Result<Option<(StoreAckRef, StoreAck)>, StoreObjectError> {
         if successor.registration != successor_ref.registration
             || successor.sequence != successor_ref.sequence
         {
@@ -354,6 +422,26 @@ impl<'a> StoreCommitVerifier<'a> {
                     key: object.slot().logical_key().to_string(),
                     source: Box::new(StoreProtocolError::InvalidAckSequence(0)),
                 })?;
+        let cached = self
+            .acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned")
+            .get(object)
+            .cloned();
+        if let Some((reference, value)) = cached {
+            if reference.registration != successor_ref.registration
+                || reference.sequence != sequence
+            {
+                return Err(StoreObjectError::InvalidObject {
+                    semantic_prefix: ack_slot_prefix(&registration.device_id.to_string(), sequence),
+                    key: object.slot().logical_key().to_string(),
+                    source: Box::new(StoreProtocolError::Malformed(
+                        "remembered Store acknowledgement differs from its successor".to_string(),
+                    )),
+                });
+            }
+            return Ok(Some((reference, value)));
+        }
         let context = ProtocolObjectContext::signed_plaintext(
             self.root.reference().store_root_hash,
             ProtocolObjectDomain::StoreAck,
@@ -382,15 +470,11 @@ impl<'a> StoreCommitVerifier<'a> {
                 key: object.slot().logical_key().to_string(),
                 source: Box::new(source),
             })?;
-        Ok(Some((
-            reference.clone(),
-            VerifiedObject {
-                value,
-                bytes,
-                semantic_hash: reference.ack_hash,
-                object: reference.object.clone(),
-            },
-        )))
+        self.acknowledgements
+            .lock()
+            .expect("authenticated acknowledgement cache poisoned")
+            .insert(reference.object.clone(), (reference.clone(), value.clone()));
+        Ok(Some((reference, value)))
     }
 
     pub(crate) async fn load_owner_recovery_node(

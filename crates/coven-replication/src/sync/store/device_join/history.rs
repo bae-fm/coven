@@ -50,7 +50,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         &self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<coven_protocol::objects::VerifiedObject<StoreAck>, StoreObjectError> {
+    ) -> Result<StoreAck, StoreObjectError> {
         self.history.load_store_ack(reference, registration).await
     }
 

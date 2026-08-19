@@ -284,7 +284,6 @@ impl<'a> MergeHistoryVerifier<'a> {
                 commits: BTreeMap::new(),
             },
             verified_memberships: Vec::new(),
-            verified_acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -348,8 +347,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let ack = self
             .load_store_ack(reference, activating_author)
             .await
-            .map_err(RegistrationLoadError::Object)?
-            .value;
+            .map_err(RegistrationLoadError::Object)?;
         let predecessor_cut = commit
             .order
             .predecessor_cut()
@@ -426,6 +424,19 @@ impl<'a> MergeHistoryVerifier<'a> {
             self.commit_verifier
                 .remember(materialization.verified_commit().clone())
                 .map_err(StorePullError::Protocol)?;
+            // The acknowledgement a commit activates, and every ack behind it in
+            // that proof chain. On a store with one device this is almost always
+            // absent and cost nothing to re-read; with two devices each side
+            // acknowledges the other's commits, so nearly every retained commit
+            // carried one and the pull paid a provider read per commit for acks
+            // whose whole verified chain was sitting in the row beside it.
+            if let Some(acknowledgement) = &materialization.history_evidence().acknowledgement {
+                for (reference, value) in acknowledgement.chain.values() {
+                    self.commit_verifier
+                        .remember_acknowledgement(reference, value)
+                        .map_err(StorePullError::Protocol)?;
+                }
+            }
             let head = materialization.activation_head();
             let head_ref = StoreDeviceHeadRef {
                 head_hash: head.head_hash(),
@@ -858,10 +869,6 @@ pub struct MergeHistoryVerifier<'a> {
     founder: VerifiedObject<StoreDeviceRegistration>,
     history: VerifiedMergeHistory,
     verified_memberships: Vec<VerifiedMembershipChain>,
-    /// Exact acknowledgement objects already authenticated under this
-    /// verifier's Store root and registration. Retained commits share long
-    /// prefixes, so walking each proof back to sequence one must reuse them.
-    verified_acknowledgements: std::sync::Mutex<BTreeMap<ExactObjectRef, (StoreAckRef, StoreAck)>>,
 }
 
 type PredecessorCommitPredicate<'a> = Box<dyn FnMut(&VerifiedStoreBatchCommit) -> bool + Send + 'a>;

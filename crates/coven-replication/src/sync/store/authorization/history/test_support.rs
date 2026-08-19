@@ -263,8 +263,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(self
             .history_verifier
             .load_store_ack(reference, registration)
-            .await?
-            .value)
+            .await?)
     }
 
     #[cfg(any(test, feature = "test-utils"))]

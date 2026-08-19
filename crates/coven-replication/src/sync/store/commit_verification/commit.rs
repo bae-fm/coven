@@ -103,7 +103,19 @@ pub(crate) struct StoreCommitVerifier<'a> {
     >,
     founder_registration: std::sync::OnceLock<VerifiedObject<StoreDeviceRegistration>>,
     verified_heads: std::sync::Mutex<BTreeMap<StoreDeviceHeadRef, VerifiedObject<StoreDeviceHead>>>,
-    acknowledgements: std::sync::Mutex<BTreeMap<StoreAckRef, VerifiedObject<StoreAck>>>,
+    /// Store acknowledgements authenticated under this verifier's root, keyed by
+    /// the exact object that carries them so both ways of asking reach one
+    /// entry: by reference, which is how a commit names the ack it activates,
+    /// and by the predecessor object a chain walk follows. The reference is kept
+    /// beside the value because a lookup by object still has to confirm it is
+    /// the ack that was asked for.
+    acknowledgements: std::sync::Mutex<BTreeMap<ExactObjectRef, (StoreAckRef, StoreAck)>>,
+    /// Snapshot metadata authenticated under this verifier's root. An
+    /// acknowledgement may name the snapshot it covers, and every commit that
+    /// activates one re-checks that coverage — over a handful of snapshots that
+    /// the whole history keeps naming, so without this the same few objects were
+    /// read once per acknowledging commit.
+    snapshots: std::sync::Mutex<BTreeMap<StoreSnapshotRef, SnapshotMeta>>,
     accepted_announcements:
         BTreeMap<StoreDeviceRegistrationRef, Vec<VerifiedAcceptedStoreAnnouncement>>,
 }
@@ -263,6 +275,7 @@ impl<'a> StoreCommitVerifier<'a> {
             founder_registration: std::sync::OnceLock::new(),
             verified_heads: std::sync::Mutex::new(BTreeMap::new()),
             acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
+            snapshots: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }
     }

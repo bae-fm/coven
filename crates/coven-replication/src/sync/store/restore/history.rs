@@ -31,10 +31,7 @@ impl<'operation, 'storage> RestoreHistory<'operation, 'storage> {
         &self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<
-        coven_protocol::objects::VerifiedObject<StoreAck>,
-        coven_protocol::objects::StoreObjectError,
-    > {
+    ) -> Result<StoreAck, coven_protocol::objects::StoreObjectError> {
         self.history.load_store_ack(reference, registration).await
     }
 

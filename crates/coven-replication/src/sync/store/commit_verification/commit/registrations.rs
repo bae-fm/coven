@@ -227,8 +227,7 @@ impl<'a> StoreCommitVerifier<'a> {
                 .value;
             let initial_ack = self
                 .load_store_ack(&node.readiness.initial_ack, &registration)
-                .await?
-                .value;
+                .await?;
             let origin_matches = matches!(
                 &registration.origin,
                 StoreDeviceRegistrationOrigin::Recovery {

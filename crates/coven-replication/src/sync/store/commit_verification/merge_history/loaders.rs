@@ -19,52 +19,23 @@ impl<'a> MergeHistoryVerifier<'a> {
                     "Store acknowledgement proof chain repeats a sequence".to_string(),
                 ));
             }
-            let Some(predecessor_object) = current.successor.predecessor.as_ref() else {
+            if current.successor.predecessor.is_none() {
                 break;
-            };
-            let cached = self
-                .verified_acknowledgements
-                .lock()
-                .expect("verified acknowledgement cache poisoned")
-                .get(predecessor_object)
-                .cloned();
-            match cached {
-                Some((predecessor_ref, predecessor)) => {
-                    let expected_sequence =
-                        current_ref.sequence.checked_sub(1).ok_or_else(|| {
-                            RegistrationLoadError::Invalid(
-                                "Store acknowledgement predecessor underflows sequence one"
-                                    .to_string(),
-                            )
-                        })?;
-                    if predecessor_ref.object != *predecessor_object
-                        || predecessor_ref.registration != current_ref.registration
-                        || predecessor_ref.sequence != expected_sequence
-                        || predecessor.registration != predecessor_ref.registration
-                        || predecessor.sequence != predecessor_ref.sequence
-                    {
-                        return Err(RegistrationLoadError::Invalid(
-                            "cached Store acknowledgement differs from its successor".to_string(),
-                        ));
-                    }
-                    current_ref = predecessor_ref;
-                    current = predecessor;
-                }
-                None => {
-                    let Some((predecessor_ref, predecessor)) = self
-                        .load_store_ack_predecessor(&current_ref, &current, registration)
-                        .await
-                        .map_err(RegistrationLoadError::Object)?
-                    else {
-                        return Err(RegistrationLoadError::Invalid(
-                            "Store acknowledgement named a predecessor that was not loaded"
-                                .to_string(),
-                        ));
-                    };
-                    current_ref = predecessor_ref;
-                    current = predecessor.value;
-                }
             }
+            // The verifier answers from what it already holds when it can, so a
+            // walk over a prefix another walk covered stops at the first ack it
+            // has rather than reading the rest again.
+            let Some((predecessor_ref, predecessor)) = self
+                .load_store_ack_predecessor(&current_ref, &current, registration)
+                .await
+                .map_err(RegistrationLoadError::Object)?
+            else {
+                return Err(RegistrationLoadError::Invalid(
+                    "Store acknowledgement named a predecessor that was not loaded".to_string(),
+                ));
+            };
+            current_ref = predecessor_ref;
+            current = predecessor;
         }
         if chain.first_key_value().map(|(sequence, _)| *sequence) != Some(1)
             || chain.last_key_value().map(|(sequence, _)| *sequence) != Some(chain.len() as u64)
@@ -73,12 +44,11 @@ impl<'a> MergeHistoryVerifier<'a> {
                 "Store acknowledgement proof chain is not contiguous from sequence one".to_string(),
             ));
         }
-        self.verified_acknowledgements
-            .lock()
-            .expect("verified acknowledgement cache poisoned")
-            .extend(chain.values().map(|(reference, value)| {
-                (reference.object.clone(), (reference.clone(), value.clone()))
-            }));
+        for (reference, value) in chain.values() {
+            self.commit_verifier
+                .remember_acknowledgement(reference, value)
+                .map_err(RegistrationLoadError::from)?;
+        }
         Ok(chain)
     }
 
@@ -251,7 +221,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         &self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
+    ) -> Result<StoreAck, StoreObjectError> {
         self.commit_verifier
             .load_store_ack(reference, registration)
             .await
@@ -262,7 +232,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         successor_ref: &StoreAckRef,
         successor: &StoreAck,
         registration: &StoreDeviceRegistration,
-    ) -> Result<Option<(StoreAckRef, VerifiedObject<StoreAck>)>, StoreObjectError> {
+    ) -> Result<Option<(StoreAckRef, StoreAck)>, StoreObjectError> {
         self.commit_verifier
             .load_store_ack_predecessor(successor_ref, successor, registration)
             .await

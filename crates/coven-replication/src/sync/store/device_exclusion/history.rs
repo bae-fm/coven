@@ -43,8 +43,7 @@ impl<'operation, 'storage> DeviceExclusionHistory<'operation, 'storage> {
         &mut self,
         reference: &StoreAckRef,
         registration: &StoreDeviceRegistration,
-    ) -> Result<coven_protocol::objects::VerifiedObject<StoreAck>, super::StoreDeviceExclusionError>
-    {
+    ) -> Result<StoreAck, super::StoreDeviceExclusionError> {
         self.history
             .load_store_ack(reference, registration)
             .await

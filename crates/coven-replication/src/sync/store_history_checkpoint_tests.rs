@@ -1119,3 +1119,204 @@ async fn a_pull_over_retained_history_still_probes_the_next_announcement_slot() 
         );
     }
 }
+
+/// Two devices, each acknowledging the other's commits.
+///
+/// The single-device fixture above cannot reach this: a lone device publishes an
+/// acknowledgement only now and then, so almost none of its retained commits
+/// activate one. With two devices nearly every commit does, and the retained
+/// path's per-commit cost lives behind exactly that — which is why a fix
+/// measured only against `PublishedHistory` looked complete and was not.
+struct AcknowledgedHistory {
+    db: coven_database::Database,
+    home: std::sync::Arc<coven_storage::cloud::test_utils::InMemoryCloudHome>,
+    device: crate::sync::test_helpers::TestDevice,
+    peer_db: coven_database::Database,
+    peer: crate::sync::test_helpers::TestDevice,
+    /// Held for the fixture's life, not read: the Store outlives every device
+    /// bound against it.
+    _store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+}
+
+impl AcknowledgedHistory {
+    async fn publish(rounds: u64) -> Self {
+        let founder = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let member_pubkey = hex::encode(member.public_key());
+        let store_dir = crate::sync::test_helpers::test_store_dir();
+        let db = crate::sync::test_helpers::open_test_db(store_dir.clone());
+        let home = crate::sync::test_helpers::test_cloud_home();
+        let (store, _storage) = TestStore::create_with_connection(
+            &db,
+            store_dir.clone(),
+            "acknowledged-history",
+            founder.clone(),
+            home.clone(),
+        )
+        .await
+        .expect("create Merge Store");
+        let encryption = coven_keys::encryption::EncryptionService::from_key([42; 32]);
+        store
+            .admit_member(
+                &db,
+                store_dir.clone(),
+                &founder,
+                &member_pubkey,
+                None,
+                coven_protocol::membership::MemberRole::Member,
+                &encryption,
+                "Acknowledged Store",
+            )
+            .await
+            .expect("admit the peer as a Member");
+        let peer_store_dir = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_store_dir.clone());
+        let peer = store
+            .activate_joined_device(
+                &db,
+                store_dir.clone(),
+                &peer_db,
+                peer_store_dir.clone(),
+                &member,
+                "2026-03-01T00:00:45Z",
+            )
+            .await
+            .expect("activate the peer device");
+        let device = store
+            .bind_device_in(&db, store_dir.clone(), &founder)
+            .await
+            .expect("bind the local device");
+
+        let fixture = Self {
+            db,
+            home,
+            device,
+            peer_db,
+            peer,
+            _store: store,
+        };
+        for round in 1..=rounds {
+            fixture.publish_round(round).await;
+        }
+        fixture
+    }
+
+    /// One note from each side, with a cycle each way afterwards so both devices
+    /// see and acknowledge the other's commit.
+    async fn publish_round(&self, round: u64) {
+        HistoryPublisher::new(&self.db, &self.device)
+            .publish_note(round * 2 - 1)
+            .await;
+        self.peer
+            .run_cycle(None)
+            .await
+            .expect("peer pulls and acknowledges");
+        HistoryPublisher::new(&self.peer_db, &self.peer)
+            .publish_note(round * 2)
+            .await;
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("local device pulls and acknowledges");
+    }
+
+    async fn retained_history(&self) -> Vec<coven_database::OwnedVerifiedMergeMaterialization> {
+        self.device
+            .retained_merge_replay_inputs_for_test()
+            .await
+            .expect("load retained verified Merge history")
+    }
+
+    /// Provider reads made by a cycle that has nothing new to do. The first
+    /// settling cycle publishes this device's own acknowledgement of what it
+    /// just pulled; the one measured after that is the steady state.
+    async fn settled_cycle_reads(&self) -> usize {
+        self.device.run_cycle(None).await.expect("settle the cycle");
+        self.home.clear_exact_reads();
+        self.device
+            .run_cycle(None)
+            .await
+            .expect("run a settled cycle");
+        self.home.exact_reads().len()
+    }
+}
+
+/// The across-cycle claim, on the history shape that actually occurs in the
+/// field: a device that has already verified two-device history with
+/// acknowledgement evidence reaches the provider for none of it again.
+#[tokio::test]
+async fn repeat_cycles_over_acknowledged_history_read_none_of_it() {
+    let fixture = AcknowledgedHistory::publish(4).await;
+    let retained = fixture.retained_history().await;
+    assert!(
+        retained
+            .iter()
+            .filter(|entry| entry.history_evidence().acknowledgement.is_some())
+            .count()
+            >= 2,
+        "the fixture must retain commits that activate acknowledgements, or it \
+         cannot exercise the ack path at all",
+    );
+    let retained_slots = retained
+        .iter()
+        .flat_map(|entry| {
+            let mut slots = vec![
+                entry.commit_ref().object.slot().clone(),
+                entry.activation_head_object().slot().clone(),
+            ];
+            if let Some(acknowledgement) = &entry.history_evidence().acknowledgement {
+                slots.extend(
+                    acknowledgement
+                        .chain
+                        .values()
+                        .map(|(reference, _)| reference.object.slot().clone()),
+                );
+            }
+            slots
+        })
+        .collect::<Vec<_>>();
+
+    for cycle in 1..=3 {
+        fixture.home.clear_exact_reads();
+        fixture
+            .device
+            .run_cycle(None)
+            .await
+            .expect("pull acknowledged retained history");
+        let reread = fixture
+            .home
+            .exact_reads()
+            .into_iter()
+            .filter(|slot| retained_slots.contains(slot))
+            .collect::<Vec<_>>();
+        assert!(
+            reread.is_empty(),
+            "cycle {cycle} reread {} retained commit/head/acknowledgement objects it had \
+             already verified: {reread:?}",
+            reread.len(),
+        );
+    }
+}
+
+/// The assertion above names the object kinds a two-device history retains, so
+/// it only catches a re-read of something already thought of. This one does not
+/// look at kinds at all: whatever a settled cycle reads, reading it must not
+/// depend on how much history the device has behind it. A per-commit cost of any
+/// shape shows up here.
+#[tokio::test]
+async fn acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads() {
+    let shallow = AcknowledgedHistory::publish(2)
+        .await
+        .settled_cycle_reads()
+        .await;
+    let deep = AcknowledgedHistory::publish(6)
+        .await
+        .settled_cycle_reads()
+        .await;
+
+    assert_eq!(
+        shallow, deep,
+        "a settled cycle's provider reads grew with two-device history depth: \
+         two rounds read {shallow}, six read {deep}",
+    );
+}

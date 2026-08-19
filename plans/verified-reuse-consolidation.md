@@ -60,6 +60,38 @@ first. That gap is why pull cost keeps returning.
   the provider. That is the boundary working as intended — it separates the
   first verification from the repeat, and only the repeat went away.
 
+- **The two acknowledgement caches are one, and retained acks come from the
+  durable row.** `MergeHistoryVerifier.verified_acknowledgements` is deleted;
+  `StoreCommitVerifier.acknowledgements` is now keyed by the exact object, which
+  is what both ways of asking have in common — by reference, how a commit names
+  the ack it activates, and by predecessor object, how a chain walk steps back.
+  `load_store_ack_predecessor` reads and writes it, so a walk over a prefix
+  another walk covered now stops at the first ack already held. `load_store_ack`
+  returns `StoreAck` rather than a `VerifiedObject` whose bytes only one caller
+  wanted; that caller re-encodes canonically, as the registration check beside it
+  already did.
+
+  This was the live gap, and it is why the previous fix measured clean in a
+  fixture and cost 119-192 s per cycle in the field. A lone device publishes an
+  acknowledgement only occasionally, so almost none of its retained commits
+  activate one; with two devices nearly every commit does, and each named a
+  distinct ack the pull re-read from the provider every cycle. The retained row
+  already carries the whole verified chain in
+  `history_evidence.acknowledgement`, so `admit_retained_history` seeds it.
+
+- **Snapshot metadata has a memo at all now.** `load_store_snapshot` had none, and
+  every commit activating an acknowledgement that names a snapshot re-read it:
+  measured 36 reads of 4 distinct objects on a six-round two-device history, 20
+  on a two-round one. Flat at 10 after, both depths.
+
+- **The test class that catches this shape, not just this instance.**
+  `acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads`
+  asserts a settled cycle's total provider reads are identical at two and six
+  rounds, naming no object kind. The kind-specific assertion beside it passed
+  while the snapshot cost was still there; the depth one caught it. Prefer it
+  when adding coverage here — it is the assertion that does not need the bug to
+  be imagined first.
+
 ## In flight
 - `publish pending writes` measured 25.9 s for one 40-blob release: the
   `prepared_remote_objects` loop writes each object serially. Stage timings
@@ -74,12 +106,6 @@ first. That gap is why pull cost keeps returning.
   each call deserializes and revalidates the entire baseline DB image into a
   fresh in-memory SQLite connection. Same class a00088f8 removed from the
   install path.
-- **Acknowledgements cached twice with disjoint populate paths.**
-  `StoreCommitVerifier.acknowledgements` (keyed `StoreAckRef`, filled only by
-  `load_store_ack`) and `MergeHistoryVerifier.verified_acknowledgements`
-  (keyed `ExactObjectRef`, filled only by `load_acknowledgement_proof_chain`).
-  `load_store_ack_predecessor` — the per-sequence walk — consults neither.
-  One cache should exist.
 - **Founder registration held three ways** in one verifier graph: a
   `OnceLock`, a force-inserted `registrations` entry, and
   `MergeHistoryVerifier.founder`.

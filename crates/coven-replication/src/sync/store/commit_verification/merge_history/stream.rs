@@ -371,8 +371,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 let initial_ack = self
                     .load_store_ack(&node_value.readiness.initial_ack, registration)
                     .await
-                    .map_err(RegistrationLoadError::Object)?
-                    .value;
+                    .map_err(RegistrationLoadError::Object)?;
                 if initial_ack.sequence != 1
                     || initial_ack.successor.predecessor.is_some()
                     || initial_ack.registration != activated.registration

@@ -68,7 +68,7 @@ impl<'storage> RestoringStore<'storage> {
         let chain = history
             .load_acknowledgement_proof_chain(
                 continuation.latest_ack.clone(),
-                latest.value,
+                latest,
                 &registration,
             )
             .await

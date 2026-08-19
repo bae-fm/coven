@@ -303,8 +303,7 @@ impl<'a> StoreCommitVerifier<'a> {
                         let ack = self
                             .load_store_ack(reference, &registration)
                             .await
-                            .map_err(RegistrationLoadError::Object)?
-                            .value;
+                            .map_err(RegistrationLoadError::Object)?;
                         if !self
                             .predecessor_activates_acknowledgement(&commit.order, reference, &ack)
                             .await

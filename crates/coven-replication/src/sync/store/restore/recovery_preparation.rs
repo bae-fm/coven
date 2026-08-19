@@ -444,7 +444,7 @@ impl<'storage> RestoringStore<'storage> {
         let initial_ack = history
             .load_store_ack(&initial_ack_ref, registration.value())
             .await?;
-        if initial_ack.value.store_cut != node.value.readiness.bootstrap_cut {
+        if initial_ack.store_cut != node.value.readiness.bootstrap_cut {
             return Err(StoreRegistrationError::Invalid(
                 "activated Owner recovery acknowledgement differs from its recovery node".into(),
             ));
@@ -485,7 +485,7 @@ impl<'storage> RestoringStore<'storage> {
             )
             .await
             .map_err(StoreObjectError::from)?;
-        if initial_ack_bytes != initial_ack.bytes
+        if initial_ack_bytes != initial_ack.to_bytes()
             || initial_ack_prepared.reference() != &initial_ack_ref.object
         {
             return Err(StoreRegistrationError::Invalid(
@@ -502,7 +502,7 @@ impl<'storage> RestoringStore<'storage> {
                 },
                 initial_ack_ref,
                 coven_protocol::objects::ExactProtocolObject {
-                    value: initial_ack.value,
+                    value: initial_ack,
                     bytes: initial_ack_bytes,
                     prepared: initial_ack_prepared,
                 },

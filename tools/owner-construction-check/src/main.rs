@@ -380,6 +380,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "create",
     ),
     (
+        "crates/coven-replication/src/sync/store_history_checkpoint_tests.rs",
+        "AcknowledgedHistory",
+        "publish",
+    ),
+    (
         "crates/coven/src/coven_tests.rs",
         "RemoteOnlyStoreBlob",
         "create",

@@ -816,7 +816,7 @@ impl<'operation, 'storage> AuthorizedDeviceExclusion<'operation, 'storage> {
                 .device_exclusion_history()
                 .load_acknowledgement(&reference, registration.value())
                 .await?;
-            let proposal_freezes = &acknowledgement.value.exclusions.proposal_freezes;
+            let proposal_freezes = &acknowledgement.exclusions.proposal_freezes;
             let freeze = proposal_freezes
                 .iter()
                 .find(|freeze| freeze.proposal == *proposal_ref)

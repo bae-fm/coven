@@ -635,8 +635,7 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
                 let ack = self
                     .join_history()
                     .load_acknowledgement(&readiness.proof.initial_ack, &registration)
-                    .await?
-                    .value;
+                    .await?;
                 readiness.proof.verify(
                     &attempt_ref,
                     &attempt,
