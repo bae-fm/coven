@@ -67,6 +67,7 @@ pub use successor::MergeHistorySuccessorEvidence;
 pub use successor::PreparedMergeHistorySuccessor;
 pub(crate) use successor::{
     compose_merge_snapshot_history_summary, compose_verified_merge_snapshot_history_summary,
+    validate_composed_snapshot_history_summary,
 };
 #[cfg(test)]
 pub(crate) use successor::{insert_latest_acknowledgement, merge_retained_merge_history};
@@ -159,14 +160,22 @@ impl<'a> MergeHistoryVerifier<'a> {
         activating_commit
             .verify_commit(activating_commit_value)
             .map_err(StorePullError::Protocol)?;
-        let chain = self
-            .load_acknowledgement_proof_chain(reference, value, registration)
-            .await
-            .map_err(StorePullError::from)?;
+        // Only the acknowledgement this commit activated. Its predecessors are
+        // retained beside the commits that activated them, and each
+        // acknowledgement names the object of the one before it, so the chain is
+        // walkable across rows. Walking it here and storing the result made the
+        // row grow with the history in front of it, and cost a provider read per
+        // link at the moment of applying a commit.
+        let object = value.to_bytes();
+        reference
+            .object
+            .verify(&object)
+            .map_err(|error| StorePullError::context("retained acknowledgement object", error))?;
+        StoreAck::parse_at(&object, self.root.reference(), &reference, registration)
+            .map_err(StorePullError::Protocol)?;
         Ok(store_commit::RetainedVerifiedActivatedAck {
-            chain,
+            acknowledgement: (reference, value),
             activating_commit: activating_commit.clone(),
-            activating_commit_value: activating_commit_value.clone(),
         })
     }
 
@@ -424,18 +433,15 @@ impl<'a> MergeHistoryVerifier<'a> {
             self.commit_verifier
                 .remember(materialization.verified_commit().clone())
                 .map_err(StorePullError::Protocol)?;
-            // The acknowledgement a commit activates, and every ack behind it in
-            // that proof chain. On a store with one device this is almost always
-            // absent and cost nothing to re-read; with two devices each side
-            // acknowledges the other's commits, so nearly every retained commit
-            // carried one and the pull paid a provider read per commit for acks
-            // whose whole verified chain was sitting in the row beside it.
-            if let Some(acknowledgement) = &materialization.history_evidence().acknowledgement {
-                for (reference, value) in acknowledgement.chain.values() {
-                    self.commit_verifier
-                        .remember_acknowledgement(reference, value)
-                        .map_err(StorePullError::Protocol)?;
-                }
+            // The one acknowledgement this commit activated. Across the retained
+            // rows that is every acknowledgement the device has made, which is
+            // what the chain walk used to re-read from the provider per commit —
+            // the rows hold it between them rather than each holding all of it.
+            if let Some(activated) = &materialization.history_evidence().acknowledgement {
+                let (reference, value) = activated.acknowledgement();
+                self.commit_verifier
+                    .remember_acknowledgement(reference, value)
+                    .map_err(StorePullError::Protocol)?;
             }
             let head = materialization.activation_head();
             let head_ref = StoreDeviceHeadRef {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::store::commit_verification::merge_history::validate_composed_snapshot_history_summary;
 use crate::sync::store::merge_conflict;
 
 impl<'storage> AuthorizedStoreHistory<'storage> {
@@ -141,7 +142,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         let predecessors = self
             .retained_history_checkpoints(frontier.values().cloned().collect())
             .await?;
-        compose_merge_snapshot_history_summary(
+        let mut summary = compose_merge_snapshot_history_summary(
             root,
             coverage,
             membership,
@@ -149,7 +150,33 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             author_ref,
             author,
             predecessors,
-        )
+        )?;
+        // The fold above sees only the acknowledgements made inside this cut. A
+        // summary has to state each device's chain from sequence one, because a
+        // device restoring from it has no rows to walk — so walk each chain once,
+        // here, where the verifier can.
+        for chain in summary.acknowledgements.values_mut() {
+            let (reference, value) = chain
+                .latest()
+                .ok_or_else(|| {
+                    pull::StorePullError::InvalidState(
+                        "composed acknowledgement chain is empty".to_string(),
+                    )
+                })?
+                .clone();
+            let registration = self
+                .history_verifier
+                .load_registration(&reference.registration)
+                .await
+                .map_err(pull::StorePullError::Object)?;
+            chain.chain = self
+                .history_verifier
+                .load_acknowledgement_proof_chain(reference, value, &registration.value)
+                .await
+                .map_err(pull::StorePullError::from)?;
+        }
+        validate_composed_snapshot_history_summary(&summary, coverage)?;
+        Ok(summary)
     }
 
     pub(crate) async fn retained_history_checkpoints(

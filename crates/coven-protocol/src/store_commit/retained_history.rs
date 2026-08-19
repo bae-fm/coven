@@ -59,9 +59,37 @@ impl MembershipCausalFloor {
     }
 }
 
+/// The acknowledgement one commit activated, retained beside that commit.
+///
+/// One acknowledgement, not the chain behind it. A retained row describes its
+/// own commit, and an acknowledgement's predecessors are described by the rows
+/// that retained *them* — each acknowledgement names its predecessor's object,
+/// so contiguity follows from the rows in the same way a commit's ancestry
+/// follows from the commits, without every row carrying a copy of everything
+/// before it.
+///
+/// Storing the chain here instead made a retained row grow with the history in
+/// front of it: on a two-device store where nearly every commit acknowledges,
+/// the row at sequence N held N acknowledgements, so the table grew with the
+/// square of the history. A field store reached 223 MB over 385 rows, and both
+/// applying a commit and reading the retained rows back paid for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedVerifiedActivatedAck {
+    pub acknowledgement: (StoreAckRef, StoreAck),
+    pub activating_commit: StoreBatchCommitRef,
+}
+
+/// A device's acknowledgement chain, contiguous from sequence one, carried by a
+/// snapshot's portable summary.
+///
+/// This is the one place the whole chain belongs. A device restoring from a
+/// snapshot has no retained rows to walk, so the summary has to state the
+/// contiguity itself; it is folded once per snapshot generation from the rows
+/// the snapshot covers, rather than rebuilt into every row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedAcknowledgementChain {
     #[serde(with = "ordered_map_entries")]
     pub chain: BTreeMap<u64, (StoreAckRef, StoreAck)>,
     pub activating_commit: StoreBatchCommitRef,
@@ -81,7 +109,7 @@ pub struct RetainedReplaySnapshotAuthority {
     #[serde(with = "ordered_map_entries")]
     pub active_registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
     #[serde(with = "ordered_map_entries")]
-    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedVerifiedActivatedAck>,
+    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
 }
 
 impl RetainedReplaySnapshotAuthority {
@@ -216,6 +244,56 @@ fn history_cut_covers_commit(cut: &StoreHistoryCut, reference: &StoreBatchCommit
 }
 
 impl RetainedVerifiedActivatedAck {
+    pub fn acknowledgement(&self) -> &(StoreAckRef, StoreAck) {
+        &self.acknowledgement
+    }
+}
+
+impl RetainedAcknowledgementChain {
+    /// Start a chain from the one acknowledgement a commit activated. Contiguity
+    /// is not claimed yet: [`extend`](Self::extend) adds the rest, and
+    /// [`validate_chain`](Self::validate_chain) is what asserts the result runs
+    /// from sequence one.
+    pub fn activated(
+        activated: &RetainedVerifiedActivatedAck,
+        activating_commit_value: &StoreBatchCommit,
+    ) -> Self {
+        let (reference, value) = activated.acknowledgement.clone();
+        Self {
+            chain: BTreeMap::from([(reference.sequence, (reference, value))]),
+            activating_commit: activated.activating_commit.clone(),
+            activating_commit_value: activating_commit_value.clone(),
+        }
+    }
+
+    /// Fold one more retained acknowledgement in. A sequence already present
+    /// must carry the same acknowledgement — two different ones at one sequence
+    /// is a forked chain, not a longer one. The activating commit tracks the
+    /// highest sequence, which is the one the summary reports.
+    pub fn extend(
+        &mut self,
+        activated: &RetainedVerifiedActivatedAck,
+        activating_commit_value: &StoreBatchCommit,
+    ) -> bool {
+        let (reference, value) = &activated.acknowledgement;
+        match self.chain.get(&reference.sequence) {
+            Some(existing) if existing == &activated.acknowledgement => {}
+            Some(_) => return false,
+            None => {
+                self.chain
+                    .insert(reference.sequence, (reference.clone(), value.clone()));
+            }
+        }
+        if self
+            .latest()
+            .is_some_and(|(latest, _)| latest.sequence == reference.sequence)
+        {
+            self.activating_commit = activated.activating_commit.clone();
+            self.activating_commit_value = activating_commit_value.clone();
+        }
+        true
+    }
+
     pub fn latest(&self) -> Option<&(StoreAckRef, StoreAck)> {
         self.chain
             .last_key_value()
@@ -308,14 +386,8 @@ impl RetainedMergeCommitEvidence {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
         if let Some(acknowledgement) = &self.acknowledgement {
-            let (reference, _) = acknowledgement
-                .latest()
-                .ok_or(StoreProtocolError::DeviceStateMismatch)?;
-            acknowledgement
-                .activating_commit
-                .verify_commit(&acknowledgement.activating_commit_value)?;
+            let (reference, _) = acknowledgement.acknowledgement();
             if acknowledgement.activating_commit != *commit_ref
-                || acknowledgement.activating_commit_value != *commit
                 || commit.acknowledgement() != Some(reference)
             {
                 return Err(StoreProtocolError::DeviceStateMismatch);
@@ -388,7 +460,7 @@ pub struct RetainedVerifiedMergeHistorySummary {
     #[serde(with = "ordered_map_entries")]
     pub registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
     #[serde(with = "ordered_map_entries")]
-    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedVerifiedActivatedAck>,
+    pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
     #[serde(with = "ordered_map_entries")]
     pub membership_proofs: BTreeMap<StoreBatchCommitRef, RetainedMergeMembershipProof>,
     #[serde(with = "ordered_map_entries")]

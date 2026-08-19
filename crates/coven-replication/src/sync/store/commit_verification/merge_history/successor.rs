@@ -44,10 +44,13 @@ where
     }
 }
 
+/// Merge one predecessor summary's acknowledgement chain for a device into the
+/// chain being composed. Two chains for one device must agree — one extending
+/// the other is a longer view of the same history; anything else is a fork.
 pub(crate) fn insert_latest_acknowledgement(
-    target: &mut BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedVerifiedActivatedAck>,
+    target: &mut BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedAcknowledgementChain>,
     device_id: store_commit::StoreDeviceId,
-    value: store_commit::RetainedVerifiedActivatedAck,
+    value: store_commit::RetainedAcknowledgementChain,
 ) -> Result<(), StorePullError> {
     match target.entry(device_id) {
         std::collections::btree_map::Entry::Vacant(entry) => {
@@ -69,6 +72,40 @@ pub(crate) fn insert_latest_acknowledgement(
         std::collections::btree_map::Entry::Occupied(_) => Err(StorePullError::InvalidState(
             "Merge predecessor checkpoints contain forked acknowledgement proof chains".to_string(),
         )),
+    }
+}
+
+/// Fold the one acknowledgement a retained commit activated into the chain being
+/// composed for its device.
+///
+/// The rows in a cut carry the acknowledgements made within it, which is enough
+/// to identify each device's latest — but not enough to reach sequence one when
+/// the cut starts above it. A summary states contiguity, so the caller completes
+/// each chain by walking it from the latest entry this fold found.
+pub(crate) fn extend_acknowledgement_chain(
+    target: &mut BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedAcknowledgementChain>,
+    device_id: store_commit::StoreDeviceId,
+    activated: &store_commit::RetainedVerifiedActivatedAck,
+    activating_commit_value: &store_commit::StoreBatchCommit,
+) -> Result<(), StorePullError> {
+    let extended = match target.entry(device_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(store_commit::RetainedAcknowledgementChain::activated(
+                activated,
+                activating_commit_value,
+            ));
+            true
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().extend(activated, activating_commit_value)
+        }
+    };
+    if extended {
+        Ok(())
+    } else {
+        Err(StorePullError::InvalidState(
+            "retained acknowledgements fork at one sequence".to_string(),
+        ))
     }
 }
 
@@ -108,7 +145,7 @@ pub(crate) struct MergedRetainedMergeHistory {
     causal_cut: BTreeMap<StoreCommitCoord, StoreBatchCommitRef>,
     registrations: BTreeMap<store_commit::StoreDeviceId, ReferencedStoreDeviceRegistration>,
     acknowledgements:
-        BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedVerifiedActivatedAck>,
+        BTreeMap<store_commit::StoreDeviceId, store_commit::RetainedAcknowledgementChain>,
     membership_proofs: BTreeMap<StoreBatchCommitRef, store_commit::RetainedMergeMembershipProof>,
     announcement_frontier: BTreeMap<
         protocol_membership::AuthorStreamId,
@@ -287,14 +324,10 @@ pub(crate) fn compose_merge_snapshot_history_summary(
         membership_proofs,
         announcement_frontier,
     };
-    summary
-        .validate_snapshot_baseline()
-        .map_err(StorePullError::Protocol)?;
-    if summary.frontier().map_err(StorePullError::Protocol)? != *frontier {
-        return Err(StorePullError::InvalidState(
-            "Merge snapshot history does not exactly cover its signed frontier".to_string(),
-        ));
-    }
+    // Assembled, not yet valid — see
+    // `validate_composed_snapshot_history_summary`, which the caller runs once
+    // each device's acknowledgement chain has been walked back to sequence one.
+    let _ = frontier;
     Ok(summary)
 }
 
@@ -341,20 +374,12 @@ fn insert_snapshot_commit(
         "retained Merge commit author conflicts with retained authority",
     )?;
     if let Some(acknowledgement) = &evidence.acknowledgement {
-        let device_id = acknowledgement
-            .latest()
-            .ok_or_else(|| {
-                StorePullError::InvalidState(
-                    "retained Merge acknowledgement proof is empty".to_string(),
-                )
-            })?
-            .0
-            .registration
-            .device_id;
-        insert_latest_acknowledgement(
+        let device_id = acknowledgement.acknowledgement().0.registration.device_id;
+        extend_acknowledgement_chain(
             &mut merged.acknowledgements,
             device_id,
-            acknowledgement.as_ref().clone(),
+            acknowledgement,
+            commit,
         )?;
     }
     let announcement = store_commit::RetainedAcceptedStoreAnnouncement {
@@ -428,6 +453,18 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
         membership_proofs,
         announcement_frontier,
     };
+    // Assembled, not yet valid: each device's acknowledgement chain still has to
+    // be completed back to sequence one, which needs a walker this function does
+    // not have. `validate_composed_snapshot_history_summary` is the other half
+    // and runs once the caller has completed them.
+    Ok(summary)
+}
+
+/// Check a composed snapshot summary once its acknowledgement chains are whole.
+pub(crate) fn validate_composed_snapshot_history_summary(
+    summary: &RetainedVerifiedMergeHistorySummary,
+    coverage: &CommitFrontier,
+) -> Result<(), StorePullError> {
     summary
         .validate_snapshot_baseline()
         .map_err(StorePullError::Protocol)?;
@@ -436,5 +473,5 @@ pub(crate) fn compose_verified_merge_snapshot_history_summary<'a>(
             "Merge snapshot history does not exactly cover its signed frontier".to_string(),
         ));
     }
-    Ok(summary)
+    Ok(())
 }

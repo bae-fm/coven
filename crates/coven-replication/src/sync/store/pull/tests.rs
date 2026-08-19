@@ -174,7 +174,7 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .retained_merge_history_frontier_for_test(vec![acknowledgement_commit])
         .await
         .expect("open acknowledgement checkpoint");
-    let acknowledgement = retained
+    let acknowledgement = *retained
         .into_iter()
         .find_map(|checkpoint| match checkpoint {
             coven_database::RetainedMergeHistoryCheckpoint::Commit(materialization) => {
@@ -183,11 +183,20 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
             coven_database::RetainedMergeHistoryCheckpoint::Snapshot(_) => None,
         })
         .expect("checkpoint retains its acknowledgement");
-    let mut forged_higher_fork = acknowledgement.clone();
-    let (latest_ref, latest_value) = acknowledgement
-        .latest()
-        .expect("acknowledgement proof chain has a latest entry");
+    // The row carries one acknowledgement; a summary's chain is folded from the
+    // rows. Fold this one, then offer a chain that disagrees with it at the same
+    // sequence — a fork, not a longer view of the same history.
+    let activating_commit_value = device
+        .load_commit_for_test(&acknowledgement.activating_commit)
+        .await
+        .expect("load the commit that activated the acknowledgement");
+    let chain = coven_protocol::store_commit::RetainedAcknowledgementChain::activated(
+        &acknowledgement,
+        &activating_commit_value,
+    );
+    let (latest_ref, latest_value) = acknowledgement.acknowledgement();
     let device_id = latest_ref.registration.device_id;
+    let mut forged_higher_fork = chain.clone();
     let mut forked_at_same_sequence = (latest_ref.clone(), latest_value.clone());
     forked_at_same_sequence.0.ack_hash = ObjectHash::digest(b"forked acknowledgement");
     forged_higher_fork
@@ -201,9 +210,9 @@ async fn retained_checkpoint_merge_rejects_different_sequence_acknowledgement_fo
         .insert(higher_sequence, forked_at_same_sequence);
 
     let mut merged = checkpoint.summary.acknowledgements;
-    insert_latest_acknowledgement(&mut merged, device_id, *acknowledgement)
+    insert_latest_acknowledgement(&mut merged, device_id, chain)
         .expect("first acknowledgement establishes the retained stream");
-    assert!(insert_latest_acknowledgement(&mut merged, device_id, *forged_higher_fork,).is_err());
+    assert!(insert_latest_acknowledgement(&mut merged, device_id, forged_higher_fork).is_err());
 }
 
 #[tokio::test]

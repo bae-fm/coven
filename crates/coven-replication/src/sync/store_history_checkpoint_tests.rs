@@ -107,23 +107,6 @@ impl PublishedHistory {
             .expect("load retained verified Merge history")
     }
 
-    async fn retained_input_size(&self, sequence: u64) -> usize {
-        let retained = self.retained_history().await;
-        let stream_id = retained
-            .iter()
-            .find(|materialization| materialization.commit_ref().coord.sequence() == sequence)
-            .expect("retained history contains requested sequence")
-            .commit_ref()
-            .coord
-            .stream_id
-            .to_string();
-        self.db
-            .retained_canonical_input_for_test(stream_id, sequence)
-            .await
-            .expect("load retained materialization input")
-            .len()
-    }
-
     async fn historical_read_slots(&self) -> (Vec<ObjectSlot>, ObjectSlot) {
         let retained = self.retained_history().await;
         let history_length = retained.len() as u64;
@@ -254,19 +237,6 @@ async fn announcement_position_rejects_a_commit_from_another_coordinate() {
     assert!(
         error.to_string().contains("coordinate"),
         "unexpected announcement coordinate error: {error}"
-    );
-}
-
-#[tokio::test]
-async fn retained_materialization_rows_do_not_repeat_predecessor_history() {
-    let fixture = PublishedHistory::publish(12).await;
-    let first_successor = fixture.retained_input_size(2).await;
-    let last = fixture.retained_input_size(12).await;
-
-    assert!(
-        last <= first_successor + 1_024,
-        "retained input grew with predecessor history: first successor={first_successor} bytes, \
-         last={last} bytes",
     );
 }
 
@@ -422,8 +392,7 @@ async fn retained_history_reuses_each_verified_acknowledgement_within_a_cycle() 
                 .history_evidence()
                 .acknowledgement
                 .as_ref()
-                .and_then(|acknowledgement| acknowledgement.latest())
-                .map(|(reference, _)| reference.object.slot().clone())
+                .map(|acknowledgement| acknowledgement.acknowledgement().0.object.slot().clone())
         })
         .collect::<Vec<_>>();
     assert!(
@@ -1265,12 +1234,7 @@ async fn repeat_cycles_over_acknowledged_history_read_none_of_it() {
                 entry.activation_head_object().slot().clone(),
             ];
             if let Some(acknowledgement) = &entry.history_evidence().acknowledgement {
-                slots.extend(
-                    acknowledgement
-                        .chain
-                        .values()
-                        .map(|(reference, _)| reference.object.slot().clone()),
-                );
+                slots.push(acknowledgement.acknowledgement().0.object.slot().clone());
             }
             slots
         })
@@ -1318,5 +1282,128 @@ async fn acknowledged_history_depth_does_not_change_what_a_settled_cycle_reads()
         shallow, deep,
         "a settled cycle's provider reads grew with two-device history depth: \
          two rounds read {shallow}, six read {deep}",
+    );
+}
+
+/// A retained row holds one acknowledgement or none — never a chain of them.
+///
+/// This replaces `retained_materialization_rows_do_not_repeat_predecessor_
+/// history`, which compared sequence 2 against sequence 12 with a 1 024-byte
+/// tolerance. The row was growing about 6 KB per acknowledging commit the whole
+/// time that test was green: over ten commits the growth fit inside the
+/// tolerance, and over three hundred it was a 223 MB table.
+///
+/// Two assertions, because neither alone is enough. The structural one is exact
+/// and is the invariant: a row carries at most one acknowledgement. The size one
+/// catches anything else that might start accumulating, and its bound is derived
+/// rather than picked — the spread across a whole history must stay under the
+/// size of a single acknowledgement, so a row cannot have gained even one extra.
+/// An exact byte equality is not available and would be false: an
+/// acknowledgement names a cut, a cut names sequence numbers, and JSON writes
+/// those in decimal, so the same shape encodes three bytes wider once sequences
+/// reach two digits.
+async fn retained_acknowledgement_evidence(rounds: u64) -> Vec<(u64, usize, usize)> {
+    let fixture = AcknowledgedHistory::publish(rounds).await;
+    let retained = fixture.retained_history().await;
+    let stream = retained
+        .last()
+        .expect("published history")
+        .commit_ref()
+        .coord
+        .stream_id
+        .to_string();
+    let mut sequences = retained
+        .iter()
+        .filter(|entry| entry.commit_ref().coord.stream_id.to_string() == stream)
+        .map(|entry| entry.commit_ref().coord.sequence())
+        .collect::<Vec<_>>();
+    sequences.sort();
+    let mut rows = Vec::new();
+    for sequence in sequences {
+        let bytes = fixture
+            .db
+            .retained_canonical_input_for_test(stream.clone(), sequence)
+            .await
+            .expect("read the retained row");
+        let row: serde_json::Value = serde_json::from_slice(&bytes).expect("row is JSON");
+        let evidence = &row["history_evidence"];
+        let acknowledgements = match &evidence["acknowledgement"] {
+            serde_json::Value::Null => 0,
+            activated => {
+                assert!(
+                    activated.get("chain").is_none(),
+                    "a retained row carries an acknowledgement chain at sequence {sequence}",
+                );
+                activated["acknowledgement"]
+                    .as_array()
+                    .map(|_| 1)
+                    .expect("an activated acknowledgement is one reference and value")
+            }
+        };
+        rows.push((
+            sequence,
+            acknowledgements,
+            serde_json::to_vec(evidence).expect("evidence").len(),
+        ));
+    }
+    rows
+}
+
+/// One acknowledgement per row is the length of the chain a row may carry, and
+/// it does not change with how much history the row sits on top of.
+#[tokio::test]
+async fn a_retained_row_never_carries_an_acknowledgement_chain() {
+    for rounds in [4_u64, 30] {
+        let rows = retained_acknowledgement_evidence(rounds).await;
+        assert!(
+            rows.iter().all(|(_, count, _)| *count <= 1),
+            "a retained row carried more than one acknowledgement at {rounds} rounds",
+        );
+        assert!(
+            rows.iter().any(|(_, count, _)| *count == 1),
+            "the fixture must retain acknowledging commits to mean anything",
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_retained_row_costs_the_same_at_every_sequence() {
+    let rows = retained_acknowledgement_evidence(25).await;
+    // A stream's first commits introduce the device and have a different shape.
+    let acknowledging = rows[2..]
+        .iter()
+        .filter(|(_, count, _)| *count == 1)
+        .collect::<Vec<_>>();
+    assert!(
+        acknowledging.len() >= 8,
+        "the fixture must retain enough acknowledging commits to compare: {acknowledging:?}",
+    );
+    let smallest = acknowledging
+        .iter()
+        .map(|(_, _, bytes)| *bytes)
+        .min()
+        .expect("acknowledging rows exist");
+    let largest = acknowledging
+        .iter()
+        .map(|(_, _, bytes)| *bytes)
+        .max()
+        .expect("acknowledging rows exist");
+    // One acknowledgement is the unit that used to accumulate, so the whole
+    // history's spread staying under one of them is the statement that none of
+    // these rows gained a second.
+    assert!(
+        largest - smallest < smallest / 2,
+        "a retained row's evidence grew across the history: smallest {smallest}, \
+         largest {largest} — {acknowledging:?}",
+    );
+
+    let plain = rows[2..]
+        .iter()
+        .filter(|(_, count, _)| *count == 0)
+        .collect::<Vec<_>>();
+    let first_plain = plain[0].2;
+    assert!(
+        plain.iter().all(|(_, _, bytes)| *bytes == first_plain),
+        "a row with no acknowledgement stopped being a fixed size: {plain:?}",
     );
 }

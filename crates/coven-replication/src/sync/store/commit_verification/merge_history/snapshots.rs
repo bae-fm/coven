@@ -99,9 +99,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             .verify_snapshot_history_state(frontier, &snapshot.meta.state.membership)
             .await?;
         self.verify_snapshot_authority_with_state(snapshot, state)
+            .await
     }
 
-    fn verify_snapshot_authority_with_state(
+    async fn verify_snapshot_authority_with_state(
         &self,
         snapshot: &coven_database::PublishedStoreSnapshot,
         state: VerifiedMergeSnapshotState,
@@ -126,7 +127,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         if !state.membership.is_owner_now(&author.value().author_pubkey) {
             return Err(StorePullError::SnapshotAuthorNotOwner);
         }
-        let canonical = compose_verified_merge_snapshot_history_summary(
+        let mut canonical = compose_verified_merge_snapshot_history_summary(
             self.root.reference(),
             &snapshot.meta.coverage,
             &state.membership,
@@ -137,6 +138,30 @@ impl<'a> MergeHistoryVerifier<'a> {
                 .commit_refs
                 .iter()
                 .map(|reference| &self.history.commits[reference]),
+        )?;
+        // Complete each chain the same way the publisher did, so the
+        // recomposition is comparable to the summary the snapshot carries.
+        for chain in canonical.acknowledgements.values_mut() {
+            let (reference, value) = chain
+                .latest()
+                .ok_or_else(|| {
+                    StorePullError::InvalidState(
+                        "composed acknowledgement chain is empty".to_string(),
+                    )
+                })?
+                .clone();
+            let registration = self
+                .commit_verifier
+                .load_registration(&reference.registration)
+                .await?;
+            chain.chain = self
+                .load_acknowledgement_proof_chain(reference, value, &registration.value)
+                .await
+                .map_err(StorePullError::from)?;
+        }
+        crate::sync::store::commit_verification::merge_history::validate_composed_snapshot_history_summary(
+            &canonical,
+            &snapshot.meta.coverage,
         )?;
         if snapshot.meta.history_summary != canonical {
             return Err(StorePullError::InvalidState(
@@ -200,26 +225,20 @@ impl<'a> MergeHistoryVerifier<'a> {
         frontier: &BTreeMap<protocol_membership::AuthorStreamId, StoreBatchCommitRef>,
     ) -> Result<Vec<VerifiedActivatedStoreAck>, StorePullError> {
         verified_merge_commit_closure(&self.history.commits, frontier.values().cloned())?;
+        // A retained row carries the one acknowledgement its commit activated, so
+        // a device's chain is assembled here, from every commit in the verified
+        // closure that acknowledged for it. This is the boundary where the whole
+        // chain is wanted — a snapshot's summary states contiguity for devices
+        // that will restore from it and have no rows to walk — and folding it
+        // once here is what lets the rows stay the size of their own commit.
         let mut acknowledgements = Vec::new();
         for (activating_commit, commit) in &self.history.commits {
             let Some((reference, value)) = commit.acknowledgement.as_ref() else {
                 continue;
             };
-            let chain = commit
-                .history_evidence
-                .acknowledgement
-                .as_ref()
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "verified acknowledgement history lacks its exact chain".to_string(),
-                    )
-                })?
-                .chain
-                .clone();
             acknowledgements.push(VerifiedActivatedStoreAck {
                 reference: reference.clone(),
                 value: value.clone(),
-                chain,
                 activating_commit: activating_commit.clone(),
                 activating_commit_value: commit.verified.value().clone(),
             });
@@ -256,9 +275,10 @@ impl<'a> MergeHistoryVerifier<'a> {
             accepted_cut,
             acknowledgements,
         )
+        .await
     }
 
-    fn build_snapshot_stability(
+    async fn build_snapshot_stability(
         &self,
         snapshot: &coven_database::PublishedStoreSnapshot,
         snapshot_cut: StoreHistoryCut,
@@ -289,10 +309,23 @@ impl<'a> MergeHistoryVerifier<'a> {
                     member: registration.value().author_pubkey.clone(),
                     device_id: device_id.to_string(),
                 })?;
+            // The summary a restoring device reads has to state the whole chain,
+            // so it is walked here — once per active device, at the snapshot
+            // boundary — rather than being carried by every retained row. The
+            // walk is served from the acknowledgements this verifier already
+            // holds, which the retained rows seeded.
+            let chain = self
+                .load_acknowledgement_proof_chain(
+                    matching.reference.clone(),
+                    matching.value.clone(),
+                    registration.value(),
+                )
+                .await
+                .map_err(StorePullError::from)?;
             retained_acknowledgements.insert(
                 *device_id,
-                store_commit::RetainedVerifiedActivatedAck {
-                    chain: matching.chain.clone(),
+                store_commit::RetainedAcknowledgementChain {
+                    chain,
                     activating_commit: matching.activating_commit.clone(),
                     activating_commit_value: matching.activating_commit_value.clone(),
                 },
