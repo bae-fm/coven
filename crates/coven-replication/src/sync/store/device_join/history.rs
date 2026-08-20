@@ -160,9 +160,25 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
                 "same-provider device join requires a published Store snapshot".to_string(),
             ));
         }
+        // The joining device installs this image and then materializes the
+        // bootstrap plan on top of it, so the plan's cut has to reach at least
+        // as far as the image does. A snapshot published past the attempt's cut
+        // would hand the joiner rows its plan then disagrees with, which the
+        // installation refuses — so it is never offered in the first place.
+        let bootstrap_frontier = attempt.bootstrap_cut.frontier();
+        let candidates = snapshots
+            .into_iter()
+            .filter(|snapshot| bootstrap_frontier.covers(&snapshot.meta.coverage))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(DeviceJoinError::Store(
+                "same-provider device join has no published Store snapshot within its bootstrap cut"
+                    .to_string(),
+            ));
+        }
         let selected = self
             .history
-            .select_maximal_stable_store_snapshot(snapshots)
+            .select_maximal_stable_store_snapshot(candidates)
             .await
             .map_err(|error| StorePullError::context("verify same-provider join snapshot", error))?
             .ok_or_else(|| {

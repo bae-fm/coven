@@ -3,7 +3,6 @@
 //! These tests run device admission with every cross-device hand-off carried by
 //! the transport's slots, over an in-memory cloud home both sides share.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +68,37 @@ struct TransportFixture {
 
 /// The Dropbox namespace a cross-principal fixture's store lives in.
 const CROSS_PRINCIPAL_NAMESPACE: &str = "transport-shared-namespace";
+
+/// Publish one Store snapshot at the owner's materialized frontier and the
+/// acknowledgement that makes it stable. The coverage is the real frontier, so
+/// a device installing this image installs the rows behind it and owes only the
+/// commits published after it.
+async fn publish_owner_snapshot_on(
+    owner_device: &TestDevice,
+    owner_database: &coven_database::StoreDatabase,
+    root: coven_protocol::store_commit::StoreRootRef,
+    snapshot_dir: &std::path::Path,
+) {
+    let image = owner_database
+        .capture_snapshot_image_for_test(root, snapshot_dir.to_path_buf(), None)
+        .await
+        .expect("create join snapshot");
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        owner_database
+            .materialized_frontier()
+            .await
+            .expect("read the owner's materialized frontier"),
+    )
+    .expect("the owner's frontier is a commit frontier");
+    owner_device
+        .publish_snapshot(image, coverage.clone())
+        .await
+        .expect("publish join snapshot");
+    owner_device
+        .publish_acknowledgement(coverage)
+        .await
+        .expect("publish join snapshot acknowledgement");
+}
 
 impl TransportFixture {
     /// Owner and joiner on one provider account: the admission takes the
@@ -187,20 +217,13 @@ impl TransportFixture {
             .expect("load membership including joiner");
         let tables = test_synced_tables();
         let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
-        let snapshot_path = snapshot_dir.path().to_path_buf();
-        let snapshot = owner_database
-            .capture_snapshot_image_for_test(store.root(), snapshot_path, None)
-            .await
-            .expect("create join snapshot");
-        let snapshot_coverage = coven_protocol::store_commit::CommitFrontier(BTreeMap::new());
-        owner_device
-            .publish_snapshot(snapshot, snapshot_coverage.clone())
-            .await
-            .expect("publish join snapshot");
-        owner_device
-            .publish_acknowledgement(snapshot_coverage)
-            .await
-            .expect("publish join snapshot acknowledgement");
+        publish_owner_snapshot_on(
+            &owner_device,
+            &owner_database,
+            store.root(),
+            snapshot_dir.path(),
+        )
+        .await;
         let owner_store = owner_device;
         let app = tempfile::tempdir().expect("join app directory");
         let layout = coven_foundation::store_dir::StoreLayout::new(app.path());
@@ -243,6 +266,19 @@ impl TransportFixture {
             },
             second_member_pubkey,
         )
+    }
+
+    /// Capture and publish a Store snapshot covering everything the owner has
+    /// materialized, then acknowledge it — the state a joining device finds
+    /// when the owner's snapshot cadence has already run.
+    async fn publish_owner_snapshot(&self) {
+        publish_owner_snapshot_on(
+            &self.owner_store,
+            &self.owner_database,
+            self.owner_test_store.root(),
+            self._snapshot.path(),
+        )
+        .await;
     }
 
     /// Publish one ordinary Store commit of the owner's — a row write, the kind
@@ -1820,4 +1856,83 @@ async fn concurrent_attempts_keep_separate_namespaces() {
     })
     .await
     .expect("concurrent attempts task");
+}
+
+/// The stream and sequence a Store package object's key names, from
+/// `package_semantic_prefix`: `.../packages/{stream}/{sequence}/{hash}`.
+fn store_package_coordinate(logical_key: &str) -> Option<(String, u64)> {
+    let (_, tail) = logical_key.split_once("/packages/")?;
+    let mut parts = tail.split('/');
+    let stream = parts.next()?.to_string();
+    let sequence = parts.next()?.parse::<u64>().ok()?;
+    Some((stream, sequence))
+}
+
+/// A joining device installs the owner's snapshot image and then owes only the
+/// history published after it. The rows behind the coverage came with the
+/// image, so reading a package per covered commit buys nothing — and it is what
+/// made a live join over a hundred commits spend minutes reinstalling history
+/// it already held.
+#[test]
+fn a_join_resolves_only_the_history_its_snapshot_does_not_cover() {
+    on_a_deep_stack(run_a_join_resolves_only_the_history_its_snapshot_does_not_cover);
+}
+
+async fn run_a_join_resolves_only_the_history_its_snapshot_does_not_cover() {
+    let fixture = TransportFixture::build("device-join-snapshot-coverage").await;
+    for index in 0..8 {
+        fixture.publish_owner_row(&format!("covered-{index}")).await;
+    }
+    fixture.publish_owner_snapshot().await;
+    let coverage = fixture
+        .owner_database
+        .latest_local_store_snapshot()
+        .await
+        .expect("read the owner's published snapshot")
+        .expect("the owner published a snapshot")
+        .meta
+        .coverage
+        .commits()
+        .iter()
+        .map(|(stream, reference)| (stream.to_string(), reference.coord.sequence()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        !coverage.is_empty(),
+        "the owner's snapshot has to cover the history it was captured over",
+    );
+    for index in 0..3 {
+        fixture
+            .publish_owner_row(&format!("uncovered-{index}"))
+            .await;
+    }
+
+    let bundle = fixture.begin().await;
+    fixture.home.clear_exact_reads();
+    let cancel = never_cancelled();
+    let joiner = fixture.client();
+    let (config, activation) = tokio::join!(
+        Box::pin(joiner.join_via_transport(&bundle, timing(), no_join_progress(), &cancel)),
+        Box::pin(fixture.drive_owner(&bundle)),
+    );
+    activated(activation);
+    joined(config);
+
+    let package_reads = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter_map(|slot| store_package_coordinate(slot.logical_key()))
+        .collect::<Vec<_>>();
+    let (covered, uncovered): (Vec<_>, Vec<_>) = package_reads
+        .iter()
+        .partition(|(stream, sequence)| coverage.get(stream).is_some_and(|tip| sequence <= tip));
+    assert!(
+        covered.is_empty(),
+        "the join read packages for commits its installed snapshot already covers: \
+         {covered:?} against coverage {coverage:?}",
+    );
+    assert!(
+        !uncovered.is_empty(),
+        "the join read no package at all, so it proves nothing about coverage",
+    );
 }

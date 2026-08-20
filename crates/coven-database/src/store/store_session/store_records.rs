@@ -370,28 +370,7 @@ impl<'store> StoreRecords<'store> {
     pub(super) fn snapshot_coverage_frontier(
         self,
     ) -> Result<coven_protocol::store_commit::CommitFrontier, DbError> {
-        let rows = crate::query_mapped_rows(
-            self.conn,
-            "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )?;
-        let mut frontier = std::collections::BTreeMap::new();
-        for (device_id, sequence, encoded_ref) in rows {
-            let sequence = Database::sequence_from_sqlite(&device_id, sequence)?;
-            let reference = super::materialized_commit_index::parse_stored_commit_ref(
-                &device_id,
-                sequence,
-                &encoded_ref,
-            )?;
-            frontier.insert(device_id, reference);
-        }
+        let frontier = super::materialized_commit_index::snapshot_coverage_on(self.conn)?;
         coven_protocol::store_commit::CommitFrontier::from_refs(frontier)
             .map_err(|error| DbError::context("snapshot coverage frontier", error))
     }

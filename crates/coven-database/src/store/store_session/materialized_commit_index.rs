@@ -453,6 +453,26 @@ pub(crate) fn materialized_frontier_on(
         );
     }
 
+    for (device_id, reference) in snapshot_coverage_on(conn)? {
+        if exclude_device == Some(device_id.as_str()) {
+            continue;
+        }
+        if frontier
+            .get(&device_id)
+            .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
+        {
+            frontier.insert(device_id, reference);
+        }
+    }
+    Ok(frontier)
+}
+
+/// The exact commit each stream's installed snapshot image reaches. The image
+/// records one tip per stream and nothing below it, so this is the whole of
+/// what a snapshot says it materialized.
+pub(crate) fn snapshot_coverage_on(
+    conn: &Connection,
+) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
     let rows = query_mapped_rows(
         conn,
         "SELECT device_id, seq, commit_ref FROM snapshot_coverage",
@@ -465,20 +485,13 @@ pub(crate) fn materialized_frontier_on(
             ))
         },
     )?;
+    let mut coverage = BTreeMap::new();
     for (device_id, seq, reference) in rows {
-        if exclude_device == Some(device_id.as_str()) {
-            continue;
-        }
         let seq = Database::sequence_from_sqlite(&device_id, seq)?;
         let reference = parse_stored_commit_ref(&device_id, seq, &reference)?;
-        if frontier
-            .get(&device_id)
-            .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
-        {
-            frontier.insert(device_id, reference);
-        }
+        coverage.insert(device_id, reference);
     }
-    Ok(frontier)
+    Ok(coverage)
 }
 
 pub(crate) fn parse_stored_commit_ref(
