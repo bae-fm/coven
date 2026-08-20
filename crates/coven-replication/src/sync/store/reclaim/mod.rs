@@ -1,4 +1,85 @@
 //! Proof-gated deletion of exact Store packages covered by exact authority.
+//!
+//! # Which devices have to acknowledge a snapshot before reclaim deletes behind it
+//!
+//! Reclaim deletes the Store packages attached to commits at or behind a
+//! snapshot's coverage. The commit announcements stay; only the row payload
+//! goes. A device that has not yet materialized such a commit needs that
+//! package to materialize it — unless it installs the snapshot image instead,
+//! which already holds those rows. So the bar is: delete only what no current
+//! member could still need to fetch. A device proves it needs nothing behind
+//! the snapshot by having already materialized past the snapshot's coverage.
+//!
+//! The proof is an activated acknowledgement naming the snapshot exactly,
+//! stating the snapshot's device state, and whose store cut covers the
+//! snapshot's coverage. That last clause is the whole content: it says the
+//! device stands at or past the coverage, and a device never moves backwards.
+//!
+//! ## The eligible set
+//!
+//! A snapshot `S` is reclaimable when every device in
+//!
+//! ```text
+//!   { d : d is Active in the CURRENT device state
+//!         and d is Active in the device state resolved at S's coverage }
+//! ```
+//!
+//! has supplied that proof. Membership is decided by two device states, not
+//! one, and each conjunct rules out a shape that can never supply a proof and
+//! never needs to.
+//!
+//! A device excluded after S's coverage is out. It was Active at S's coverage,
+//! so the coverage-time state alone would demand its acknowledgement — but it
+//! was excluded afterwards and will never publish again. An excluded device is
+//! not a member: it cannot pull, cannot publish, and cannot re-enter except
+//! through a fresh join, which bootstraps from a snapshot image at or past S.
+//! There is no history behind S it could still fetch, so requiring its
+//! signature demands a signature that can never exist. This is the shape that
+//! blocks a store permanently — after any exclusion that postdates a snapshot's
+//! coverage, that snapshot and every earlier one become unreclaimable forever.
+//!
+//! A device that joined after S's coverage is also out, and this one the
+//! coverage-time state already handles, since it is absent there. It is worth
+//! stating anyway, because the reason is not that the device is new: it is that
+//! a join installs a snapshot image and materializes only the history past it,
+//! so the device stands at or past S's coverage before it is ever active. It is
+//! already in the position an acknowledgement would have proved.
+//!
+//! A device active at S's coverage and active now is in, with no relaxation. It
+//! may have been idle since; it may hold nothing past S's coverage at all. It
+//! is a current member that could still need what is behind S. It acknowledges,
+//! or the snapshot is not reclaimable.
+//!
+//! ## What the joined-after leg rests on
+//!
+//! That leg assumes the snapshot a join installs has coverage at or past S's.
+//! A join selects the maximal installable snapshot within its bootstrap cut, so
+//! it normally lands on S or later. It does not have to: if S is rejected as
+//! uninstallable the join falls back to an older generation, and Store snapshot
+//! images are never themselves reclaimed, so an older generation stays
+//! selectable indefinitely. A join that falls back below S's coverage then
+//! needs packages reclaim has already deleted, and cannot complete. The hazard
+//! is not introduced by this set — it is there today — but the leg is only as
+//! sound as it is.
+//!
+//! ## Deliberately not part of the rule
+//!
+//! An acknowledgement of a later snapshot whose coverage is at or past S's
+//! proves the same thing as an acknowledgement of S, but the match is by exact
+//! snapshot reference, so it does not count for S. Accepting it would decouple
+//! reclaim from acknowledgement timing. It is left out because reclaim already
+//! selects the maximal acknowledged snapshot: if every device acknowledged that
+//! later snapshot, that is what gets selected and reclaim proceeds past S
+//! anyway. The narrowing would only ever matter for reclaiming S's own image,
+//! which nothing reclaims.
+//!
+//! ## Where the implementation is stricter than this
+//!
+//! The unanimity walk in `verify_snapshot_stability` reads its device set from
+//! the state resolved at the snapshot's coverage and consults no other. It
+//! therefore still demands an acknowledgement from a device excluded after that
+//! coverage, which is the first case above. Correcting it means intersecting
+//! with the current device state at that walk.
 
 use coven_database::StoreReclaimJournalError;
 use std::sync::Arc;
