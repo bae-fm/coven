@@ -156,6 +156,19 @@ pub enum KeyError {
          team must omit the entitlement and will hit this same error on first key use"
     )]
     MissingKeychainEntitlement,
+    /// The OS refused this keychain operation with `errSecInteractionNotAllowed`
+    /// (OSStatus -25308): the keychain is locked, the display is asleep, or the
+    /// login session cannot show UI. Nothing is wrong with the entry or with
+    /// this process's entitlements — the same operation succeeds once the
+    /// session unlocks, so a caller that needs the key should say so and try
+    /// again rather than treat the store as broken or the key as absent.
+    #[error(
+        "the OS refused this keychain operation with errSecInteractionNotAllowed \
+         (OSStatus -25308): the keychain is locked, the display is asleep, or this \
+         login session cannot show UI — the same operation succeeds once the session \
+         unlocks, so retry it then rather than treating the key as missing"
+    )]
+    KeychainTemporarilyUnavailable,
 }
 
 /// Credentials for the cloud home, stored as a single JSON keyring entry.

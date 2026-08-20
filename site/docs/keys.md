@@ -272,6 +272,15 @@ nothing alike:
   omitting it degrades to the first failure mode (a clear, typed error on
   first key use) instead of a launch-time kill with no diagnostic.
 
+A third refusal has nothing to do with signing: while the keychain is locked,
+the display is asleep, or the login session cannot show UI, the OS answers
+`errSecInteractionNotAllowed` (OSStatus -25308). coven surfaces that as
+[`KeyError::KeychainTemporarilyUnavailable`](rustdoc:enum:coven::KeyError),
+separate from every other keyring failure, because the entry is there and the
+same read succeeds after the session unlocks. A host that reads a key during
+startup should say the device is locked and ask again, not treat the key as
+absent and establish a second one.
+
 A plain `cargo test` binary can never carry a provisioning profile (Apple
 doesn't code-sign `cargo test` harnesses), so it can never reach the real
 data-protection keychain — this is a platform limitation, not a coven gap.

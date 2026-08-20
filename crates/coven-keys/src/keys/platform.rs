@@ -193,10 +193,22 @@ fn registered_keyring() -> Result<&'static KeyringService, KeyError> {
     KEYRING_SERVICE.get().ok_or(KeyError::ServiceNotRegistered)
 }
 
+/// The process has no keychain-access-groups entitlement behind a provisioning
+/// profile. Nothing the caller does at runtime changes this.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
+/// The OS refused to let this process touch the keychain right now — the
+/// keychain is locked, the display is asleep, or the login session cannot show
+/// UI. The same operation succeeds once the session unlocks.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
+
 fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    if is_missing_keychain_entitlement(&e) {
-        return KeyError::MissingKeychainEntitlement;
+    match keychain_os_status(&e) {
+        Some(ERR_SEC_MISSING_ENTITLEMENT) => return KeyError::MissingKeychainEntitlement,
+        Some(ERR_SEC_INTERACTION_NOT_ALLOWED) => return KeyError::KeychainTemporarilyUnavailable,
+        _ => {}
     }
     match e {
         keyring_core::Error::NoDefaultStore => KeyError::StoreNotInstalled,
@@ -204,8 +216,10 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
     }
 }
 
-/// `errSecMissingEntitlement` (OSStatus -34018) arrives from
-/// `apple-native-keyring-store`'s `protected::decode_error` as
+/// The OSStatus behind a Keychain refusal, when there is one.
+///
+/// `apple-native-keyring-store`'s `protected::decode_error` reports every
+/// OSStatus it has no dedicated `keyring_core::Error` variant for as
 /// `keyring_core::Error::PlatformFailure`, whose payload is a
 /// `Box<dyn std::error::Error + Send + Sync>` — the OSStatus is not exposed as
 /// a field on `keyring_core::Error` itself. The box's concrete type is always
@@ -215,13 +229,13 @@ fn map_keyring_error(e: keyring_core::Error) -> KeyError {
 /// recovers it and `.code()` reads the real OSStatus — a structured match, not
 /// a string search over the formatted error.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn is_missing_keychain_entitlement(e: &keyring_core::Error) -> bool {
+fn keychain_os_status(e: &keyring_core::Error) -> Option<i32> {
     let keyring_core::Error::PlatformFailure(inner) = e else {
-        return false;
+        return None;
     };
     inner
         .downcast_ref::<security_framework::base::Error>()
-        .is_some_and(|err| err.code() == -34018)
+        .map(|err| err.code())
 }
 
 /// The base account name [`KeyringSlot::DeviceSigningKey`] renders as

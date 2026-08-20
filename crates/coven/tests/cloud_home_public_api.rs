@@ -93,6 +93,15 @@ fn external_host_can_read_cloud_home_key_state(
     handle.cloud_home_key_state(storage)
 }
 
+/// A host that asks for the cloud home key state has to tell a keychain that
+/// refused right now — locked, display asleep, no UI session — apart from a
+/// store that never held a key and from every other keyring failure, so it can
+/// ask again after unlock instead of aborting its boot. That decision is a
+/// match on a variant, not a search through a message.
+fn external_host_can_tell_a_keychain_refusal_apart(error: &coven::KeyError) -> bool {
+    matches!(error, coven::KeyError::KeychainTemporarilyUnavailable)
+}
+
 fn external_host_can_classify_cloud_home_setup(
     error: &coven::CloudHomeSetupError,
 ) -> coven::CloudHomeSetupFailure {
@@ -114,6 +123,7 @@ fn external_host_can_name_cloud_home_probe_surface() {
     #[cfg(feature = "oauth-providers")]
     let _ = external_host_can_setup_oauth;
     let _ = external_host_can_read_cloud_home_key_state;
+    let _ = external_host_can_tell_a_keychain_refusal_apart;
     let _ = external_host_can_classify_cloud_home_setup;
 }
 
