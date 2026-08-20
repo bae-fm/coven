@@ -360,8 +360,8 @@ impl StoreRecords<'_> {
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         // Capturing the baseline copies the whole store: the open database is
         // serialized, hashed, compressed and written as a payload, then read
-        // back and compared. Each of those is a pass over the image, so they
-        // are named apart rather than as one number that only says "big store".
+        // back. Each of those is a pass over the image, so they are named apart
+        // rather than as one number that only says "big store".
         let mut timings =
             coven_foundation::stage_timing::StageTimings::start("Retained replay baseline capture");
         let image_bytes = timings.mark("serialize the image", || {
@@ -393,47 +393,51 @@ impl StoreRecords<'_> {
             baseline,
             image_bytes,
         } = prepared;
-        self.validate_replay_authority(&baseline)?;
-        let installed_image_hash = timings.mark("store the image payload", || {
+        // The baseline's authority is not checked here. Both callers validate
+        // the image they are about to install immediately before calling this,
+        // and `validate_open_image` ends by validating the authority against
+        // that image — so a check here would be the same check on the same
+        // baseline a moment later. It is not free: for an installed snapshot
+        // the authority carries the signed snapshot metadata and every active
+        // device's registration, and validating it verifies all of those
+        // signatures.
+        timings.mark("store the image payload", || {
             self.install_payload(&image_bytes)
+                .map(drop)
                 .map_err(|error| DbError::context("install retained replay image", error))
         })?;
-        if installed_image_hash != baseline.image_payload_hash {
-            return Err(DbError::Message(
-                "installed retained replay image has a different content address".to_string(),
-            ));
-        }
-        let (authority_bytes, authority_hash) =
-            timings.mark("store the authority payload", || {
-                let authority_bytes = baseline.canonical_authority_bytes()?;
-                let authority_hash = self.install_payload(&authority_bytes).map_err(|error| {
-                    DbError::context("install retained replay authority", error)
-                })?;
-                self.insert_retained_replay_baseline_row(&baseline, authority_hash)?;
-                Ok::<_, DbError>((authority_bytes, authority_hash))
-            })?;
-        let installed_image = timings.mark("read back the image payload", || {
-            self.verified_payload(installed_image_hash)
+        timings.mark("store the authority payload", || {
+            let authority_hash = self
+                .install_payload(&baseline.canonical_authority_bytes()?)
+                .map_err(|error| DbError::context("install retained replay authority", error))?;
+            self.insert_retained_replay_baseline_row(&baseline, authority_hash)
+        })?;
+        // Read the image back at the address the row now names, after the row
+        // exists, because this is the last moment the bad state is still
+        // preventable. A baseline is what replay rewinds to; commit one whose
+        // image will not open and the device has recorded a recovery point it
+        // cannot recover from and cannot re-take, since the state the image
+        // described is what replay was going to restore. Every later reader
+        // does check this address, but by then the only answer left is that
+        // the baseline is gone. Content addressing alone is not the argument
+        // for reading here — being before the commit is.
+        //
+        // The bytes are not compared to the ones written: `verified_payload`
+        // has already established that what came back hashes to the address
+        // asked for, and that address is the digest of those bytes.
+        timings.mark("read back the image payload", || {
+            self.verified_payload(baseline.image_payload_hash)
+                .map(drop)
                 .map_err(|error| DbError::context("read installed retained replay image", error))
         })?;
-        if installed_image != image_bytes {
-            return Err(DbError::Message(
-                "installed retained replay image differs from its prepared bytes".to_string(),
-            ));
-        }
-        let installed_authority = self
-            .verified_payload(authority_hash)
-            .map_err(|error| DbError::context("read installed retained replay authority", error))?;
-        if installed_authority != authority_bytes {
-            return Err(DbError::Message(
-                "installed retained replay authority differs from its canonical bytes".to_string(),
-            ));
-        }
-        let installed = crate::store::retained_replay::load_replay_baseline_metadata_on(self)?
-            .ok_or_else(|| {
-                DbError::Message("installed retained replay baseline is absent".to_string())
-            })?;
-        self.validate_replay_authority(&installed)?;
+        // The authority payload needs no read of its own: loading the row back
+        // opens it through the same content-addressed path, and then parses and
+        // re-serializes it to confirm it is canonical.
+        let installed = timings.mark("read back the baseline row", || {
+            crate::store::retained_replay::load_replay_baseline_metadata_on(self)?.ok_or_else(
+                || DbError::Message("installed retained replay baseline is absent".to_string()),
+            )
+        })?;
         if installed != baseline {
             return Err(DbError::Message(
                 "installed retained replay baseline differs from its verified image".to_string(),
