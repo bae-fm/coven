@@ -143,6 +143,49 @@ fn missing_entitlement_os_status_maps_to_a_typed_actionable_error() {
     );
 }
 
+/// The mirror of the test above for the refusal a running device actually
+/// meets: `errSecInteractionNotAllowed` (OSStatus -25308), which the keychain
+/// returns while it is locked, while the display sleeps, or from a login
+/// session that cannot show UI. Callers have to tell that apart from "no key
+/// was ever stored" — the key is there and the read succeeds after the session
+/// unlocks — so it gets its own variant rather than the generic bucket.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[test]
+fn interaction_not_allowed_os_status_maps_to_a_typed_retryable_error() {
+    let raw = keyring_core::Error::PlatformFailure(Box::new(
+        security_framework::base::Error::from_code(-25308),
+    ));
+
+    let mapped = map_keyring_error(raw);
+
+    assert!(
+        matches!(mapped, KeyError::KeychainTemporarilyUnavailable),
+        "got {mapped:?}"
+    );
+    let message = mapped.to_string();
+    assert!(message.contains("-25308"), "{message}");
+    assert!(message.contains("errSecInteractionNotAllowed"), "{message}");
+    assert!(message.contains("unlocks"), "{message}");
+}
+
+/// A refusal is not absence. `read` turns only `NoEntry` into `Ok(None)`; a
+/// keychain that refuses the operation has to reach the caller as an error, or
+/// a locked session reads as "this store has no key" and the caller goes on to
+/// establish a second one.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[test]
+fn a_refused_keychain_operation_is_never_reported_as_an_absent_entry() {
+    for status in [-25308, -34018, -25291] {
+        let mapped = map_keyring_error(keyring_core::Error::PlatformFailure(Box::new(
+            security_framework::base::Error::from_code(status),
+        )));
+        assert!(
+            !matches!(mapped, KeyError::StoreNotInstalled),
+            "OSStatus {status} mapped to an absence-shaped error: {mapped:?}"
+        );
+    }
+}
+
 /// The match is scoped to exactly -34018, not "any `PlatformFailure`" —
 /// another OSStatus wrapped the same way must still fall through to the
 /// source-preserving keyring error rather than being
