@@ -378,8 +378,9 @@ impl<'a> MergeHistoryVerifier<'a> {
         let acknowledgements = self
             .activated_snapshot_acknowledgements(&authority.accepted_cut.0)
             .await?;
+        let current_devices = self.device_state_at_verified_cut(&authority.accepted_cut)?;
         let acknowledged = self
-            .build_acknowledged_snapshot(authority, acknowledgements)
+            .build_acknowledged_snapshot(authority, acknowledgements, &current_devices)
             .await?;
         VerifiedAcknowledgedStoreSnapshot::from_acknowledged(acknowledged)
             .map_err(StorePullError::Database)
@@ -405,13 +406,58 @@ impl<'a> MergeHistoryVerifier<'a> {
         )
     }
 
+    /// The device state the store stands in now, resolved at `cut`.
+    ///
+    /// The accepted cut is the snapshot's coverage extended to each device's
+    /// latest announcement, so this is the newest device state this verifier
+    /// can derive from history it has verified — which is what "active now" has
+    /// to mean for a device deciding what it may delete.
+    ///
+    /// Reads already-verified history and does not fetch: the caller passes a
+    /// cut that gathering the acknowledgements has just verified, so a commit
+    /// missing here is a caller that changed that order, not a commit that
+    /// needs loading.
+    fn device_state_at_verified_cut(
+        &self,
+        cut: &StoreHistoryCut,
+    ) -> Result<ResolvedStoreDeviceState, StorePullError> {
+        let (device_state, _) = self.verified_merge_history_authority_parts(&cut.0)?;
+        Ok(device_state)
+    }
+
+    /// Which devices must have acknowledged `authority`'s snapshot, and their
+    /// proofs.
+    ///
+    /// The set is the devices Active at the snapshot's coverage that are also
+    /// Active now. Both conjuncts are in the reclaim module's rule, with the
+    /// argument for each; the short version is that a device excluded after the
+    /// coverage was Active there, so coverage alone demands a signature it can
+    /// never publish, and one snapshot going unreclaimable that way takes every
+    /// earlier one with it.
+    ///
+    /// A device that is Active at the coverage but not now is passed over
+    /// rather than failed: it is not a member, so there is nothing behind the
+    /// snapshot it could still ask for.
     async fn build_acknowledged_snapshot(
         &self,
         authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
         acknowledgements: Vec<VerifiedActivatedStoreAck>,
+        current_devices: &ResolvedStoreDeviceState,
     ) -> Result<coven_protocol::store_commit::AcknowledgedStoreSnapshot, StorePullError> {
         let mut retained_acknowledgements = BTreeMap::new();
         for (device_id, registration) in &authority.active_registrations {
+            let active_now = current_devices
+                .devices
+                .get(device_id)
+                .is_some_and(|record| {
+                    matches!(
+                        record.status,
+                        coven_protocol::store_commit::StoreDeviceStatus::Active
+                    )
+                });
+            if !active_now {
+                continue;
+            }
             let registration_ref = registration.reference();
             let matching = acknowledgements
                 .iter()

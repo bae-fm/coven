@@ -141,6 +141,13 @@ pub struct RetainedReplaySnapshotAuthority {
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgedStoreSnapshot {
     pub authority: RetainedReplaySnapshotAuthority,
+    /// One chain per device that had to acknowledge, which is a subset of the
+    /// devices active at the coverage: those still active now. Which subset is
+    /// a question about the current device state, so it is decided by the
+    /// builder against verified history and recorded here — `validate` can
+    /// check that these devices were active at the coverage and that each chain
+    /// proves what it claims, but not that the set is the right one to have
+    /// asked. See the reclaim module for why the set is what it is.
     #[serde(with = "ordered_map_entries")]
     pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
 }
@@ -247,17 +254,22 @@ impl AcknowledgedStoreSnapshot {
     /// snapshot only against this.
     pub fn validate(&self) -> Result<(), StoreProtocolError> {
         self.authority.validate()?;
-        if self.acknowledgements.len() != self.authority.active_registrations.len() {
+        if self.acknowledgements.is_empty() {
             return Err(StoreProtocolError::Malformed(
-                "acknowledged snapshot does not exactly cover active devices".to_string(),
+                "acknowledged snapshot has no acknowledgements".to_string(),
             ));
         }
-        for (device_id, registration) in &self.authority.active_registrations {
-            let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
-                StoreProtocolError::Malformed(
-                    "retained snapshot active device has no acknowledgement".to_string(),
-                )
-            })?;
+        for (device_id, acknowledgement) in &self.acknowledgements {
+            let registration = self
+                .authority
+                .active_registrations
+                .get(device_id)
+                .ok_or_else(|| {
+                    StoreProtocolError::Malformed(
+                        "acknowledged snapshot names a device that was not active at its coverage"
+                            .to_string(),
+                    )
+                })?;
             acknowledgement.validate_chain(&self.authority.store_root, registration)?;
             let (acknowledgement_ref, acknowledgement_value) =
                 acknowledgement.latest().ok_or_else(|| {

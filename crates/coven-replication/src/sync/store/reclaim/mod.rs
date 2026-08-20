@@ -73,13 +73,47 @@
 //! anyway. The narrowing would only ever matter for reclaiming S's own image,
 //! which nothing reclaims.
 //!
-//! ## Where the implementation is stricter than this
+//! ## Where the set is computed
 //!
-//! The unanimity walk in `verify_snapshot_stability` reads its device set from
-//! the state resolved at the snapshot's coverage and consults no other. It
-//! therefore still demands an acknowledgement from a device excluded after that
-//! coverage, which is the first case above. Correcting it means intersecting
-//! with the current device state at that walk.
+//! `build_acknowledged_snapshot` walks the devices active at the coverage and
+//! passes over the ones that are not active in the device state resolved at the
+//! authority's accepted cut — the coverage extended to each device's latest
+//! announcement, which is the newest state the walking device has verified.
+//!
+//! That set is a function of when it is asked, so a reclaim's evidence is
+//! checked against it twice: when this device signs the evidence, and again
+//! before it deletes, which can be a later cycle. The required set can only
+//! shrink between those points — a device leaves it by being excluded, and one
+//! that joins after the coverage was never in it — so the evidence check asks
+//! that the claim carry every acknowledgement now required and permits it to
+//! carry more. Requiring the two to match exactly would mean an exclusion
+//! landing in that window left a signed authorization that could never execute
+//! and, because an existing operation for a target blocks re-authorizing it,
+//! never be replaced.
+//!
+//! ## The empty set, and why it holds
+//!
+//! If no device active at the coverage is still active, the set is empty and
+//! the rule above is vacuously satisfied. That is arguably a licence to
+//! reclaim, and the argument is sound as far as it goes: every current member
+//! must then have joined after the coverage, and a join bootstraps from a
+//! snapshot at or past `S`, so no current member needs anything behind `S` —
+//! there is nobody left to ask because there is nobody left who could want it.
+//!
+//! It is held anyway. The joined-after leg rests on that bootstrap landing at
+//! or past `S`, and the section above says where that can fail: a snapshot
+//! rejected as uninstallable sends a join back to an older generation, and
+//! Store snapshot images are never reclaimed, so an older generation stays
+//! selectable indefinitely. With at least one live witness the acknowledgement
+//! is independent evidence that some current device really is past the
+//! coverage. With none, the only thing standing behind the deletion is that
+//! same bootstrap assumption, which is exactly the one not yet settled. So
+//! until the interaction with old-generation fallback is looked at on its own:
+//! no live witness, no delete.
+//!
+//! This is a choice, not a derived bound, and it costs a reclaim that would
+//! have been safe. It needs every device from the coverage era — the owner's
+//! registration among them — to have been excluded before it can arise.
 
 use coven_database::StoreReclaimJournalError;
 use std::sync::Arc;

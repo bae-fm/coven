@@ -2,7 +2,9 @@ use super::*;
 use coven_keys::keys::{self, UserKeypair};
 use coven_protocol::objects::ExactObjectRef;
 use coven_protocol::objects::ObjectSlot;
-use coven_protocol::store_commit::{StoreCommitCoord, StoreProtocolError};
+use coven_protocol::store_commit::{
+    StoreCommitCoord, StoreDeviceRegistrationRef, StoreProtocolError,
+};
 use coven_storage::CloudSyncObjectStorage;
 use std::collections::BTreeMap;
 
@@ -791,4 +793,287 @@ fn snapshot_supersedes_seed_requires_strict_domination() {
         !super::candidates::snapshot_supersedes_seed(&frontier_at("owner", 3), &seed),
         "a snapshot behind the seed does not cover it and cannot supersede it"
     );
+}
+
+/// A two-device owner Store with a snapshot whose coverage the peer's join is
+/// under, and only the owner's acknowledgement of it.
+///
+/// # What a fixture here has to get right
+///
+/// Four things about the harness decide whether a test like this measures the
+/// eligible set or something else entirely. Each of them produced a test that
+/// passed for the wrong reason before it was understood, so they are written
+/// down rather than rediscovered.
+///
+/// **Reclaim always has the generation-zero snapshot to fall back on.** Its
+/// coverage is empty, so the founder is the only device at it and the owner's
+/// own acknowledgement settles it. "Blocked" therefore never surfaces as an
+/// error — `choose_snapshot` still returns `Ok`, just with an older snapshot.
+/// Asserting on an error, or on whether any packages were deleted, measures the
+/// fallback rather than the rule. These tests assert *which* snapshot is chosen,
+/// which is also what decides how much history a reclaim may delete.
+///
+/// **A join publishes commits but no snapshot of its own, and acknowledges the
+/// one that already exists.** So a freshly joined device is not idle with
+/// respect to that snapshot, and a snapshot published before the join cannot
+/// have the peer in its coverage-time state. The snapshot under test has to be
+/// taken *after* the join.
+///
+/// **Its coverage has to be the owner's position after the join, not the join
+/// snapshot's own coverage.** The latter is generation zero's, which sits below
+/// the join's commits: reusing it yields a snapshot the peer is absent from and
+/// which does not strictly dominate the seed, so reclaim rejects it for a reason
+/// that has nothing to do with acknowledgements.
+///
+/// **The test producer shares the founder's stream**, so anything published
+/// before the packages shifts their expected sequence numbers, and a
+/// freshly activated peer has no local Store position of its own to read.
+struct UnanimityFixture {
+    owner_device: crate::sync::test_helpers::TestDevice,
+    /// Read once while the fixture's database is open. Reclaim uses these only
+    /// to enumerate snapshot streams; which devices must acknowledge comes from
+    /// the verified device states, not from this list.
+    registrations: Vec<coven_protocol::store_commit::ReferencedStoreDeviceRegistration>,
+    /// The snapshot whose eligible set is under test.
+    covering: coven_protocol::store_commit::StoreSnapshotRef,
+    peer: Option<StoreDeviceRegistrationRef>,
+}
+
+/// When the second device joins, relative to the snapshot's coverage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerJoin {
+    BeforeCoverage,
+    AfterCoverage,
+}
+
+impl UnanimityFixture {
+    async fn build(store_id: &str, join: PeerJoin) -> Self {
+        let signer = UserKeypair::generate();
+        let owner_dir = crate::sync::test_helpers::test_store_dir();
+        let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
+        let store = std::sync::Arc::new(
+            Box::pin(crate::sync::test_helpers::TestStore::create(
+                &owner_db,
+                owner_dir.clone(),
+                store_id,
+                signer.clone(),
+                crate::sync::test_helpers::test_cloud_home(),
+            ))
+            .await
+            .expect("create two-device reclaim Store"),
+        );
+        let owner_device = Box::pin(store.open_into(&owner_db, owner_dir.clone()))
+            .await
+            .expect("open owner Store device");
+
+        let changeset =
+            crate::sync::test_helpers::open_test_db(crate::sync::test_helpers::test_store_dir())
+                .capture_test_changeset(&[
+                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                     VALUES ('unanimity-row', 'unanimity', NULL, \
+                     '0000000001000-0000-unanimity', '2026-01-01')",
+                ])
+                .await;
+        let commit = store
+            .publish_changeset("founder", 1, &changeset, owner_db.schema_version())
+            .await
+            .expect("publish Store history to snapshot");
+
+        // A join publishes its own snapshot, and its coverage spans what the
+        // activation touched — so that snapshot's device state is the one the
+        // peer is in. Joining before the coverage means letting it be the
+        // snapshot under test; joining after means the owner takes one first,
+        // from a state the peer is absent from.
+        let latest_snapshot = || async {
+            coven_database::StoreDatabase::new(&owner_db)
+                .latest_local_store_snapshot()
+                .await
+                .expect("load the latest snapshot")
+                .expect("a snapshot exists")
+        };
+        let mut covering = None;
+        if join == PeerJoin::AfterCoverage {
+            let StoreCommitCoord { stream_id, .. } = commit.coord;
+            owner_device
+                .publish_snapshot(
+                    b"unanimity snapshot".to_vec(),
+                    CommitFrontier(BTreeMap::from([(stream_id, commit)])),
+                )
+                .await
+                .expect("publish covering snapshot");
+            covering = Some(latest_snapshot().await.reference);
+        }
+        let peer_dir = crate::sync::test_helpers::test_store_dir();
+        let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
+        Box::pin(store.activate_joined_device(
+            &owner_db,
+            owner_dir.clone(),
+            &peer_db,
+            peer_dir,
+            &signer,
+            "2026-07-18T00:00:00Z",
+        ))
+        .await
+        .expect("activate peer Store device");
+        let covering = match covering {
+            Some(reference) => reference,
+            None => {
+                // A join publishes a snapshot and acknowledges it, so the peer
+                // is not idle with respect to that one. The snapshot under test
+                // is a fresh one the owner takes afterwards, over the join
+                // snapshot's own coverage — the frontier that spans the streams
+                // the activation touched, and so the one whose device state has
+                // the peer in it. Acknowledgements match a snapshot by exact
+                // reference, so the peer's earlier one does not carry over.
+                // A join publishes commits but no snapshot of its own, and
+                // it acknowledges the one that already exists — so the peer is
+                // not idle with respect to that one. The snapshot under test is
+                // one the owner takes now, over its position *after* the join:
+                // that frontier is above the join's commits, so the device state
+                // resolved at it has the peer in it, and it strictly dominates
+                // the seed. Acknowledgements match a snapshot by exact
+                // reference, so the peer's earlier one does not carry over.
+                let after_join = owner_device
+                    .latest_local_store_position()
+                    .await
+                    .expect("read the owner's Store position after the join")
+                    .expect("the join published Store history");
+                let StoreCommitCoord { stream_id, .. } = after_join.coord;
+                owner_device
+                    .publish_snapshot(
+                        b"unanimity snapshot".to_vec(),
+                        CommitFrontier(BTreeMap::from([(stream_id, after_join)])),
+                    )
+                    .await
+                    .expect("publish covering snapshot above the join");
+                latest_snapshot().await.reference
+            }
+        };
+
+        let acknowledged_at = owner_device
+            .latest_local_store_position()
+            .await
+            .expect("read the owner's Store position")
+            .expect("the Store has published history");
+        let StoreCommitCoord { stream_id, .. } = acknowledged_at.coord;
+        owner_device
+            .publish_acknowledgement(CommitFrontier(BTreeMap::from([(
+                stream_id,
+                acknowledged_at,
+            )])))
+            .await
+            .expect("owner acknowledges the covering snapshot");
+
+        let local_device_id = owner_device.device_id().clone();
+        let registrations = coven_database::StoreDatabase::new(&owner_db)
+            .activated_store_device_registration_records()
+            .await
+            .expect("list active Store registrations");
+        let peer = registrations
+            .iter()
+            .map(|registration| registration.reference().clone())
+            .find(|reference| reference.device_id.to_string() != local_device_id);
+
+        Self {
+            owner_device,
+            registrations,
+            covering,
+            peer,
+        }
+    }
+
+    async fn chosen_snapshot(&self) -> coven_protocol::store_commit::StoreSnapshotRef {
+        let mut writer = self
+            .owner_device
+            .authorize_writer()
+            .await
+            .expect("authorize reclaim writer");
+        writer
+            .reclaim()
+            .choose_snapshot(&self.registrations)
+            .await
+            .expect("reclaim selects some snapshot")
+            .snapshot
+            .reference
+    }
+}
+
+/// A device active at the coverage and still active gets no relaxation, whether
+/// or not it has done anything since. It is a current member, so history behind
+/// that snapshot is history it could still ask for, and reclaim declines the
+/// snapshot rather than delete it.
+#[tokio::test]
+async fn an_idle_device_active_at_the_coverage_still_blocks_reclaim() {
+    Box::pin(async {
+        let fixture =
+            UnanimityFixture::build("reclaim-unanimity-idle", PeerJoin::BeforeCoverage).await;
+        assert!(
+            fixture.peer.is_some(),
+            "the peer joined before the coverage"
+        );
+
+        let chosen = fixture.chosen_snapshot().await;
+        assert!(
+            chosen.generation < fixture.covering.generation,
+            "a current member that has not acknowledged the snapshot blocks it, so reclaim \
+             falls back below it: chose generation {} against {}",
+            chosen.generation,
+            fixture.covering.generation,
+        );
+    })
+    .await;
+}
+
+/// A device excluded after the coverage was active there, so the coverage-time
+/// state alone would demand a signature it can never publish — and one snapshot
+/// stuck that way takes every earlier one with it. It is not a member, cannot
+/// pull, and re-enters only through a join that bootstraps at or past the
+/// snapshot, so there is nothing behind it left to need.
+#[tokio::test]
+async fn a_device_excluded_after_the_coverage_does_not_block_reclaim() {
+    Box::pin(async {
+        let fixture =
+            UnanimityFixture::build("reclaim-unanimity-excluded", PeerJoin::BeforeCoverage).await;
+        let peer = fixture.peer.clone().expect("the peer joined");
+        fixture.owner_device.finalize_peer_exclusion(&peer).await;
+
+        // At or past, not equal: excluding a device publishes history of its own,
+        // which can produce a newer snapshot that is also selectable. What
+        // matters is that reclaim is no longer held below the one the excluded
+        // device was blocking.
+        let chosen = fixture.chosen_snapshot().await;
+        assert!(
+            chosen.generation >= fixture.covering.generation,
+            "an excluded device is excused, so reclaim reaches its snapshot: chose \
+             generation {} against {}",
+            chosen.generation,
+            fixture.covering.generation,
+        );
+    })
+    .await;
+}
+
+/// A device that joined after the coverage is absent from the coverage-time
+/// state, so it never enters the set. Stated as its own case because the reason
+/// is not that it is new: a join installs a snapshot image and materializes only
+/// what is past it, so the device already stands where an acknowledgement would
+/// have put it.
+#[tokio::test]
+async fn a_device_that_joined_after_the_coverage_does_not_block_reclaim() {
+    Box::pin(async {
+        let fixture =
+            UnanimityFixture::build("reclaim-unanimity-joined-after", PeerJoin::AfterCoverage)
+                .await;
+        assert!(fixture.peer.is_some(), "the peer joined after the coverage");
+
+        let chosen = fixture.chosen_snapshot().await;
+        assert!(
+            chosen.generation >= fixture.covering.generation,
+            "a device that joined after the coverage is excused, so reclaim reaches its \
+             snapshot: chose generation {} against {}",
+            chosen.generation,
+            fixture.covering.generation,
+        );
+    })
+    .await;
 }

@@ -559,14 +559,29 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             ) => return Err(StoreReclaimError::NoSnapshot),
             Err(error) => return Err(StoreReclaimError::from(error)),
         };
-        let expected_acknowledgements = acknowledged
+        // The claim has to carry every acknowledgement the stability proof
+        // requires *now*, and may carry more. It is checked twice — once when
+        // this device signs the evidence and once before it deletes, which can
+        // be a later cycle — and between those the required set can only
+        // shrink, because a device leaves it by being excluded and a device
+        // that joins after the coverage was never in it. Demanding the two
+        // lists match exactly would mean an exclusion landing in that window
+        // left a signed authorization that could never be executed and, since
+        // an existing operation blocks re-authorizing its target, never be
+        // replaced either. A claim proving more than is now required is still
+        // a claim that proves what is required.
+        let required_acknowledgements = acknowledged
             .acknowledgement_refs()
             .map_err(StoreReclaimError::from)?;
-        if claim.acknowledgements != expected_acknowledgements {
-            return Err(StoreReclaimError::Authorization(
-            "reclaim evidence acknowledgements differ from the activated snapshot stability proof"
-                .to_string(),
-        ));
+        if let Some(missing) = required_acknowledgements
+            .iter()
+            .find(|required| !claim.acknowledgements.contains(required))
+        {
+            return Err(StoreReclaimError::Authorization(format!(
+                "reclaim evidence omits the acknowledgement the snapshot stability proof \
+                 requires from device {:?}",
+                missing.registration.device_id.to_string()
+            )));
         }
         if activation.value().store_package() != Some(&claim.target.package)
             || !history

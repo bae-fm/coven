@@ -285,6 +285,11 @@ const COMPOSITION_ROOTS: &[(&str, &str, &str)] = &[
         "build",
     ),
     (
+        "crates/coven-replication/src/sync/store/reclaim/tests.rs",
+        "UnanimityFixture",
+        "build",
+    ),
+    (
         "crates/coven-replication/src/sync/store/commit_publication/operation/commit_plan/tests/merge_fixture.rs",
         "PreparedWriteFixture",
         "prepare",
