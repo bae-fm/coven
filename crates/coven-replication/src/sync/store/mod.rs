@@ -61,6 +61,7 @@ pub use coven_protocol::circle_journal::CircleTransitionHistory;
 #[cfg(any(test, feature = "test-utils"))]
 pub use device_exclusion::StoreDeviceExclusionOperationInfo;
 pub use device_exclusion::{StoreDeviceExclusionError, StoreDeviceExclusionResult};
+pub use device_join::transport::timed_owner_join_step;
 pub use device_join::transport::StoreDeviceJoinTransport;
 pub use device_join::transport::{
     AdmittingDeviceJoinProgress, DeviceJoinApproval, DeviceJoinApprovalPolicy,

@@ -88,8 +88,41 @@ impl PullHistory<'_, '_> {
             uncovered_commits = unrepresented.len(),
             "Device join bootstrap resolves the history its snapshot does not cover"
         );
-        let mut row_data = BTreeMap::new();
+        // The commit that failed is the one whose split is wanted, so the inner
+        // breakdown is reported before the failure propagates.
         let mut inner = StageTimings::start("Device join bootstrap row data");
+        let row_data = Box::pin(self.resolve_bootstrap_row_data(
+            &plan,
+            unrepresented,
+            local_store_membership,
+            routing_key.as_ref(),
+            &schema,
+            timings,
+            &mut inner,
+        ))
+        .await;
+        inner.report();
+        Ok(ResolvedDeviceJoinBootstrap {
+            plan,
+            row_data: row_data?,
+            local_store_membership,
+            routing_key,
+            receiver_wall_ms,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_bootstrap_row_data(
+        &mut self,
+        plan: &DeviceJoinBootstrapPlan,
+        unrepresented: Vec<StoreBatchCommitRef>,
+        local_store_membership: LocalStoreMembership,
+        routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
+        schema: &std::sync::Arc<coven_database::TableSchema>,
+        timings: &mut StageTimings,
+        inner: &mut StageTimings,
+    ) -> Result<BTreeMap<StoreBatchCommitRef, DeviceJoinBootstrapRowData>, StorePullError> {
+        let mut row_data = BTreeMap::new();
         for reference in unrepresented {
             let prepared = plan
                 .commits
@@ -113,22 +146,15 @@ impl PullHistory<'_, '_> {
                         self,
                         candidate,
                         local_store_membership,
-                        routing_key.as_ref(),
-                        &schema,
-                        &mut inner,
+                        routing_key,
+                        schema,
+                        inner,
                     )),
                 )
                 .await?;
             row_data.insert(reference, resolved);
         }
-        inner.report();
-        Ok(ResolvedDeviceJoinBootstrap {
-            plan,
-            row_data,
-            local_store_membership,
-            routing_key,
-            receiver_wall_ms,
-        })
+        Ok(row_data)
     }
 
     async fn resolve_bootstrap_commit_row_data(

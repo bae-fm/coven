@@ -449,6 +449,24 @@ impl JoinPollBackoff {
     }
 }
 
+/// Time one owner-side device-join step and report it the way every other
+/// staged run reports.
+///
+/// Each of these is one transition in the Add-a-device flow — approve the
+/// provider access, accept the registration, activate — and each is one or more
+/// provider round trips. Two flows reach them: the discrete command API a host
+/// drives itself, and the pairing driver's `drive_once`. They share this
+/// function so a run through either one reads the same in the log.
+pub async fn timed_owner_join_step<T>(
+    step: &'static str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let mut timings = crate::sync::stage_timing::StageTimings::start("Device join owner step");
+    let outcome = timings.stage(step, work).await;
+    timings.report();
+    outcome
+}
+
 /// One wait on the counterpart, reported when it ends.
 ///
 /// A join that took four minutes is either waiting on the other device or
@@ -967,9 +985,21 @@ impl<'attempt> AttemptTransport<'attempt> {
     /// the same transfer, so a step that produced its artifact and died before
     /// publishing it republishes here for nothing.
     async fn publish(&self, action: DeviceJoinAction) -> Result<(), DeviceJoinTransportError> {
-        self.store
-            .publish_device_join_transport_artifact(self.bundle, self.roles, &action)
-            .await
+        self.step(
+            "publish artifact",
+            self.store
+                .publish_device_join_transport_artifact(self.bundle, self.roles, &action),
+        )
+        .await
+    }
+
+    /// Time one step of the driven exchange under the shared owner-step line.
+    ///
+    /// The work is boxed: `drive_once` holds a dozen of these, and leaving each
+    /// one inline grows its already-large state machine past the stack a test
+    /// runner gives it.
+    async fn step<T>(&self, step: &'static str, work: impl std::future::Future<Output = T>) -> T {
+        timed_owner_join_step(step, Box::pin(work)).await
     }
 
     /// Read the artifact the other side owes this step, waiting for it to appear.
@@ -1040,12 +1070,19 @@ impl<'attempt> AttemptTransport<'attempt> {
                     let request = self
                         .await_artifact::<DeviceProviderAccessRequest>(timing)
                         .await?;
-                    self.approve_access_request(&request, policy).await?;
+                    self.step(
+                        "approve access request",
+                        self.approve_access_request(&request, policy),
+                    )
+                    .await?;
                     if roles.owner && request.offer.provider_admin.provider == request.peer_provider
                     {
                         on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                         let join = self
-                            .activate_same_principal(request, access_administrator)
+                            .step(
+                                "activate same-provider device",
+                                self.activate_same_principal(request, access_administrator),
+                            )
                             .await?;
                         self.publish(DeviceJoinAction::TransferSamePrincipalJoin(join.clone()))
                             .await?;
@@ -1053,9 +1090,12 @@ impl<'attempt> AttemptTransport<'attempt> {
                     }
                     on_progress(AdmittingDeviceJoinProgress::GrantingProviderAccess);
                     Some(
-                        self.store
-                            .authorize_device_provider_access(request, access_administrator)
-                            .await?,
+                        self.step(
+                            "authorize provider access",
+                            self.store
+                                .authorize_device_provider_access(request, access_administrator),
+                        )
+                        .await?,
                     )
                 }
             };
@@ -1088,9 +1128,11 @@ impl<'attempt> AttemptTransport<'attempt> {
                 ) => None,
                 Some(DeviceJoinStatus::AwaitingBootstrap { request }) => Some({
                     on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
-                    self.store
-                        .accept_device_registration_request(request)
-                        .await?
+                    self.step(
+                        "accept registration",
+                        self.store.accept_device_registration_request(request),
+                    )
+                    .await?
                 }),
                 _ => {
                     let request = match local_registration.take() {
@@ -1103,9 +1145,11 @@ impl<'attempt> AttemptTransport<'attempt> {
                     };
                     on_progress(AdmittingDeviceJoinProgress::RegisteringDevice);
                     Some(
-                        self.store
-                            .accept_device_registration_request(request)
-                            .await?,
+                        self.step(
+                            "accept registration",
+                            self.store.accept_device_registration_request(request),
+                        )
+                        .await?,
                     )
                 }
             };
@@ -1128,9 +1172,11 @@ impl<'attempt> AttemptTransport<'attempt> {
                 ) => None,
                 Some(DeviceJoinStatus::AwaitingChallengePublication { bootstrap }) => Some({
                     on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
-                    self.store
-                        .publish_device_provider_challenge(bootstrap)
-                        .await?
+                    self.step(
+                        "publish provider challenge",
+                        self.store.publish_device_provider_challenge(bootstrap),
+                    )
+                    .await?
                 }),
                 _ => {
                     let provisional = match local_provisional.take() {
@@ -1142,9 +1188,11 @@ impl<'attempt> AttemptTransport<'attempt> {
                     };
                     Some({
                         on_progress(AdmittingDeviceJoinProgress::PreparingLibrary);
-                        self.store
-                            .publish_device_provider_challenge(provisional)
-                            .await?
+                        self.step(
+                            "publish provider challenge",
+                            self.store.publish_device_provider_challenge(provisional),
+                        )
+                        .await?
                     })
                 }
             };
@@ -1156,9 +1204,12 @@ impl<'attempt> AttemptTransport<'attempt> {
                     )
                 {
                     local_completion = Some(
-                        self.store
-                            .complete_same_principal_device_admission(ready.clone())
-                            .await?,
+                        self.step(
+                            "complete same-provider admission",
+                            self.store
+                                .complete_same_principal_device_admission(ready.clone()),
+                        )
+                        .await?,
                     );
                 }
                 self.publish(DeviceJoinAction::TransferProviderReadyBootstrap(ready))
@@ -1171,17 +1222,21 @@ impl<'attempt> AttemptTransport<'attempt> {
                 match self.admin_status().await? {
                     Some(DeviceJoinStatus::AwaitingActivation { completion }) => completion,
                     Some(DeviceJoinStatus::AwaitingProviderCompletion { readiness }) => {
-                        self.store
-                            .complete_device_provider_admission(readiness)
-                            .await?
+                        self.step(
+                            "complete provider admission",
+                            self.store.complete_device_provider_admission(readiness),
+                        )
+                        .await?
                     }
                     _ => {
                         on_progress(AdmittingDeviceJoinProgress::WaitingForJoiningDevice);
                         let readiness = self.await_artifact::<DeviceJoinReadiness>(timing).await?;
                         on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
-                        self.store
-                            .complete_device_provider_admission(readiness)
-                            .await?
+                        self.step(
+                            "complete provider admission",
+                            self.store.complete_device_provider_admission(readiness),
+                        )
+                        .await?
                     }
                 }
             };
@@ -1205,7 +1260,11 @@ impl<'attempt> AttemptTransport<'attempt> {
             Some(DeviceJoinStatus::AwaitingCompletion { activation }) => activation,
             Some(DeviceJoinStatus::AwaitingActivation { completion }) => {
                 on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
-                self.store.finalize_device_join(completion).await?
+                self.step(
+                    "publish activation",
+                    self.store.finalize_device_join(completion),
+                )
+                .await?
             }
             _ => {
                 let completion = match local_completion {
@@ -1216,7 +1275,11 @@ impl<'attempt> AttemptTransport<'attempt> {
                     }
                 };
                 on_progress(AdmittingDeviceJoinProgress::ActivatingDevice);
-                self.store.finalize_device_join(completion).await?
+                self.step(
+                    "publish activation",
+                    self.store.finalize_device_join(completion),
+                )
+                .await?
             }
         };
         self.publish(DeviceJoinAction::TransferActivation(activation.clone()))

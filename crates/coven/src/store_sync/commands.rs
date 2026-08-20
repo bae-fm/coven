@@ -1,24 +1,6 @@
 use super::*;
 
-use coven_replication::sync::stage_timing::StageTimings;
-
-/// Time one owner-side device-join step and report it the way every other
-/// staged run reports.
-///
-/// Each of these is a single operator action in the Add-a-device flow — publish
-/// the offer, approve the provider access, accept the registration, activate —
-/// and each is one or more provider round trips. None of them logged anything,
-/// so a joining device that sat for minutes could not be told apart from an
-/// owner that had not published yet.
-async fn timed_owner_join_step<T>(
-    step: &'static str,
-    work: impl std::future::Future<Output = T>,
-) -> T {
-    let mut timings = StageTimings::start("Device join owner step");
-    let outcome = timings.stage(step, work).await;
-    timings.report();
-    outcome
-}
+use coven_replication::sync::store::timed_owner_join_step;
 
 impl StoreSync {
     pub(crate) async fn members(
