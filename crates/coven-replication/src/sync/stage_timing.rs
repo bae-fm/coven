@@ -31,6 +31,7 @@ pub struct StageTimings {
     run: &'static str,
     started: Stopwatch,
     stages: Vec<(&'static str, Duration)>,
+    reported: bool,
 }
 
 impl StageTimings {
@@ -40,6 +41,7 @@ impl StageTimings {
             run,
             started: Stopwatch::start(),
             stages: Vec::new(),
+            reported: false,
         }
     }
 
@@ -68,13 +70,36 @@ impl StageTimings {
 
     /// Reports the breakdown. Called on every exit path, including failures —
     /// a cycle that died halfway is exactly the one whose stage timings matter.
-    pub fn report(self) {
+    pub fn report(mut self) {
+        self.emit(false);
+    }
+
+    /// Reports once. Returns whether this call was the one that reported, so a
+    /// test can hold the "exactly once, whichever path gets there first" rule.
+    fn emit(&mut self, cancelled: bool) -> bool {
+        if std::mem::replace(&mut self.reported, true) {
+            return false;
+        }
         info!(
             run = self.run,
             total_ms = self.started.elapsed().as_millis() as u64,
             stages = %StageBreakdown(&self.stages),
+            cancelled,
             "Sync stage timings"
         );
+        true
+    }
+}
+
+/// A run that is dropped without reporting was cancelled — its future was
+/// abandoned partway, which no `?` and no explicit call at the end of a function
+/// can catch. A device join whose pairing code expires mid-install is exactly
+/// that, and it used to leave no trace at all: the stages it had reached died
+/// with the future. Reporting from the drop makes the abandoned run say how far
+/// it got.
+impl Drop for StageTimings {
+    fn drop(&mut self) {
+        self.emit(true);
     }
 }
 
@@ -133,6 +158,39 @@ mod tests {
                 .map(|(name, _)| *name)
                 .collect::<Vec<_>>(),
             vec!["verify commits"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    /// A run whose future is abandoned partway never reaches its `report()` —
+    /// the live case is a device join whose pairing code expires mid-install.
+    /// Its drop reports instead, so the stages it did reach still say so.
+    #[test]
+    fn an_abandoned_run_reports_from_its_drop() {
+        let mut timings = StageTimings::start("abandoned run");
+        timings.add("first", Duration::from_millis(3));
+
+        assert!(
+            timings.emit(true),
+            "a run that never reported reports when it is dropped",
+        );
+    }
+
+    /// And a run that did report stays quiet when it drops, so an ordinary
+    /// completion still logs one line.
+    #[test]
+    fn a_reported_run_does_not_report_again_when_it_drops() {
+        let mut timings = StageTimings::start("reported run");
+        timings.add("only", Duration::from_millis(1));
+
+        assert!(timings.emit(false), "the first report is the one that logs");
+        assert!(
+            !timings.emit(true),
+            "its drop finds the run already reported",
         );
     }
 }

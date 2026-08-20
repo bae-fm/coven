@@ -1297,22 +1297,38 @@ impl<'attempt> AttemptTransport<'attempt> {
         request: DeviceProviderAccessRequest,
         access_administrator: Option<&dyn DeviceProviderAccessAdministrator>,
     ) -> Result<SamePrincipalDeviceJoin, DeviceJoinTransportError> {
-        let mut writer = self
-            .store
-            .authorize_writer()
-            .await
-            .map_err(DeviceJoinError::from)?;
-        let approval = writer
-            .provider_administrator_join()?
-            .authorize_access(request, access_administrator)
-            .await?;
-        let registration =
-            DeviceRegistrationRequest::same_principal(approval).map_err(DeviceJoinError::from)?;
-        writer
-            .join_operation()
-            .activate_same_principal_join(registration)
-            .await
-            .map_err(DeviceJoinTransportError::from)
+        // Sixty-eight seconds hid behind this one step in a live run. It is
+        // three provider-facing pieces, and they report as three.
+        let mut timings =
+            crate::sync::stage_timing::StageTimings::start("Device join same-provider activation");
+        let outcome = async {
+            let mut writer = timings
+                .stage("authorize writer", self.store.authorize_writer())
+                .await
+                .map_err(DeviceJoinError::from)?;
+            let approval = timings
+                .stage(
+                    "authorize provider access",
+                    writer
+                        .provider_administrator_join()?
+                        .authorize_access(request, access_administrator),
+                )
+                .await?;
+            let registration = DeviceRegistrationRequest::same_principal(approval)
+                .map_err(DeviceJoinError::from)?;
+            timings
+                .stage(
+                    "activate the join",
+                    writer
+                        .join_operation()
+                        .activate_same_principal_join(registration),
+                )
+                .await
+                .map_err(DeviceJoinTransportError::from)
+        }
+        .await;
+        timings.report();
+        outcome
     }
 
     async fn cancel_once(
