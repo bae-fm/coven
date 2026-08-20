@@ -34,6 +34,18 @@ impl<'a> MergeHistoryVerifier<'a> {
                     StorePullError::SnapshotNotStable { .. }
                     | StorePullError::SnapshotAuthorInactive
                     | StorePullError::SnapshotAuthorNotOwner => {
+                        // Which snapshot a device installs decides how much
+                        // history its bootstrap then resolves, so a rejection
+                        // here is worth as much as the choice: a store whose
+                        // newest snapshot is rejected silently falls back to an
+                        // older one and pays for the difference on every join.
+                        tracing::info!(
+                            generation = snapshot.reference.generation,
+                            snapshot = %snapshot.reference.snapshot_hash,
+                            coverage_positions = snapshot.meta.coverage.position_count(),
+                            rejection = %error,
+                            "Store snapshot is not a stable candidate"
+                        );
                         if snapshot.reference == maximal_reference {
                             maximal_rejection = Some(error);
                         }
@@ -57,7 +69,16 @@ impl<'a> MergeHistoryVerifier<'a> {
                         "stable Store snapshot selection lost its verified candidate".to_string(),
                     )
                 })?;
-            return Ok(Some(stable.swap_remove(index)));
+            let selected = stable.swap_remove(index);
+            tracing::info!(
+                generation = selected.snapshot.reference.generation,
+                snapshot = %selected.snapshot.reference.snapshot_hash,
+                coverage_streams = selected.snapshot.meta.coverage.commits().len(),
+                coverage_positions = selected.snapshot.meta.coverage.position_count(),
+                stable_candidates = stable.len() + 1,
+                "Selected the Store snapshot to install"
+            );
+            return Ok(Some(selected));
         }
         Err(maximal_rejection.ok_or_else(|| {
             StorePullError::InvalidState(
