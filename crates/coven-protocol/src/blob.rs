@@ -509,6 +509,31 @@ impl RowBlobAuthority {
 /// [`RowBlobRef::new`] enforces the same facts and more, one field at a time so
 /// it can name which one diverged; this is the yes-or-no form for callers that
 /// answer a mismatch their own way.
+/// Whether `locator` is the blob this row already has at the provider, for the
+/// audience it is being published to.
+///
+/// This is deliberately **not** equality with a freshly minted locator. A
+/// locator carries the fingerprint of the key that sealed its bytes, and that
+/// key is whichever generation the keyring sealed under at upload time. Minting
+/// one today and demanding the stored one match it says "any key rotation
+/// re-identifies every blob in the Store" — which would ask the publisher to
+/// re-upload bytes it has, under a name nothing has ever written, and for a
+/// user-provided blob there is no local file left to re-upload from.
+///
+/// What actually identifies an already-uploaded blob is its content and where
+/// it is readable from: namespace, id, plaintext size and hash, key scope, and
+/// audience. An audience move is a genuine re-seal and is still refused here.
+pub fn locator_is_this_rows_upload(
+    locator: &locator::BlobLocator,
+    blob: &BlobRef,
+    plaintext_size: u64,
+    plaintext_hash: crate::store_commit::ObjectHash,
+    audience: &locator::RemoteAudience,
+) -> bool {
+    locator_describes_row(locator, blob, plaintext_size, plaintext_hash)
+        && &locator.audience() == audience
+}
+
 pub fn locator_describes_row(
     locator: &locator::BlobLocator,
     blob: &BlobRef,

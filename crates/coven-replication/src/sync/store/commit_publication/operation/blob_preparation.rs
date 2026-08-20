@@ -368,7 +368,13 @@ impl AuthorizedWriterOperation<'_> {
             .store_dir
             .outbound_blob_spool_path(locator.locator_hash());
         if let Some(previous) = &fact.previous {
-            if previous.stored.locator() == &locator {
+            if coven_protocol::blob::locator_is_this_rows_upload(
+                previous.stored.locator(),
+                &fact.blob,
+                fact.plaintext_size,
+                fact.plaintext_hash,
+                &audience,
+            ) {
                 let binding = audience_package::RowBlobLocatorBinding::new(
                     fact.table.clone(),
                     fact.row_id.clone(),

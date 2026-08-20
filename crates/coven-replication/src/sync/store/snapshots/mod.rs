@@ -86,18 +86,6 @@ impl SnapshotBlobDestination {
             }
         }
     }
-
-    fn key_fingerprint(&self) -> Option<coven_keys::encryption::KeyFingerprint> {
-        match self {
-            Self::Store => None,
-            Self::Circle { protection, .. } => match protection {
-                coven_protocol::objects::BlobSpoolProtection::Opaque(encryption) => {
-                    Some(encryption.seal_key_fingerprint())
-                }
-                coven_protocol::objects::BlobSpoolProtection::Browsable => None,
-            },
-        }
-    }
 }
 
 impl StoreSnapshotCut {
@@ -489,145 +477,138 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
         SnapshotError,
     > {
         let database = &self.database;
-        let storage = self.storage.as_ref();
         let authority = self.local_writer.blob_write_authority();
         let (db_image, mut blobs) = snapshot.into_parts();
         blobs.sort_by_key(|captured| captured.fact.previous.is_none());
         let mut prepared: Vec<coven_database::PreparedSnapshotBlob> = Vec::new();
         let mut coalesced = std::collections::BTreeMap::<String, usize>::new();
         let preparation = async {
-    for captured in blobs {
-        let (destination, package_authority) = match captured.audience {
-            SnapshotBlobAudience::Store => (
-                SnapshotBlobDestination::Store,
-                coven_protocol::audience_package::PackageAudience::Store,
-            ),
-            SnapshotBlobAudience::Circle { circle_id, control } => {
-                let access = database
-                    .circle_publication_context(circle_id, control.coordinate().clone())
-                    .await
-                    .map_err(SnapshotError::from)?;
-                let key_fingerprint = access.key_fingerprint();
-                (
-                    SnapshotBlobDestination::Circle {
-                        circle_id,
-                        protection: access.blob_protection(),
-                    },
-                    coven_protocol::audience_package::PackageAudience::Circle {
-                        circle_id,
-                        control: control.coordinate().clone(),
-                        key_fingerprint,
-                    },
-                )
-            }
-        };
-        let audience = destination.audience();
-        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
-            && captured.fact.previous.is_none()
-        {
-            return Err(SnapshotError::PublishBlobs(format!(
-                "snapshot UserProvided blob {}/{} has no existing exact remote binding",
-                captured.fact.blob.namespace, captured.fact.blob.id
-            )));
-        }
-        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided {
-            let locator = crate::sync::store::commit_publication::prepare_partition_blob_locator(
-                &captured.fact,
-                audience.clone(),
-                match &destination {
-                    SnapshotBlobDestination::Store => storage
-                        .store_blob_key_fingerprint()
-                        .map_err(SnapshotError::Bucket)?,
-                    SnapshotBlobDestination::Circle { .. } => destination.key_fingerprint(),
-                },
-                &authority,
-            )
-            .map_err(SnapshotError::from)?;
-            if captured
-                .fact
-                .previous
-                .as_ref()
-                .is_none_or(|previous| previous.stored.locator() != &locator)
-            {
-                return Err(SnapshotError::PublishBlobs(format!(
-                    "snapshot UserProvided blob {}/{} does not match its existing exact remote binding",
-                    captured.fact.blob.namespace, captured.fact.blob.id
-                )));
-            }
-        }
-        let coalesce_key = serde_json::to_string(&(
-            &package_authority,
-            &captured.fact.blob.namespace,
-            &captured.fact.blob.id,
-            &captured.fact.blob.scope,
-            &captured.fact.blob.cloud_path,
-            captured.fact.plaintext_size,
-            captured.fact.plaintext_hash,
-        ))
-        .map_err(SnapshotError::from)?;
-        if let Some(index) = coalesced.get(&coalesce_key).copied() {
-            let stored = prepared[index].bindings[0].blob().clone();
-            let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
-                captured.fact.table,
-                captured.fact.row_id,
-                captured.fact.row_stamp,
-                captured.fact.column,
-                stored,
-            )
-            .map_err(SnapshotError::from)?;
-            prepared[index].bindings.push(binding);
-            continue;
-        }
-        let prepared_blob = match destination {
-            SnapshotBlobDestination::Store => self
-                .writer
-                .prepare_store_partition_blob(&captured.fact, &authority)
-                .await,
-            SnapshotBlobDestination::Circle {
-                circle_id,
-                protection,
-            } => self
-                .writer
-                .prepare_circle_partition_blob(
-                    &captured.fact,
-                    coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
-                    protection,
-                    &authority,
-                )
-                .await,
-        };
-        let (binding, blob) = prepared_blob
-            .map_err(SnapshotError::from)?;
-        if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
-            && !blob.uploaded_verified
-        {
-            return Err(SnapshotError::PublishBlobs(format!(
+            for captured in blobs {
+                let (destination, package_authority) = match captured.audience {
+                    SnapshotBlobAudience::Store => (
+                        SnapshotBlobDestination::Store,
+                        coven_protocol::audience_package::PackageAudience::Store,
+                    ),
+                    SnapshotBlobAudience::Circle { circle_id, control } => {
+                        let access = database
+                            .circle_publication_context(circle_id, control.coordinate().clone())
+                            .await
+                            .map_err(SnapshotError::from)?;
+                        let key_fingerprint = access.key_fingerprint();
+                        (
+                            SnapshotBlobDestination::Circle {
+                                circle_id,
+                                protection: access.blob_protection(),
+                            },
+                            coven_protocol::audience_package::PackageAudience::Circle {
+                                circle_id,
+                                control: control.coordinate().clone(),
+                                key_fingerprint,
+                            },
+                        )
+                    }
+                };
+                let audience = destination.audience();
+                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
+                    && captured.fact.previous.is_none()
+                {
+                    return Err(SnapshotError::PublishBlobs(format!(
+                        "snapshot UserProvided blob {}/{} has no existing exact remote binding",
+                        captured.fact.blob.namespace, captured.fact.blob.id
+                    )));
+                }
+                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
+                    && captured.fact.previous.as_ref().is_none_or(|previous| {
+                        !coven_protocol::blob::locator_is_this_rows_upload(
+                            previous.stored.locator(),
+                            &captured.fact.blob,
+                            captured.fact.plaintext_size,
+                            captured.fact.plaintext_hash,
+                            &audience,
+                        )
+                    })
+                {
+                    return Err(SnapshotError::PublishBlobs(format!(
                 "snapshot UserProvided blob {}/{} does not match its existing exact remote binding",
                 captured.fact.blob.namespace, captured.fact.blob.id
             )));
+                }
+                let coalesce_key = serde_json::to_string(&(
+                    &package_authority,
+                    &captured.fact.blob.namespace,
+                    &captured.fact.blob.id,
+                    &captured.fact.blob.scope,
+                    &captured.fact.blob.cloud_path,
+                    captured.fact.plaintext_size,
+                    captured.fact.plaintext_hash,
+                ))
+                .map_err(SnapshotError::from)?;
+                if let Some(index) = coalesced.get(&coalesce_key).copied() {
+                    let stored = prepared[index].bindings[0].blob().clone();
+                    let binding = coven_protocol::audience_package::RowBlobLocatorBinding::new(
+                        captured.fact.table,
+                        captured.fact.row_id,
+                        captured.fact.row_stamp,
+                        captured.fact.column,
+                        stored,
+                    )
+                    .map_err(SnapshotError::from)?;
+                    prepared[index].bindings.push(binding);
+                    continue;
+                }
+                let prepared_blob = match destination {
+                    SnapshotBlobDestination::Store => {
+                        self.writer
+                            .prepare_store_partition_blob(&captured.fact, &authority)
+                            .await
+                    }
+                    SnapshotBlobDestination::Circle {
+                        circle_id,
+                        protection,
+                    } => {
+                        self.writer
+                            .prepare_circle_partition_blob(
+                                &captured.fact,
+                                coven_protocol::blob::locator::RemoteAudience::Circle(circle_id),
+                                protection,
+                                &authority,
+                            )
+                            .await
+                    }
+                };
+                let (binding, blob) = prepared_blob.map_err(SnapshotError::from)?;
+                if captured.fact.blob.provenance == coven_protocol::blob::Provenance::UserProvided
+                    && !blob.uploaded_verified
+                {
+                    return Err(SnapshotError::PublishBlobs(format!(
+                "snapshot UserProvided blob {}/{} does not match its existing exact remote binding",
+                captured.fact.blob.namespace, captured.fact.blob.id
+            )));
+                }
+                let spool_path = blob.spool_path;
+                if !blob.uploaded_verified && spool_path.is_none() {
+                    return Err(SnapshotError::PublicationState(
+                        "prepared snapshot blob awaiting upload has no exact spool".to_string(),
+                    ));
+                }
+                let remote =
+                    coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
+                        &blob.stored,
+                        owner.clone(),
+                    )
+                    .map_err(SnapshotError::from)?
+                    .into_record();
+                prepared.push(coven_database::PreparedSnapshotBlob {
+                    bindings: vec![binding],
+                    authority: package_authority,
+                    remote,
+                    spool_path,
+                });
+                coalesced.insert(coalesce_key, prepared.len() - 1);
+            }
+            Ok::<(), SnapshotError>(())
         }
-        let spool_path = blob.spool_path;
-        if !blob.uploaded_verified && spool_path.is_none() {
-            return Err(SnapshotError::PublicationState(
-                "prepared snapshot blob awaiting upload has no exact spool".to_string(),
-            ));
-        }
-        let remote = coven_protocol::remote_object::RemoteObjectRecord::snapshot_activated_blob(
-            &blob.stored,
-            owner.clone(),
-        )
-        .map_err(SnapshotError::from)?
-        .into_record();
-        prepared.push(coven_database::PreparedSnapshotBlob {
-            bindings: vec![binding],
-            authority: package_authority,
-            remote,
-            spool_path,
-        });
-        coalesced.insert(coalesce_key, prepared.len() - 1);
-    }
-    Ok::<(), SnapshotError>(())
-    }.await;
+        .await;
         if let Err(error) = preparation {
             return match cleanup_snapshot_spools(self.store_dir, &prepared).await {
                 Ok(()) => Err(error),

@@ -686,3 +686,115 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod row_upload_identity_tests {
+    use super::*;
+    use crate::blob::{locator_is_this_rows_upload, BlobRef, CacheFill, Provenance};
+    use crate::objects::{ExactObjectRef, ObjectSlot};
+    use crate::store_commit::StoreDeviceRegistrationRef;
+
+    fn hash(bytes: &[u8]) -> ObjectHash {
+        ObjectHash::digest(bytes)
+    }
+
+    fn uploader() -> StoreDeviceRegistrationRef {
+        let bytes = b"row upload identity uploader registration";
+        StoreDeviceRegistrationRef {
+            device_id: "11".repeat(32).parse().unwrap(),
+            registration_hash: hash(bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/devices/row-upload-identity.json".to_string())
+                    .unwrap(),
+                bytes.len() as u64,
+                hash(bytes),
+            ),
+        }
+    }
+
+    fn row_blob() -> BlobRef {
+        BlobRef {
+            namespace: "release_files".to_string(),
+            id: "03b1d792".to_string(),
+            scope: BlobScope::Master,
+            cloud_path: None,
+            fill: CacheFill::CacheLazy,
+            provenance: Provenance::UserProvided,
+        }
+    }
+
+    fn sealed_under(fingerprint: [u8; 32], audience: RemoteAudience) -> BlobLocator {
+        BlobLocator::opaque(
+            "release_files",
+            "03b1d792",
+            uploader(),
+            audience,
+            BlobScope::Master,
+            KeyFingerprint::from_bytes(fingerprint),
+            13_205_924,
+            hash(b"the row's plaintext"),
+        )
+        .unwrap()
+    }
+
+    /// A blob's stored locator names the key generation that sealed its bytes.
+    /// Rotating the Store key changes what a *new* upload would be sealed
+    /// under; it does not re-identify bytes already at the provider.
+    ///
+    /// Comparing a stored locator against one minted under today's key says the
+    /// opposite, and that answer wedges the Store: a snapshot after any
+    /// rotation asks the publisher to re-upload every pre-rotation blob, and a
+    /// user-provided blob has no local file left to re-upload from.
+    #[test]
+    fn a_key_rotation_does_not_re_identify_a_blob_already_uploaded() {
+        let blob = row_blob();
+        let before_rotation = sealed_under([1; 32], RemoteAudience::Store);
+        let after_rotation = sealed_under([2; 32], RemoteAudience::Store);
+
+        assert_ne!(
+            before_rotation, after_rotation,
+            "the two locators differ only in the key that sealed them",
+        );
+        for locator in [&before_rotation, &after_rotation] {
+            assert!(
+                locator_is_this_rows_upload(
+                    locator,
+                    &blob,
+                    13_205_924,
+                    hash(b"the row's plaintext"),
+                    &RemoteAudience::Store,
+                ),
+                "a generation change is not a different blob",
+            );
+        }
+    }
+
+    /// The rule still refuses what a re-seal really is: an audience move, or
+    /// bytes that are not this row's.
+    #[test]
+    fn a_moved_audience_or_changed_content_is_not_this_rows_upload() {
+        let blob = row_blob();
+        let circle = crate::circle::CircleId::from_bytes([7; 16]);
+
+        assert!(
+            !locator_is_this_rows_upload(
+                &sealed_under([1; 32], RemoteAudience::Circle(circle)),
+                &blob,
+                13_205_924,
+                hash(b"the row's plaintext"),
+                &RemoteAudience::Store,
+            ),
+            "a Circle blob is not the Store audience's upload",
+        );
+        assert!(
+            !locator_is_this_rows_upload(
+                &sealed_under([1; 32], RemoteAudience::Store),
+                &blob,
+                13_205_924,
+                hash(b"other bytes"),
+                &RemoteAudience::Store,
+            ),
+            "different plaintext is a different blob",
+        );
+    }
+}
