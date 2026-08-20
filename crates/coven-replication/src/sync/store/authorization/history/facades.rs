@@ -36,6 +36,26 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .await
     }
 
+    /// Seed the verifier from the history this device already retains.
+    ///
+    /// A walk over retained history that has not been seeded re-reads every
+    /// commit, its activation head, and its acknowledgement from the provider —
+    /// five reads per commit, serial. On a real provider that is the seconds
+    /// per commit an owner spent activating a device join. The rows hold all of
+    /// it already; a pull seeds from them at the top of every cycle, and the
+    /// write path needs the same seed before it walks.
+    pub(crate) async fn seed_retained_history(&mut self) -> Result<(), pull::StorePullError> {
+        let root = self.history_verifier.verified_root().reference().clone();
+        let retained = self.database.retained_merge_replay_inputs(root).await?;
+        self.history_verifier.admit_retained_history(&retained)?;
+        let refs = retained
+            .iter()
+            .map(|materialization| materialization.commit_ref().clone())
+            .collect::<Vec<_>>();
+        self.history_verifier.verify_refs(refs).await?;
+        Ok(())
+    }
+
     pub(super) fn pull_history(&mut self) -> pull::PullHistory<'_, 'storage> {
         pull::PullHistory::new(
             self.database.clone(),

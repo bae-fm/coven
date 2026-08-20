@@ -207,6 +207,14 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
             .await
     }
 
+    /// Seed the verifier from retained history before a walk over it, so the
+    /// walk reads nothing from the provider.
+    pub(crate) async fn seed_retained_history(
+        &mut self,
+    ) -> Result<(), crate::sync::store::pull::StorePullError> {
+        self.history.seed_retained_history().await
+    }
+
     pub(super) async fn prepare_merge_history_successor(
         &self,
         commit: &coven_protocol::store_commit::VerifiedStoreBatchCommit,

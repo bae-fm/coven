@@ -6652,3 +6652,103 @@ async fn a_device_join_reads_no_blob_content() {
         "the join fetched blob content it did not need: {blob_reads:?}",
     );
 }
+
+/// The provider reads one same-provider join activation issues, over a Store
+/// whose history is `commits` deep.
+async fn same_provider_activation_reads(commits: usize) -> Vec<String> {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let home = crate::sync::test_helpers::test_cloud_home();
+    let (storage, _cloud) =
+        cycle_test_store_fixture(&owner_db, owner_db_store_dir.clone(), &owner, home.clone()).await;
+    for index in 0..commits {
+        owner_db
+            .execute_test_host_write(&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('depth-{index}', 'Depth {index}', NULL, 1, '{:013}-0000-M', '2026-01-01')",
+                (index + 2) * 1000
+            ))
+            .await;
+        storage
+            .open_into(&owner_db, owner_db_store_dir.clone())
+            .await
+            .expect("open the owner Store")
+            .run_cycle(None)
+            .await
+            .expect("publish the row");
+    }
+
+    let observer = storage
+        .open_into(&owner_db, owner_db_store_dir.clone())
+        .await
+        .expect("open the observing owner device");
+    observer
+        .ensure_device_join_snapshot_for_test()
+        .await
+        .expect("author the join snapshot");
+    let pending_dir = tempfile::tempdir().expect("pending journal directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending-device-join.sqlite"),
+    )
+    .expect("open the pending join journal");
+    let offer = observer
+        .begin_device_join(&crate::sync::test_helpers::pubkey_hex(&owner))
+        .await
+        .expect("publish the join offer");
+    let mut pending_join = observer
+        .open_pending_device_join_for_test(&pending, &owner, offer)
+        .await
+        .expect("open the pending join");
+    let access_request = pending_join
+        .prepare_provider_access_request()
+        .await
+        .expect("prepare the provider access request");
+    let approval = observer
+        .authorize_device_provider_access(access_request, None)
+        .await
+        .expect("authorize provider access");
+    let registration_request = pending_join
+        .prepare_registration_request(approval)
+        .await
+        .expect("prepare the registration request");
+
+    home.clear_exact_reads();
+    observer
+        .activate_same_principal_join_for_test(registration_request)
+        .await
+        .expect("activate the same-provider join");
+    home.exact_reads()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect()
+}
+
+/// Activating a same-provider join must cost the same number of provider reads
+/// whatever the Store's history is.
+///
+/// Unseeded, the walk over retained history re-read every commit, its
+/// activation head and its acknowledgement from the provider — five reads per
+/// commit, serial. Measured here: 64 reads over ten commits and 214 over forty.
+/// On a real provider at ~120 ms a read that is the sixty-odd seconds an owner
+/// spent in this one step of the Add-a-device flow, growing with every commit
+/// the Store ever published.
+///
+/// Counts, not milliseconds: the round trips are the thing that scales, and
+/// they are deterministic.
+#[tokio::test]
+async fn a_same_provider_activation_reads_the_same_however_deep_its_history() {
+    let shallow = same_provider_activation_reads(10).await;
+    let deep = same_provider_activation_reads(40).await;
+
+    assert_eq!(
+        deep.len(),
+        shallow.len(),
+        "four times the history changed what the activation reads:\n  10 commits: {shallow:#?}\n  40 commits: {deep:#?}",
+    );
+    assert!(
+        deep.len() <= 24,
+        "the activation reads {} objects before it can act: {deep:#?}",
+        deep.len(),
+    );
+}

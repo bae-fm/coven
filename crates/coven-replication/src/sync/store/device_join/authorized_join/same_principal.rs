@@ -10,6 +10,10 @@ impl<'operation, 'storage> AuthorizedJoin<'operation, 'storage> {
         if !matches!(request, DeviceRegistrationRequest::SamePrincipal { .. }) {
             return Err(DeviceJoinError::ApprovalMismatch);
         }
+        self.writer
+            .seed_retained_history()
+            .await
+            .map_err(DeviceJoinError::from)?;
         let offer = self.validate_registration_request(&request).await?;
         let journal = self.journal(offer.attempt_id);
         let current = journal.current().await?;
