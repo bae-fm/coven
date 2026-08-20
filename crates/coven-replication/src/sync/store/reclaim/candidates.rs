@@ -400,6 +400,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     ) -> Result<VerifiedReclaimSnapshot, StoreReclaimError> {
         let storage = self.storage.clone();
         let root = self.root.clone();
+        let members = self.membership.clone();
         let mut history = self.history();
         let mut authorized = Vec::new();
         for registration in registrations {
@@ -412,7 +413,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             }
         }
         let selected = match history
-            .select_maximal_acknowledged_store_snapshot(authorized)
+            .select_maximal_acknowledged_store_snapshot(authorized, &members)
             .await
         {
             Ok(Some(selected)) => selected,

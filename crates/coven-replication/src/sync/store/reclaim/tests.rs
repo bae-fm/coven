@@ -828,7 +828,20 @@ fn snapshot_supersedes_seed_requires_strict_domination() {
 /// **The test producer shares the founder's stream**, so anything published
 /// before the packages shifts their expected sequence numbers, and a
 /// freshly activated peer has no local Store position of its own to read.
+///
+/// **Who the peer belongs to decides which questions the fixture can ask.** A
+/// second device of the owner's own identity settles everything about device
+/// status, but its author is the owner, so it cannot be removed as a member
+/// while the store still has an owner. Asking what a *member* removal does to
+/// the set needs a peer with a keypair of its own — see [`PeerPrincipal`].
 struct UnanimityFixture {
+    store: std::sync::Arc<crate::sync::test_helpers::TestStore>,
+    owner_db: coven_database::Database,
+    owner_dir: coven_foundation::store_dir::StoreDir,
+    owner: UserKeypair,
+    /// The peer's own identity, for a [`PeerPrincipal::SeparateMember`] peer.
+    /// A same-principal peer has none: it writes under the owner's key.
+    member: Option<UserKeypair>,
     owner_device: crate::sync::test_helpers::TestDevice,
     /// Read once while the fixture's database is open. Reclaim uses these only
     /// to enumerate snapshot streams; which devices must acknowledge comes from
@@ -846,22 +859,39 @@ enum PeerJoin {
     AfterCoverage,
 }
 
+/// Whose identity the second device registers under.
+///
+/// The two are not interchangeable, because ending a device and ending a member
+/// are different acts with different reach. Excluding a device marks that device
+/// Inactive and leaves its owner a member. Removing a member ends that member's
+/// grants and rotates the store key, and touches no device status at all — so
+/// only a peer with an identity of its own can pose that second question.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerPrincipal {
+    /// A second device of the owner's own identity.
+    SamePrincipal,
+    /// A distinct member, admitted to the Store, with its own keypair.
+    SeparateMember,
+}
+
 impl UnanimityFixture {
-    async fn build(store_id: &str, join: PeerJoin) -> Self {
+    async fn build(store_id: &str, join: PeerJoin, principal: PeerPrincipal) -> Self {
         let signer = UserKeypair::generate();
+        let member = match principal {
+            PeerPrincipal::SamePrincipal => None,
+            PeerPrincipal::SeparateMember => Some(UserKeypair::generate()),
+        };
         let owner_dir = crate::sync::test_helpers::test_store_dir();
         let owner_db = crate::sync::test_helpers::open_test_db(owner_dir.clone());
-        let store = std::sync::Arc::new(
-            Box::pin(crate::sync::test_helpers::TestStore::create(
-                &owner_db,
-                owner_dir.clone(),
-                store_id,
-                signer.clone(),
-                crate::sync::test_helpers::test_cloud_home(),
-            ))
-            .await
-            .expect("create two-device reclaim Store"),
-        );
+        let store = Box::pin(crate::sync::test_helpers::TestStore::create(
+            &owner_db,
+            owner_dir.clone(),
+            store_id,
+            signer.clone(),
+            crate::sync::test_helpers::test_cloud_home(),
+        ))
+        .await
+        .expect("create two-device reclaim Store");
         let owner_device = Box::pin(store.open_into(&owner_db, owner_dir.clone()))
             .await
             .expect("open owner Store device");
@@ -905,16 +935,35 @@ impl UnanimityFixture {
         }
         let peer_dir = crate::sync::test_helpers::test_store_dir();
         let peer_db = crate::sync::test_helpers::open_test_db(peer_dir.clone());
-        Box::pin(store.activate_joined_device(
-            &owner_db,
-            owner_dir.clone(),
-            &peer_db,
-            peer_dir,
-            &signer,
-            "2026-07-18T00:00:00Z",
-        ))
-        .await
-        .expect("activate peer Store device");
+        match &member {
+            None => {
+                Box::pin(store.activate_joined_device(
+                    &owner_db,
+                    owner_dir.clone(),
+                    &peer_db,
+                    peer_dir,
+                    &signer,
+                    "2026-07-18T00:00:00Z",
+                ))
+                .await
+                .expect("activate peer Store device");
+            }
+            Some(member) => {
+                // Admitting first is what makes this peer a member in its own
+                // right; the activation that follows is the same join the
+                // same-principal peer does, so the choreography above still
+                // holds and only the author of the registration differs.
+                Box::pin(store.admit_and_activate_peer(
+                    &owner_db,
+                    owner_dir.clone(),
+                    &peer_db,
+                    peer_dir,
+                    member,
+                ))
+                .await
+                .expect("admit and activate a second member's device");
+            }
+        }
         let covering = match covering {
             Some(reference) => reference,
             None => {
@@ -975,11 +1024,37 @@ impl UnanimityFixture {
             .find(|reference| reference.device_id.to_string() != local_device_id);
 
         Self {
+            store,
+            owner_db,
+            owner_dir,
+            owner: signer,
+            member,
             owner_device,
             registrations,
             covering,
             peer,
         }
+    }
+
+    /// Removes the peer's member from the Store: its grants end and the store
+    /// key rotates. The devices that member registered keep the status they
+    /// had, which is the whole point of the case this serves.
+    async fn remove_peer_member(&self) {
+        let member = self
+            .member
+            .as_ref()
+            .expect("only a separate member can be removed as one");
+        self.store
+            .remove_member(
+                &self.owner_db,
+                self.owner_dir.clone(),
+                &self.owner,
+                &crate::sync::test_helpers::pubkey_hex(member),
+                &coven_keys::encryption::EncryptionService::from_key([42; 32]),
+                &crate::sync::test_helpers::TestCustody::default(),
+            )
+            .await
+            .expect("remove the peer's member");
     }
 
     async fn chosen_snapshot(&self) -> coven_protocol::store_commit::StoreSnapshotRef {
@@ -1005,8 +1080,12 @@ impl UnanimityFixture {
 #[tokio::test]
 async fn an_idle_device_active_at_the_coverage_still_blocks_reclaim() {
     Box::pin(async {
-        let fixture =
-            UnanimityFixture::build("reclaim-unanimity-idle", PeerJoin::BeforeCoverage).await;
+        let fixture = UnanimityFixture::build(
+            "reclaim-unanimity-idle",
+            PeerJoin::BeforeCoverage,
+            PeerPrincipal::SamePrincipal,
+        )
+        .await;
         assert!(
             fixture.peer.is_some(),
             "the peer joined before the coverage"
@@ -1032,8 +1111,12 @@ async fn an_idle_device_active_at_the_coverage_still_blocks_reclaim() {
 #[tokio::test]
 async fn a_device_excluded_after_the_coverage_does_not_block_reclaim() {
     Box::pin(async {
-        let fixture =
-            UnanimityFixture::build("reclaim-unanimity-excluded", PeerJoin::BeforeCoverage).await;
+        let fixture = UnanimityFixture::build(
+            "reclaim-unanimity-excluded",
+            PeerJoin::BeforeCoverage,
+            PeerPrincipal::SamePrincipal,
+        )
+        .await;
         let peer = fixture.peer.clone().expect("the peer joined");
         fixture.owner_device.finalize_peer_exclusion(&peer).await;
 
@@ -1061,9 +1144,12 @@ async fn a_device_excluded_after_the_coverage_does_not_block_reclaim() {
 #[tokio::test]
 async fn a_device_that_joined_after_the_coverage_does_not_block_reclaim() {
     Box::pin(async {
-        let fixture =
-            UnanimityFixture::build("reclaim-unanimity-joined-after", PeerJoin::AfterCoverage)
-                .await;
+        let fixture = UnanimityFixture::build(
+            "reclaim-unanimity-joined-after",
+            PeerJoin::AfterCoverage,
+            PeerPrincipal::SamePrincipal,
+        )
+        .await;
         assert!(fixture.peer.is_some(), "the peer joined after the coverage");
 
         let chosen = fixture.chosen_snapshot().await;
@@ -1072,6 +1158,61 @@ async fn a_device_that_joined_after_the_coverage_does_not_block_reclaim() {
             "a device that joined after the coverage is excused, so reclaim reaches its \
              snapshot: chose generation {} against {}",
             chosen.generation,
+            fixture.covering.generation,
+        );
+    })
+    .await;
+}
+
+/// A removed member's device stops blocking reclaim — the case device status
+/// alone can never notice.
+///
+/// This is the shape the live store was stuck on. Removing a member ends its
+/// grants and rotates the store key; it does not mark the devices that member
+/// registered Inactive, because device status tracks a device's own lifecycle,
+/// not its owner's standing. A rule that asked only "is this device still
+/// Active" therefore kept demanding an acknowledgement from every removed
+/// member's device — devices that cannot pull, will never publish again, and
+/// had every snapshot behind them pinned unreclaimable for good.
+///
+/// Asserted as a before and an after over one fixture, so what moves reclaim is
+/// the removal and not the generation-zero fallback every one of these tests
+/// can otherwise land on.
+#[tokio::test]
+async fn a_removed_members_device_does_not_block_reclaim() {
+    Box::pin(async {
+        let fixture = UnanimityFixture::build(
+            "reclaim-unanimity-removed-member",
+            PeerJoin::BeforeCoverage,
+            PeerPrincipal::SeparateMember,
+        )
+        .await;
+        assert!(
+            fixture.peer.is_some(),
+            "the second member's device joined before the coverage"
+        );
+
+        let before = fixture.chosen_snapshot().await;
+        assert!(
+            before.generation < fixture.covering.generation,
+            "while it is still a member, its device blocks the snapshot: chose generation {} \
+             against {}",
+            before.generation,
+            fixture.covering.generation,
+        );
+
+        fixture.remove_peer_member().await;
+
+        // At or past, not equal: removing a member publishes history of its own,
+        // which can produce a newer snapshot that is also selectable. What
+        // matters is that reclaim is no longer held below the one the removed
+        // member's device was blocking.
+        let after = fixture.chosen_snapshot().await;
+        assert!(
+            after.generation >= fixture.covering.generation,
+            "a removed member's device is excused, so reclaim reaches its snapshot: chose \
+             generation {} against {}",
+            after.generation,
             fixture.covering.generation,
         );
     })

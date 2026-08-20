@@ -10,6 +10,22 @@ impl MembershipChain {
             .any(|(_, record)| record.role.can_write())
     }
 
+    /// Whether `pubkey` holds any active grant — a member of this Store now,
+    /// whatever role it has.
+    ///
+    /// Distinct from any question about that member's devices. Removing a
+    /// member ends its grants here and rotates the key; it does not mark the
+    /// devices it registered inactive, because device status tracks a device's
+    /// own lifecycle — a lost laptop belonging to a member in good standing.
+    /// Anything asking "could this principal still be owed history" has to ask
+    /// membership, not device status.
+    pub fn is_member_now(&self, pubkey: &str) -> bool {
+        if self.conflict().is_some() {
+            return false;
+        }
+        !self.active_grants_for(pubkey).is_empty()
+    }
+
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
         if self.conflict().is_some() {
             return false;

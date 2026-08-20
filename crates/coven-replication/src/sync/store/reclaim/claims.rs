@@ -528,6 +528,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         activation: &VerifiedStoreBatchCommit,
         claim: &StorePackageReclaimClaim,
     ) -> Result<StorePackageReclaimTarget, StoreReclaimError> {
+        let members = self.membership.clone();
         let mut history = self.history();
         let author = history
             .load_registration(&claim.covering_snapshot.author_registration)
@@ -545,7 +546,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             successor_slot: metadata.successor.next_slot.clone(),
             meta: metadata,
         };
-        let acknowledged = match history.verify_snapshot_stability(&snapshot).await {
+        let acknowledged = match history.verify_snapshot_stability(&snapshot, &members).await {
             Ok(acknowledged) => acknowledged,
             Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
                 member,

@@ -142,6 +142,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn select_maximal_acknowledged_store_snapshot(
         &mut self,
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
+        members: &MembershipChain,
     ) -> Result<Option<SelectedAcknowledgedStoreSnapshot>, StorePullError> {
         let Some(maximal_candidate) =
             crate::sync::store::snapshots::select_maximal_store_snapshot(candidates.clone())
@@ -152,7 +153,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         let mut eligible = Vec::new();
         let mut maximal_rejection = None;
         for snapshot in candidates {
-            match self.verify_snapshot_stability(&snapshot).await {
+            match self.verify_snapshot_stability(&snapshot, members).await {
                 Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
                 Err(error) if disqualifies_one_candidate(&error) => {
                     report_rejected_snapshot(&snapshot, &error);
@@ -373,6 +374,7 @@ impl<'a> MergeHistoryVerifier<'a> {
     pub(crate) async fn verify_snapshot_stability(
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
+        members: &MembershipChain,
     ) -> Result<VerifiedAcknowledgedStoreSnapshot, StorePullError> {
         let authority = self.build_snapshot_authority(snapshot).await?;
         let acknowledgements = self
@@ -380,7 +382,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             .await?;
         let current_devices = self.device_state_at_verified_cut(&authority.accepted_cut)?;
         let acknowledged = self
-            .build_acknowledged_snapshot(authority, acknowledgements, &current_devices)
+            .build_acknowledged_snapshot(authority, acknowledgements, &current_devices, members)
             .await?;
         VerifiedAcknowledgedStoreSnapshot::from_acknowledged(acknowledged)
             .map_err(StorePullError::Database)
@@ -443,6 +445,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
         acknowledgements: Vec<VerifiedActivatedStoreAck>,
         current_devices: &ResolvedStoreDeviceState,
+        members: &MembershipChain,
     ) -> Result<coven_protocol::store_commit::AcknowledgedStoreSnapshot, StorePullError> {
         let mut retained_acknowledgements = BTreeMap::new();
         for (device_id, registration) in &authority.active_registrations {
@@ -455,7 +458,19 @@ impl<'a> MergeHistoryVerifier<'a> {
                         coven_protocol::store_commit::StoreDeviceStatus::Active
                     )
                 });
-            if !active_now {
+            // Two different things put a device out of the set, and asking only
+            // one of them is what left this rule demanding signatures nobody
+            // can produce.
+            //
+            // Device status answers "may this device still act": one excluded
+            // after the coverage is Inactive here. Membership answers "is this
+            // principal still owed anything": removing a member ends its grants
+            // and rotates the key, and does not touch the status of the devices
+            // it registered — those stay Active for good. So a store whose
+            // members were removed still counted every one of their devices,
+            // and every snapshot behind them stayed unreclaimable, which is the
+            // shape this rule exists to end.
+            if !active_now || !members.is_member_now(&registration.value().author_pubkey) {
                 continue;
             }
             let registration_ref = registration.reference();

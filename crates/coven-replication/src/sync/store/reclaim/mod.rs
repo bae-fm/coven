@@ -21,12 +21,17 @@
 //!
 //! ```text
 //!   { d : d is Active in the CURRENT device state
-//!         and d is Active in the device state resolved at S's coverage }
+//!         and d is Active in the device state resolved at S's coverage
+//!         and d's registering principal holds an active grant NOW }
 //! ```
 //!
-//! has supplied that proof. Membership is decided by two device states, not
-//! one, and each conjunct rules out a shape that can never supply a proof and
-//! never needs to.
+//! has supplied that proof. Three conjuncts, and each rules out a shape that
+//! can never supply a proof and never needs to. The third asks membership,
+//! not device status: removing a member ends its grants and rotates the key
+//! without touching the status of the devices it registered — those stay
+//! Active for good, so a rule reading device status alone kept demanding
+//! signatures from devices whose principals could never publish again, and
+//! every snapshot behind them stayed unreclaimable.
 //!
 //! A device excluded after S's coverage is out. It was Active at S's coverage,
 //! so the coverage-time state alone would demand its acknowledgement — but it
@@ -49,6 +54,12 @@
 //! may have been idle since; it may hold nothing past S's coverage at all. It
 //! is a current member that could still need what is behind S. It acknowledges,
 //! or the snapshot is not reclaimable.
+//!
+//! A removed member's devices are out, whatever their device status says. A
+//! removed member cannot pull, publish, or re-enter except by a fresh join,
+//! which bootstraps at or past S — nothing behind S is reachable to it, and
+//! its devices' Active status is a statement about the devices' own
+//! lifecycle, not the principal's standing.
 //!
 //! ## What the joined-after leg rests on
 //!
