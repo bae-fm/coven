@@ -483,6 +483,18 @@ impl CloudSyncObjectStorage for CloudSyncConnection {
         .await
     }
 
+    async fn list_protocol_slots(
+        &self,
+        context: &ProtocolObjectContext,
+        listing_prefix: &str,
+    ) -> Result<Vec<ObjectSlot>, StorageError> {
+        let listed = self.home.list_slots(listing_prefix).await?;
+        Ok(listed
+            .into_iter()
+            .filter(|slot| context.semantic_prefix_of(slot).is_some())
+            .collect())
+    }
+
     async fn read_protocol_slot(
         &self,
         context: &ProtocolObjectContext,

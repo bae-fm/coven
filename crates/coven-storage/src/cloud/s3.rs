@@ -1579,6 +1579,9 @@ impl ExactSlotStorage for S3CloudHome {
         })
         .await
     }
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+    }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("S3")?;
         S3CloudHome::read(self, slot.logical_key()).await

@@ -286,6 +286,24 @@ pub trait CloudSyncObjectStorage: Send + Sync {
         progress: crate::cloud::DownloadProgress,
     ) -> Result<Vec<u8>, StorageError>;
 
+    /// Name every slot under `listing_prefix` that holds a `context` object.
+    ///
+    /// A listing is not evidence. It decides which bytes are worth fetching and
+    /// nothing else: each slot it yields is read and verified exactly as one
+    /// named by a signed reference would be, so a listing that omits, invents,
+    /// or reorders entries changes how many round trips a reader makes and
+    /// never what it believes. Slots whose logical key is not one this domain
+    /// writes are dropped here rather than fetched.
+    ///
+    /// This exists because a chain of slots that each name the next costs one
+    /// round trip per link to walk, while the slots themselves are named by
+    /// coordinate and so share a prefix a provider can enumerate at once.
+    async fn list_protocol_slots(
+        &self,
+        context: &ProtocolObjectContext,
+        listing_prefix: &str,
+    ) -> Result<Vec<ObjectSlot>, StorageError>;
+
     /// Read one predecessor-reserved successor slot and return both its opened
     /// bytes and the completed exact reference derived from the stored bytes.
     async fn read_protocol_slot(

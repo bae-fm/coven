@@ -547,5 +547,8 @@ fn assert_list_page_preserves_namespace_relative_key(
         .parse_list_page(&body, "objects/")
         .expect("parse list page");
 
-    assert_eq!(page.keys, vec![expected_key]);
+    assert_eq!(
+        page.slots,
+        vec![ObjectSlot::logical(expected_key.to_string()).expect("logical slot")]
+    );
 }

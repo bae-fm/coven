@@ -4570,6 +4570,11 @@ pub enum ProtocolRead {
     Object,
     Slot,
     PreparedSlot,
+    /// Naming the slots under a prefix, which fetches no object's bytes. Apart
+    /// from `Slot` because a reader that lists a prefix and then reads what it
+    /// found makes one of these and N of those, and a test counting reads or
+    /// failing the Nth one means the reads.
+    Listing,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -5271,6 +5276,20 @@ where
             .await?;
         self.inner
             .read_protocol_object_with_progress(context, object, semantic_prefix, progress)
+            .await
+    }
+
+    async fn list_protocol_slots(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        listing_prefix: &str,
+    ) -> Result<Vec<coven_protocol::objects::ObjectSlot>, coven_protocol::objects::StorageError>
+    {
+        self.interceptor
+            .before_protocol_read(ProtocolRead::Listing, listing_prefix)
+            .await?;
+        self.inner
+            .list_protocol_slots(context, listing_prefix)
             .await
     }
 

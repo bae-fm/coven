@@ -156,6 +156,21 @@ impl ProtocolObjectContext {
         self.validate_slot(object.slot(), semantic_prefix)
     }
 
+    /// The semantic path `slot` names, when the slot names an object of this
+    /// context's domain.
+    ///
+    /// A slot's logical key is its semantic path plus the domain's extension,
+    /// so the path is recoverable from the key alone. Returns `None` for a slot
+    /// this domain would not have written — which is how a caller that learned
+    /// of a slot by listing a provider prefix, rather than by following a
+    /// signed reference, discards what does not belong to it.
+    pub fn semantic_prefix_of<'slot>(&self, slot: &'slot ObjectSlot) -> Option<&'slot str> {
+        let semantic_prefix = slot.logical_key().strip_suffix(self.domain.extension())?;
+        self.validate_slot(slot, semantic_prefix)
+            .ok()
+            .map(|()| semantic_prefix)
+    }
+
     pub fn validate_slot(
         &self,
         slot: &ObjectSlot,

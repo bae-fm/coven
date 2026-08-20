@@ -1122,14 +1122,20 @@ fn parse_list_page_skips_malformed_flat_names() {
     let valid = encode_key("objects/dev1/1.enc");
     let other_prefix = encode_key("snapshots/dev1.json.enc");
     let body = format!(
-        r#"{{"files":[{{"name":"{valid}"}},{{"name":"not-hex"}},{{"name":"{other_prefix}"}}]}}"#
+        r#"{{"files":[{{"id":"file-valid","name":"{valid}"}},{{"id":"file-junk","name":"not-hex"}},{{"id":"file-other","name":"{other_prefix}"}}]}}"#
     );
 
     let page = home()
         .parse_list_page(&body, "objects/")
         .expect("parse list page");
 
-    assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
+    assert_eq!(
+        page.slots,
+        vec![
+            ObjectSlot::opaque("objects/dev1/1.enc".to_string(), "file-valid".to_string())
+                .expect("opaque slot")
+        ]
+    );
 }
 
 #[test]

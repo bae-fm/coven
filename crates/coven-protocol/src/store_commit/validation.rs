@@ -427,13 +427,31 @@ pub(crate) fn membership_head_semantic_prefix(
     )
 }
 
+/// Everything one author stream's head slots share, up to the sequence number.
+///
+/// A head's slot is named by its coordinate alone, so a provider can enumerate
+/// a whole stream under this prefix instead of a reader learning each slot from
+/// the head before it. The founder's first head is the exception: it is written
+/// under [`founder_membership_head_semantic_prefix`] before the founder has a
+/// grant to name, so a listing here starts the founder's stream at sequence 2.
+pub fn membership_head_stream_prefix(
+    author: &str,
+    author_owner_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
+) -> String {
+    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{author_owner_grant}/{stream_id}/")
+}
+
 pub fn membership_head_slot_prefix(
     author: &str,
     author_owner_grant: &MembershipGrantId,
     stream_id: AuthorStreamId,
     seq: u64,
 ) -> String {
-    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{author_owner_grant}/{stream_id}/{seq}")
+    format!(
+        "{}{seq}",
+        membership_head_stream_prefix(author, author_owner_grant, stream_id)
+    )
 }
 
 pub fn membership_resolution_semantic_prefix(

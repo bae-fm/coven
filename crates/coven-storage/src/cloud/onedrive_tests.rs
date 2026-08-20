@@ -340,7 +340,10 @@ fn parse_list_page_skips_malformed_flat_names() {
         .parse_list_page(&body, "objects/")
         .expect("parse list page");
 
-    assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
+    assert_eq!(
+        page.slots,
+        vec![ObjectSlot::logical("objects/dev1/1.enc".to_string()).expect("logical slot")]
+    );
 }
 
 #[test]

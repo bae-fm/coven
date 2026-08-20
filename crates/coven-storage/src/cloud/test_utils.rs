@@ -85,6 +85,8 @@ pub struct InMemoryCloudHome {
     probe_failure: Arc<Mutex<Option<coven_protocol::objects::StorageBackendFailure>>>,
     exact_full_read_count: Arc<AtomicUsize>,
     exact_full_read_delay_millis: Arc<AtomicU64>,
+    exact_list_count: Arc<AtomicUsize>,
+    exact_listed_prefixes: Arc<Mutex<Vec<String>>>,
     exact_full_read_inflight: Arc<AtomicUsize>,
     exact_full_read_max_inflight: Arc<AtomicUsize>,
     exact_stream_read_count: Arc<AtomicUsize>,
@@ -150,6 +152,8 @@ impl InMemoryCloudHome {
             probe_pause: Arc::new(Mutex::new(None)),
             probe_failure: Arc::new(Mutex::new(None)),
             exact_full_read_count: Arc::new(AtomicUsize::new(0)),
+            exact_list_count: Arc::new(AtomicUsize::new(0)),
+            exact_listed_prefixes: Arc::new(Mutex::new(Vec::new())),
             exact_full_read_delay_millis: Arc::new(AtomicU64::new(0)),
             exact_full_read_inflight: Arc::new(AtomicUsize::new(0)),
             exact_full_read_max_inflight: Arc::new(AtomicUsize::new(0)),
@@ -299,6 +303,19 @@ impl InMemoryCloudHome {
 
     pub fn exact_full_read_count(&self) -> usize {
         self.exact_full_read_count.load(Ordering::SeqCst)
+    }
+
+    pub fn exact_list_count(&self) -> usize {
+        self.exact_list_count.load(Ordering::SeqCst)
+    }
+
+    pub fn exact_listed_prefixes(&self) -> Vec<String> {
+        self.exact_listed_prefixes.lock().unwrap().clone()
+    }
+
+    pub fn clear_exact_listings(&self) {
+        self.exact_list_count.store(0, Ordering::SeqCst);
+        self.exact_listed_prefixes.lock().unwrap().clear();
     }
 
     /// Delay every whole-object exact read and measure their concurrency.
@@ -527,6 +544,19 @@ impl InMemoryCloudHome {
                 format!("{}#exact#{provider_id}", slot.logical_key())
             }
         })
+    }
+
+    /// The slot [`exact_storage_key`](Self::exact_storage_key) built this
+    /// bucket key from, so a listing recovers the locator the writer allocated
+    /// the same way a real provider's listing does.
+    fn exact_slot_from_storage_key(key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        match key.split_once("#exact#") {
+            Some((logical_key, provider_id)) => {
+                ObjectSlot::opaque(logical_key.to_string(), provider_id.to_string())
+            }
+            None => ObjectSlot::logical(key.to_string()),
+        }
+        .map_err(CloudHomeError::from)
     }
 
     async fn create_at_slot(
@@ -900,6 +930,26 @@ impl ExactSlotStorage for InMemoryCloudHome {
         &self,
     ) -> Result<coven_protocol::objects::ResolvedProviderBinding, CloudHomeError> {
         Ok(self.provider_binding.clone())
+    }
+
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        self.exact_list_count.fetch_add(1, Ordering::SeqCst);
+        self.exact_listed_prefixes
+            .lock()
+            .unwrap()
+            .push(prefix.to_string());
+        let mut keys: Vec<String> = self
+            .writes
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.iter()
+            .map(|key| Self::exact_slot_from_storage_key(key))
+            .collect()
     }
 
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {

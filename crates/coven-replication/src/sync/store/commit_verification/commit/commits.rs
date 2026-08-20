@@ -441,6 +441,102 @@ impl<'a> StoreCommitVerifier<'a> {
             .await
     }
 
+    /// Every slot the walk of `listing_prefix` might reach, fetched together.
+    ///
+    /// What this changes for a caller is how many round trips it makes, never
+    /// what it ends up believing: which slots exist is decided by an unsigned
+    /// listing that gets no trust, and the bytes are handed back unverified for
+    /// the caller to check exactly as it would have checked its own reads.
+    /// Anything the caller reaches and does not find here it still reads for
+    /// itself.
+    ///
+    /// A read that fails is a different matter from a slot that is absent, and
+    /// is reported rather than dropped. Absence is ordinary — it is how a chain
+    /// walk learns it has reached the end — but a slot under this prefix that
+    /// cannot be read is an object this Store wrote and can no longer open, and
+    /// swallowing that would leave a caller retrying it silently and, if the
+    /// second read happened to succeed, believing a chain whose first read had
+    /// failed.
+    ///
+    /// The result is remembered under the prefix, because one anchored-chain
+    /// load walks the same stream several times and each walk would otherwise
+    /// list and fetch it again.
+    pub(crate) async fn prefetch_slot_stream(
+        &self,
+        context: &ProtocolObjectContext,
+        listing_prefix: &str,
+        anchor_slots: Vec<coven_protocol::objects::ObjectSlot>,
+    ) -> Result<PrefetchedSlotStream, StorageError> {
+        if let Some(prefetched) = self
+            .prefetched_slot_streams
+            .lock()
+            .expect("prefetched slot stream cache poisoned")
+            .get(listing_prefix)
+        {
+            return Ok(PrefetchedSlotStream::Remembered(prefetched.clone()));
+        }
+        let mut slots = anchor_slots;
+        slots.extend(
+            self.storage
+                .list_protocol_slots(context, listing_prefix)
+                .await?,
+        );
+        let prefetched: StreamSlotReads =
+            std::sync::Arc::new(self.read_protocol_slots(context, slots).await?);
+        self.prefetched_slot_streams
+            .lock()
+            .expect("prefetched slot stream cache poisoned")
+            .insert(listing_prefix.to_string(), prefetched.clone());
+        Ok(PrefetchedSlotStream::Fetched(prefetched))
+    }
+
+    /// Read every slot in `slots`, `PROTOCOL_SLOT_READ_WIDTH` at a time.
+    ///
+    /// Slots whose names a reader already knows have no ordering between them,
+    /// so reading them one after another spends a provider round trip per slot
+    /// for nothing.
+    ///
+    /// A slot that is absent, or whose key is not one this domain writes, is
+    /// left out — the caller decides what a missing slot means, and for a chain
+    /// walk it means the end. Every other failure is returned, because a reader
+    /// that cannot tell "not there" from "could not look" would read a provider
+    /// fault as the end of history.
+    ///
+    /// Nothing here is verified beyond opening the stored bytes; the caller
+    /// runs its own checks on whatever it takes.
+    async fn read_protocol_slots(
+        &self,
+        context: &ProtocolObjectContext,
+        slots: Vec<coven_protocol::objects::ObjectSlot>,
+    ) -> Result<BTreeMap<coven_protocol::objects::ObjectSlot, ReadProtocolSlot>, StorageError> {
+        use futures_util::StreamExt;
+
+        let mut slots = slots;
+        slots.sort();
+        slots.dedup();
+        futures_util::stream::iter(slots)
+            .map(|slot| async move {
+                let Some(semantic_prefix) = context.semantic_prefix_of(&slot) else {
+                    return Ok(None);
+                };
+                match self
+                    .storage
+                    .read_protocol_slot(context, &slot, semantic_prefix)
+                    .await
+                {
+                    Ok((bytes, object)) => Ok(Some((slot, ReadProtocolSlot { bytes, object }))),
+                    Err(StorageError::NotFound(_)) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            })
+            .buffer_unordered(PROTOCOL_SLOT_READ_WIDTH)
+            .filter_map(|read| std::future::ready(read.transpose()))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn remember(
         &mut self,
         commit: VerifiedStoreBatchCommit,

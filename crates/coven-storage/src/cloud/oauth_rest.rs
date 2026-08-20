@@ -15,11 +15,18 @@ use std::path::Path;
 use super::http::{body_text, ensure_ok, ok_bytes, NotFound};
 use super::s3_common::is_range_success;
 use super::{CloudFileReadError, CloudHomeError};
+use coven_protocol::objects::ObjectSlot;
 
-/// One page of a listing: the keys it yielded (already decoded and prefix-filtered)
-/// and the cursor to fetch the next page, present only when more pages remain.
+/// One page of a listing: the slots it yielded (already decoded and
+/// prefix-filtered) and the cursor to fetch the next page, present only when
+/// more pages remain.
+///
+/// Slots rather than keys because a listing already knows how the provider
+/// addresses what it listed — Google Drive reports the file id beside the name
+/// — and a caller that goes on to read what it found needs that locator. The
+/// key-only view is the projection, not the other way round.
 pub(crate) struct ListPage {
-    pub keys: Vec<String>,
+    pub slots: Vec<ObjectSlot>,
     pub next: Option<String>,
 }
 
@@ -83,8 +90,8 @@ pub(crate) trait OAuthRestHome: Send + Sync {
         cursor: Option<&str>,
     ) -> Result<reqwest::Response, CloudHomeError>;
 
-    /// Parse a listing page body into its keys (decoded and filtered to `prefix`)
-    /// and the next cursor.
+    /// Parse a listing page body into its slots (decoded and filtered to
+    /// `prefix`) and the next cursor.
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError>;
 }
 
@@ -197,16 +204,17 @@ pub(crate) async fn rest_delete<T: OAuthRestHome + ?Sized>(
     }
 }
 
-/// List every key under `prefix`, following pagination. A not-found on the first
-/// page (Dropbox returns it when the folder doesn't exist yet) is an empty list.
-/// A not-found on a continuation page is a truncated listing — an expired cursor
-/// or a transient 404 mid-pagination — and propagates as an error, since the keys
-/// collected so far are not the complete result the caller would read them as.
-pub(crate) async fn rest_list<T: OAuthRestHome + ?Sized>(
+/// List every slot under `prefix`, following pagination. A not-found on the
+/// first page (Dropbox returns it when the folder doesn't exist yet) is an empty
+/// list. A not-found on a continuation page is a truncated listing — an expired
+/// cursor or a transient 404 mid-pagination — and propagates as an error, since
+/// the slots collected so far are not the complete result the caller would read
+/// them as.
+pub(crate) async fn rest_list_slots<T: OAuthRestHome + ?Sized>(
     home: &T,
     prefix: &str,
-) -> Result<Vec<String>, CloudHomeError> {
-    let mut keys = Vec::new();
+) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+    let mut slots = Vec::new();
     let mut cursor: Option<String> = None;
     let mut page_tokens = PageTokenTracker::new("OAuth REST listing");
     loop {
@@ -218,19 +226,31 @@ pub(crate) async fn rest_list<T: OAuthRestHome + ?Sized>(
             // truncated listing and must fail rather than return a partial result.
             Err(CloudHomeError::NotFound(_)) if cursor.is_none() => {
                 tracing::debug!("list root for {prefix} absent; returning empty listing");
-                return Ok(keys);
+                return Ok(slots);
             }
             Err(e) => return Err(e),
         };
         let body = body_text(resp).await;
         let page = home.parse_list_page(&body, prefix)?;
-        keys.extend(page.keys);
+        slots.extend(page.slots);
         match page.next {
             Some(token) => cursor = Some(page_tokens.record(&token)?),
             None => break,
         }
     }
-    Ok(keys)
+    Ok(slots)
+}
+
+/// The logical keys [`rest_list_slots`] found, for [`CloudHome::list`].
+pub(crate) async fn rest_list<T: OAuthRestHome + ?Sized>(
+    home: &T,
+    prefix: &str,
+) -> Result<Vec<String>, CloudHomeError> {
+    Ok(rest_list_slots(home, prefix)
+        .await?
+        .iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect())
 }
 
 #[cfg(test)]
@@ -286,7 +306,7 @@ mod tests {
         fn parse_list_page(&self, body: &str, _prefix: &str) -> Result<ListPage, CloudHomeError> {
             assert_eq!(body, "PAGE1", "only the first page's body is ever parsed");
             Ok(ListPage {
-                keys: vec!["objects/dev1.json".to_string()],
+                slots: vec![ObjectSlot::logical("objects/dev1.json".to_string())?],
                 next: Some("page2".to_string()),
             })
         }

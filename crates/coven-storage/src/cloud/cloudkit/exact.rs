@@ -443,6 +443,10 @@ impl ExactSlotStorage for CloudKitCloudHome {
         Ok(outcome)
     }
 
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
+    }
+
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         slot.require_logical_key_for("CloudKit")?;
         let ops = self.ops.clone();

@@ -323,6 +323,17 @@ impl ExactSlotStorage for ExternalProvider {
             .map_err(CloudHomeError::from)
     }
 
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        CloudHome::list(self, prefix)
+            .await?
+            .into_iter()
+            .map(|key| {
+                ObjectSlot::opaque(key, "provider:created-copy".to_string())
+                    .map_err(CloudHomeError::from)
+            })
+            .collect()
+    }
+
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,

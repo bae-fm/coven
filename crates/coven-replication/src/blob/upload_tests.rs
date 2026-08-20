@@ -182,6 +182,10 @@ impl ExactSlotStorage for InstrumentedHome {
         ExactSlotStorage::allocate_slot(&self.inner, logical_key).await
     }
 
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        ExactSlotStorage::list_slots(&self.inner, prefix).await
+    }
+
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,

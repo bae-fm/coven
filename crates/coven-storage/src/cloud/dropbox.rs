@@ -937,7 +937,7 @@ impl OAuthRestHome for DropboxCloudHome {
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
-        let mut keys = Vec::new();
+        let mut slots = Vec::new();
         if let Some(entries) = json["entries"].as_array() {
             for entry in entries {
                 if entry[".tag"].as_str() != Some("file") {
@@ -955,7 +955,7 @@ impl OAuthRestHome for DropboxCloudHome {
                     continue;
                 };
                 if key.starts_with(prefix) {
-                    keys.push(key.to_string());
+                    slots.push(ObjectSlot::logical(key.to_string())?);
                 }
             }
         }
@@ -973,7 +973,7 @@ impl OAuthRestHome for DropboxCloudHome {
         } else {
             None
         };
-        Ok(ListPage { keys, next })
+        Ok(ListPage { slots, next })
     }
 }
 
@@ -1283,6 +1283,10 @@ impl ExactSlotStorage for DropboxCloudHome {
             self.verify_exact_upload(upload, observed)
         })
         .await
+    }
+
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
     }
 
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {

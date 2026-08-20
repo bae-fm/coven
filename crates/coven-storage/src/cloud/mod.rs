@@ -481,6 +481,14 @@ pub(crate) fn range_header(start: u64, end: u64) -> String {
     format!("bytes={start}-{}", end.saturating_sub(1))
 }
 
+/// [`ExactSlotStorage::list_slots`] for a provider that addresses objects by
+/// their key, where the listed key is the whole locator.
+pub(crate) fn logical_slots(keys: Vec<String>) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+    keys.into_iter()
+        .map(|key| ObjectSlot::logical(key).map_err(CloudHomeError::from))
+        .collect()
+}
+
 /// Low-level cloud storage. Implementations handle a single store.
 ///
 /// All methods deal in raw bytes. No encryption or path layout logic.
@@ -525,6 +533,16 @@ pub trait ExactSlotStorage: Send + Sync {
     async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
         ObjectSlot::logical(logical_key.to_string()).map_err(CloudHomeError::from)
     }
+
+    /// Name every slot this home holds whose logical key starts with `prefix`.
+    ///
+    /// The slot-shaped counterpart of [`CloudHome::list`], and the read side of
+    /// [`allocate_slot`](ExactSlotStorage::allocate_slot): a provider that
+    /// addresses objects by their key derives each slot from the listed key,
+    /// and one that mints its own object ids reports the ids it listed.
+    /// Callers get slots rather than keys because [`read_at`](Self::read_at) is
+    /// what they will do next, and that takes a slot.
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError>;
 
     async fn create_at(
         &self,

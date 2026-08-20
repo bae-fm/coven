@@ -1194,3 +1194,84 @@ async fn a_removal_whose_stream_position_was_taken_ends_and_re_issues() {
         .expect("the re-issued removal publishes at the position that follows");
     assert!(!fixture.load().await.can_write_now(&pubkey_hex(&member)));
 }
+
+/// A membership stream is a hash-linked list, so its heads have to be verified
+/// in order — but they do not have to be *fetched* in order. Every head's slot
+/// is named by its coordinate, so the whole stream shares one provider prefix,
+/// and a reader that lists it fetches the stream at once instead of spending a
+/// round trip per head purely to learn where the next one lives.
+#[tokio::test]
+async fn a_membership_stream_is_listed_once_and_fetched_together() {
+    let fixture = MergeFixture::new("membership-list-then-fetch").await;
+    let mut admission = fixture
+        .admit_member(&UserKeypair::generate(), MemberRole::Member)
+        .await;
+    for _ in 0..3 {
+        admission = fixture
+            .admit_member(&UserKeypair::generate(), MemberRole::Member)
+            .await;
+    }
+    let expected = fixture.load().await;
+
+    fixture.home.clear_exact_reads();
+    fixture.home.clear_exact_listings();
+    fixture
+        .home
+        .delay_exact_full_reads(std::time::Duration::from_millis(20));
+    let mut history = crate::sync::store::HistoryConstructionAuthority::admission()
+        .open_pinned(&*fixture.storage, &admission.store_root)
+        .await
+        .expect("open admission history");
+    let walked = history
+        .load_exact_anchored_membership(
+            &admission.membership_floor.0,
+            Some(&admission.owner_pubkey),
+        )
+        .await
+        .expect("walk membership from the cloud");
+
+    assert_eq!(walked.head_refs(), expected.head_refs());
+    let founder = expected
+        .head_refs()
+        .first()
+        .expect("founder membership head")
+        .clone();
+    assert_eq!(
+        fixture.home.exact_listed_prefixes(),
+        vec![coven_protocol::store_commit::membership_head_stream_prefix(
+            &founder.coord.author_pubkey,
+            &founder.coord.author_owner_grant,
+            founder.coord.stream_id,
+        )],
+        "one listing per membership stream, naming only that stream's prefix"
+    );
+    let head_reads = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| slot.logical_key().starts_with("store-v1/membership/heads/"))
+        .collect::<Vec<_>>();
+    let distinct = head_reads
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let stream_length = founder.coord.seq as usize;
+    assert!(
+        distinct > stream_length,
+        "every head in the stream is read, plus the absent slot that ends it; \
+         got {distinct} distinct slots for a stream of {stream_length}"
+    );
+    // One anchored-chain load walks the founder's stream several times. The
+    // heads it fetched the first time serve every later walk, so what repeats
+    // is the read of the one absent slot each walk ends on.
+    assert!(
+        head_reads.len() < 2 * distinct,
+        "a repeated walk re-reads no head it already fetched; \
+         got {} reads over {distinct} slots",
+        head_reads.len()
+    );
+    assert!(
+        fixture.home.exact_full_read_max_inflight() > 1,
+        "membership heads are fetched together, not each one gated on the last"
+    );
+}

@@ -207,15 +207,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         stream_id: coven_protocol::membership::AuthorStreamId,
         sequence: u64,
     ) -> Result<VerifiedObject<AuthorHead>, StoreObjectError> {
-        let semantic_prefix = slot.logical_key().strip_suffix(".json").ok_or_else(|| {
-            StoreObjectError::InvalidObject {
-                semantic_prefix: slot.logical_key().to_string(),
-                key: slot.logical_key().to_string(),
-                source: Box::new(StoreProtocolError::Malformed(
-                    "membership head exact slot has no .json suffix".to_string(),
-                )),
-            }
-        })?;
+        let semantic_prefix = Self::head_semantic_prefix(slot)?;
         let context = ProtocolObjectContext::signed_plaintext(
             self.commit_verifier.store_root_hash(),
             ProtocolObjectDomain::StoreMembershipHead,
@@ -224,11 +216,44 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             .commit_verifier
             .read_protocol_slot(&context, slot, semantic_prefix)
             .await?;
-        self.commit_verifier.remember_exact_object(&object, &bytes);
-        let parse_bytes = bytes.clone();
+        self.verify_head_at_slot(&bytes, &object, author, grant, stream_id, sequence)
+            .await
+    }
+
+    fn head_semantic_prefix(
+        slot: &coven_protocol::objects::ObjectSlot,
+    ) -> Result<&str, StoreObjectError> {
+        slot.logical_key()
+            .strip_suffix(".json")
+            .ok_or_else(|| StoreObjectError::InvalidObject {
+                semantic_prefix: slot.logical_key().to_string(),
+                key: slot.logical_key().to_string(),
+                source: Box::new(StoreProtocolError::Malformed(
+                    "membership head exact slot has no .json suffix".to_string(),
+                )),
+            })
+    }
+
+    /// Every check [`load_head_at_slot`](Self::load_head_at_slot) makes once
+    /// the slot's bytes are in hand, split out so a reader that fetched the
+    /// stream's slots together runs the identical verification over what it
+    /// already holds.
+    pub(crate) async fn verify_head_at_slot(
+        &self,
+        bytes: &[u8],
+        object: &coven_protocol::objects::ExactObjectRef,
+        author: &str,
+        grant: &MembershipGrantId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        sequence: u64,
+    ) -> Result<VerifiedObject<AuthorHead>, StoreObjectError> {
+        let slot = object.slot();
+        let semantic_prefix = Self::head_semantic_prefix(slot)?;
+        self.commit_verifier.remember_exact_object(object, bytes);
+        let parse_bytes = bytes.to_vec();
         let head: AuthorHead = run_blocking_object_verification(
             semantic_prefix,
-            &object,
+            object,
             Box::new(move || coven_protocol::objects::decode_protocol_object(&parse_bytes)),
         )
         .await?;
@@ -279,8 +304,8 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
         Ok(VerifiedObject {
             semantic_hash: head_hash,
             value: head,
-            bytes,
-            object,
+            bytes: bytes.to_vec(),
+            object: object.clone(),
         })
     }
 }

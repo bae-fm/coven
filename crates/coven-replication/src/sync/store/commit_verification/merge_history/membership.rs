@@ -845,6 +845,179 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         }
     }
 
+    /// Run every check `load_membership_head_at_slot` would have run, over
+    /// bytes a prefetch already holds.
+    async fn verify_membership_head_at_slot(
+        &self,
+        read: &crate::sync::store::commit_verification::commit::ReadProtocolSlot,
+        author: &str,
+        grant: &MembershipGrantId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        sequence: u64,
+    ) -> Result<coven_protocol::objects::VerifiedObject<AuthorHead>, StoreObjectError> {
+        match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .membership_objects()
+                    .verify_head_at_slot(
+                        &read.bytes,
+                        &read.object,
+                        author,
+                        grant,
+                        stream_id,
+                        sequence,
+                    )
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .membership_objects()
+                    .verify_head_at_slot(
+                        &read.bytes,
+                        &read.object,
+                        author,
+                        grant,
+                        stream_id,
+                        sequence,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn prefetch_slot_stream(
+        &self,
+        context: &coven_protocol::objects::ProtocolObjectContext,
+        listing_prefix: &str,
+        anchor_slots: Vec<coven_protocol::objects::ObjectSlot>,
+    ) -> Result<crate::sync::store::commit_verification::commit::PrefetchedSlotStream, StorageError>
+    {
+        match self {
+            Self::History { history } => {
+                history
+                    .commit_verifier
+                    .prefetch_slot_stream(context, listing_prefix, anchor_slots)
+                    .await
+            }
+            Self::VerifiedPrefix {
+                commit_verifier, ..
+            } => {
+                commit_verifier
+                    .prefetch_slot_stream(context, listing_prefix, anchor_slots)
+                    .await
+            }
+        }
+    }
+
+    /// Fetch every slot the provider holds for one author stream, and the
+    /// objects those heads name, before the walk verifies any of them.
+    ///
+    /// A membership stream is a hash-linked list, so verification has to run in
+    /// order: a head means nothing until the head before it has been checked.
+    /// Fetching does not — a head's slot is named by its coordinate alone, so
+    /// the whole stream shares one provider prefix, and the objects each head
+    /// names are readable as soon as its bytes arrive. Following the links to
+    /// discover slot k+1 from slot k's bytes therefore spends a round trip per
+    /// head purely on discovery, which against a live store is where a joining
+    /// device's minutes went.
+    ///
+    /// Nothing here is trusted. The listing only chooses what to fetch: the
+    /// walk still starts at the anchor's first slot, still follows each head's
+    /// signed successor link, and still runs every check on every head it
+    /// reaches. A slot the walk reaches that this did not fetch is read the way
+    /// it always was, so an incomplete or dishonest listing costs round trips
+    /// and never truth — and the decode below is a guess at what else to
+    /// fetch, so a head that fails it is simply not prefetched.
+    async fn prefetch_membership_stream(
+        &self,
+        author: &str,
+        grant: &MembershipGrantId,
+        stream_id: coven_protocol::membership::AuthorStreamId,
+        first_slot: &coven_protocol::objects::ObjectSlot,
+    ) -> Result<crate::sync::store::commit_verification::commit::StreamSlotReads, AnchoredChainError>
+    {
+        let context = coven_protocol::objects::ProtocolObjectContext::signed_plaintext(
+            self.root().store_root_hash,
+            coven_protocol::objects::ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let listing_prefix =
+            coven_protocol::store_commit::membership_head_stream_prefix(author, grant, stream_id);
+        // The founder's first head is written under a prefix of its own, before
+        // the founder has a grant to file it under, so the anchor's slot is
+        // handed in rather than found in the listing.
+        let heads = self
+            .prefetch_slot_stream(&context, &listing_prefix, vec![first_slot.clone()])
+            .await
+            .map_err(|source| {
+                if source.is_transport() {
+                    AnchoredChainError::StorageUnavailable {
+                        operation: format!("fetch membership stream {author}/{grant}/{stream_id}"),
+                        source,
+                    }
+                } else {
+                    map_membership_object_error(StoreObjectError::Storage(source))
+                }
+            })?;
+
+        if let Some(fetched) = heads.freshly_fetched() {
+            let mut entries = Vec::new();
+            let mut resolutions = Vec::new();
+            for read in fetched.values() {
+                let Ok(head) =
+                    coven_protocol::objects::decode_protocol_object::<AuthorHead>(&read.bytes)
+                else {
+                    continue;
+                };
+                entries.push(head.body.entry.clone());
+                resolutions.extend(head.body.resolutions.iter().cloned());
+            }
+            self.prefetch_membership_head_dependencies(entries, resolutions)
+                .await;
+        }
+        Ok(heads.reads().clone())
+    }
+
+    /// Read the entry each prefetched head selects, and the resolutions each
+    /// names, into the verifier's object memo so the walk finds them in memory.
+    ///
+    /// Content-addressed reads by reference, so a hit still runs every check
+    /// the walk would have run — this decides when the bytes are fetched, not
+    /// whether they are believed.
+    ///
+    /// Unlike the head slots, a failure here is dropped rather than reported.
+    /// A head's slot is named by the stream's own coordinates, so a slot under
+    /// that prefix that will not open is this Store's own object failing. These
+    /// references come out of heads nothing has verified yet, so a head that
+    /// names an object that is absent or corrupt would otherwise let whoever
+    /// wrote it fail every reader's walk. The walk reads what it actually
+    /// reaches, and fails there, on a reference it has verified.
+    async fn prefetch_membership_head_dependencies(
+        &self,
+        entries: Vec<coven_protocol::membership::MembershipEntryRef>,
+        resolutions: Vec<StoreMembershipConflictResolutionRef>,
+    ) {
+        use futures_util::StreamExt;
+
+        let width = crate::sync::store::commit_verification::commit::PROTOCOL_SLOT_READ_WIDTH;
+        let entries = futures_util::stream::iter(entries)
+            .map(|reference| async move { self.load_membership_entry(&reference).await.map(drop) })
+            .buffer_unordered(width);
+        let resolutions =
+            futures_util::stream::iter(resolutions)
+                .map(|reference| async move {
+                    self.load_membership_resolution(&reference).await.map(drop)
+                })
+                .buffer_unordered(width);
+        for read in entries.chain(resolutions).collect::<Vec<_>>().await {
+            if let Err(error) = read {
+                tracing::debug!(%error, "speculative membership object read did not land");
+            }
+        }
+    }
+
     async fn validate_head_activation(
         &mut self,
         reference: &MembershipHeadRef,
@@ -913,6 +1086,9 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
                 "membership stream uses a recovery anchor".to_string(),
             ));
         };
+        let prefetched = self
+            .prefetch_membership_stream(author, grant, stream_id, first_slot)
+            .await?;
         let mut slot = first_slot.clone();
         let mut expected_sequence = 1_u64;
         let mut predecessor: Option<MembershipHeadRef> = None;
@@ -922,10 +1098,29 @@ impl<'storage> MembershipActivationAuthority<'_, 'storage> {
         let mut reached_cursor = cursor.is_none();
 
         loop {
-            let loaded = match self
-                .load_membership_head_at_slot(&slot, author, grant, stream_id, expected_sequence)
-                .await
-            {
+            let read = match prefetched.get(&slot) {
+                Some(read) => {
+                    self.verify_membership_head_at_slot(
+                        read,
+                        author,
+                        grant,
+                        stream_id,
+                        expected_sequence,
+                    )
+                    .await
+                }
+                None => {
+                    self.load_membership_head_at_slot(
+                        &slot,
+                        author,
+                        grant,
+                        stream_id,
+                        expected_sequence,
+                    )
+                    .await
+                }
+            };
+            let loaded = match read {
                 Ok(value) => value,
                 Err(StoreObjectError::Storage(StorageError::NotFound(_))) => break,
                 Err(StoreObjectError::Storage(source)) if source.is_transport() => {

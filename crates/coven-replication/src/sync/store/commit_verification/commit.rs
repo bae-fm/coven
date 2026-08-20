@@ -94,6 +94,51 @@ impl DeviceStateResolver<'_> {
     }
 }
 
+/// How many protocol slots a reader fetches at once.
+///
+/// Protocol objects are small signed documents, so the limit that matters is
+/// how many requests a provider will take at once, not bandwidth. One value,
+/// so it is a constant rather than a setting; blob transfer limits are a
+/// separate policy because blobs are large enough for their width to be a
+/// bandwidth decision.
+pub(crate) const PROTOCOL_SLOT_READ_WIDTH: usize = 16;
+
+/// Bytes read out of one protocol slot, with the exact object the stored bytes
+/// identify. What [`StoreCommitVerifier::read_protocol_slot`] returns, named so
+/// a batch of them can be handed around.
+pub(crate) struct ReadProtocolSlot {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) object: ExactObjectRef,
+}
+
+/// What one prefix's worth of speculative slot reads found, shared by every
+/// reader that goes on to walk that prefix.
+pub(crate) type StreamSlotReads =
+    std::sync::Arc<BTreeMap<coven_protocol::objects::ObjectSlot, ReadProtocolSlot>>;
+
+/// A prefetched slot stream, and whether this caller is the one that fetched
+/// it. Callers that go on to prefetch what the fetched bytes *name* need to
+/// know, so the second walk of a stream does not repeat that follow-on work.
+pub(crate) enum PrefetchedSlotStream {
+    Fetched(StreamSlotReads),
+    Remembered(StreamSlotReads),
+}
+
+impl PrefetchedSlotStream {
+    pub(crate) fn reads(&self) -> &StreamSlotReads {
+        match self {
+            Self::Fetched(reads) | Self::Remembered(reads) => reads,
+        }
+    }
+
+    pub(crate) fn freshly_fetched(&self) -> Option<&StreamSlotReads> {
+        match self {
+            Self::Fetched(reads) => Some(reads),
+            Self::Remembered(_) => None,
+        }
+    }
+}
+
 pub(crate) struct StoreCommitVerifier<'a> {
     storage: &'a dyn CloudSyncObjectStorage,
     root: crate::sync::store::protocol_root::VerifiedStoreRoot,
@@ -148,6 +193,20 @@ pub(crate) struct StoreCommitVerifier<'a> {
     /// have produced. Objects named this way are immutable, so a verifier's
     /// lifetime is a safe one to hold them for.
     exact_objects: std::sync::Mutex<BTreeMap<ExactObjectRef, Vec<u8>>>,
+    /// Each author membership stream's head slots, as far as this verifier has
+    /// fetched them, keyed by the provider prefix the stream is listed under.
+    ///
+    /// One anchored-chain load traverses the same stream several times — the
+    /// founder's seven times over a small fixture — because discovery, layering
+    /// and activation each walk it for their own reasons. The walks are by
+    /// slot, and a slot read is the one read that cannot go through
+    /// `exact_objects`, since a walker does not know a head's reference until
+    /// it has read the head. This holds what a stream's listing found so the
+    /// second walk and the seventh cost nothing.
+    ///
+    /// A stream that has grown since is not a problem: what is missing here is
+    /// read from the provider, so this decides round trips and never contents.
+    prefetched_slot_streams: std::sync::Mutex<BTreeMap<String, StreamSlotReads>>,
     snapshot_streams: std::sync::Mutex<
         BTreeMap<StoreDeviceRegistrationRef, Vec<coven_database::PublishedStoreSnapshot>>,
     >,
@@ -312,6 +371,7 @@ impl<'a> StoreCommitVerifier<'a> {
             acknowledgements: std::sync::Mutex::new(BTreeMap::new()),
             snapshots: std::sync::Mutex::new(BTreeMap::new()),
             exact_objects: std::sync::Mutex::new(BTreeMap::new()),
+            prefetched_slot_streams: std::sync::Mutex::new(BTreeMap::new()),
             snapshot_streams: std::sync::Mutex::new(BTreeMap::new()),
             accepted_announcements: BTreeMap::new(),
         }

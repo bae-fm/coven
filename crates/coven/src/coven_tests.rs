@@ -2681,6 +2681,11 @@ impl ExactSlotStorage for GateCloudHome {
         ExactSlotStorage::allocate_slot(&self.inner, key).await
     }
 
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        self.gate().await;
+        ExactSlotStorage::list_slots(&self.inner, prefix).await
+    }
+
     async fn create_at(
         &self,
         upload: &ExactUpload<'_>,

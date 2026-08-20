@@ -266,8 +266,11 @@ impl crate::sync::test_helpers::StorageInterceptor for MembershipReadCounter {
         read: crate::sync::test_helpers::ProtocolRead,
         semantic_prefix: &str,
     ) -> Result<(), coven_protocol::objects::StorageError> {
-        if read != crate::sync::test_helpers::ProtocolRead::Object
-            && semantic_prefix.starts_with("store-v1/membership/heads/")
+        if matches!(
+            read,
+            crate::sync::test_helpers::ProtocolRead::Slot
+                | crate::sync::test_helpers::ProtocolRead::PreparedSlot
+        ) && semantic_prefix.starts_with("store-v1/membership/heads/")
         {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }

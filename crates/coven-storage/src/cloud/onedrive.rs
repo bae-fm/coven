@@ -479,7 +479,7 @@ impl OAuthRestHome for OneDriveCloudHome {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
         let encoded_prefix = encode_key(prefix);
-        let mut keys = Vec::new();
+        let mut slots = Vec::new();
         if let Some(items) = json["value"].as_array() {
             for item in items {
                 if let Some(name) = item["name"].as_str() {
@@ -487,13 +487,13 @@ impl OAuthRestHome for OneDriveCloudHome {
                         let Some(decoded) = decode_listed_key("OneDrive", name) else {
                             continue;
                         };
-                        keys.push(decoded)
+                        slots.push(ObjectSlot::logical(decoded)?)
                     }
                 }
             }
         }
         Ok(ListPage {
-            keys,
+            slots,
             next: json["@odata.nextLink"].as_str().map(String::from),
         })
     }
@@ -735,6 +735,9 @@ impl ExactSlotStorage for OneDriveCloudHome {
             self.verify_exact_upload(upload, observed)
         })
         .await
+    }
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        crate::cloud::logical_slots(CloudHome::list(self, prefix).await?)
     }
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         self.verify_slot(slot).await?;

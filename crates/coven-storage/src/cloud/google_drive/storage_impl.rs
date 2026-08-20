@@ -226,7 +226,7 @@ impl OAuthRestHome for GoogleDriveCloudHome {
                 let mut req = supports_all_drives(oauth.get(format!("{}/files", self.drive_api)))
                     .query(&[
                         ("q", query.as_str()),
-                        ("fields", "nextPageToken,files(name)"),
+                        ("fields", "nextPageToken,files(id,name)"),
                         ("pageSize", "1000"),
                         ("includeItemsFromAllDrives", "true"),
                     ]);
@@ -241,23 +241,24 @@ impl OAuthRestHome for GoogleDriveCloudHome {
     fn parse_list_page(&self, body: &str, prefix: &str) -> Result<ListPage, CloudHomeError> {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| CloudHomeError::transport("parse list".to_string(), e))?;
-        let mut keys = Vec::new();
+        let mut slots = Vec::new();
         if let Some(files) = json["files"].as_array() {
             for file in files {
-                if let Some(name) = file["name"].as_str() {
-                    let Some(decoded) = decode_listed_key("Google Drive", name) else {
-                        continue;
-                    };
-                    // The `contains` query may match mid-string, so filter to the
-                    // actual prefix.
-                    if decoded.starts_with(prefix) {
-                        keys.push(decoded);
-                    }
+                let (Some(name), Some(id)) = (file["name"].as_str(), file["id"].as_str()) else {
+                    continue;
+                };
+                let Some(decoded) = decode_listed_key("Google Drive", name) else {
+                    continue;
+                };
+                // The `contains` query may match mid-string, so filter to the
+                // actual prefix.
+                if decoded.starts_with(prefix) {
+                    slots.push(ObjectSlot::opaque(decoded, id.to_string())?);
                 }
             }
         }
         Ok(ListPage {
-            keys,
+            slots,
             next: json["nextPageToken"].as_str().map(String::from),
         })
     }
@@ -537,6 +538,12 @@ impl ExactSlotStorage for GoogleDriveCloudHome {
         })
         .await
     }
+    /// Drive mints its own file ids, so the listing reports the id it saw
+    /// beside the name rather than deriving a locator from the key.
+    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError> {
+        crate::cloud::oauth_rest::rest_list_slots(self, prefix).await
+    }
+
     async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
         GoogleDriveCloudHome::read_at_slot(self, slot).await
     }
