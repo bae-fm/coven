@@ -331,6 +331,33 @@ impl RemoteObjectRecord {
         self.into_activated(commit)
     }
 
+    /// Whether this device already created these exact bytes at the provider
+    /// and settled the create.
+    ///
+    /// The record is the evidence, so nothing that holds one needs to read the
+    /// object back to know its content: the bytes were hashed locally before
+    /// the upload and the provider's exact-upload verification settled the
+    /// create. Reading it back would test the provider's durability, not this
+    /// device's correctness, and an object that later goes missing surfaces on
+    /// the read that wants it.
+    pub fn records_verified_upload(&self) -> bool {
+        match self {
+            Self::CandidateCommit(record) => {
+                matches!(record.state, CandidateCommitState::UploadedVerified)
+            }
+            Self::CandidateExclusive(record) => {
+                matches!(record.state, CandidateObjectState::UploadedVerified { .. })
+            }
+            Self::RetainedAuthority(record) => matches!(
+                record.state,
+                RetainedAuthorityObjectState::UploadedVerified { .. }
+            ),
+            Self::SharedLiveSet(record) => {
+                matches!(record.state, OwnedObjectState::UploadedVerified { .. })
+            }
+        }
+    }
+
     pub fn mark_uploaded_verified(&mut self) -> Result<(), RemoteObjectRecordError> {
         match self {
             Self::CandidateCommit(record) => match record.state {

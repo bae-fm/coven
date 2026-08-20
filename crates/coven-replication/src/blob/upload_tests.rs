@@ -1225,27 +1225,27 @@ async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     assert!(!is_created(&fixture.journal(&ids[1]).await));
 }
 
-/// Publishing a write's prepared objects overlaps them, up to the transfer
-/// limit, and still finishes all of them before the commit that names them.
+/// A write publishes its package before the commit that names it, and never
+/// reads back the blobs the upload queue already put at the provider.
 ///
-/// Live, a twenty-two file Move-to-Cloud spent 8977 ms of an 11027 ms
-/// publication here, one provider round trip after another. The objects are
-/// independent — a package per audience, a blob per file, each with its own
-/// bytes and its own durable mark — so the only thing that has to hold is the
-/// barrier at the end.
+/// The upload hashed each file locally and the provider settled the create, so
+/// reading those bytes home again proves nothing about them. Live, a write that
+/// created one 74 KB package spent 14990 ms in this stage re-downloading the
+/// thirteen blobs it referenced — hundreds of megabytes, every time.
 #[tokio::test]
-async fn publication_overlaps_prepared_objects_but_not_the_commit() {
+async fn publication_creates_the_package_before_the_commit_and_reads_no_blob() {
     let fixture = UploadFixture::new(4).await;
     fixture.seed_uploads(6).await;
     fixture.drain(&fixed_clock(T0), None).await.unwrap();
 
-    // Publication verifies each already-uploaded blob against the provider, so
-    // holding reads open is what makes overlap observable at all.
-    fixture
-        .home
-        .inner
-        .delay_exact_full_reads(std::time::Duration::from_millis(30));
+    let uploaded = fixture.home.keys();
+    assert_eq!(
+        uploaded.len(),
+        6,
+        "the seeded blobs were uploaded: {uploaded:?}"
+    );
     fixture.home.inner.clear_exact_creates();
+    fixture.home.inner.clear_exact_reads();
 
     assert!(
         fixture
@@ -1264,14 +1264,19 @@ async fn publication_overlaps_prepared_objects_but_not_the_commit() {
         1,
     );
 
-    let overlap = fixture.home.inner.exact_full_read_max_inflight();
+    let read = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    let reread = uploaded
+        .iter()
+        .filter(|key| read.contains(key))
+        .collect::<Vec<_>>();
     assert!(
-        overlap > 1,
-        "publication issued its provider calls one at a time",
-    );
-    assert!(
-        overlap <= 4,
-        "publication overlapped {overlap} calls past the transfer limit of four",
+        reread.is_empty(),
+        "publication read back blobs this device uploaded: {reread:?}",
     );
 
     let created = fixture
@@ -1292,34 +1297,5 @@ async fn publication_overlaps_prepared_objects_but_not_the_commit() {
     assert!(
         package < commit,
         "the commit was created before the package it names: {created:?}",
-    );
-}
-
-/// The limit is the ceiling, not a target: one at a time stays one at a time.
-#[tokio::test]
-async fn publication_respects_a_transfer_limit_of_one() {
-    let fixture = UploadFixture::new(1).await;
-    fixture.seed_uploads(4).await;
-    fixture.drain(&fixed_clock(T0), None).await.unwrap();
-    fixture
-        .home
-        .inner
-        .delay_exact_full_reads(std::time::Duration::from_millis(10));
-
-    fixture
-        .device
-        .prepare_pending_store_write()
-        .await
-        .expect("prepare the Store write");
-    fixture
-        .device
-        .drain_store_writes()
-        .await
-        .expect("publish the Store write");
-
-    assert_eq!(
-        fixture.home.inner.exact_full_read_max_inflight(),
-        1,
-        "a limit of one still publishes one object at a time",
     );
 }

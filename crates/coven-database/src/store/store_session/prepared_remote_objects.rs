@@ -124,7 +124,7 @@ impl StoreSession<'_> {
                 .parse()
                 .map_err(|error| DbError::context("prepared blob remote object id", error))?;
             let remote = load_remote_object_on(conn, remote_object_id)?;
-            if remote_object_is_uploaded(&remote) {
+            if remote.records_verified_upload() {
                 spools.push(UploadedBlobSpool {
                     write_id: WriteId::from_generated(write_id),
                     remote_object_id,
@@ -138,7 +138,7 @@ impl StoreSession<'_> {
     fn clear_uploaded_blob_spool(&self, spool: UploadedBlobSpool) -> Result<(), DbError> {
         let conn = self.conn;
         let remote = load_remote_object_on(conn, spool.remote_object_id)?;
-        if !remote_object_is_uploaded(&remote) {
+        if !remote.records_verified_upload() {
             return Err(DbError::Message(format!(
                 "prepared blob {} lost uploaded state before spool retirement",
                 spool.remote_object_id
@@ -464,25 +464,4 @@ pub(crate) fn persist_prepared_audience_objects_on(
         validate_prepared_blob_on(conn, write_id, prepared)?;
     }
     Ok(())
-}
-
-fn remote_object_is_uploaded(remote: &RemoteObjectRecord) -> bool {
-    match remote {
-        RemoteObjectRecord::CandidateCommit(record) => matches!(
-            &record.state,
-            coven_protocol::remote_object::CandidateCommitState::UploadedVerified
-        ),
-        RemoteObjectRecord::CandidateExclusive(record) => matches!(
-            &record.state,
-            coven_protocol::remote_object::CandidateObjectState::UploadedVerified { .. }
-        ),
-        RemoteObjectRecord::RetainedAuthority(record) => matches!(
-            &record.state,
-            coven_protocol::remote_object::RetainedAuthorityObjectState::UploadedVerified { .. }
-        ),
-        RemoteObjectRecord::SharedLiveSet(record) => matches!(
-            &record.state,
-            coven_protocol::remote_object::OwnedObjectState::UploadedVerified { .. }
-        ),
-    }
 }

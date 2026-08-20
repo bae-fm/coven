@@ -559,14 +559,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             id: blob.locator().blob_id().to_string(),
                             source,
                         })?;
+                } else if !remote.records_verified_upload() {
+                    // Nothing here uploads a blob it has no spool for, and a
+                    // blob whose record does not say it was created is one this
+                    // device never wrote. Publishing a commit that names it
+                    // would name bytes nobody put at the provider.
+                    return Err(StoreError::InvalidOutbound(format!(
+                        "prepared blob {} has no durable record of its upload",
+                        remote.object_id()
+                    )));
                 }
-                storage.verify_blob_object(&blob).await.map_err(|source| {
-                    StoreError::BlobStorage {
-                        namespace: blob.locator().namespace().to_string(),
-                        id: blob.locator().blob_id().to_string(),
-                        source,
-                    }
-                })?;
             }
             coven_protocol::remote_object::RemoteObjectPayloads::SpooledExternal => {
                 return Err(StoreError::InvalidOutbound(format!(

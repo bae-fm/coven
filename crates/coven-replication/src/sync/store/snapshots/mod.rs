@@ -606,12 +606,6 @@ impl<'operation, 'storage> AuthorizedSnapshots<'operation, 'storage> {
                 captured.fact.blob.namespace, captured.fact.blob.id
             )));
         }
-        if blob.uploaded_verified {
-            storage
-                .verify_blob_object(&blob.stored)
-                .await
-                .map_err(SnapshotError::Bucket)?;
-        }
         let spool_path = blob.spool_path;
         if !blob.uploaded_verified && spool_path.is_none() {
             return Err(SnapshotError::PublicationState(

@@ -71,11 +71,17 @@ impl<'operation> AuthorizedSnapshotPublication<'operation> {
                     )
                     .await
                     .map_err(SnapshotError::Bucket)?;
+            } else if !prepared.remote.records_verified_upload() {
+                // Preparation spools every blob it has to upload, so one with
+                // no spool and no durable record of its create is a blob this
+                // device never wrote. A snapshot naming it would send joining
+                // devices to bytes nobody put at the provider.
+                return Err(SnapshotError::PublicationState(format!(
+                    "snapshot blob {}/{} has no durable record of its upload",
+                    blob.locator().namespace(),
+                    blob.locator().blob_id()
+                )));
             }
-            self.storage
-                .verify_blob_object(blob)
-                .await
-                .map_err(SnapshotError::Bucket)?;
         }
         self.storage
             .create_verified_protocol_object(
