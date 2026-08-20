@@ -25,8 +25,10 @@ pub(crate) type SelectedAcknowledgedStoreSnapshot =
 fn report_rejected_snapshot(
     snapshot: &coven_database::PublishedStoreSnapshot,
     error: &StorePullError,
+    selector: SnapshotSelector,
 ) {
     tracing::info!(
+        selector = selector.as_str(),
         generation = snapshot.reference.generation,
         snapshot = %snapshot.reference.snapshot_hash,
         coverage_positions = snapshot.meta.coverage.position_count(),
@@ -35,7 +37,35 @@ fn report_rejected_snapshot(
     );
 }
 
-fn report_selected_snapshot(snapshot: &coven_database::PublishedStoreSnapshot, eligible: usize) {
+/// Which question a selection was answering.
+///
+/// Two selectors share this reporting, and they decide different things: one
+/// picks the image a device starts from, the other picks the snapshot reclaim
+/// may delete behind. A line that does not say which leaves a reader unable to
+/// tell a healthy join from a reclaim that found nothing, because both print
+/// the same sentence with the same generation.
+#[derive(Clone, Copy)]
+pub(crate) enum SnapshotSelector {
+    /// The newest snapshot this device can install as its starting state.
+    Installable,
+    /// The newest snapshot every device active at its cut has acknowledged.
+    Acknowledged,
+}
+
+impl SnapshotSelector {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Installable => "installable",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+}
+
+fn report_selected_snapshot(
+    snapshot: &coven_database::PublishedStoreSnapshot,
+    eligible: usize,
+    selector: SnapshotSelector,
+) {
     // The tips themselves, not just how many: the whole point of reading this
     // line is to tell how much history the snapshot spares a joining device.
     let coverage = snapshot
@@ -47,6 +77,7 @@ fn report_selected_snapshot(snapshot: &coven_database::PublishedStoreSnapshot, e
         .collect::<Vec<_>>()
         .join(" ");
     tracing::info!(
+        selector = selector.as_str(),
         generation = snapshot.reference.generation,
         snapshot = %snapshot.reference.snapshot_hash,
         coverage_streams = snapshot.meta.coverage.position_count(),
@@ -73,6 +104,7 @@ fn disqualifies_one_candidate(error: &StorePullError) -> bool {
 fn take_maximal_eligible<Verified>(
     mut eligible: Vec<SelectedStoreSnapshot<Verified>>,
     maximal_rejection: Option<StorePullError>,
+    selector: SnapshotSelector,
 ) -> Result<Option<SelectedStoreSnapshot<Verified>>, StorePullError> {
     let selected = crate::sync::store::snapshots::select_maximal_store_snapshot(
         eligible
@@ -91,7 +123,7 @@ fn take_maximal_eligible<Verified>(
             })?;
         let count = eligible.len();
         let selected = eligible.swap_remove(index);
-        report_selected_snapshot(&selected.snapshot, count);
+        report_selected_snapshot(&selected.snapshot, count, selector);
         return Ok(Some(selected));
     }
     Err(maximal_rejection.ok_or_else(|| {
@@ -119,6 +151,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         else {
             return Ok(None);
         };
+        let selector = SnapshotSelector::Installable;
         let maximal_reference = maximal_candidate.reference;
         let mut eligible = Vec::new();
         let mut maximal_rejection = None;
@@ -126,7 +159,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             match self.verify_installable_snapshot(&snapshot).await {
                 Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
                 Err(error) if disqualifies_one_candidate(&error) => {
-                    report_rejected_snapshot(&snapshot, &error);
+                    report_rejected_snapshot(&snapshot, &error, selector);
                     if snapshot.reference == maximal_reference {
                         maximal_rejection = Some(error);
                     }
@@ -134,7 +167,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Err(error) => return Err(error),
             }
         }
-        take_maximal_eligible(eligible, maximal_rejection)
+        take_maximal_eligible(eligible, maximal_rejection, selector)
     }
 
     /// The newest snapshot every device active at its cut has acknowledged.
@@ -149,6 +182,7 @@ impl<'a> MergeHistoryVerifier<'a> {
         else {
             return Ok(None);
         };
+        let selector = SnapshotSelector::Acknowledged;
         let maximal_reference = maximal_candidate.reference;
         let mut eligible = Vec::new();
         let mut maximal_rejection = None;
@@ -156,7 +190,7 @@ impl<'a> MergeHistoryVerifier<'a> {
             match self.verify_snapshot_stability(&snapshot, members).await {
                 Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
                 Err(error) if disqualifies_one_candidate(&error) => {
-                    report_rejected_snapshot(&snapshot, &error);
+                    report_rejected_snapshot(&snapshot, &error, selector);
                     if snapshot.reference == maximal_reference {
                         maximal_rejection = Some(error);
                     }
@@ -164,7 +198,7 @@ impl<'a> MergeHistoryVerifier<'a> {
                 Err(error) => return Err(error),
             }
         }
-        take_maximal_eligible(eligible, maximal_rejection)
+        take_maximal_eligible(eligible, maximal_rejection, selector)
     }
 
     async fn verify_snapshot_history_state(

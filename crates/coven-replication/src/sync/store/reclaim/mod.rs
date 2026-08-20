@@ -152,6 +152,77 @@ pub(crate) use history::{CircleSnapshotStream, ReclaimHistory, SelectedCircleSna
 pub struct StoreReclaimResult {
     pub packages_deleted: u64,
     pub physical_copies_deleted: u64,
+    /// What the Store-package leg did, so a run that deleted nothing says which
+    /// step declined instead of reporting a bare zero. The leg is the one whose
+    /// outcome was previously unobservable: its two commonest declines are
+    /// turned into an empty target list on purpose, so that Store trouble does
+    /// not block Circle reclaim, and that swallowed the reason with the error.
+    pub store_packages: StorePackageReclaimReport,
+}
+
+/// What the Store-package leg of one reclaim run considered and what it did.
+///
+/// Counts rather than per-target lines: a store with hundreds of covered
+/// commits would drown a cycle in log spam, and the question a reader has is
+/// which step the targets died at, not which target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorePackageReclaimReport {
+    /// The coverage the leg had to work from, or why it had none.
+    pub coverage: StorePackageReclaimCoverage,
+    /// Package-bearing commits at or behind the coverage.
+    pub targets_considered: u64,
+    /// Targets left alone because a retained materialization still pins them
+    /// for replay. A run where this equals `targets_considered` is one whose
+    /// retained set has not been narrowed by a snapshot image projection.
+    pub retained_for_replay: u64,
+    /// Targets that already have a journalled operation, which blocks
+    /// re-authorizing them.
+    pub already_authorized: u64,
+    /// Targets this run signed a fresh authorization for.
+    pub authorized: u64,
+}
+
+/// The coverage the Store-package leg worked from, or why it had none.
+///
+/// A decline is a value here rather than a swallowed error because it is the
+/// leg's ordinary outcome, not a failure: `run` deliberately continues to the
+/// Circle legs when the Store leg has no coverage, and reporting the reason is
+/// the only way a reader can tell that apart from having nothing to delete.
+impl StorePackageReclaimReport {
+    /// A report for a leg that has not looked at any target yet — the shape a
+    /// declined leg keeps, and the starting point for one that proceeds.
+    fn declined(coverage: StorePackageReclaimCoverage) -> Self {
+        Self {
+            coverage,
+            targets_considered: 0,
+            retained_for_replay: 0,
+            already_authorized: 0,
+            authorized: 0,
+        }
+    }
+}
+
+/// Whether a claim reached the provider or found its target already journalled.
+///
+/// An existing operation for a target blocks re-authorizing it, so the two are
+/// worth telling apart: one is progress, the other is a target this run could
+/// not have acted on however it was configured.
+enum AuthorizationOutcome {
+    Signed,
+    AlreadyJournalled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorePackageReclaimCoverage {
+    /// The generation the leg deleted behind.
+    Snapshot { generation: u64 },
+    /// No snapshot every active device has acknowledged.
+    NoSnapshot,
+    /// A device that must acknowledge the snapshot has not, so nothing may be
+    /// deleted behind it.
+    MissingAcknowledgement { member: String, device_id: String },
+    /// This device is not the current owner, so it does not reclaim at all.
+    NotOwner,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -270,6 +341,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             return Ok(StoreReclaimResult {
                 packages_deleted,
                 physical_copies_deleted: packages_deleted,
+                store_packages: StorePackageReclaimReport::declined(
+                    StorePackageReclaimCoverage::NotOwner,
+                ),
             });
         }
         let registrations = database
@@ -278,20 +352,37 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .map_err(StoreReclaimError::from)?;
         // A missing or unstable Store snapshot leaves Store packages uncovered but must
         // not block Circle package reclamation, which carries its own Circle coverage.
-        let store_targets = match Box::pin(self.choose_snapshot(&registrations)).await {
-            Ok(snapshot) => self
-                .history()
-                .store_package_targets(&snapshot.snapshot.meta.coverage)
-                .await
-                .map_err(StoreReclaimError::from)?
-                .into_iter()
-                .map(|(commit, package)| (commit, package, snapshot.clone()))
-                .collect::<Vec<_>>(),
-            Err(
-                StoreReclaimError::NoSnapshot | StoreReclaimError::MissingAcknowledgement { .. },
-            ) => Vec::new(),
+        let (coverage, store_targets) = match Box::pin(self.choose_snapshot(&registrations)).await {
+            Ok(snapshot) => {
+                let generation = snapshot.snapshot.reference.generation;
+                let targets = self
+                    .history()
+                    .store_package_targets(&snapshot.snapshot.meta.coverage)
+                    .await
+                    .map_err(StoreReclaimError::from)?
+                    .into_iter()
+                    .map(|(commit, package)| (commit, package, snapshot.clone()))
+                    .collect::<Vec<_>>();
+                (
+                    StorePackageReclaimCoverage::Snapshot { generation },
+                    targets,
+                )
+            }
+            // Store trouble must not block Circle reclamation, which carries
+            // its own Circle coverage — so these two do not propagate. The
+            // reason travels in the report instead of dying here, which is what
+            // makes a cycle that deleted nothing say why.
+            Err(StoreReclaimError::NoSnapshot) => {
+                (StorePackageReclaimCoverage::NoSnapshot, Vec::new())
+            }
+            Err(StoreReclaimError::MissingAcknowledgement { member, device_id }) => (
+                StorePackageReclaimCoverage::MissingAcknowledgement { member, device_id },
+                Vec::new(),
+            ),
             Err(error) => return Err(error),
         };
+        let mut store_packages = StorePackageReclaimReport::declined(coverage);
+        store_packages.targets_considered = store_targets.len() as u64;
         for (commit, package, snapshot) in store_targets {
             if database
                 .store_package_is_retained_for_replay(
@@ -301,9 +392,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 )
                 .await?
             {
+                store_packages.retained_for_replay += 1;
                 continue;
             }
-            Box::pin(self.prepare_authorization(ReclaimClaim::StorePackage(
+            let authorized = Box::pin(self.prepare_authorization(ReclaimClaim::StorePackage(
                 StorePackageReclaimClaim {
                     target: StorePackageReclaimTarget {
                         package,
@@ -317,6 +409,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 },
             )))
             .await?;
+            match authorized {
+                AuthorizationOutcome::Signed => store_packages.authorized += 1,
+                AuthorizationOutcome::AlreadyJournalled => store_packages.already_authorized += 1,
+            }
         }
         Box::pin(self.prepare_circle_authorizations(&registrations)).await?;
         Box::pin(self.prepare_audience_blob_authorizations()).await?;
@@ -328,6 +424,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
         Ok(StoreReclaimResult {
             packages_deleted,
             physical_copies_deleted: packages_deleted,
+            store_packages,
         })
     }
 
@@ -651,7 +748,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
     async fn prepare_authorization(
         &mut self,
         claim: ReclaimClaim,
-    ) -> Result<(), StoreReclaimError> {
+    ) -> Result<AuthorizationOutcome, StoreReclaimError> {
         let database = self.database.clone();
         let root = self.root.clone();
         let target = claim.target();
@@ -661,7 +758,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             .iter()
             .any(|operation| operation.authorization().target() == &target)
         {
-            return Ok(());
+            return Ok(AuthorizationOutcome::AlreadyJournalled);
         }
         let plan = self.writer.prepare_plan().await?;
         let owner_grant = plan.owner_grant().cloned().ok_or_else(|| {
@@ -739,7 +836,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             candidate: Box::new(candidate),
         };
         Box::pin(database.begin_store_reclaim_operation(operation)).await?;
-        Ok(())
+        Ok(AuthorizationOutcome::Signed)
     }
 
     async fn resume_operations(&mut self) -> Result<u64, StoreReclaimError> {

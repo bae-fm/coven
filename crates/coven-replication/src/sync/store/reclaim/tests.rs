@@ -695,11 +695,8 @@ async fn interrupted_reclaim_deletes_only_the_remaining_package_on_restart() {
         .await
         .expect("restart resumes reclamation");
     assert_eq!(
-        resumed,
-        StoreReclaimResult {
-            packages_deleted: 1,
-            physical_copies_deleted: 1,
-        },
+        (resumed.packages_deleted, resumed.physical_copies_deleted),
+        (1, 1),
         "the restart reclaims exactly the one remaining package",
     );
     for target in &fixture.packages {
@@ -722,11 +719,8 @@ async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
     let fixture = ReclaimJourneyFixture::build("reclaim-journal-full-pass").await;
     let result = fixture.reclaim().await.expect("reclaim covered packages");
     assert_eq!(
-        result,
-        StoreReclaimResult {
-            packages_deleted: 2,
-            physical_copies_deleted: 2,
-        },
+        (result.packages_deleted, result.physical_copies_deleted),
+        (2, 2),
     );
     for target in &fixture.packages {
         assert!(
@@ -745,12 +739,63 @@ async fn reclaim_journal_deletes_every_covered_package_in_one_pass() {
         .await
         .expect("a second reclaim over the same coverage is a no-op");
     assert_eq!(
-        idempotent,
-        StoreReclaimResult {
-            packages_deleted: 0,
-            physical_copies_deleted: 0,
-        },
+        (
+            idempotent.packages_deleted,
+            idempotent.physical_copies_deleted
+        ),
+        (0, 0),
         "the recorded reclaim operations are not repeated",
+    );
+    assert_eq!(
+        idempotent.store_packages.authorized, 0,
+        "a second pass signs no fresh authorization",
+    );
+    assert_eq!(
+        idempotent.store_packages.already_authorized, 2,
+        "it reports both targets as already journalled rather than as nothing to do",
+    );
+}
+
+/// A run that deletes nothing says which step declined, not just that it
+/// deleted nothing.
+///
+/// This is the shape that cost a live store a night: the reclaim stage ran
+/// every cycle, spent seconds, deleted nothing, and emitted no line about what
+/// it had considered — so "declining" and "nothing to do" were the same
+/// observation from outside. The two commonest declines are deliberately
+/// turned into an empty target list so Store trouble cannot block Circle
+/// reclaim, which is what swallowed the reason along with the error. The
+/// report carries it instead.
+#[tokio::test]
+async fn a_reclaim_that_deletes_nothing_reports_the_step_that_declined() {
+    let fixture = ReclaimJourneyFixture::build("reclaim-decline-visibility").await;
+
+    let result = fixture.reclaim().await.expect("reclaim covered packages");
+
+    assert_eq!(
+        result.store_packages.coverage,
+        super::StorePackageReclaimCoverage::Snapshot { generation: 0 },
+        "a run that found coverage names the generation it deleted behind \
+         (the fixture's covering snapshot is its first, so generation zero)",
+    );
+    assert_eq!(
+        result.store_packages.targets_considered, 2,
+        "the report counts the package-bearing commits behind the coverage",
+    );
+    assert_eq!(
+        result.store_packages.authorized, 2,
+        "and how many of them this run signed an authorization for",
+    );
+    assert_eq!(
+        result.store_packages.retained_for_replay, 0,
+        "none of them were pinned by a retained materialization",
+    );
+    assert_eq!(
+        result.store_packages.targets_considered,
+        result.store_packages.retained_for_replay
+            + result.store_packages.already_authorized
+            + result.store_packages.authorized,
+        "every considered target is accounted for by exactly one outcome",
     );
 }
 

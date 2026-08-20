@@ -552,20 +552,47 @@ impl AuthorizedSyncCycle<'_, '_> {
         })
     }
 
+    /// Reclaim, and say what it did every cycle rather than only when it
+    /// deleted something.
+    ///
+    /// A stage that reports only its successes is indistinguishable from one
+    /// that is not running, which is what a store spending seconds here and
+    /// deleting nothing looked like from the log. One line per cycle, counts
+    /// rather than per-target detail: a store with hundreds of covered commits
+    /// would drown the cycle, and the question is which step the targets died
+    /// at, not which target.
     async fn reclaim_packages(&mut self) -> Result<(), SyncCycleFailure> {
-        match self.authorization.reclaim_packages().await {
-            Ok(result) if result.packages_deleted > 0 => info!(
-                packages = result.packages_deleted,
-                copies = result.physical_copies_deleted,
-                "Reclaimed snapshot-covered Store packages"
-            ),
-            Ok(_) => {}
-            Err(
-                error @ (super::store::StoreReclaimError::NoSnapshot
-                | super::store::StoreReclaimError::MissingAcknowledgement { .. }),
-            ) => info!(%error, "Store package reclamation is awaiting coverage"),
+        use super::store::StorePackageReclaimCoverage;
+
+        let result = match self.authorization.reclaim_packages().await {
+            Ok(result) => result,
             Err(error) => return Err(SyncCycleFailure::operation("reclaim Store packages", error)),
-        }
+        };
+        let store = &result.store_packages;
+        let coverage = match &store.coverage {
+            StorePackageReclaimCoverage::Snapshot { generation } => {
+                format!("snapshot generation {generation}")
+            }
+            StorePackageReclaimCoverage::NoSnapshot => {
+                "no snapshot every active device has acknowledged".to_string()
+            }
+            StorePackageReclaimCoverage::MissingAcknowledgement { member, device_id } => {
+                format!("device {device_id} of member {member} has not acknowledged the snapshot")
+            }
+            StorePackageReclaimCoverage::NotOwner => {
+                "this device is not the current owner".to_string()
+            }
+        };
+        info!(
+            %coverage,
+            considered = store.targets_considered,
+            retained_for_replay = store.retained_for_replay,
+            already_authorized = store.already_authorized,
+            authorized = store.authorized,
+            packages = result.packages_deleted,
+            copies = result.physical_copies_deleted,
+            "Reclaimed snapshot-covered Store packages"
+        );
         Ok(())
     }
 }

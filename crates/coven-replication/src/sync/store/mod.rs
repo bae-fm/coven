@@ -96,6 +96,8 @@ pub use membership::MembershipMutationError;
 pub(crate) use membership::MembershipOpsError;
 pub use merge_conflict::{ExcludedCandidateHeadObservation, MergeCandidateAbandonment};
 pub use owner_role_promotion::OwnerPromotionError;
+pub use reclaim::StorePackageReclaimCoverage;
+pub use reclaim::StorePackageReclaimReport;
 pub use reclaim::StoreReclaimError;
 pub use reclaim::StoreReclaimResult;
 
