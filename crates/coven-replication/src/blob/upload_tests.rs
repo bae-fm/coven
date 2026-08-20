@@ -265,12 +265,67 @@ struct UploadFixture {
     home: Arc<InstrumentedHome>,
 }
 
-impl UploadFixture {
-    async fn new(uploads: usize) -> Self {
-        Self::with_home(uploads, Arc::new(InstrumentedHome::new())).await
+/// What the fixture's Store synchronizes: rows with a blob column, or rows
+/// routed to a Circle. A blob upload and a two-audience write need different
+/// tables and neither wants the other's.
+#[derive(Clone, Copy)]
+enum FixtureSchema {
+    RowBlobs,
+    CircleScoped,
+}
+
+impl FixtureSchema {
+    fn tables(self) -> Vec<coven_protocol::synced_schema::SyncedTable> {
+        match self {
+            Self::RowBlobs => test_synced_tables_with_blob(BlobDecl::new(
+                "photos",
+                Provenance::UserProvided,
+                CacheFill::CacheLazy,
+            )),
+            Self::CircleScoped => vec![coven_protocol::synced_schema::SyncedTable::new(
+                "documents",
+                coven_protocol::synced_schema::RowIdentity::SharedKey,
+            )
+            .scoped_by("audience")],
+        }
     }
 
-    async fn with_home(uploads: usize, home: Arc<InstrumentedHome>) -> Self {
+    fn migrations(self) -> Vec<coven_database::Migration> {
+        match self {
+            Self::RowBlobs => test_migrations(),
+            Self::CircleScoped => vec![coven_database::Migration::sql(
+                1,
+                "documents",
+                "CREATE TABLE documents (
+                     id TEXT PRIMARY KEY,
+                     audience TEXT,
+                     _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )],
+        }
+    }
+}
+
+impl UploadFixture {
+    async fn new(uploads: usize) -> Self {
+        Self::with_home(
+            uploads,
+            Arc::new(InstrumentedHome::new()),
+            FixtureSchema::RowBlobs,
+        )
+        .await
+    }
+
+    async fn scoped(uploads: usize) -> Self {
+        Self::with_home(
+            uploads,
+            Arc::new(InstrumentedHome::new()),
+            FixtureSchema::CircleScoped,
+        )
+        .await
+    }
+
+    async fn with_home(uploads: usize, home: Arc<InstrumentedHome>, schema: FixtureSchema) -> Self {
         let limits = coven_protocol::blob::TransferLimits {
             uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
             downloads: std::num::NonZeroUsize::MIN,
@@ -279,16 +334,12 @@ impl UploadFixture {
         let db = Database::open_synthetic_for_test(
             std::path::Path::new(":memory:"),
             db_store_dir.clone(),
-            test_synced_tables_with_blob(BlobDecl::new(
-                "photos",
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
-            )),
+            schema.tables(),
             coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
             limits,
             "test-device".to_string(),
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
-            &test_migrations(),
+            &schema.migrations(),
         )
         .expect("open upload database");
         let owner = UserKeypair::generate();
@@ -391,6 +442,33 @@ impl UploadFixture {
         .await
         .expect("enqueue real make_remote upload journals");
         paths
+    }
+
+    /// One host write whose rows land in two audiences, so the write it stages
+    /// carries a Store package and a Circle package. Needs the
+    /// [`FixtureSchema::CircleScoped`] tables.
+    async fn write_two_audiences(&self, label: &str) {
+        let circle = self
+            .device
+            .create_circle("0000000001000-0000-owner", "Readers")
+            .await
+            .expect("create the publication Circle");
+        let sql = format!(
+            "INSERT INTO documents (id, audience, _updated_at) \
+             VALUES ('{label}-store', NULL, '0000000002000-0000-D'), \
+                    ('{label}-circle', '{circle}', '0000000002001-0000-D');"
+        );
+        self.database
+            .run_host_store_write_for_test(
+                Some(EncryptionService::from_key([42; 32])),
+                None,
+                move |tx| {
+                    tx.execute_batch(&sql)
+                        .map_err(coven_database::DbError::from)
+                },
+            )
+            .await
+            .expect("stage the two-audience host write");
     }
 
     async fn seed_uploads(&self, count: usize) -> Vec<String> {
@@ -1153,7 +1231,7 @@ async fn limit_one_drains_every_entry_in_order() {
 #[tokio::test]
 async fn concurrent_drain_overlaps_up_to_the_limit() {
     let home = Arc::new(InstrumentedHome::with_barrier(Some(2)));
-    let fixture = UploadFixture::with_home(2, home.clone()).await;
+    let fixture = UploadFixture::with_home(2, home.clone(), FixtureSchema::RowBlobs).await;
     let ids = fixture.seed_uploads(4).await;
     home.enable_barrier();
 
@@ -1223,6 +1301,234 @@ async fn pause_after_first_finishes_inflight_and_stops_admitting() {
     assert_eq!(observer.started(), vec![ids[0].clone()]);
     assert!(is_created(&fixture.journal(&ids[0]).await));
     assert!(!is_created(&fixture.journal(&ids[1]).await));
+}
+
+/// Publishing a write's prepared objects overlaps them, up to the transfer
+/// limit, and still finishes all of them before the commit that names them.
+///
+/// Live, a twenty-two file Move-to-Cloud spent 8977 ms of an 11027 ms
+/// publication here, one provider round trip after another. Each package is
+/// independent — its own bytes, its own create, its own durable mark — so the
+/// only thing that has to hold is the barrier at the end.
+#[tokio::test]
+async fn publication_overlaps_prepared_packages_but_not_the_commit() {
+    let fixture = UploadFixture::scoped(4).await;
+    fixture.write_two_audiences("overlap").await;
+
+    // Holding each create open is what makes the overlap observable.
+    fixture
+        .home
+        .slow_creates(1 << 20, std::time::Duration::from_millis(20));
+    fixture.home.reset_observations();
+    fixture.home.inner.clear_exact_creates();
+
+    assert!(
+        fixture
+            .device
+            .prepare_pending_store_write()
+            .await
+            .expect("prepare the scoped Store write"),
+        "the two-audience write is ready to publish",
+    );
+    assert_eq!(
+        fixture
+            .device
+            .drain_store_writes()
+            .await
+            .expect("publish the scoped Store write"),
+        1,
+    );
+
+    let created = fixture
+        .home
+        .inner
+        .exact_creates()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    let packages = created
+        .iter()
+        .filter(|key| key.contains("/packages/"))
+        .count();
+    assert!(
+        packages > 1,
+        "the write did not publish more than one package: {created:?}",
+    );
+    assert_eq!(
+        fixture.home.max_inflight(),
+        2,
+        "publication issued its package creates one at a time",
+    );
+    let last_package = created
+        .iter()
+        .rposition(|key| key.contains("/packages/"))
+        .expect("the write published its packages");
+    let commit = created
+        .iter()
+        .position(|key| key.contains("/commits/"))
+        .expect("the write published its commit");
+    assert!(
+        last_package < commit,
+        "the commit was created before a package it names: {created:?}",
+    );
+}
+
+/// The limit is the ceiling, not a target: one at a time stays one at a time.
+#[tokio::test]
+async fn publication_respects_a_transfer_limit_of_one() {
+    let fixture = UploadFixture::scoped(1).await;
+    fixture.write_two_audiences("serial").await;
+    fixture
+        .home
+        .slow_creates(1 << 20, std::time::Duration::from_millis(20));
+    fixture.home.reset_observations();
+
+    fixture
+        .device
+        .prepare_pending_store_write()
+        .await
+        .expect("prepare the scoped Store write");
+    fixture
+        .device
+        .drain_store_writes()
+        .await
+        .expect("publish the scoped Store write");
+
+    assert_eq!(
+        fixture.home.max_inflight(),
+        1,
+        "a limit of one still publishes one object at a time",
+    );
+}
+
+/// A blob whose ownership flips to `RetirementPending` — its last pending
+/// candidate lost — is a blob nothing will ever upload, and publication has to
+/// refuse the write loudly rather than skip it.
+///
+/// This state is reachable on a write still being drained. Publication reads
+/// each record live through `reopen_remote_object_on`, not from a snapshot
+/// taken when the write was prepared, and the nonactivation machinery retires
+/// ownership the moment a candidate loses a merge race, is abandoned, or has
+/// its author excluded — here driven through the same
+/// `begin_remote_candidate_nonactivation_on` those paths call. Skipping the
+/// blob would publish a commit naming bytes nobody put at the provider; going
+/// to the provider to check would be the round trip this path exists to avoid.
+#[tokio::test]
+async fn publication_refuses_a_blob_whose_candidate_ownership_was_retired() {
+    let fixture = UploadFixture::new(4).await;
+    fixture.seed_uploads(1).await;
+    fixture.drain(&fixed_clock(T0), None).await.unwrap();
+    assert!(
+        fixture
+            .device
+            .prepare_pending_store_write()
+            .await
+            .expect("prepare the Store write"),
+        "the seeded blob produces a Store write to publish",
+    );
+
+    let prepared = fixture
+        .database
+        .oldest_prepared_store_write()
+        .await
+        .expect("load the prepared write")
+        .expect("the prepared write exists");
+    let write_id = prepared.commit.value.value().write_id.clone();
+    let candidate = prepared.commit.value.reference().clone();
+    let candidate_bytes = prepared.commit.bytes.clone();
+    let blob = fixture
+        .database
+        .prepared_remote_objects(&write_id)
+        .await
+        .expect("load the prepared remote objects")
+        .into_iter()
+        .find(|prepared| {
+            matches!(
+                prepared.closed.payloads(),
+                coven_protocol::remote_object::RemoteObjectPayloads::RowBlob { .. }
+            )
+        })
+        .expect("the write names a prepared blob");
+    assert!(
+        blob.closed.record().records_verified_upload(),
+        "the write's blob starts out as one this device uploaded and verified",
+    );
+    let blob_object = blob.closed.object().clone();
+    let blob_key = blob_object.slot().logical_key().to_string();
+
+    fixture
+        .database
+        .begin_remote_candidate_nonactivation_for_test(
+            coven_protocol::remote_object::remote_object_id(&blob_object),
+            losing_candidate_nonactivation(&candidate, candidate_bytes),
+        )
+        .await
+        .expect("the losing candidate retires the blob's ownership");
+    fixture.home.inner.clear_exact_reads();
+    fixture.home.reset_observations();
+
+    let error = fixture
+        .device
+        .drain_store_writes()
+        .await
+        .expect_err("publication refuses the retired blob");
+    assert!(
+        error
+            .to_string()
+            .contains("no durable record of its upload"),
+        "publication failed for another reason: {error}",
+    );
+
+    let created = fixture.home.keys();
+    let touched = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .map(|slot| slot.logical_key().to_string())
+        .chain(created.iter().cloned())
+        .collect::<Vec<_>>();
+    assert!(
+        !touched.contains(&blob_key),
+        "publication went to the provider for the retired blob: {touched:?}",
+    );
+    // The refusal lands before the barrier, so the commit that would have named
+    // the retired blob never reaches the provider. Without the guard the write
+    // gets that far and only trips over the blob at activation, with the commit
+    // already published.
+    assert!(
+        !created.iter().any(|key| key.contains("/commits/")),
+        "publication created the commit naming the retired blob: {created:?}",
+    );
+}
+
+/// The receipt a candidate's loss carries: another head won the position this
+/// candidate wanted.
+fn losing_candidate_nonactivation(
+    candidate: &coven_protocol::store_commit::StoreBatchCommitRef,
+    candidate_bytes: Vec<u8>,
+) -> coven_protocol::remote_object::CandidateNonactivation {
+    let winner_bytes = b"the head that won this position";
+    let winner_object = coven_protocol::objects::ExactObjectRef::new(
+        coven_protocol::objects::ObjectSlot::logical(
+            "store-v1/heads/retired-blob-winner.json".to_string(),
+        )
+        .expect("construct the winning head slot"),
+        winner_bytes.len() as u64,
+        coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
+    );
+    coven_protocol::remote_object::CandidateNonactivation::unverified_for_test(
+        coven_protocol::store_commit::StoreBatchCommitDeletionTarget {
+            coord: candidate.coord.clone(),
+            object: candidate.object.clone(),
+            canonical_signed_bytes: candidate_bytes,
+        },
+        coven_protocol::remote_object::CandidateNonactivationProof::MergeWinner {
+            winner_head: coven_protocol::store_commit::StoreDeviceHeadRef {
+                head_hash: coven_protocol::store_commit::ObjectHash::digest(winner_bytes),
+                object: winner_object,
+            },
+        },
+    )
 }
 
 /// A write publishes its package before the commit that names it, and never

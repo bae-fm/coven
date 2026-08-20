@@ -560,10 +560,16 @@ impl<'storage> AuthorizedWriterOperation<'storage> {
                             source,
                         })?;
                 } else if !remote.records_verified_upload() {
-                    // Nothing here uploads a blob it has no spool for, and a
-                    // blob whose record does not say it was created is one this
-                    // device never wrote. Publishing a commit that names it
-                    // would name bytes nobody put at the provider.
+                    // Nothing here uploads a blob it has no spool for, so this
+                    // is a blob whose record does not say it was created — and
+                    // that is reachable while the write is still draining:
+                    // these records are read live, and the nonactivation
+                    // machinery retires a blob's ownership the moment its last
+                    // pending candidate loses a merge race, is abandoned, or
+                    // has its author excluded. Refuse the write. Skipping the
+                    // blob would publish a commit naming bytes nobody put at
+                    // the provider; reading the provider to find out would be
+                    // the round trip this path exists to avoid.
                     return Err(StoreError::InvalidOutbound(format!(
                         "prepared blob {} has no durable record of its upload",
                         remote.object_id()

@@ -37,6 +37,17 @@ impl StoreDatabase {
             .await
     }
 
+    pub async fn begin_remote_candidate_nonactivation_for_test(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<(), DbError> {
+        self.call_store(move |session| {
+            session.begin_remote_candidate_nonactivation_for_test(object_id, nonactivation)
+        })
+        .await
+    }
+
     pub async fn install_indexed_shared_blobs_for_test(
         &self,
         write_id: WriteId,

@@ -706,6 +706,20 @@ impl StoreSession<'_> {
             .install_indexed_shared_blobs(write_id, records)
     }
 
+    /// Run the production candidate-nonactivation transition against one
+    /// indexed remote object, the way a lost merge race, an abandonment, or an
+    /// author exclusion does — so a test can put a write's own object into the
+    /// ownership state those paths produce.
+    fn begin_remote_candidate_nonactivation_for_test(
+        &self,
+        object_id: coven_protocol::store_commit::ObjectHash,
+        nonactivation: coven_protocol::remote_object::CandidateNonactivation,
+    ) -> Result<(), DbError> {
+        let transaction = self.conn.unchecked_transaction().map_err(DbError::from)?;
+        crate::begin_remote_candidate_nonactivation_on(&transaction, object_id, nonactivation)?;
+        transaction.commit().map_err(DbError::from)
+    }
+
     fn replace_blob_row_stamp_for_test(
         &self,
         table: &str,
