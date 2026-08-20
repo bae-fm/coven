@@ -385,6 +385,26 @@ impl<'storage> JoiningStore<'storage> {
         published_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
     ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
+        let mut timings =
+            crate::sync::stage_timing::StageTimings::start("Device join history install");
+        let outcome = Box::pin(self.bootstrap_staged(
+            bootstrap,
+            published_at,
+            routing_encryption,
+            &mut timings,
+        ))
+        .await;
+        timings.report();
+        outcome
+    }
+
+    async fn bootstrap_staged(
+        &mut self,
+        bootstrap: ProviderReadyDeviceBootstrap,
+        published_at: &str,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        timings: &mut crate::sync::stage_timing::StageTimings,
+    ) -> Result<DeviceJoinReadiness, DeviceJoinError> {
         let offer = &bootstrap.bootstrap.request.approval().request.offer;
         if &offer.store_root != self.history.root()
             || offer.member_pubkey != coven_keys::keys::public_key_hex(&self.identity)
@@ -398,59 +418,76 @@ impl<'storage> JoiningStore<'storage> {
         {
             return Err(DeviceJoinError::OfferMismatch);
         }
-        let attempt_owner = self
-            .history
-            .device_join()
-            .load_registration(&offer.owner_registration)
+        let attempt_owner = timings
+            .stage(
+                "read registrations",
+                self.history
+                    .device_join()
+                    .load_registration(&offer.owner_registration),
+            )
             .await?
             .value;
-        let administrator = self
-            .history
-            .device_join()
-            .load_registration(&offer.provider_admin.administrator)
+        let administrator = timings
+            .stage(
+                "read registrations",
+                self.history
+                    .device_join()
+                    .load_registration(&offer.provider_admin.administrator),
+            )
             .await?
             .value;
-        let (verified_attempt, bootstrap_plan) = Box::pin(
-            self.history
-                .device_join()
-                .verify_attempt_and_prepare_bootstrap(
-                    &bootstrap.bootstrap.publication_authorization.attempt,
-                    &attempt_owner,
-                    &bootstrap
-                        .bootstrap
-                        .publication_authorization
-                        .attempt_activation,
+        let (verified_attempt, bootstrap_plan) = timings
+            .stage(
+                "verify history",
+                Box::pin(
+                    self.history
+                        .device_join()
+                        .verify_attempt_and_prepare_bootstrap(
+                            &bootstrap.bootstrap.publication_authorization.attempt,
+                            &attempt_owner,
+                            &bootstrap
+                                .bootstrap
+                                .publication_authorization
+                                .attempt_activation,
+                        ),
                 ),
-        )
-        .await?;
+            )
+            .await?;
         if verified_attempt.value.expected_registration
             != *bootstrap.bootstrap.request.expected_registration()
         {
             return Err(DeviceJoinError::AttemptMismatch);
         }
-        let resolved = self
-            .resolve_bootstrap(bootstrap_plan, routing_encryption)
+        let resolved = timings
+            .stage(
+                "resolve row data",
+                self.resolve_bootstrap(bootstrap_plan, routing_encryption),
+            )
             .await?;
-        let proof = Box::pin(
-            self.history.device_join().bootstrap_pending_device(
-                &self.identity,
-                bootstrap
-                    .bootstrap
-                    .publication_authorization
-                    .attempt
-                    .clone(),
-                verified_attempt,
-                resolved,
-                bootstrap
-                    .bootstrap
-                    .publication_authorization
-                    .attempt_activation
-                    .clone(),
-                &attempt_owner,
-                published_at,
-            ),
-        )
-        .await?;
+        let proof = timings
+            .stage(
+                "publish readiness",
+                Box::pin(
+                    self.history.device_join().bootstrap_pending_device(
+                        &self.identity,
+                        bootstrap
+                            .bootstrap
+                            .publication_authorization
+                            .attempt
+                            .clone(),
+                        verified_attempt,
+                        resolved,
+                        bootstrap
+                            .bootstrap
+                            .publication_authorization
+                            .attempt_activation
+                            .clone(),
+                        &attempt_owner,
+                        published_at,
+                    ),
+                ),
+            )
+            .await?;
         let provider = match (
             &bootstrap.bootstrap.request.approval().admission,
             &bootstrap.bootstrap.request.response(),

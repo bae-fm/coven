@@ -20,6 +20,7 @@ use coven_keys::keys::{
     CloudHomeCredentials, DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys, UserKeypair,
 };
 use coven_protocol::synced_schema::SyncedTable;
+use coven_replication::sync::stage_timing::StageTimings;
 use coven_replication::sync::store::{
     MembershipMutationError, PreparedDeviceJoinSnapshot, PreparedSnapshotBootstrap, PullError,
     SnapshotError,
@@ -717,11 +718,36 @@ impl DeviceJoinClient {
         )?)
     }
 
+    /// Report the breakdown whichever way the bootstrap ends. A join that took
+    /// four minutes is exactly the one whose stage timings are wanted, and a
+    /// join that failed partway still reached the stages it reached.
     pub(crate) async fn bootstrap_pending_device(
         &self,
         bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
+    ) -> Result<
+        coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
+        BootstrapError,
+    > {
+        let mut timings = StageTimings::start("Device join bootstrap");
+        let outcome = Box::pin(self.bootstrap_pending_device_staged(
+            bootstrap,
+            on_progress,
+            cancel,
+            &mut timings,
+        ))
+        .await;
+        timings.report();
+        outcome
+    }
+
+    async fn bootstrap_pending_device_staged(
+        &self,
+        bootstrap: coven_replication::sync::ProviderReadyDeviceBootstrap,
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &watch::Receiver<bool>,
+        timings: &mut StageTimings,
     ) -> Result<
         coven_protocol::store_commit::device_join_exchange::DeviceJoinReadiness,
         BootstrapError,
@@ -734,7 +760,9 @@ impl DeviceJoinClient {
             return Err(BootstrapError::Cancelled);
         }
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let join = self.build_storage(&signer).await?;
+        let join = timings
+            .stage("open cloud home", self.build_storage(&signer))
+            .await?;
         let store_dir = self.layout.store_dir(&self.admission.store_id);
         if let Some(readiness) = pending.completed_joiner_readiness(attempt)? {
             if store_dir.db_path().exists() {
@@ -746,22 +774,29 @@ impl DeviceJoinClient {
         }
         store_dir.ensure_created()?;
         let db_path = store_dir.db_path();
-        let history_verifier =
-            coven_replication::sync::store::HistoryConstructionAuthority::for_snapshot()
-                .open_pinned(join.storage.as_ref(), &offer.store_root)
-                .await
-                .map_err(SnapshotError::from)?;
-        let snapshot = PreparedSnapshotBootstrap::prepare(
-            &join.storage,
-            history_verifier,
-            &self.admission.membership_floor,
-            supported_version(&self.migrations),
-            &db_path,
-            &signer,
-            std::sync::Arc::clone(on_progress),
-            cancel,
-        )
-        .await?;
+        let history_verifier = timings
+            .stage(
+                "read Store root",
+                coven_replication::sync::store::HistoryConstructionAuthority::for_snapshot()
+                    .open_pinned(join.storage.as_ref(), &offer.store_root),
+            )
+            .await
+            .map_err(SnapshotError::from)?;
+        let snapshot = timings
+            .stage(
+                "download snapshot",
+                PreparedSnapshotBootstrap::prepare(
+                    &join.storage,
+                    history_verifier,
+                    &self.admission.membership_floor,
+                    supported_version(&self.migrations),
+                    &db_path,
+                    &signer,
+                    std::sync::Arc::clone(on_progress),
+                    cancel,
+                ),
+            )
+            .await?;
         on_progress(coven_replication::sync::JoiningDeviceJoinProgress::InstallingSnapshot);
         let routing_encryption = EncryptionService::from(join.keyring.clone());
         let device_id = bootstrap
@@ -770,24 +805,33 @@ impl DeviceJoinClient {
             .expected_registration()
             .device_id
             .to_string();
-        let opened = snapshot
-            .install(
-                &store_dir,
-                self.synced_tables.clone(),
-                coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-                self.transfer_limits,
-                device_id,
-                self.clock.clone(),
-                &self.migrations,
-                Some(&routing_encryption),
+        let opened = timings
+            .stage(
+                "install snapshot",
+                snapshot.install(
+                    &store_dir,
+                    self.synced_tables.clone(),
+                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                    self.transfer_limits,
+                    device_id,
+                    self.clock.clone(),
+                    &self.migrations,
+                    Some(&routing_encryption),
+                ),
             )
             .await?;
         let published_at = self.clock.now().to_rfc3339();
-        let mut joining = opened
-            .begin_device_join(&pending, offer.as_ref().clone())
+        let mut joining = timings
+            .stage(
+                "load membership",
+                opened.begin_device_join(&pending, offer.as_ref().clone()),
+            )
             .await?;
-        Ok(joining
-            .bootstrap(bootstrap, &published_at, Some(&routing_encryption))
+        Ok(timings
+            .stage(
+                "install history",
+                joining.bootstrap(bootstrap, &published_at, Some(&routing_encryption)),
+            )
             .await?)
     }
 
@@ -795,6 +839,19 @@ impl DeviceJoinClient {
         &self,
         activation: coven_replication::sync::DeviceJoinActivation,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+    ) -> Result<Config, BootstrapError> {
+        let mut timings = StageTimings::start("Device join completion");
+        let outcome =
+            Box::pin(self.complete_device_join_staged(activation, on_progress, &mut timings)).await;
+        timings.report();
+        outcome
+    }
+
+    async fn complete_device_join_staged(
+        &self,
+        activation: coven_replication::sync::DeviceJoinActivation,
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+        timings: &mut StageTimings,
     ) -> Result<Config, BootstrapError> {
         let attempt_id = activation.outcome.attempt().attempt_id;
         let pending = self.open_pending_journal()?;
@@ -814,7 +871,9 @@ impl DeviceJoinClient {
             Some(_) => coven_keys::keys::require_identity(self.identity_custody.as_ref())?,
             None => coven_keys::keys::peek_pending_identity(&self.member_pubkey)?,
         };
-        let join = self.build_storage(&signer).await?;
+        let join = timings
+            .stage("open cloud home", self.build_storage(&signer))
+            .await?;
         let pending_readiness = pending.observe_joiner_activation_if_pending(&activation)?;
         let device_id = match (pending_readiness.as_ref(), completed_config.as_ref()) {
             (Some(readiness), _) => readiness.proof.registration.device_id.to_string(),
@@ -835,21 +894,36 @@ impl DeviceJoinClient {
         )?;
         let database = coven_database::StoreDatabase::from_database(db.clone());
         let routing_encryption = EncryptionService::from(join.keyring.clone());
-        let observation = coven_replication::sync::store::PendingDeviceJoinObservation::open(
-            &pending,
-            &join.storage,
-            &self.admission.store_root,
-            attempt_id,
-        )
-        .await?;
-        let mut joining = observation
-            .into_joining_store(database, &store_dir, signer.clone())
+        let observation = timings
+            .stage(
+                "read Store root",
+                coven_replication::sync::store::PendingDeviceJoinObservation::open(
+                    &pending,
+                    &join.storage,
+                    &self.admission.store_root,
+                    attempt_id,
+                ),
+            )
+            .await?;
+        let mut joining = timings
+            .stage(
+                "load membership",
+                observation.into_joining_store(database, &store_dir, signer.clone()),
+            )
             .await?;
         on_progress(coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp);
-        joining
-            .pull_store_history(Some(&routing_encryption))
+        timings
+            .stage(
+                "pull history",
+                joining.pull_store_history(Some(&routing_encryption)),
+            )
             .await?;
-        let joined = joining.materialize(activation.clone()).await?;
+        let joined = timings
+            .stage(
+                "materialize activation",
+                joining.materialize(activation.clone()),
+            )
+            .await?;
         if pending_readiness
             .as_ref()
             .is_some_and(|readiness| joined.registration != readiness.proof.registration)
@@ -873,7 +947,9 @@ impl DeviceJoinClient {
         );
         config.cloud_home.exact_upload_verification = self.exact_upload_verification;
         config.save_to_config_yaml(&store_dir)?;
-        joining.complete(activation).await?;
+        timings
+            .stage("close join journal", joining.complete(activation))
+            .await?;
         coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
         info!(store_id = %self.admission.store_id, "joined Store device");
         Ok(config)
@@ -884,6 +960,25 @@ impl DeviceJoinClient {
         join: coven_replication::sync::SamePrincipalDeviceJoin,
         on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
         cancel: &watch::Receiver<bool>,
+    ) -> Result<Config, BootstrapError> {
+        let mut timings = StageTimings::start("Same-provider device join");
+        let outcome = Box::pin(self.install_same_principal_device_join_staged(
+            join,
+            on_progress,
+            cancel,
+            &mut timings,
+        ))
+        .await;
+        timings.report();
+        outcome
+    }
+
+    async fn install_same_principal_device_join_staged(
+        &self,
+        join: coven_replication::sync::SamePrincipalDeviceJoin,
+        on_progress: &coven_replication::sync::JoiningDeviceJoinProgressObserver,
+        cancel: &watch::Receiver<bool>,
+        timings: &mut StageTimings,
     ) -> Result<Config, BootstrapError> {
         join.verify_shape()
             .map_err(coven_replication::sync::DeviceJoinError::from)?;
@@ -898,17 +993,23 @@ impl DeviceJoinClient {
             return Err(BootstrapError::StoreExists(self.admission.store_id.clone()));
         }
         let signer = coven_keys::keys::peek_pending_identity(&offer.member_pubkey)?;
-        let storage = self.build_storage(&signer).await?;
+        let storage = timings
+            .stage("open cloud home", self.build_storage(&signer))
+            .await?;
         store_dir.ensure_created()?;
-        let prepared = PreparedDeviceJoinSnapshot::prepare(
-            &storage.storage,
-            (*join.installation).clone(),
-            supported_version(&self.migrations),
-            &store_dir.db_path(),
-            on_progress,
-            cancel,
-        )
-        .await?;
+        let prepared = timings
+            .stage(
+                "download snapshot",
+                PreparedDeviceJoinSnapshot::prepare(
+                    &storage.storage,
+                    (*join.installation).clone(),
+                    supported_version(&self.migrations),
+                    &store_dir.db_path(),
+                    on_progress,
+                    cancel,
+                ),
+            )
+            .await?;
         if *cancel.borrow() {
             return Err(BootstrapError::Cancelled);
         }
@@ -921,16 +1022,20 @@ impl DeviceJoinClient {
             .expected_registration()
             .device_id
             .to_string();
-        let installed = prepared.install(
-            self.synced_tables.clone(),
-            coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
-            self.transfer_limits,
-            device_id.clone(),
-            self.clock.clone(),
-            &self.migrations,
-            &routing_encryption,
-        )?;
-        let completion = coven_replication::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(
+        let installed = timings
+            .stage("install snapshot", async {
+                prepared.install(
+                    self.synced_tables.clone(),
+                    coven_protocol::blob::BLOB_TOMBSTONE_GRACE,
+                    self.transfer_limits,
+                    device_id.clone(),
+                    self.clock.clone(),
+                    &self.migrations,
+                    &routing_encryption,
+                )
+            })
+            .await?;
+        let completion = timings.stage("install history", coven_replication::sync::store::PendingDeviceJoinAuthority::prepare_same_principal_completion(
             &pending,
             &storage.storage,
             &store_dir,
@@ -939,7 +1044,7 @@ impl DeviceJoinClient {
             installed,
             &self.clock.now().to_rfc3339(),
             Some(&routing_encryption),
-        )
+        ))
         .await?;
         if completion.joined().registration.device_id.to_string() != device_id {
             return Err(coven_replication::sync::DeviceJoinError::JournalConflict.into());
@@ -960,7 +1065,9 @@ impl DeviceJoinClient {
         );
         config.cloud_home.exact_upload_verification = self.exact_upload_verification;
         config.save_to_config_yaml(&store_dir)?;
-        completion.complete().await?;
+        timings
+            .stage("close join journal", completion.complete())
+            .await?;
         coven_keys::keys::discard_pending_identity(&self.member_pubkey)?;
         info!(store_id = %self.admission.store_id, "joined Store device");
         Ok(config)

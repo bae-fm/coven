@@ -1,5 +1,25 @@
 use super::*;
 
+use coven_replication::sync::stage_timing::StageTimings;
+
+/// Time one owner-side device-join step and report it the way every other
+/// staged run reports.
+///
+/// Each of these is a single operator action in the Add-a-device flow — publish
+/// the offer, approve the provider access, accept the registration, activate —
+/// and each is one or more provider round trips. None of them logged anything,
+/// so a joining device that sat for minutes could not be told apart from an
+/// owner that had not published yet.
+async fn timed_owner_join_step<T>(
+    step: &'static str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let mut timings = StageTimings::start("Device join owner step");
+    let outcome = timings.stage(step, work).await;
+    timings.report();
+    outcome
+}
+
 impl StoreSync {
     pub(crate) async fn members(
         &self,
@@ -311,20 +331,16 @@ impl StoreSync {
         &self,
         member_pubkey: &str,
     ) -> Result<crate::DeviceJoinOffer, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .begin_device_join(member_pubkey)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step("publish offer", sync.begin_device_join(member_pubkey)).await?)
     }
 
     pub(crate) async fn abandon_device_join(
         &self,
         offer: crate::DeviceJoinOffer,
     ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .abandon_device_join(offer)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step("abandon offer", sync.abandon_device_join(offer)).await?)
     }
 
     pub(crate) async fn authorize_device_provider_access(
@@ -332,50 +348,59 @@ impl StoreSync {
         request: crate::DeviceProviderAccessRequest,
         access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
     ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .authorize_device_provider_access(request, access_administrator)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step(
+            "authorize provider access",
+            sync.authorize_device_provider_access(request, access_administrator),
+        )
+        .await?)
     }
 
     pub(crate) async fn accept_device_registration(
         &self,
         request: crate::DeviceRegistrationRequest,
     ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .accept_device_registration(request)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step(
+            "accept registration",
+            sync.accept_device_registration(request),
+        )
+        .await?)
     }
 
     pub(crate) async fn publish_device_provider_challenge(
         &self,
         bootstrap: crate::ProvisionalDeviceBootstrap,
     ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .publish_device_provider_challenge(bootstrap)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step(
+            "publish provider challenge",
+            sync.publish_device_provider_challenge(bootstrap),
+        )
+        .await?)
     }
 
     pub(crate) async fn complete_device_provider_admission(
         &self,
         readiness: crate::DeviceJoinReadiness,
     ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .complete_device_provider_admission(readiness)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(timed_owner_join_step(
+            "complete provider admission",
+            sync.complete_device_provider_admission(readiness),
+        )
+        .await?)
     }
 
     pub(crate) async fn finalize_device_join(
         &self,
         completion: crate::DeviceProviderAdmissionCompletion,
     ) -> Result<crate::DeviceJoinActivation, SyncError> {
-        Ok(active_sync!(self)
-            .ok_or(SyncError::LoopNotRunning)?
-            .finalize_device_join(completion)
-            .await?)
+        let sync = active_sync!(self).ok_or(SyncError::LoopNotRunning)?;
+        Ok(
+            timed_owner_join_step("publish activation", sync.finalize_device_join(completion))
+                .await?,
+        )
     }
 
     pub(crate) async fn cancel_device_join(

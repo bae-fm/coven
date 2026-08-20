@@ -10,6 +10,62 @@ fn interactive_pairing_uses_coven_owned_polling_and_deadline() {
         }
     );
 }
+/// A wait on a counterpart looks immediately, then backs off.
+///
+/// The counterpart is a person reading an approval prompt, or a device whose
+/// next sync cycle is tens of seconds away. Looking every hundred milliseconds
+/// for all of it is hundreds of provider reads that answer "not yet"; the first
+/// look still happens at the asked-for cadence, so an answer already waiting is
+/// still seen at once.
+#[test]
+fn a_wait_looks_at_once_and_then_backs_off_to_the_ceiling() {
+    let mut polls = DeviceJoinTransportTiming::interactive().polls();
+    let cadence = std::iter::from_fn(|| Some(polls.next()))
+        .take(7)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        cadence,
+        vec![
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(400),
+            Duration::from_millis(800),
+            Duration::from_millis(1600),
+            JOIN_POLL_CEILING,
+            JOIN_POLL_CEILING,
+        ],
+    );
+    let looks_in_a_minute = {
+        let mut polls = DeviceJoinTransportTiming::interactive().polls();
+        let mut elapsed = Duration::ZERO;
+        let mut looks = 0;
+        while elapsed < Duration::from_secs(60) {
+            elapsed += polls.next();
+            looks += 1;
+        }
+        looks
+    };
+    assert!(
+        looks_in_a_minute < 40,
+        "a minute of waiting still cost {looks_in_a_minute} provider reads",
+    );
+}
+
+/// A caller that asks for a slower cadence than the ceiling keeps its own: the
+/// ceiling exists to stop fast polling, never to speed a caller up.
+#[test]
+fn a_wait_slower_than_the_ceiling_keeps_its_own_cadence() {
+    let mut polls = DeviceJoinTransportTiming {
+        poll: Duration::from_secs(5),
+        deadline: Duration::from_secs(180),
+    }
+    .polls();
+
+    assert_eq!(polls.next(), Duration::from_secs(5));
+    assert_eq!(polls.next(), Duration::from_secs(5));
+}
+
 use std::cell::Cell;
 
 fn conflict() -> DeviceJoinTransportError {

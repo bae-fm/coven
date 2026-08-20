@@ -416,6 +416,74 @@ impl DeviceJoinTransportTiming {
             deadline: Duration::from_secs(180),
         }
     }
+
+    /// The cadence a wait on this timing uses.
+    fn polls(self) -> JoinPollBackoff {
+        JoinPollBackoff {
+            next: self.poll,
+            ceiling: JOIN_POLL_CEILING.max(self.poll),
+        }
+    }
+}
+
+/// The longest a wait ever sleeps between looks.
+///
+/// A wait on a counterpart is a wait on a person — an owner reading an approval
+/// prompt — or on that device's next sync cycle, which is tens of seconds away.
+/// Looking every hundred milliseconds for all of it is hundreds of provider
+/// reads that answer "not yet", and a provider that rate-limits them makes the
+/// join slower, not faster. The first look is immediate and the cadence backs
+/// off to this, so a counterpart that answers at once is still seen at once.
+const JOIN_POLL_CEILING: Duration = Duration::from_secs(2);
+
+struct JoinPollBackoff {
+    next: Duration,
+    ceiling: Duration,
+}
+
+impl JoinPollBackoff {
+    fn next(&mut self) -> Duration {
+        let current = self.next;
+        self.next = (current * 2).min(self.ceiling);
+        current
+    }
+}
+
+/// One wait on the counterpart, reported when it ends.
+///
+/// A join that took four minutes is either waiting on the other device or
+/// fetching, and until these lines existed the logs could not say which. The
+/// poll count separates a wait that sat through the owner's next sync cycle
+/// from one that answered immediately.
+struct JoinWait {
+    kind: DeviceJoinTransportKind,
+    started: coven_foundation::clock::Stopwatch,
+    polls: std::sync::atomic::AtomicU64,
+}
+
+impl JoinWait {
+    fn begin(kind: DeviceJoinTransportKind) -> Self {
+        Self {
+            kind,
+            started: coven_foundation::clock::Stopwatch::start(),
+            polls: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn polled(&self) {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn report(self) {
+        tracing::info!(
+            kind = ?self.kind,
+            produced_by = ?self.kind.producer(),
+            waited_ms = self.started.elapsed().as_millis() as u64,
+            looks = self.polls.load(std::sync::atomic::Ordering::Relaxed),
+            "Device join waited for its counterpart"
+        );
+    }
 }
 
 /// Why a transfer through the transport failed.
@@ -602,16 +670,20 @@ impl<'a> DeviceJoinTransport<'a> {
         timing: DeviceJoinTransportTiming,
     ) -> Result<T, DeviceJoinTransportError> {
         let kind = T::KIND;
+        let wait = JoinWait::begin(kind);
         let polled = tokio::time::timeout(timing.deadline, async {
+            let mut poll = timing.polls();
             loop {
+                wait.polled();
                 if let Some(action) = self.read(kind).await? {
                     return T::from_action(action)
                         .ok_or(DeviceJoinTransportError::KindMismatch { kind });
                 }
-                tokio::time::sleep(timing.poll).await;
+                tokio::time::sleep(poll.next()).await;
             }
         })
         .await;
+        wait.report();
         match polled {
             Ok(artifact) => artifact,
             Err(_) => Err(DeviceJoinTransportError::Timeout {
@@ -650,8 +722,11 @@ impl<'a> DeviceJoinTransport<'a> {
         timing: DeviceJoinTransportTiming,
     ) -> Result<DeviceJoinStep<T>, DeviceJoinTransportError> {
         let kind = T::KIND;
+        let wait = JoinWait::begin(kind);
         let polled = tokio::time::timeout(timing.deadline, async {
+            let mut poll = timing.polls();
             loop {
+                wait.polled();
                 if let Some(action) = self.read(DeviceJoinTransportKind::Abandonment).await? {
                     return DeviceJoinAbandonment::from_action(action)
                         .map(DeviceJoinStep::Abandoned)
@@ -664,10 +739,11 @@ impl<'a> DeviceJoinTransport<'a> {
                         .map(DeviceJoinStep::Continue)
                         .ok_or(DeviceJoinTransportError::KindMismatch { kind });
                 }
-                tokio::time::sleep(timing.poll).await;
+                tokio::time::sleep(poll.next()).await;
             }
         })
         .await;
+        wait.report();
         match polled {
             Ok(step) => step,
             Err(_) => Err(DeviceJoinTransportError::Timeout {

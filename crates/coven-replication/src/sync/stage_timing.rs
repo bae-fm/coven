@@ -27,7 +27,7 @@ use std::time::Duration;
 use coven_foundation::clock::Stopwatch;
 use tracing::info;
 
-pub(crate) struct StageTimings {
+pub struct StageTimings {
     run: &'static str,
     started: Stopwatch,
     stages: Vec<(&'static str, Duration)>,
@@ -35,7 +35,7 @@ pub(crate) struct StageTimings {
 
 impl StageTimings {
     /// Begins timing a run. `run` names it in the reported line.
-    pub(crate) fn start(run: &'static str) -> Self {
+    pub fn start(run: &'static str) -> Self {
         Self {
             run,
             started: Stopwatch::start(),
@@ -45,11 +45,7 @@ impl StageTimings {
 
     /// Awaits `work` as the named stage, adding its elapsed time to that
     /// stage's total for this run.
-    pub(crate) async fn stage<T>(
-        &mut self,
-        stage: &'static str,
-        work: impl Future<Output = T>,
-    ) -> T {
+    pub async fn stage<T>(&mut self, stage: &'static str, work: impl Future<Output = T>) -> T {
         let started = Stopwatch::start();
         let outcome = work.await;
         self.add(stage, started.elapsed());
@@ -59,7 +55,7 @@ impl StageTimings {
     /// Adds time a caller measured itself, for work whose split is only visible
     /// from inside it — a stream walk knows how much of its wait was head slots
     /// and how much was the commits behind them; the pull only sees the total.
-    pub(crate) fn record(&mut self, stage: &'static str, elapsed: Duration) {
+    pub fn record(&mut self, stage: &'static str, elapsed: Duration) {
         self.add(stage, elapsed);
     }
 
@@ -72,7 +68,7 @@ impl StageTimings {
 
     /// Reports the breakdown. Called on every exit path, including failures —
     /// a cycle that died halfway is exactly the one whose stage timings matter.
-    pub(crate) fn report(self) {
+    pub fn report(self) {
         info!(
             run = self.run,
             total_ms = self.started.elapsed().as_millis() as u64,

@@ -8,6 +8,7 @@
 //! decrypted and verified here first, exactly the way an ordinary pull does.
 
 use super::*;
+use crate::sync::stage_timing::StageTimings;
 use coven_database::{
     DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData, PreparedMergeMaterializationPackage,
     ResolvedDeviceJoinBootstrap,
@@ -17,12 +18,37 @@ use coven_protocol::membership::{LocalStoreMembership, MembershipChain};
 use std::collections::BTreeMap;
 
 impl PullHistory<'_, '_> {
+    /// Report the breakdown whichever way the resolution ends, and say how much
+    /// history it covered: a bootstrap over a store whose newest snapshot is a
+    /// hundred changesets back reads a package per uncovered commit, and the
+    /// only way to tell that cost from provider latency is to count both.
     pub(crate) async fn resolve_device_join_bootstrap(
         &mut self,
         plan: DeviceJoinBootstrapPlan,
         membership: &MembershipChain,
         identity: &UserKeypair,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+    ) -> Result<ResolvedDeviceJoinBootstrap, StorePullError> {
+        let mut timings = StageTimings::start("Device join bootstrap resolution");
+        let outcome = Box::pin(self.resolve_device_join_bootstrap_staged(
+            plan,
+            membership,
+            identity,
+            routing_encryption,
+            &mut timings,
+        ))
+        .await;
+        timings.report();
+        outcome
+    }
+
+    async fn resolve_device_join_bootstrap_staged(
+        &mut self,
+        plan: DeviceJoinBootstrapPlan,
+        membership: &MembershipChain,
+        identity: &UserKeypair,
+        routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        timings: &mut StageTimings,
     ) -> Result<ResolvedDeviceJoinBootstrap, StorePullError> {
         let (plan, unrepresented) = self
             .unrepresented_device_join_bootstrap_commits(plan)
@@ -57,7 +83,13 @@ impl PullHistory<'_, '_> {
                 error,
             ))
         })?;
+        tracing::info!(
+            plan_commits = plan.commits.len(),
+            uncovered_commits = unrepresented.len(),
+            "Device join bootstrap resolves the history its snapshot does not cover"
+        );
         let mut row_data = BTreeMap::new();
+        let mut inner = StageTimings::start("Device join bootstrap row data");
         for reference in unrepresented {
             let prepared = plan
                 .commits
@@ -74,15 +106,22 @@ impl PullHistory<'_, '_> {
                 package: None,
                 registrations: prepared.registrations.clone(),
             };
-            let resolved = Box::pin(self.resolve_bootstrap_commit_row_data(
-                candidate,
-                local_store_membership,
-                routing_key.as_ref(),
-                &schema,
-            ))
-            .await?;
+            let resolved = timings
+                .stage(
+                    "resolve commit row data",
+                    Box::pin(Self::resolve_bootstrap_commit_row_data(
+                        self,
+                        candidate,
+                        local_store_membership,
+                        routing_key.as_ref(),
+                        &schema,
+                        &mut inner,
+                    )),
+                )
+                .await?;
             row_data.insert(reference, resolved);
         }
+        inner.report();
         Ok(ResolvedDeviceJoinBootstrap {
             plan,
             row_data,
@@ -98,6 +137,7 @@ impl PullHistory<'_, '_> {
         local_store_membership: LocalStoreMembership,
         routing_key: Option<&coven_protocol::circle::RowRoutingKey>,
         schema: &std::sync::Arc<coven_database::TableSchema>,
+        timings: &mut StageTimings,
     ) -> Result<DeviceJoinBootstrapRowData, StorePullError> {
         let verified = candidate.verified.clone();
         let commit = verified.value().clone();
@@ -112,7 +152,9 @@ impl PullHistory<'_, '_> {
         // Circle bootstrap image on its first pull, the same way any device that
         // gains access later receives them.
         let circle_activations = if commit.control().is_some() {
-            self.verify_refs([reference.clone()]).await?;
+            timings
+                .stage("verify commits", self.verify_refs([reference.clone()]))
+                .await?;
             self.verified_commit(&reference)
                 .and_then(|candidate| candidate.membership_control)
                 .ok_or_else(|| {
@@ -129,25 +171,34 @@ impl PullHistory<'_, '_> {
             // verified predecessor closure, so the closure has to be in the
             // verifier first. A same-provider join carries its plan across from
             // the donor device and has verified none of it here yet.
-            self.verify_refs(commit_predecessor_references(&commit))
+            timings
+                .stage(
+                    "verify commits",
+                    self.verify_refs(commit_predecessor_references(&commit)),
+                )
                 .await?;
             let membership_prefix =
                 self.verified_membership_prefix(commit_predecessor_references(&commit))?;
             let verified_prefix = VerifiedStreamActivationPrefix::empty();
-            self.circles()
-                .activations()
-                .load_payload(
-                    &verified,
-                    None,
-                    routing_key,
-                    &verified_prefix,
-                    &membership_prefix,
+            timings
+                .stage(
+                    "read Circle activations",
+                    self.circles().activations().load_payload(
+                        &verified,
+                        None,
+                        routing_key,
+                        &verified_prefix,
+                        &membership_prefix,
+                    ),
                 )
                 .await
                 .map_err(super::CirclePackageReadError::from)?
         };
-        let membership_closure = self
-            .verified_membership_objects(&reference, &commit)
+        let membership_closure = timings
+            .stage(
+                "read membership objects",
+                self.verified_membership_objects(&reference, &commit),
+            )
             .await?;
         let membership_objects = membership_closure
             .as_ref()
@@ -158,8 +209,8 @@ impl PullHistory<'_, '_> {
 
         let mut packages = Vec::new();
         if commit.store_package().is_some() {
-            let bytes = self
-                .load_store_package(&reference)
+            let bytes = timings
+                .stage("read Store package", self.load_store_package(&reference))
                 .await?
                 .ok_or_else(|| {
                     StorePullError::InvalidState(format!(
@@ -173,19 +224,24 @@ impl PullHistory<'_, '_> {
                 .parse_store_package(&bytes)
                 .map_err(|reason| bootstrap_row_data_error(&reference, reason))?;
             packages.push(
-                self.prepare_bootstrap_package(&reference, package, schema)
+                timings
+                    .stage(
+                        "fetch blobs",
+                        self.prepare_bootstrap_package(&reference, package, schema),
+                    )
                     .await?,
             );
         }
         let author = verified.author().clone();
-        let circle_packages = self
-            .circles()
-            .packages()
-            .load_applicable(
-                &verified,
-                circle_activations.circles(),
-                &author,
-                local_store_membership,
+        let circle_packages = timings
+            .stage(
+                "read Circle packages",
+                self.circles().packages().load_applicable(
+                    &verified,
+                    circle_activations.circles(),
+                    &author,
+                    local_store_membership,
+                ),
             )
             .await?;
         for loaded in &circle_packages {
@@ -193,7 +249,11 @@ impl PullHistory<'_, '_> {
                 .parse_circle_package(loaded)
                 .map_err(|reason| bootstrap_row_data_error(&reference, reason))?;
             packages.push(
-                self.prepare_bootstrap_package(&reference, package, schema)
+                timings
+                    .stage(
+                        "fetch blobs",
+                        self.prepare_bootstrap_package(&reference, package, schema),
+                    )
                     .await?,
             );
         }
