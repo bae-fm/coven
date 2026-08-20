@@ -259,7 +259,7 @@ pub struct PreparedDeviceJoinSnapshot {
         coven_protocol::store_commit::StoreDeviceRegistration,
     >,
     snapshot: coven_database::PublishedStoreSnapshot,
-    stability: coven_database::VerifiedStoreSnapshotStability,
+    authority: coven_database::VerifiedStoreSnapshotAuthority,
     membership: coven_database::InitialStoreMembershipAuthority,
     attempt: coven_protocol::store_commit::DeviceJoinAttempt,
     outcome: coven_protocol::store_commit::DeviceJoinOutcome,
@@ -275,14 +275,14 @@ impl PreparedDeviceJoinSnapshot {
         on_progress: &crate::sync::JoiningDeviceJoinProgressObserver,
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Self, SnapshotError> {
-        installation.stability.validate()?;
+        installation.authority.validate()?;
         if installation.metadata.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {
                 snapshot_version: installation.metadata.schema_version,
                 supported: binary_schema_version,
             });
         }
-        let root_ref = installation.stability.store_root.clone();
+        let root_ref = installation.authority.store_root.clone();
         let root_bytes = installation.store_root.to_bytes();
         root_ref.object.verify(&root_bytes)?;
         if installation.store_root.object_hash() != root_ref.store_root_hash
@@ -332,8 +332,8 @@ impl PreparedDeviceJoinSnapshot {
             successor_slot: installation.metadata.successor.next_slot.clone(),
             meta: installation.metadata,
         };
-        let stability =
-            coven_database::VerifiedStoreSnapshotStability::from_authority(installation.stability)?;
+        let authority =
+            coven_database::VerifiedStoreSnapshotAuthority::from_authority(installation.authority)?;
         let plaintext =
             download_snapshot_image(storage.as_ref(), &root_ref, &snapshot, on_progress, cancel)
                 .await?;
@@ -345,7 +345,7 @@ impl PreparedDeviceJoinSnapshot {
             root,
             founder,
             snapshot,
-            stability,
+            authority,
             membership,
             attempt: installation.attempt,
             outcome: installation.outcome,
@@ -370,7 +370,7 @@ impl PreparedDeviceJoinSnapshot {
             root,
             founder,
             snapshot,
-            stability,
+            authority,
             membership,
             attempt,
             outcome,
@@ -391,7 +391,7 @@ impl PreparedDeviceJoinSnapshot {
                 snapshot,
                 root.clone(),
                 founder,
-                stability,
+                authority,
                 membership,
                 Some(routing_encryption),
             )?
@@ -451,7 +451,7 @@ pub struct PreparedSnapshotBootstrap<'storage> {
     restorer_identity: coven_keys::keys::UserKeypair,
     snapshot: coven_database::PublishedStoreSnapshot,
     coverage: coven_protocol::store_commit::CommitFrontier,
-    stability: coven_database::VerifiedStoreSnapshotStability,
+    authority: coven_database::VerifiedStoreSnapshotAuthority,
     membership: coven_protocol::membership::MembershipChain,
     #[cfg(any(test, feature = "test-utils"))]
     fail_circle_install: bool,
@@ -522,14 +522,15 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                     .await?,
             );
         }
-        let selected = Box::pin(history_verifier.select_maximal_stable_store_snapshot(authorized))
-            .await
-            .map_err(SnapshotError::from)?
-            .ok_or_else(|| {
-                SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
-                    "Store snapshot stream".to_string(),
-                ))
-            })?;
+        let selected =
+            Box::pin(history_verifier.select_maximal_installable_store_snapshot(authorized))
+                .await
+                .map_err(SnapshotError::from)?
+                .ok_or_else(|| {
+                    SnapshotError::Bucket(coven_protocol::objects::StorageError::NotFound(
+                        "Store snapshot stream".to_string(),
+                    ))
+                })?;
         let snapshot = selected.snapshot;
         if snapshot.meta.schema_version > binary_schema_version {
             return Err(SnapshotError::SchemaTooNew {
@@ -549,7 +550,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             .load_founder_registration()
             .await
             .map_err(SnapshotError::from)?;
-        let stability = selected.stability;
+        let authority = selected.verified;
         let coverage = snapshot.meta.coverage.clone();
         let database_image =
             SnapshotDatabaseImage::create(target_path.to_path_buf(), &plaintext)?.canonicalize()?;
@@ -569,7 +570,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             restorer_identity: restorer_identity.clone(),
             snapshot,
             coverage,
-            stability,
+            authority,
             membership,
             #[cfg(any(test, feature = "test-utils"))]
             fail_circle_install: false,
@@ -612,7 +613,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
             restorer_identity,
             snapshot,
             coverage,
-            stability,
+            authority,
             membership,
             #[cfg(any(test, feature = "test-utils"))]
             fail_circle_install,
@@ -630,7 +631,7 @@ impl<'storage> PreparedSnapshotBootstrap<'storage> {
                 snapshot,
                 root.object().clone(),
                 founder_registration,
-                stability,
+                authority,
                 coven_database::InitialStoreMembershipAuthority {
                     head_refs: membership.head_refs().to_vec(),
                 },

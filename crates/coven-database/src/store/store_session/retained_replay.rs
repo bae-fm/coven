@@ -116,7 +116,7 @@ pub(crate) fn ensure_founder_replay_baseline_on(
     if let Some(existing) = load_generation_zero_replay_baseline_on(records)? {
         let authority_matches = match &existing.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == &authority,
-            RetainedReplayAuthority::StableSnapshot(existing) => {
+            RetainedReplayAuthority::InstalledSnapshot(existing) => {
                 existing.store_root == authority.store_root
                     && existing.founder_registration == authority.founder_registration
             }
@@ -317,7 +317,10 @@ pub struct RetainedReplayGenesisAuthority {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RetainedReplayAuthority {
     Genesis(RetainedReplayGenesisAuthority),
-    StableSnapshot(RetainedReplaySnapshotAuthority),
+    /// The device installed a snapshot image and replays forward from it. Named
+    /// for what happened, not for a property of the snapshot: installing one
+    /// never required the store's other devices to have acknowledged it.
+    InstalledSnapshot(RetainedReplaySnapshotAuthority),
 }
 
 /// The database image a replay starts from, and the authority that says which
@@ -427,7 +430,7 @@ impl RetainedReplayBaseline {
                 }
                 validate_replay_image_foreign_keys(image)?;
             }
-            RetainedReplayAuthority::StableSnapshot(authority) => {
+            RetainedReplayAuthority::InstalledSnapshot(authority) => {
                 authority.validate()?;
                 if self.exact_cut != authority.metadata.coverage {
                     return Err(DbError::Message(

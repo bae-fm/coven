@@ -412,7 +412,7 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             }
         }
         let selected = match history
-            .select_maximal_stable_store_snapshot(authorized)
+            .select_maximal_acknowledged_store_snapshot(authorized)
             .await
         {
             Ok(Some(selected)) => selected,
@@ -449,22 +449,10 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
                 "snapshot image differs from its signed exact reference".to_string(),
             ));
         }
-        let authority = selected.stability.into_authority();
-        let mut acknowledgements = authority
-            .acknowledgements
-            .values()
-            .map(|acknowledgement| {
-                acknowledgement
-                    .latest()
-                    .map(|(reference, _)| reference.clone())
-                    .ok_or_else(|| {
-                        StoreReclaimError::Authorization(
-                            "snapshot stability acknowledgement proof chain is empty".to_string(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        acknowledgements.sort();
+        let acknowledgements = selected
+            .verified
+            .acknowledgement_refs()
+            .map_err(StoreReclaimError::from)?;
         Ok(VerifiedReclaimSnapshot {
             snapshot,
             acknowledgements,

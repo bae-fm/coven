@@ -89,7 +89,8 @@ pub use materialization_models::{
     MembershipAuthorityBytes, OwnedVerifiedMergeMaterialization, PreparedMergeMaterialization,
     PreparedMergeMaterializationPackage, ResolvedDeviceJoinBootstrap, RetainedAudiencePackage,
     RetainedMergeHistoryCheckpoint, RetainedMergeMaterializationKey, RetainedPackageApplication,
-    VerifiedMergeMaterialization, VerifiedMergeMembershipObjects, VerifiedStoreSnapshotStability,
+    VerifiedAcknowledgedStoreSnapshot, VerifiedMergeMaterialization,
+    VerifiedMergeMembershipObjects, VerifiedStoreSnapshotAuthority,
 };
 #[cfg(test)]
 pub(crate) use merge_materialization_transaction::test_install_winning_blob_bindings;

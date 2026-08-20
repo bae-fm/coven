@@ -244,7 +244,7 @@ pub use store::{
     activated_merge_membership_remote_objects, DeviceJoinBootstrapActivation,
     DeviceJoinBootstrapCommit, DeviceJoinBootstrapPlan, DeviceJoinBootstrapRowData,
     MembershipAuthorityBytes, PreparedMergeMaterialization, PreparedMergeMaterializationPackage,
-    ResolvedDeviceJoinBootstrap, VerifiedStoreSnapshotStability,
+    ResolvedDeviceJoinBootstrap, VerifiedAcknowledgedStoreSnapshot, VerifiedStoreSnapshotAuthority,
 };
 pub use store::{
     audience_moves_by_row, local_blob_cleanup_intents, AudienceBlobMoveStaging, PostUpload,
@@ -883,7 +883,7 @@ pub struct VerifiedSnapshotBootstrapInstall {
     snapshot: PublishedStoreSnapshot,
     store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
     founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-    stability: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
+    authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     membership: InitialStoreMembershipAuthority,
     routing_key: Option<coven_protocol::circle::RowRoutingKey>,
     circle_selection: CircleRestoreSelection,
@@ -899,7 +899,7 @@ impl VerifiedSnapshotBootstrapInstall {
         snapshot: PublishedStoreSnapshot,
         store_root: coven_protocol::objects::VerifiedObject<StoreProtocolRoot>,
         founder: coven_protocol::objects::VerifiedObject<StoreDeviceRegistration>,
-        stability: crate::VerifiedStoreSnapshotStability,
+        authority: crate::VerifiedStoreSnapshotAuthority,
         membership: InitialStoreMembershipAuthority,
         routing_encryption: Option<&EncryptionService>,
     ) -> Result<Self, DbError> {
@@ -922,16 +922,16 @@ impl VerifiedSnapshotBootstrapInstall {
                 "bootstrap founder semantic hash differs from its exact registration".to_string(),
             ));
         }
-        let stability = stability.into_authority();
-        stability.validate()?;
-        if stability.store_root != root
-            || stability.founder_registration != founder_reference
-            || stability.snapshot != snapshot.reference
-            || stability.metadata != snapshot.meta
+        let authority = authority.into_authority();
+        authority.validate()?;
+        if authority.store_root != root
+            || authority.founder_registration != founder_reference
+            || authority.snapshot != snapshot.reference
+            || authority.metadata != snapshot.meta
             || snapshot.meta.successor.next_slot != snapshot.successor_slot
         {
             return Err(DbError::Message(
-                "bootstrap snapshot differs from its verified stability authority".to_string(),
+                "bootstrap snapshot differs from its verified authority authority".to_string(),
             ));
         }
         let routing_key = routing_encryption
@@ -944,7 +944,7 @@ impl VerifiedSnapshotBootstrapInstall {
             snapshot,
             store_root,
             founder,
-            stability,
+            authority,
             membership,
             routing_key,
             circle_selection: CircleRestoreSelection::Pending,

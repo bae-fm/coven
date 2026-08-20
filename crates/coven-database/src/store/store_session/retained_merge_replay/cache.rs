@@ -82,7 +82,7 @@ impl RetainedReplayCache {
         })?;
         let matches = match &baseline.authority {
             RetainedReplayAuthority::Genesis(existing) => existing == authority,
-            RetainedReplayAuthority::StableSnapshot(existing) => {
+            RetainedReplayAuthority::InstalledSnapshot(existing) => {
                 existing.store_root == authority.store_root
                     && existing.founder_registration == authority.founder_registration
             }

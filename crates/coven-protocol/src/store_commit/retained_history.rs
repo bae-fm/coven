@@ -96,6 +96,19 @@ pub struct RetainedAcknowledgementChain {
     pub activating_commit_value: StoreBatchCommit,
 }
 
+/// Everything a device needs to install one snapshot as its starting state and
+/// verify what arrives after it: the Store root and founder it belongs to, the
+/// signed metadata, the cut it covers, and the device state and registrations
+/// active at that cut.
+///
+/// Every field is re-derived from the signed `metadata` by
+/// [`validate`](Self::validate), so an installing device trusts the owner's
+/// signature over the snapshot and nothing local. What is deliberately absent
+/// is any claim about the *other* devices having caught up: that is
+/// [`AcknowledgedStoreSnapshot`], and only reclaim needs it. A device installing
+/// a baseline verifies each later commit against the registrations and device
+/// state carried here, exactly as a device that never installed a snapshot
+/// verifies them against its own history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedReplaySnapshotAuthority {
@@ -108,6 +121,26 @@ pub struct RetainedReplaySnapshotAuthority {
     pub device_state: ResolvedStoreDeviceState,
     #[serde(with = "ordered_map_entries")]
     pub active_registrations: BTreeMap<StoreDeviceId, ReferencedStoreDeviceRegistration>,
+}
+
+/// One snapshot every device active at its cut has acknowledged.
+///
+/// This is the unanimity proof, and it answers only one question: may history
+/// behind this snapshot be deleted? It may, because every device that could
+/// still need that history has said in a signed acknowledgement — activated by
+/// a commit in the verified closure — that it holds this snapshot.
+///
+/// Installing a snapshot asks a different question and does not need this. A
+/// device joining or restoring wants a signed, owner-authored, history-
+/// consistent image; whether some other device has caught up has no bearing on
+/// that, and a device that is behind converges through an ordinary pull no
+/// matter which image the joiner installed. Requiring unanimity there made a
+/// store with one joined-and-idle device fall back to its generation-zero
+/// image forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgedStoreSnapshot {
+    pub authority: RetainedReplaySnapshotAuthority,
     #[serde(with = "ordered_map_entries")]
     pub acknowledgements: BTreeMap<StoreDeviceId, RetainedAcknowledgementChain>,
 }
@@ -163,7 +196,6 @@ impl RetainedReplaySnapshotAuthority {
                     .get(device_id)
                     .is_none_or(|registration| registration.reference() != *reference)
             })
-            || self.acknowledgements.len() != self.active_registrations.len()
         {
             return Err(StoreProtocolError::Malformed(
                 "retained snapshot replay authority does not exactly cover active devices"
@@ -182,12 +214,51 @@ impl RetainedReplaySnapshotAuthority {
             registration
                 .reference()
                 .verify_registration(registration.value())?;
+        }
+        Ok(())
+    }
+}
+
+impl AcknowledgedStoreSnapshot {
+    /// The latest acknowledgement each active device signed for this snapshot,
+    /// in a stable order. This is the evidence a reclaim claim carries: the
+    /// devices are named by what they signed, not by the chains behind it.
+    pub fn acknowledgement_refs(&self) -> Result<Vec<StoreAckRef>, StoreProtocolError> {
+        let mut references = self
+            .acknowledgements
+            .values()
+            .map(|acknowledgement| {
+                acknowledgement
+                    .latest()
+                    .map(|(reference, _)| reference.clone())
+                    .ok_or_else(|| {
+                        StoreProtocolError::Malformed(
+                            "acknowledged snapshot proof chain is empty".to_string(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        references.sort();
+        Ok(references)
+    }
+
+    /// The installable authority, plus proof that every device active at its cut
+    /// acknowledged this exact snapshot. Reclaim deletes history behind a
+    /// snapshot only against this.
+    pub fn validate(&self) -> Result<(), StoreProtocolError> {
+        self.authority.validate()?;
+        if self.acknowledgements.len() != self.authority.active_registrations.len() {
+            return Err(StoreProtocolError::Malformed(
+                "acknowledged snapshot does not exactly cover active devices".to_string(),
+            ));
+        }
+        for (device_id, registration) in &self.authority.active_registrations {
             let acknowledgement = self.acknowledgements.get(device_id).ok_or_else(|| {
                 StoreProtocolError::Malformed(
                     "retained snapshot active device has no acknowledgement".to_string(),
                 )
             })?;
-            acknowledgement.validate_chain(&self.store_root, registration)?;
+            acknowledgement.validate_chain(&self.authority.store_root, registration)?;
             let (acknowledgement_ref, acknowledgement_value) =
                 acknowledgement.latest().ok_or_else(|| {
                     StoreProtocolError::Malformed(
@@ -201,7 +272,7 @@ impl RetainedReplaySnapshotAuthority {
                 .verify(&commit_bytes)?;
             let parsed_commit = VerifiedStoreBatchCommit::parse(
                 &commit_bytes,
-                self.store_root.store_root_hash,
+                self.authority.store_root.store_root_hash,
                 &acknowledgement.activating_commit,
                 registration.value(),
             )?;
@@ -209,21 +280,22 @@ impl RetainedReplaySnapshotAuthority {
                 || parsed_commit.commit_hash() != acknowledgement.activating_commit.commit_hash
                 || parsed_commit.acknowledgement() != Some(acknowledgement_ref)
                 || !history_cut_covers_commit(
-                    &self.accepted_cut,
+                    &self.authority.accepted_cut,
                     &acknowledgement.activating_commit,
                 )
                 || !acknowledgement_value
                     .snapshot
                     .as_ref()
                     .is_some_and(|acknowledged| {
-                        acknowledged.author_registration == self.metadata.author_registration
-                            && acknowledged.snapshot == self.snapshot
+                        acknowledged.author_registration
+                            == self.authority.metadata.author_registration
+                            && acknowledged.snapshot == self.authority.snapshot
                     })
-                || acknowledgement_value.device_state != self.metadata.state.devices
+                || acknowledgement_value.device_state != self.authority.metadata.state.devices
                 || !acknowledgement_value
                     .store_cut
                     .frontier()
-                    .covers(&self.metadata.coverage)
+                    .covers(&self.authority.metadata.coverage)
             {
                 return Err(StoreProtocolError::Malformed(
                     "retained snapshot acknowledgement differs from its activated commit"

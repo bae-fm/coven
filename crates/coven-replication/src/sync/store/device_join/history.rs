@@ -178,16 +178,16 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
         }
         let selected = self
             .history
-            .select_maximal_stable_store_snapshot(candidates)
+            .select_maximal_installable_store_snapshot(candidates)
             .await
             .map_err(|error| StorePullError::context("verify same-provider join snapshot", error))?
             .ok_or_else(|| {
                 DeviceJoinError::Store(
-                    "same-provider device join has no stable Store snapshot".to_string(),
+                    "same-provider device join has no installable Store snapshot".to_string(),
                 )
             })?;
         let snapshot = selected.snapshot;
-        let stability = selected.stability;
+        let authority = selected.verified;
         let plan = self
             .history
             .prepare_device_join_bootstrap(
@@ -206,7 +206,7 @@ impl<'operation, 'storage> DeviceJoinHistory<'operation, 'storage> {
             outcome,
             snapshot: snapshot.reference,
             metadata: snapshot.meta,
-            stability: stability.into_authority(),
+            authority: authority.into_authority(),
             bootstrap,
         })
     }

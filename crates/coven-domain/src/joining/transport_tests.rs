@@ -48,6 +48,8 @@ struct TransportFixture {
     /// point into it.
     owner_storage: std::sync::Arc<coven_storage::CloudSyncConnection>,
     owner_store_dir: coven_foundation::store_dir::StoreDir,
+    /// The owner's identity, kept so a test can admit further members.
+    owner_keypair: UserKeypair,
     home: Arc<coven_storage::InMemoryCloudHome>,
     member_pubkey: String,
     admission: coven_replication::sync::MemberAdmission,
@@ -222,6 +224,7 @@ impl TransportFixture {
                 owner_storage,
                 owner_test_store: store,
                 owner_store_dir: owner_db_store_dir,
+                owner_keypair: owner,
                 home,
                 member_pubkey,
                 admission,
@@ -248,6 +251,61 @@ impl TransportFixture {
             self._snapshot.path(),
         )
         .await;
+    }
+
+    /// Admit and activate a second device that then publishes its own rows, so
+    /// the store's history runs on two announcement streams rather than one.
+    /// A snapshot's coverage names a tip per stream, and a bootstrap credits
+    /// each stream's tip independently — a single-stream fixture cannot tell a
+    /// walk that handles one stream from one that handles all of them.
+    async fn publish_second_stream(&self, rows: usize) {
+        let member = UserKeypair::generate();
+        self.owner_test_store
+            .admit_member(
+                &self.owner_db,
+                self.owner_store_dir.clone(),
+                &self.owner_keypair,
+                &pubkey_hex(&member),
+                None,
+                coven_protocol::membership::MemberRole::Member,
+                &EncryptionService::from_key([42; 32]),
+                "Device Join Transport Store",
+            )
+            .await
+            .expect("admit the second publishing member");
+        let member_store_dir = test_store_dir();
+        let member_db = open_test_db(member_store_dir.clone());
+        let member_device = self
+            .owner_test_store
+            .activate_joined_device(
+                &self.owner_db,
+                self.owner_store_dir.clone(),
+                &member_db,
+                member_store_dir.clone(),
+                &member,
+                "2026-07-16T00:00:00Z",
+            )
+            .await
+            .expect("activate the second publishing device");
+        for index in 0..rows {
+            member_db
+                .execute_test_host_write(&format!(
+                    "INSERT INTO notes (id, title, shared, _updated_at, created_at) \
+                     VALUES ('second-stream-{index}', 'second {index}', 1, \
+                     '{:013}-0000-member', '2026-01-01')",
+                    5000 + index
+                ))
+                .await;
+            member_device
+                .run_cycle(None)
+                .await
+                .expect("publish the second device's Store write");
+        }
+        // The owner has to materialize that stream before it can cover it.
+        self.owner_store
+            .run_cycle(None)
+            .await
+            .expect("pull the second device's history onto the owner");
     }
 
     /// Publish one ordinary Store commit of the owner's — a row write, the kind
@@ -1852,6 +1910,9 @@ async fn run_a_join_resolves_only_the_history_its_snapshot_does_not_cover() {
     for index in 0..8 {
         fixture.publish_owner_row(&format!("covered-{index}")).await;
     }
+    // Two announcement streams, so the coverage names a tip for each and the
+    // bootstrap has to credit both.
+    fixture.publish_second_stream(3).await;
     fixture.publish_owner_snapshot().await;
     let coverage = fixture
         .owner_database
@@ -1866,8 +1927,8 @@ async fn run_a_join_resolves_only_the_history_its_snapshot_does_not_cover() {
         .map(|(stream, reference)| (stream.to_string(), reference.coord.sequence()))
         .collect::<std::collections::BTreeMap<_, _>>();
     assert!(
-        !coverage.is_empty(),
-        "the owner's snapshot has to cover the history it was captured over",
+        coverage.len() > 1,
+        "the snapshot has to cover more than one stream: {coverage:?}",
     );
     for index in 0..3 {
         fixture

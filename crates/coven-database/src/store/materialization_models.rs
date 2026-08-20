@@ -617,12 +617,16 @@ pub fn activated_merge_membership_remote_objects(
     Ok(remotes)
 }
 
+/// One snapshot verified as installable: its signed metadata, the cut it
+/// covers, and the devices and registrations active there. A device installs
+/// its baseline from this and verifies everything that arrives afterwards
+/// against it.
 #[derive(Debug)]
-pub struct VerifiedStoreSnapshotStability {
+pub struct VerifiedStoreSnapshotAuthority {
     authority: RetainedReplaySnapshotAuthority,
 }
 
-impl VerifiedStoreSnapshotStability {
+impl VerifiedStoreSnapshotAuthority {
     pub fn from_authority(
         authority: RetainedReplaySnapshotAuthority,
     ) -> Result<Self, crate::DbError> {
@@ -632,6 +636,31 @@ impl VerifiedStoreSnapshotStability {
 
     pub fn into_authority(self) -> RetainedReplaySnapshotAuthority {
         self.authority
+    }
+}
+
+/// One snapshot verified as acknowledged by every device active at its cut.
+/// Reclaim deletes history behind a snapshot only against this, and carries the
+/// acknowledgements it names as the claim's evidence.
+#[derive(Debug)]
+pub struct VerifiedAcknowledgedStoreSnapshot {
+    acknowledged: coven_protocol::store_commit::AcknowledgedStoreSnapshot,
+}
+
+impl VerifiedAcknowledgedStoreSnapshot {
+    pub fn from_acknowledged(
+        acknowledged: coven_protocol::store_commit::AcknowledgedStoreSnapshot,
+    ) -> Result<Self, crate::DbError> {
+        acknowledged.validate()?;
+        Ok(Self { acknowledged })
+    }
+
+    pub fn acknowledgement_refs(
+        &self,
+    ) -> Result<Vec<coven_protocol::store_commit::StoreAckRef>, crate::DbError> {
+        self.acknowledged
+            .acknowledgement_refs()
+            .map_err(crate::DbError::from)
     }
 }
 

@@ -392,7 +392,7 @@ pub(crate) fn validate_replay_authority_on(
         RetainedReplayAuthority::Genesis(authority) => {
             (&authority.store_root, &authority.founder_registration)
         }
-        RetainedReplayAuthority::StableSnapshot(authority) => {
+        RetainedReplayAuthority::InstalledSnapshot(authority) => {
             authority.validate()?;
             (&authority.store_root, &authority.founder_registration)
         }
@@ -429,7 +429,7 @@ pub(crate) fn validate_replay_authority_on(
             "retained replay founder differs from its exact activation".to_string(),
         ));
     }
-    if let RetainedReplayAuthority::StableSnapshot(authority) = &baseline.authority {
+    if let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority {
         for registration in authority.active_registrations.values() {
             let installed =
                 load_activated_registration_on(conn, &root_ref, registration.reference())?;

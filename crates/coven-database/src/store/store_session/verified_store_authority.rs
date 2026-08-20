@@ -225,7 +225,7 @@ impl VerifiedStoreAuthority {
     fn commit_installed_retained_replay_baseline(&mut self, baseline: RetainedReplayBaseline) {
         let baseline_root = match &baseline.authority {
             RetainedReplayAuthority::Genesis(authority) => &authority.store_root,
-            RetainedReplayAuthority::StableSnapshot(authority) => &authority.store_root,
+            RetainedReplayAuthority::InstalledSnapshot(authority) => &authority.store_root,
         };
         assert_eq!(
             self.root_authority.as_ref().map(|(reference, _)| reference),
@@ -476,7 +476,7 @@ impl VerifiedStoreAuthority {
         let baseline = self.retained_replay.baseline_on(records)?;
         let baseline_root = match &baseline.authority {
             RetainedReplayAuthority::Genesis(authority) => &authority.store_root,
-            RetainedReplayAuthority::StableSnapshot(authority) => &authority.store_root,
+            RetainedReplayAuthority::InstalledSnapshot(authority) => &authority.store_root,
         };
         if baseline_root != &root {
             return Err(DbError::Message(

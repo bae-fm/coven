@@ -190,7 +190,7 @@ async fn store_creation_installs_generation_zero_replay_baseline() {
         coven_database::RetainedReplayAuthority::Genesis(authority) => {
             assert_eq!(authority.store_root, store.root())
         }
-        coven_database::RetainedReplayAuthority::StableSnapshot(_) => {
+        coven_database::RetainedReplayAuthority::InstalledSnapshot(_) => {
             panic!("Store creation installed a snapshot replay baseline")
         }
     }

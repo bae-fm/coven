@@ -545,8 +545,8 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             successor_slot: metadata.successor.next_slot.clone(),
             meta: metadata,
         };
-        let authority = match history.verify_snapshot_stability(&snapshot).await {
-            Ok(stability) => stability.into_authority(),
+        let acknowledged = match history.verify_snapshot_stability(&snapshot).await {
+            Ok(acknowledged) => acknowledged,
             Err(crate::sync::store::pull::StorePullError::SnapshotNotStable {
                 member,
                 device_id,
@@ -559,21 +559,9 @@ impl<'operation, 'storage> AuthorizedReclaim<'operation, 'storage> {
             ) => return Err(StoreReclaimError::NoSnapshot),
             Err(error) => return Err(StoreReclaimError::from(error)),
         };
-        let mut expected_acknowledgements = authority
-            .acknowledgements
-            .values()
-            .map(|acknowledgement| {
-                acknowledgement
-                    .latest()
-                    .map(|(reference, _)| reference.clone())
-                    .ok_or_else(|| {
-                        StoreReclaimError::Authorization(
-                            "snapshot stability acknowledgement proof chain is empty".to_string(),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        expected_acknowledgements.sort();
+        let expected_acknowledgements = acknowledged
+            .acknowledgement_refs()
+            .map_err(StoreReclaimError::from)?;
         if claim.acknowledgements != expected_acknowledgements {
             return Err(StoreReclaimError::Authorization(
             "reclaim evidence acknowledgements differ from the activated snapshot stability proof"

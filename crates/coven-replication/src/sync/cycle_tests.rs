@@ -6752,3 +6752,201 @@ async fn a_same_provider_activation_reads_the_same_however_deep_its_history() {
         deep.len(),
     );
 }
+
+/// Publish one owner row and the Store commit that carries it.
+async fn publish_owner_row_commit(
+    storage: &TestStore,
+    owner_db: &Database,
+    owner_db_store_dir: &StoreDir,
+    stamp: u64,
+    id: &str,
+) {
+    owner_db
+        .execute_test_host_write(&format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('{id}', '{id}', NULL, 1, '{stamp:013}-0000-owner', '2026-01-01')"
+        ))
+        .await;
+    assert!(
+        storage
+            .publish_pending(owner_db, owner_db_store_dir)
+            .await
+            .expect("publish the owner's own Store write"),
+        "the owner's row write at {id} produced no Store commit",
+    );
+}
+
+/// Capture and publish a Store snapshot covering everything the owner has
+/// materialized, and acknowledge it from the owner.
+async fn publish_owner_snapshot(
+    storage: &TestStore,
+    owner_db: &Database,
+    owner_db_store_dir: &StoreDir,
+    owner: &UserKeypair,
+) {
+    let owner_device = storage
+        .bind_device_in(owner_db, owner_db_store_dir.clone(), owner)
+        .await
+        .expect("bind the owner device");
+    let image_dir = tempfile::tempdir().expect("snapshot image directory");
+    let database = StoreDatabase::new(owner_db);
+    let image = database
+        .capture_snapshot_image_for_test(
+            storage.root().clone(),
+            image_dir.path().to_path_buf(),
+            Some(EncryptionService::from_key([42; 32])),
+        )
+        .await
+        .expect("capture the Store snapshot image");
+    let coverage = coven_protocol::store_commit::CommitFrontier::from_refs(
+        database
+            .materialized_frontier()
+            .await
+            .expect("read the materialized frontier"),
+    )
+    .expect("the materialized frontier is a commit frontier");
+    owner_device
+        .publish_snapshot(image, coverage.clone())
+        .await
+        .expect("publish the Store snapshot");
+    owner_device
+        .publish_acknowledgement(coverage)
+        .await
+        .expect("acknowledge the Store snapshot");
+}
+
+/// Drive a same-provider join far enough to see which snapshot the owner offers
+/// the joining device.
+async fn offered_join_snapshot(
+    storage: &TestStore,
+    owner_db: &Database,
+    owner_db_store_dir: &StoreDir,
+    owner: &UserKeypair,
+    joiner: &UserKeypair,
+) -> coven_protocol::store_commit::StoreSnapshotRef {
+    let pending_dir = tempfile::tempdir().expect("pending join journal directory");
+    let pending = crate::sync::store::DeviceJoinJournalDatabase::open_for_test(
+        pending_dir.path().join("pending-device-join.sqlite"),
+    )
+    .expect("open the pending join journal");
+    let observer = storage
+        .bind_device_in(owner_db, owner_db_store_dir.clone(), owner)
+        .await
+        .expect("bind the observing owner device");
+    let offer = observer
+        .begin_device_join(&crate::sync::test_helpers::pubkey_hex(joiner))
+        .await
+        .expect("publish the join offer");
+    let mut pending_join = observer
+        .open_pending_device_join_for_test(&pending, joiner, offer)
+        .await
+        .expect("open the pending join");
+    let access_request = pending_join
+        .prepare_provider_access_request()
+        .await
+        .expect("prepare the provider access request");
+    let approval = observer
+        .authorize_device_provider_access(access_request, None)
+        .await
+        .expect("authorize provider access");
+    let registration_request = pending_join
+        .prepare_registration_request(approval)
+        .await
+        .expect("prepare the registration request");
+    observer
+        .activate_same_principal_join_for_test(registration_request)
+        .await
+        .expect("activate the same-provider join")
+        .installation
+        .snapshot
+}
+
+/// A device that joined and was never used again stays active in membership and
+/// authors no commit, so it can never acknowledge anything. Installing a
+/// snapshot does not depend on that device having caught up — a laggard
+/// converges through an ordinary pull whichever image the joiner installed — so
+/// the next join is still offered the newest snapshot.
+///
+/// Requiring unanimity here pinned a live store to its generation-zero image,
+/// whose coverage is empty: every join re-resolved all hundred and ninety-seven
+/// commits it had just installed.
+#[tokio::test]
+async fn a_join_is_offered_the_newest_snapshot_despite_an_idle_device() {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let storage = cycle_test_store(
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    let idle = UserKeypair::generate();
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &idle,
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await;
+    // The idle device joins, is activated, and then authors nothing.
+    let idle_store_dir = crate::sync::test_helpers::test_store_dir();
+    let idle_db = crate::sync::test_helpers::open_test_db(idle_store_dir.clone());
+    storage
+        .activate_joined_device(
+            &owner_db,
+            owner_db_store_dir.clone(),
+            &idle_db,
+            idle_store_dir.clone(),
+            &idle,
+            T0,
+        )
+        .await
+        .expect("activate the device that then goes idle");
+
+    for index in 0..4u64 {
+        publish_owner_row_commit(
+            &storage,
+            &owner_db,
+            &owner_db_store_dir,
+            3000 + index,
+            &format!("after-join-{index}"),
+        )
+        .await;
+    }
+    publish_owner_snapshot(&storage, &owner_db, &owner_db_store_dir, &owner).await;
+    let published = StoreDatabase::new(&owner_db)
+        .local_store_snapshots()
+        .await
+        .expect("read the owner's published snapshots");
+    let newest = published
+        .iter()
+        .map(|snapshot| snapshot.reference.generation)
+        .max()
+        .expect("the owner published a snapshot");
+    assert!(
+        newest > 0,
+        "the fixture has to publish a snapshot past generation zero",
+    );
+
+    let joiner = UserKeypair::generate();
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &joiner,
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await;
+    let offered =
+        offered_join_snapshot(&storage, &owner_db, &owner_db_store_dir, &owner, &joiner).await;
+    assert_eq!(
+        offered.generation, newest,
+        "the join was offered generation {} while the store has {newest}",
+        offered.generation,
+    );
+}

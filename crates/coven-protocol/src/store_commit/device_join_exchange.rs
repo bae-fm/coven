@@ -597,7 +597,7 @@ pub struct SamePrincipalStoreInstallation {
     pub outcome: DeviceJoinOutcome,
     pub snapshot: StoreSnapshotRef,
     pub metadata: SnapshotMeta,
-    pub stability: RetainedReplaySnapshotAuthority,
+    pub authority: RetainedReplaySnapshotAuthority,
     pub bootstrap: DeviceJoinBootstrapClosure,
 }
 
@@ -651,7 +651,7 @@ impl SamePrincipalDeviceJoin {
                     .bootstrap
                     .publication_authorization
                     .attempt_activation
-            || installation.stability.store_root
+            || installation.authority.store_root
                 != bootstrap
                     .bootstrap
                     .request
@@ -659,15 +659,15 @@ impl SamePrincipalDeviceJoin {
                     .request
                     .offer
                     .store_root
-            || installation.snapshot != installation.stability.snapshot
-            || installation.metadata != installation.stability.metadata
+            || installation.snapshot != installation.authority.snapshot
+            || installation.metadata != installation.authority.metadata
             || installation.store_root.descriptor.store_root_id()
-                != installation.stability.store_root.store_root_id
+                != installation.authority.store_root.store_root_id
             || installation.store_root.object_hash()
-                != installation.stability.store_root.store_root_hash
+                != installation.authority.store_root.store_root_hash
             || installation.attempt.attempt_hash() != attempt_reference.attempt_hash
             || installation.attempt.attempt_slot != *attempt_reference.object.slot()
-            || installation.attempt.store_root != installation.stability.store_root
+            || installation.attempt.store_root != installation.authority.store_root
             || installation.attempt.expected_registration
                 != *bootstrap.bootstrap.request.expected_registration()
             || installation.attempt.provider_approval != *bootstrap.bootstrap.request.approval()

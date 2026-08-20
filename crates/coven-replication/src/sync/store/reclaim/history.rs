@@ -375,21 +375,23 @@ impl<'operation, 'storage> ReclaimHistory<'operation, 'storage> {
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
     ) -> Result<
-        coven_database::VerifiedStoreSnapshotStability,
+        coven_database::VerifiedAcknowledgedStoreSnapshot,
         crate::sync::store::pull::StorePullError,
     > {
         self.history.verify_snapshot_stability(snapshot).await
     }
 
-    pub(crate) async fn select_maximal_stable_store_snapshot(
+    pub(crate) async fn select_maximal_acknowledged_store_snapshot(
         &mut self,
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
     ) -> Result<
-        Option<crate::sync::store::commit_verification::merge_history::SelectedStableStoreSnapshot>,
+        Option<
+            crate::sync::store::commit_verification::merge_history::SelectedAcknowledgedStoreSnapshot,
+        >,
         crate::sync::store::pull::StorePullError,
-    > {
+    >{
         self.history
-            .select_maximal_stable_store_snapshot(candidates)
+            .select_maximal_acknowledged_store_snapshot(candidates)
             .await
     }
 }

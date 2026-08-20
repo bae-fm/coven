@@ -50,10 +50,12 @@ impl StoreSession<'_> {
             .retained_replay_baseline_on(records)?;
         let owner_authority = match &baseline.authority {
             RetainedReplayAuthority::Genesis(authority) => authority.clone(),
-            RetainedReplayAuthority::StableSnapshot(authority) => RetainedReplayGenesisAuthority {
-                store_root: authority.store_root.clone(),
-                founder_registration: authority.founder_registration.clone(),
-            },
+            RetainedReplayAuthority::InstalledSnapshot(authority) => {
+                RetainedReplayGenesisAuthority {
+                    store_root: authority.store_root.clone(),
+                    founder_registration: authority.founder_registration.clone(),
+                }
+            }
         };
         if owner_authority.store_root != root {
             return Err(DbError::Message(

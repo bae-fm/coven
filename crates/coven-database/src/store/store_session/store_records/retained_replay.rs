@@ -357,7 +357,7 @@ impl StoreRecords<'_> {
             authority.metadata.coverage.clone(),
             schema_version,
             routing_hash,
-            crate::RetainedReplayAuthority::StableSnapshot(authority),
+            crate::RetainedReplayAuthority::InstalledSnapshot(authority),
             image_bytes,
         );
         prepared

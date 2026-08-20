@@ -90,7 +90,7 @@ impl StoreTransaction<'_, '_> {
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             schema_version,
             routing_hash,
-            install.stability.clone(),
+            install.authority.clone(),
         )?;
         self.install_selected_snapshot_circles(install, &root, synced_tables)
     }

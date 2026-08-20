@@ -1223,7 +1223,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             .expect("load installed snapshot replay baseline");
         assert_eq!(baseline.exact_cut, published_snapshot.coverage);
         match &baseline.authority {
-            coven_database::RetainedReplayAuthority::StableSnapshot(authority) => {
+            coven_database::RetainedReplayAuthority::InstalledSnapshot(authority) => {
                 assert_eq!(authority.store_root, store.root());
                 assert_eq!(authority.metadata, published_snapshot);
             }
@@ -1232,7 +1232,7 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
             }
         }
         let mut tampered = baseline.authority.clone();
-        let coven_database::RetainedReplayAuthority::StableSnapshot(authority) = &mut tampered
+        let coven_database::RetainedReplayAuthority::InstalledSnapshot(authority) = &mut tampered
         else {
             panic!("snapshot bootstrap installed a genesis replay baseline")
         };
@@ -1253,8 +1253,18 @@ async fn bootstrap_installs_the_verified_exact_store_root() {
     .await;
 }
 
+/// Installing a snapshot does not depend on the store's other devices having
+/// caught up to it. Whether they have is reclaim's question — deleting history
+/// behind a snapshot needs everyone provably past it — and answering it here
+/// pinned a store with one joined-and-idle device to its generation-zero image
+/// forever, because a device that authors no commit can never acknowledge
+/// anything.
+///
+/// What the restore still refuses is unchanged and checked elsewhere: metadata
+/// that does not recompose from the verified history, an author who is not an
+/// owner, and a cut the author's own stream does not contain.
 #[tokio::test]
-async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements() {
+async fn bootstrap_installs_an_owner_snapshot_no_device_has_acknowledged() {
     let source_store_dir = crate::sync::test_helpers::test_store_dir();
     let source = crate::sync::test_helpers::open_test_db(source_store_dir.clone());
     let signer = UserKeypair::generate();
@@ -1287,23 +1297,27 @@ async fn bootstrap_refuses_an_owner_snapshot_without_stability_acknowledgements(
     // is still the frontier the captured image holds.
     let coverage = captured_coverage(&source_database).await;
     device
-        .publish_snapshot(image, coverage)
+        .publish_snapshot(image, coverage.clone())
         .await
-        .expect("publish unstable bootstrap database image");
+        .expect("publish unacknowledged bootstrap database image");
 
     let destination = tempfile::tempdir().expect("bootstrap destination");
     let database_path = destination.path().join("store.db");
-    let result = store
+    let bootstrap = store
         .prepare_snapshot_bootstrap(
             &coven_protocol::membership::MembershipFloor(membership.head_refs().to_vec()),
             1,
             &database_path,
             &signer,
         )
-        .await;
+        .await
+        .expect("an unacknowledged owner snapshot is still installable");
 
-    assert!(result.is_err());
-    assert!(!database_path.exists());
+    assert_eq!(
+        bootstrap.coverage_count(),
+        coverage.position_count(),
+        "the bootstrap installs the coverage its snapshot signed",
+    );
 }
 
 #[tokio::test]

@@ -453,7 +453,7 @@ impl StoreDatabase {
                     "snapshot Merge checkpoint coordinate contains another commit".to_string(),
                 ));
             }
-            let RetainedReplayAuthority::StableSnapshot(authority) = &baseline.authority else {
+            let RetainedReplayAuthority::InstalledSnapshot(authority) = &baseline.authority else {
                 return Err(DbError::Message(
                     "snapshot Merge checkpoint has genesis replay authority".to_string(),
                 ));

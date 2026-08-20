@@ -6,85 +6,154 @@ struct VerifiedMergeSnapshotState {
     commit_refs: BTreeSet<StoreBatchCommitRef>,
 }
 
-pub(crate) struct SelectedStableStoreSnapshot {
+/// One snapshot chosen out of the candidates, with the verification that made
+/// it eligible. The two predicates answer different questions, so the evidence
+/// they produce has different types and cannot be swapped.
+pub(crate) struct SelectedStoreSnapshot<Verified> {
     pub(crate) snapshot: coven_database::PublishedStoreSnapshot,
-    pub(crate) stability: coven_database::VerifiedStoreSnapshotStability,
+    pub(crate) verified: Verified,
+}
+
+pub(crate) type SelectedInstallableStoreSnapshot =
+    SelectedStoreSnapshot<coven_database::VerifiedStoreSnapshotAuthority>;
+pub(crate) type SelectedAcknowledgedStoreSnapshot =
+    SelectedStoreSnapshot<coven_database::VerifiedAcknowledgedStoreSnapshot>;
+
+/// Report a candidate that was passed over. A rejection here costs as much as
+/// the choice does: a store whose newest snapshot is rejected silently falls
+/// back to an older one and pays the difference on every join.
+fn report_rejected_snapshot(
+    snapshot: &coven_database::PublishedStoreSnapshot,
+    error: &StorePullError,
+) {
+    tracing::info!(
+        generation = snapshot.reference.generation,
+        snapshot = %snapshot.reference.snapshot_hash,
+        coverage_positions = snapshot.meta.coverage.position_count(),
+        rejection = %error,
+        "Store snapshot is not an eligible candidate"
+    );
+}
+
+fn report_selected_snapshot(snapshot: &coven_database::PublishedStoreSnapshot, eligible: usize) {
+    tracing::info!(
+        generation = snapshot.reference.generation,
+        snapshot = %snapshot.reference.snapshot_hash,
+        coverage_streams = snapshot.meta.coverage.commits().len(),
+        coverage_positions = snapshot.meta.coverage.position_count(),
+        eligible_candidates = eligible,
+        "Selected the Store snapshot"
+    );
+}
+
+/// Whether a rejection disqualifies one candidate or fails the whole selection.
+/// An unstable or improperly authored snapshot is a candidate the store may
+/// simply not have yet; anything else is a fault worth propagating.
+fn disqualifies_one_candidate(error: &StorePullError) -> bool {
+    matches!(
+        error,
+        StorePullError::SnapshotNotStable { .. }
+            | StorePullError::SnapshotAuthorInactive
+            | StorePullError::SnapshotAuthorNotOwner
+    )
+}
+
+/// Take the maximal snapshot out of those that passed, or hand back the reason
+/// the maximal candidate overall was turned away.
+fn take_maximal_eligible<Verified>(
+    mut eligible: Vec<SelectedStoreSnapshot<Verified>>,
+    maximal_rejection: Option<StorePullError>,
+) -> Result<Option<SelectedStoreSnapshot<Verified>>, StorePullError> {
+    let selected = crate::sync::store::snapshots::select_maximal_store_snapshot(
+        eligible
+            .iter()
+            .map(|candidate| candidate.snapshot.clone())
+            .collect(),
+    );
+    if let Some(selected) = selected {
+        let index = eligible
+            .iter()
+            .position(|candidate| candidate.snapshot.reference == selected.reference)
+            .ok_or_else(|| {
+                StorePullError::InvalidState(
+                    "Store snapshot selection lost its verified candidate".to_string(),
+                )
+            })?;
+        let count = eligible.len();
+        let selected = eligible.swap_remove(index);
+        report_selected_snapshot(&selected.snapshot, count);
+        return Ok(Some(selected));
+    }
+    Err(maximal_rejection.ok_or_else(|| {
+        StorePullError::InvalidState(
+            "Store snapshot candidates produced no eligibility decision".to_string(),
+        )
+    })?)
 }
 
 impl<'a> MergeHistoryVerifier<'a> {
-    pub(crate) async fn select_maximal_stable_store_snapshot(
+    /// The newest snapshot this device can install as its starting state.
+    ///
+    /// Eligibility is the owner's signature over a history-consistent image and
+    /// nothing else. Whether the store's other devices have caught up to it is
+    /// a different question, asked by
+    /// [`select_maximal_acknowledged_store_snapshot`](Self::select_maximal_acknowledged_store_snapshot)
+    /// on reclaim's behalf; a device that is behind converges through an
+    /// ordinary pull whichever image the joiner installed.
+    pub(crate) async fn select_maximal_installable_store_snapshot(
         &mut self,
         candidates: Vec<coven_database::PublishedStoreSnapshot>,
-    ) -> Result<Option<SelectedStableStoreSnapshot>, StorePullError> {
+    ) -> Result<Option<SelectedInstallableStoreSnapshot>, StorePullError> {
         let Some(maximal_candidate) =
             crate::sync::store::snapshots::select_maximal_store_snapshot(candidates.clone())
         else {
             return Ok(None);
         };
         let maximal_reference = maximal_candidate.reference;
-        let mut stable = Vec::new();
+        let mut eligible = Vec::new();
+        let mut maximal_rejection = None;
+        for snapshot in candidates {
+            match self.verify_installable_snapshot(&snapshot).await {
+                Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
+                Err(error) if disqualifies_one_candidate(&error) => {
+                    report_rejected_snapshot(&snapshot, &error);
+                    if snapshot.reference == maximal_reference {
+                        maximal_rejection = Some(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        take_maximal_eligible(eligible, maximal_rejection)
+    }
+
+    /// The newest snapshot every device active at its cut has acknowledged.
+    /// Reclaim deletes history behind a snapshot only against this.
+    pub(crate) async fn select_maximal_acknowledged_store_snapshot(
+        &mut self,
+        candidates: Vec<coven_database::PublishedStoreSnapshot>,
+    ) -> Result<Option<SelectedAcknowledgedStoreSnapshot>, StorePullError> {
+        let Some(maximal_candidate) =
+            crate::sync::store::snapshots::select_maximal_store_snapshot(candidates.clone())
+        else {
+            return Ok(None);
+        };
+        let maximal_reference = maximal_candidate.reference;
+        let mut eligible = Vec::new();
         let mut maximal_rejection = None;
         for snapshot in candidates {
             match self.verify_snapshot_stability(&snapshot).await {
-                Ok(stability) => stable.push(SelectedStableStoreSnapshot {
-                    snapshot,
-                    stability,
-                }),
-                Err(error) => match &error {
-                    StorePullError::SnapshotNotStable { .. }
-                    | StorePullError::SnapshotAuthorInactive
-                    | StorePullError::SnapshotAuthorNotOwner => {
-                        // Which snapshot a device installs decides how much
-                        // history its bootstrap then resolves, so a rejection
-                        // here is worth as much as the choice: a store whose
-                        // newest snapshot is rejected silently falls back to an
-                        // older one and pays for the difference on every join.
-                        tracing::info!(
-                            generation = snapshot.reference.generation,
-                            snapshot = %snapshot.reference.snapshot_hash,
-                            coverage_positions = snapshot.meta.coverage.position_count(),
-                            rejection = %error,
-                            "Store snapshot is not a stable candidate"
-                        );
-                        if snapshot.reference == maximal_reference {
-                            maximal_rejection = Some(error);
-                        }
+                Ok(verified) => eligible.push(SelectedStoreSnapshot { snapshot, verified }),
+                Err(error) if disqualifies_one_candidate(&error) => {
+                    report_rejected_snapshot(&snapshot, &error);
+                    if snapshot.reference == maximal_reference {
+                        maximal_rejection = Some(error);
                     }
-                    _ => return Err(error),
-                },
+                }
+                Err(error) => return Err(error),
             }
         }
-        let selected = crate::sync::store::snapshots::select_maximal_store_snapshot(
-            stable
-                .iter()
-                .map(|candidate| candidate.snapshot.clone())
-                .collect(),
-        );
-        if let Some(selected) = selected {
-            let index = stable
-                .iter()
-                .position(|candidate| candidate.snapshot.reference == selected.reference)
-                .ok_or_else(|| {
-                    StorePullError::InvalidState(
-                        "stable Store snapshot selection lost its verified candidate".to_string(),
-                    )
-                })?;
-            let selected = stable.swap_remove(index);
-            tracing::info!(
-                generation = selected.snapshot.reference.generation,
-                snapshot = %selected.snapshot.reference.snapshot_hash,
-                coverage_streams = selected.snapshot.meta.coverage.commits().len(),
-                coverage_positions = selected.snapshot.meta.coverage.position_count(),
-                stable_candidates = stable.len() + 1,
-                "Selected the Store snapshot to install"
-            );
-            return Ok(Some(selected));
-        }
-        Err(maximal_rejection.ok_or_else(|| {
-            StorePullError::InvalidState(
-                "Store snapshot candidates produced no stability decision".to_string(),
-            )
-        })?)
+        take_maximal_eligible(eligible, maximal_rejection)
     }
 
     async fn verify_snapshot_history_state(
@@ -277,64 +346,88 @@ impl<'a> MergeHistoryVerifier<'a> {
         Ok(())
     }
 
+    /// Verify one snapshot as installable: the owner's signature over metadata
+    /// whose coverage, device state and history summary all recompose from the
+    /// verified history. Nothing here consults the other devices.
+    pub(crate) async fn verify_installable_snapshot(
+        &mut self,
+        snapshot: &coven_database::PublishedStoreSnapshot,
+    ) -> Result<VerifiedStoreSnapshotAuthority, StorePullError> {
+        let authority = self.build_snapshot_authority(snapshot).await?;
+        VerifiedStoreSnapshotAuthority::from_authority(authority).map_err(StorePullError::Database)
+    }
+
+    /// Verify one snapshot as acknowledged by every device active at its cut.
+    /// This is the installable verification plus the unanimity walk, which
+    /// reads one acknowledgement chain per active device.
     pub(crate) async fn verify_snapshot_stability(
         &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
-    ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
-        let (snapshot_cut, state) = self.verify_snapshot_authority(snapshot).await?;
-        let snapshot_frontier = &snapshot_cut.0;
-        let accepted_cut = self
-            .accepted_snapshot_cut(snapshot_frontier, &state)
-            .await?;
+    ) -> Result<VerifiedAcknowledgedStoreSnapshot, StorePullError> {
+        let authority = self.build_snapshot_authority(snapshot).await?;
         let acknowledgements = self
-            .activated_snapshot_acknowledgements(&accepted_cut.0)
+            .activated_snapshot_acknowledgements(&authority.accepted_cut.0)
             .await?;
-        self.build_snapshot_stability(
-            snapshot,
-            snapshot_cut,
-            state,
-            accepted_cut,
-            acknowledgements,
-        )
-        .await
+        let acknowledged = self
+            .build_acknowledged_snapshot(authority, acknowledgements)
+            .await?;
+        VerifiedAcknowledgedStoreSnapshot::from_acknowledged(acknowledged)
+            .map_err(StorePullError::Database)
     }
 
-    async fn build_snapshot_stability(
-        &self,
+    async fn build_snapshot_authority(
+        &mut self,
         snapshot: &coven_database::PublishedStoreSnapshot,
-        snapshot_cut: StoreHistoryCut,
-        state: VerifiedMergeSnapshotState,
-        accepted_cut: StoreHistoryCut,
+    ) -> Result<coven_protocol::store_commit::RetainedReplaySnapshotAuthority, StorePullError> {
+        let (snapshot_cut, state) = self.verify_snapshot_authority(snapshot).await?;
+        let accepted_cut = self.accepted_snapshot_cut(&snapshot_cut.0, &state).await?;
+        Ok(
+            coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
+                store_root: self.root.reference().clone(),
+                founder_registration: self.founder.clone(),
+                snapshot: snapshot.reference.clone(),
+                metadata: snapshot.meta.clone(),
+                snapshot_cut,
+                accepted_cut,
+                device_state: state.common.device_state,
+                active_registrations: state.common.active_registrations,
+            },
+        )
+    }
+
+    async fn build_acknowledged_snapshot(
+        &self,
+        authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
         acknowledgements: Vec<VerifiedActivatedStoreAck>,
-    ) -> Result<VerifiedStoreSnapshotStability, StorePullError> {
+    ) -> Result<coven_protocol::store_commit::AcknowledgedStoreSnapshot, StorePullError> {
         let mut retained_acknowledgements = BTreeMap::new();
-        for (device_id, registration) in &state.common.active_registrations {
+        for (device_id, registration) in &authority.active_registrations {
             let registration_ref = registration.reference();
             let matching = acknowledgements
                 .iter()
                 .filter(|ack| {
                     ack.value.registration == *registration_ref
                         && ack.value.snapshot.as_ref().is_some_and(|acknowledged| {
-                            acknowledged.author_registration == snapshot.meta.author_registration
-                                && acknowledged.snapshot == snapshot.reference
+                            acknowledged.author_registration
+                                == authority.metadata.author_registration
+                                && acknowledged.snapshot == authority.snapshot
                         })
-                        && ack.value.device_state == snapshot.meta.state.devices
+                        && ack.value.device_state == authority.metadata.state.devices
                         && ack
                             .value
                             .store_cut
                             .frontier()
-                            .covers(&snapshot.meta.coverage)
+                            .covers(&authority.metadata.coverage)
                 })
                 .max_by_key(|ack| (ack.reference.sequence, ack.activating_commit.clone()))
                 .ok_or_else(|| StorePullError::SnapshotNotStable {
                     member: registration.value().author_pubkey.clone(),
                     device_id: device_id.to_string(),
                 })?;
-            // The summary a restoring device reads has to state the whole chain,
-            // so it is walked here — once per active device, at the snapshot
-            // boundary — rather than being carried by every retained row. The
-            // walk is served from the acknowledgements this verifier already
-            // holds, which the retained rows seeded.
+            // The whole chain is stated once here, at the snapshot boundary,
+            // rather than carried by every retained row. The walk is served from
+            // the acknowledgements this verifier already holds, which the
+            // retained rows seeded.
             let chain = self
                 .load_acknowledgement_proof_chain(
                     matching.reference.clone(),
@@ -352,17 +445,9 @@ impl<'a> MergeHistoryVerifier<'a> {
                 },
             );
         }
-        let authority = coven_protocol::store_commit::RetainedReplaySnapshotAuthority {
-            store_root: self.root.reference().clone(),
-            founder_registration: self.founder.clone(),
-            snapshot: snapshot.reference.clone(),
-            metadata: snapshot.meta.clone(),
-            snapshot_cut,
-            accepted_cut,
-            device_state: state.common.device_state,
-            active_registrations: state.common.active_registrations,
+        Ok(coven_protocol::store_commit::AcknowledgedStoreSnapshot {
+            authority,
             acknowledgements: retained_acknowledgements,
-        };
-        VerifiedStoreSnapshotStability::from_authority(authority).map_err(StorePullError::Database)
+        })
     }
 }
