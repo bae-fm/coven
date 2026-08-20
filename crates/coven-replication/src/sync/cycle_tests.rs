@@ -6950,3 +6950,59 @@ async fn a_join_is_offered_the_newest_snapshot_despite_an_idle_device() {
         offered.generation,
     );
 }
+
+/// A journal record this binary cannot read belongs to some other attempt —
+/// abandoned, or written before the journal's shape changed, which it does
+/// freely. Beginning a new join sweeps every attempt's record to find one
+/// already outstanding for the member, and failing that sweep on the first
+/// unreadable row stopped every later pairing on the device: a live owner could
+/// not approve any device until its journal was edited by hand.
+///
+/// The attempt actually being driven still reads its own record by key and
+/// still refuses anything it cannot parse.
+#[tokio::test]
+async fn a_journal_record_this_binary_cannot_read_does_not_stop_the_next_join() {
+    let owner = UserKeypair::generate();
+    let owner_db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let owner_db = crate::sync::test_helpers::open_test_db(owner_db_store_dir.clone());
+    let storage = cycle_test_store(
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        crate::sync::test_helpers::test_cloud_home(),
+    )
+    .await;
+    let member = UserKeypair::generate();
+    admit_test_member(
+        &storage,
+        &owner_db,
+        owner_db_store_dir.clone(),
+        &owner,
+        &member,
+        &EncryptionService::from_key([42; 32]),
+    )
+    .await;
+
+    // A record left by another attempt, in a shape this binary does not know.
+    StoreDatabase::new(&owner_db)
+        .set_protocol_state(
+            "device_join/00000000-0000-4000-8000-00000000dead/owner",
+            r#"{"attempt_id":"00000000-0000-4000-8000-00000000dead",
+                "progress":{"owner":{"same_principal_completed":{"join":{"stability":"gone"}}}}}"#,
+        )
+        .await
+        .expect("plant the unreadable journal record");
+
+    let observer = storage
+        .bind_device_in(&owner_db, owner_db_store_dir.clone(), &owner)
+        .await
+        .expect("bind the owner device");
+    let offer = observer
+        .begin_device_join(&crate::sync::test_helpers::pubkey_hex(&member))
+        .await
+        .expect("an unreadable record from another attempt does not stop a new join");
+    assert_eq!(
+        offer.member_pubkey,
+        crate::sync::test_helpers::pubkey_hex(&member),
+    );
+}

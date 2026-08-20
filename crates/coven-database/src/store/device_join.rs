@@ -430,6 +430,16 @@ impl StoreDatabase {
         Ok(())
     }
 
+    /// Every attempt's journal record, for the sweeps that look across attempts.
+    ///
+    /// A row this binary cannot read is reported and skipped rather than failing
+    /// the sweep. The rows are one per attempt and role, and an attempt being
+    /// driven reads its own row by key through
+    /// [`load_device_join`](Self::load_device_join), which still refuses
+    /// anything it cannot parse. Aborting here instead meant one abandoned
+    /// attempt's record — left by an older binary, since the journal shape is
+    /// not carried across changes — stopped every later pairing on the device,
+    /// with nothing short of editing the database to recover.
     async fn device_join_records(
         &self,
     ) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinJournalError> {
@@ -439,9 +449,24 @@ impl StoreDatabase {
             .map_err(DeviceJoinJournalError::Database)?;
         let mut records = Vec::with_capacity(rows.len());
         for (key, value) in rows {
-            let record: DeviceJoinJournalRecord = serde_json::from_str(&value)?;
+            let record: DeviceJoinJournalRecord = match serde_json::from_str(&value) {
+                Ok(record) => record,
+                Err(error) => {
+                    tracing::warn!(
+                        journal_key = %key,
+                        %error,
+                        "Skipping a device join journal record this binary cannot read"
+                    );
+                    continue;
+                }
+            };
             if record.store_key() != key {
-                return Err(DeviceJoinJournalError::JournalConflict);
+                tracing::warn!(
+                    journal_key = %key,
+                    record_key = %record.store_key(),
+                    "Skipping a device join journal record stored under another attempt's key"
+                );
+                continue;
             }
             records.push(record);
         }

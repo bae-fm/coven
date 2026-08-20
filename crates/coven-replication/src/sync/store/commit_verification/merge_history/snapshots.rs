@@ -36,11 +36,21 @@ fn report_rejected_snapshot(
 }
 
 fn report_selected_snapshot(snapshot: &coven_database::PublishedStoreSnapshot, eligible: usize) {
+    // The tips themselves, not just how many: the whole point of reading this
+    // line is to tell how much history the snapshot spares a joining device.
+    let coverage = snapshot
+        .meta
+        .coverage
+        .commits()
+        .iter()
+        .map(|(stream, reference)| format!("{stream}/{}", reference.coord.sequence()))
+        .collect::<Vec<_>>()
+        .join(" ");
     tracing::info!(
         generation = snapshot.reference.generation,
         snapshot = %snapshot.reference.snapshot_hash,
-        coverage_streams = snapshot.meta.coverage.commits().len(),
-        coverage_positions = snapshot.meta.coverage.position_count(),
+        coverage_streams = snapshot.meta.coverage.position_count(),
+        %coverage,
         eligible_candidates = eligible,
         "Selected the Store snapshot"
     );
