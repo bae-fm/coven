@@ -159,24 +159,23 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
                     "membership head exact slot has no .json suffix".to_string(),
                 )),
             })?;
-        let bytes = self
+        let context = ProtocolObjectContext::signed_plaintext(
+            self.commit_verifier.store_root_hash(),
+            ProtocolObjectDomain::StoreMembershipHead,
+        );
+        let loaded: VerifiedObject<AuthorHead> = self
             .commit_verifier
-            .read_protocol_object(
-                &ProtocolObjectContext::signed_plaintext(
-                    self.commit_verifier.store_root_hash(),
-                    ProtocolObjectDomain::StoreMembershipHead,
-                ),
+            .load_exact_object(
+                &context,
                 &reference.object,
                 semantic_prefix,
+                reference.head_hash,
+                coven_protocol::objects::decode_protocol_object,
             )
             .await?;
-        let parse_bytes = bytes.clone();
-        let head: AuthorHead = run_blocking_object_verification(
-            semantic_prefix,
-            &reference.object,
-            Box::new(move || coven_protocol::objects::decode_protocol_object(&parse_bytes)),
-        )
-        .await?;
+        let VerifiedObject {
+            value: head, bytes, ..
+        } = loaded;
         let registration = self
             .commit_verifier
             .load_registration(&head.body.author_registration)
@@ -225,6 +224,7 @@ impl<'operation, 'storage> StoreMembershipObjectVerifier<'operation, 'storage> {
             .commit_verifier
             .read_protocol_slot(&context, slot, semantic_prefix)
             .await?;
+        self.commit_verifier.remember_exact_object(&object, &bytes);
         let parse_bytes = bytes.clone();
         let head: AuthorHead = run_blocking_object_verification(
             semantic_prefix,

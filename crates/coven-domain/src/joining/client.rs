@@ -494,6 +494,10 @@ pub(crate) struct DeviceJoinClient {
 struct DeviceJoinStorage {
     storage: Arc<dyn coven_storage::CloudSyncObjectStorage>,
     keyring: MasterKeyring,
+    /// The owner-anchored membership chain the keyring open already walked and
+    /// verified. Installing this device's owner anchor needs the same chain, so
+    /// it is kept rather than walked from the cloud a second time.
+    membership: coven_protocol::membership::MembershipChain,
 }
 
 impl DeviceJoinClient {
@@ -908,7 +912,12 @@ impl DeviceJoinClient {
         let mut joining = timings
             .stage(
                 "load membership",
-                observation.into_joining_store(database, &store_dir, signer.clone()),
+                observation.into_joining_store(
+                    database,
+                    &store_dir,
+                    signer.clone(),
+                    Some(join.membership.clone()),
+                ),
             )
             .await?;
         on_progress(coven_replication::sync::JoiningDeviceJoinProgress::CatchingUp);
@@ -1044,6 +1053,7 @@ impl DeviceJoinClient {
             installed,
             &self.clock.now().to_rfc3339(),
             Some(&routing_encryption),
+            Some(storage.membership.clone()),
         ))
         .await?;
         if completion.joined().registration.device_id.to_string() != device_id {
@@ -1217,6 +1227,7 @@ impl DeviceJoinClient {
         Ok(DeviceJoinStorage {
             storage: Arc::new(storage),
             keyring,
+            membership: chain,
         })
     }
 }

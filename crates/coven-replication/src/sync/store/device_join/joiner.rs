@@ -271,7 +271,7 @@ impl<'storage> JoiningStore<'storage> {
             .founder_pubkey
             .clone();
         let membership = history
-            .load_and_install_owner_membership(&founder_pubkey)
+            .load_and_install_owner_membership(&founder_pubkey, None)
             .await
             .map_err(DeviceJoinError::from)?;
         history
@@ -645,6 +645,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         installed: crate::sync::store::InstalledDeviceJoinSnapshot,
         published_at: &str,
         routing_encryption: Option<&coven_keys::encryption::EncryptionService>,
+        membership: Option<coven_protocol::membership::MembershipChain>,
     ) -> Result<PendingSamePrincipalDeviceJoinCompletion, DeviceJoinError> {
         let mut run = coven_foundation::stage_timing::StageTimings::start(
             "Same-provider join history install",
@@ -746,7 +747,12 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         let mut joining = timings
             .stage(
                 "install the owner membership",
-                observation.into_joining_store(database.clone(), store_dir, identity.clone()),
+                observation.into_joining_store(
+                    database.clone(),
+                    store_dir,
+                    identity.clone(),
+                    membership,
+                ),
             )
             .await?;
         let resolved = timings
@@ -856,7 +862,7 @@ impl<'storage> PendingDeviceJoinAuthority<'storage> {
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         self.observation
-            .into_joining_store(database, store_dir, self.identity)
+            .into_joining_store(database, store_dir, self.identity, None)
             .await
     }
 }
@@ -972,11 +978,21 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         }
     }
 
+    /// Open the joining store over the database this device just installed.
+    ///
+    /// `membership` is a chain the caller already walked and verified for this
+    /// Store root, if it has one. Opening a cloud home walks that chain, and so
+    /// does installing the owner anchor here — over the network, from each
+    /// stream's founder anchor, one round-trip per head. Handing the first
+    /// walk's result in is what keeps a join from paying for the same traversal
+    /// twice; a chain that does not reach this database's cursors is ignored
+    /// and the walk runs as before.
     pub async fn into_joining_store(
         self,
         database: StoreDatabase,
         store_dir: &'storage coven_foundation::store_dir::StoreDir,
         identity: UserKeypair,
+        membership: Option<coven_protocol::membership::MembershipChain>,
     ) -> Result<JoiningStore<'storage>, DeviceJoinError> {
         let Self {
             journal,
@@ -1004,7 +1020,7 @@ impl<'storage> PendingDeviceJoinObservation<'storage> {
         );
         let founder_pubkey = root.protocol().descriptor.founder_pubkey.clone();
         let membership = history
-            .load_and_install_owner_membership(&founder_pubkey)
+            .load_and_install_owner_membership(&founder_pubkey, membership)
             .await
             .map_err(DeviceJoinError::from)?;
         history

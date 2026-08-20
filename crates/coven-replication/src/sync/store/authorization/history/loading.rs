@@ -253,9 +253,22 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
         Ok(chain)
     }
 
+    /// Load the owner-anchored membership chain and install it as this
+    /// device's owner anchor.
+    ///
+    /// `carried` is a chain this operation already walked and verified for the
+    /// same Store root — a joining device walks one to open its cloud home
+    /// before it ever opens a database. Walking a membership stream always
+    /// starts at its founder anchor and runs to the end, so a second walk
+    /// re-reads every head the first one did; when the carried chain already
+    /// reaches the durable cursors, it is exactly what the second walk would
+    /// produce and is used instead. A chain that falls short of the cursors is
+    /// discarded and the walk runs, so this never installs less history than
+    /// the device already has.
     pub(crate) async fn load_and_install_owner_membership(
         &mut self,
         owner_pubkey: &str,
+        carried: Option<MembershipChain>,
     ) -> Result<MembershipChain, crate::sync::store::membership::AnchoredChainError> {
         let _membership_load = self.database.membership_load_permit().await;
         let cursors = self
@@ -263,11 +276,16 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .membership_head_cursors()
             .await
             .map_err(crate::sync::store::membership::AnchoredChainError::from)?;
-        let chain = Box::pin(
-            self.history_verifier
-                .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
-        )
-        .await?;
+        let chain = match carried.filter(|chain| chain.covers_heads(&cursors.head_refs)) {
+            Some(chain) => chain,
+            None => {
+                Box::pin(
+                    self.history_verifier
+                        .load_exact_anchored_membership(&cursors.head_refs, Some(owner_pubkey)),
+                )
+                .await?
+            }
+        };
         let root = self.history_verifier.verified_root().reference().clone();
         let root_object = self.history_verifier.verified_root().object().clone();
         let founder = chain.founder_coord().ok_or_else(|| {

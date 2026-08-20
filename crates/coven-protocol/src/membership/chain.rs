@@ -81,6 +81,28 @@ impl MembershipChain {
         })
     }
 
+    /// Whether this chain reaches at least as far as `heads` on every stream
+    /// they name.
+    ///
+    /// A membership stream is a hash-linked list walked from its founder anchor
+    /// forward: a walk cannot start in the middle, so two walks of the same
+    /// stream verify the same heads up to the shorter one's end. A chain that
+    /// covers a set of cursors therefore contains everything a walk anchored at
+    /// those cursors would have verified, and can stand in for it.
+    pub fn covers_heads(&self, heads: &[MembershipHeadRef]) -> bool {
+        heads.iter().all(|covered| {
+            self.head_ref_for_stream(
+                &covered.coord.author_pubkey,
+                &covered.coord.author_owner_grant,
+                covered.coord.stream_id,
+            )
+            .is_some_and(|current| {
+                current.coord.seq > covered.coord.seq
+                    || (current.coord.seq == covered.coord.seq && current == covered)
+            })
+        })
+    }
+
     pub fn membership_anchor(&self, grant: &MembershipGrantId) -> Option<&GrantStreamAnchor> {
         self.entries
             .iter()

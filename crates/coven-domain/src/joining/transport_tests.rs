@@ -2194,3 +2194,76 @@ async fn run_a_trimmed_closure_is_still_verified_commit_by_commit() {
         "a closure of another Store's commits built a plan for this Store's root",
     );
 }
+
+/// A membership stream is a hash-linked list: each head names the slot of the
+/// next, so a walk always starts at the founder anchor and runs to the end, and
+/// no part of it can be fetched in parallel or skipped. That makes walking it
+/// twice exactly twice the round-trips — which is what a joining device used to
+/// do, once to open its cloud home and once to install its owner anchor, for
+/// about twenty-four seconds of a two-minute live join.
+///
+/// The two sides run one at a time here because they share one cloud home in
+/// this fixture, and the claim is about what the joining device reads.
+#[test]
+fn a_join_walks_the_membership_chain_once() {
+    on_a_deep_stack(run_a_join_walks_the_membership_chain_once);
+}
+
+async fn run_a_join_walks_the_membership_chain_once() {
+    let fixture = TransportFixture::build("device-join-membership-once").await;
+    // More than one membership stream, and more than one head on each, so a
+    // repeated walk shows up as a repeated read rather than as a single one.
+    fixture.publish_second_stream(1).await;
+    fixture.publish_owner_snapshot().await;
+    let bundle = fixture.begin().await;
+    let cancel = never_cancelled();
+
+    let join_once = |timing| {
+        let client = fixture.client();
+        let bundle = &bundle;
+        let cancel = &cancel;
+        async move {
+            client
+                .join_via_transport(bundle, timing, no_join_progress(), cancel)
+                .await
+        }
+    };
+
+    // The joining device publishes its request and dies; the owner then admits
+    // it without needing the joining device back.
+    assert_joiner_waited_for(
+        Box::pin(join_once(one_shot())).await,
+        DeviceJoinTransportKind::SamePrincipalJoin,
+    );
+    activated(fixture.drive_owner_with(&bundle, one_shot()).await);
+
+    // From here to the end of the join, every read is the joining device's.
+    fixture.home.clear_exact_reads();
+    joined(Box::pin(join_once(timing())).await);
+
+    let head_reads = fixture
+        .home
+        .exact_reads()
+        .into_iter()
+        .filter(|slot| slot.logical_key().contains("/membership/heads/"))
+        .map(|slot| slot.logical_key().to_string())
+        .collect::<Vec<_>>();
+    let distinct = head_reads.iter().collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        distinct.len() > 1,
+        "the joining device read at most one membership head, so this proves \
+         nothing about walking the chain twice",
+    );
+    // One read per head, plus one: installing the owner anchor resolves the
+    // founder's newest head to find the registration that signed it, and it
+    // does so through the store's own verifier rather than the short-lived one
+    // that opened the cloud home, so that single object is fetched again. A
+    // second walk would instead cost one more read for every head there is.
+    assert!(
+        head_reads.len() <= distinct.len() + 1,
+        "the joining device read {} membership heads over {} distinct ones, \
+         which is a second walk rather than a single re-read: {head_reads:?}",
+        head_reads.len(),
+        distinct.len(),
+    );
+}

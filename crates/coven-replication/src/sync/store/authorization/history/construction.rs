@@ -50,7 +50,7 @@ impl<'storage> AuthorizedStoreHistory<'storage> {
             .descriptor
             .founder_pubkey
             .clone();
-        self.load_and_install_owner_membership(&founder_pubkey)
+        self.load_and_install_owner_membership(&founder_pubkey, None)
             .await?;
         if device_id.is_none() && identity_is_founder {
             self.install_existing_founder_device(identity).await?;

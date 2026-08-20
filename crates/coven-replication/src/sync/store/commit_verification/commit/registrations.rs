@@ -370,6 +370,21 @@ impl<'a> StoreCommitVerifier<'a> {
         Ok(verified)
     }
 
+    /// Remember bytes this verifier read some other way than by reference.
+    ///
+    /// A membership stream is walked by slot, because the walk does not know a
+    /// head's reference until it has read it. The re-reads come later and ask
+    /// by reference, so a walk that drops what it read pays the round trip
+    /// again. Same immutability argument as `load_exact_object`: the reference
+    /// names content-addressed bytes, and every reader still verifies them.
+    pub(crate) fn remember_exact_object(&self, object: &ExactObjectRef, bytes: &[u8]) {
+        self.exact_objects
+            .lock()
+            .expect("verified exact object cache poisoned")
+            .entry(object.clone())
+            .or_insert_with(|| bytes.to_vec());
+    }
+
     pub(crate) async fn load_exact_object<T>(
         &self,
         context: &ProtocolObjectContext,
