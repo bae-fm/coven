@@ -485,7 +485,7 @@ impl RetainedReplayCache {
                     )));
                 }
                 if !active_references.contains(&dependency)
-                    && !replay_dependency_is_baseline_covered(&dependency, &baseline.exact_cut)
+                    && !baseline.exact_cut.covers_commit(&dependency)
                 {
                     return Err(DbError::Message(format!(
                         "surviving retained Merge commit {:?} has unretained dependency {:?}",
@@ -710,21 +710,5 @@ fn replay_dependency_is_settled(
     applied: &BTreeSet<StoreBatchCommitRef>,
     baseline: &CommitFrontier,
 ) -> bool {
-    if applied.contains(dependency) {
-        return true;
-    }
-    replay_dependency_is_baseline_covered(dependency, baseline)
-}
-
-fn replay_dependency_is_baseline_covered(
-    dependency: &StoreBatchCommitRef,
-    baseline: &CommitFrontier,
-) -> bool {
-    baseline
-        .0
-        .get(&dependency.coord.stream_id)
-        .is_some_and(|covered| {
-            covered.coord.sequence() > dependency.coord.sequence
-                || (covered.coord.sequence() == dependency.coord.sequence && covered == dependency)
-        })
+    applied.contains(dependency) || baseline.covers_commit(dependency)
 }
