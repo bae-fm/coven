@@ -1315,7 +1315,10 @@ async fn publication_overlaps_prepared_packages_but_not_the_commit() {
     let fixture = UploadFixture::scoped(4).await;
     fixture.write_two_audiences("overlap").await;
 
-    // Holding each create open is what makes the overlap observable.
+    // Holding each create open is what makes the overlap observable. The chunk
+    // is larger than any package here, so each create sleeps exactly once
+    // instead of once per chunk — a chunk of one byte holds a package open for
+    // minutes.
     fixture
         .home
         .slow_creates(1 << 20, std::time::Duration::from_millis(20));
@@ -1378,6 +1381,7 @@ async fn publication_overlaps_prepared_packages_but_not_the_commit() {
 async fn publication_respects_a_transfer_limit_of_one() {
     let fixture = UploadFixture::scoped(1).await;
     fixture.write_two_audiences("serial").await;
+    // One sleep per create, as above.
     fixture
         .home
         .slow_creates(1 << 20, std::time::Duration::from_millis(20));
