@@ -307,6 +307,53 @@ async fn generation_zero_replay_baseline_rejects_an_image_payload_under_the_wron
     );
 }
 
+/// Installing a baseline does not read its authority payload back to check it
+/// landed, because whoever loads the baseline reads that payload through the
+/// content-addressed path and is the one who has to be right about it. This is
+/// that guarantee: bytes under the authority's address that do not hash to it
+/// fail the load rather than being believed.
+#[tokio::test]
+async fn generation_zero_replay_baseline_rejects_an_authority_payload_under_the_wrong_hash() {
+    let db_store_dir = crate::sync::test_helpers::test_store_dir();
+    let db = crate::sync::test_helpers::open_test_db(db_store_dir.clone());
+    TestStore::create(
+        &db,
+        db_store_dir.clone(),
+        "retained-replay-authority-content-address",
+        UserKeypair::generate(),
+        test_cloud_home(),
+    )
+    .await
+    .expect("create Store");
+    let database = coven_database::StoreDatabase::new(&db);
+    let baseline = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect("load installed replay baseline");
+    let authority_hash = coven_protocol::store_commit::ObjectHash::digest(
+        &baseline
+            .canonical_authority_bytes()
+            .expect("canonical authority bytes"),
+    );
+
+    database
+        .corrupt_payload_for_test(
+            authority_hash,
+            b"not the content-addressed replay authority".to_vec(),
+        )
+        .await
+        .expect("replace replay authority payload bytes");
+
+    let error = database
+        .generation_zero_replay_baseline_for_test()
+        .await
+        .expect_err("a replay authority payload under the wrong hash must be rejected");
+    assert!(
+        error.to_string().contains("contains bytes hashing to"),
+        "{error}"
+    );
+}
+
 /// Replacing the baseline's authority replaces its claim set, and the flow that
 /// drops the last claim on the superseded payload pays for it before returning:
 /// the old authority payload is gone, the image the row still names is not.
