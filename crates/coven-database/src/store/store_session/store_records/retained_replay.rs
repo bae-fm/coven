@@ -343,7 +343,13 @@ impl StoreRecords<'_> {
             image.database_bytes()?,
         );
         image.validate(&prepared.baseline, self.store_dir)?;
-        self.install_prepared_replay_baseline(prepared)
+        // A founder's generation-zero image is the empty store, so this reports
+        // the same stages over nothing much; it costs a line, not a pass.
+        let mut timings =
+            coven_foundation::stage_timing::StageTimings::start("Retained replay baseline capture");
+        let outcome = self.install_prepared_replay_baseline(prepared, &mut timings);
+        timings.report();
+        outcome
     }
 
     pub(super) fn install_snapshot_replay_baseline_records(
@@ -352,7 +358,15 @@ impl StoreRecords<'_> {
         routing_hash: ObjectHash,
         authority: coven_protocol::store_commit::RetainedReplaySnapshotAuthority,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
-        let image_bytes = crate::connection_io::serialize_database_image(self.conn)?;
+        // Capturing the baseline copies the whole store: the open database is
+        // serialized, hashed, compressed and written as a payload, then read
+        // back and compared. Each of those is a pass over the image, so they
+        // are named apart rather than as one number that only says "big store".
+        let mut timings =
+            coven_foundation::stage_timing::StageTimings::start("Retained replay baseline capture");
+        let image_bytes = timings.mark("serialize the image", || {
+            crate::connection_io::serialize_database_image(self.conn)
+        })?;
         let prepared = PreparedRetainedReplayBaseline::new(
             authority.metadata.coverage.clone(),
             schema_version,
@@ -360,37 +374,48 @@ impl StoreRecords<'_> {
             crate::RetainedReplayAuthority::InstalledSnapshot(authority),
             image_bytes,
         );
-        prepared
-            .baseline
-            .validate_open_image(self.conn, self.store_dir)?;
-        self.install_prepared_replay_baseline(prepared)
+        timings.mark("validate the image", || {
+            prepared
+                .baseline
+                .validate_open_image(self.conn, self.store_dir)
+        })?;
+        let outcome = self.install_prepared_replay_baseline(prepared, &mut timings);
+        timings.report();
+        outcome
     }
 
     fn install_prepared_replay_baseline(
         self,
         prepared: PreparedRetainedReplayBaseline,
+        timings: &mut coven_foundation::stage_timing::StageTimings,
     ) -> Result<crate::RetainedReplayBaseline, DbError> {
         let PreparedRetainedReplayBaseline {
             baseline,
             image_bytes,
         } = prepared;
         self.validate_replay_authority(&baseline)?;
-        let installed_image_hash = self
-            .install_payload(&image_bytes)
-            .map_err(|error| DbError::context("install retained replay image", error))?;
+        let installed_image_hash = timings.mark("store the image payload", || {
+            self.install_payload(&image_bytes)
+                .map_err(|error| DbError::context("install retained replay image", error))
+        })?;
         if installed_image_hash != baseline.image_payload_hash {
             return Err(DbError::Message(
                 "installed retained replay image has a different content address".to_string(),
             ));
         }
-        let authority_bytes = baseline.canonical_authority_bytes()?;
-        let authority_hash = self
-            .install_payload(&authority_bytes)
-            .map_err(|error| DbError::context("install retained replay authority", error))?;
-        self.insert_retained_replay_baseline_row(&baseline, authority_hash)?;
-        let installed_image = self
-            .verified_payload(installed_image_hash)
-            .map_err(|error| DbError::context("read installed retained replay image", error))?;
+        let (authority_bytes, authority_hash) =
+            timings.mark("store the authority payload", || {
+                let authority_bytes = baseline.canonical_authority_bytes()?;
+                let authority_hash = self.install_payload(&authority_bytes).map_err(|error| {
+                    DbError::context("install retained replay authority", error)
+                })?;
+                self.insert_retained_replay_baseline_row(&baseline, authority_hash)?;
+                Ok::<_, DbError>((authority_bytes, authority_hash))
+            })?;
+        let installed_image = timings.mark("read back the image payload", || {
+            self.verified_payload(installed_image_hash)
+                .map_err(|error| DbError::context("read installed retained replay image", error))
+        })?;
         if installed_image != image_bytes {
             return Err(DbError::Message(
                 "installed retained replay image differs from its prepared bytes".to_string(),

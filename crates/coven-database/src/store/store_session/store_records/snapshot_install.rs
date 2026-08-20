@@ -35,6 +35,13 @@ impl StoreTransaction<'_, '_> {
         routing_hash: crate::ObjectHash,
         synced_tables: &[SyncedTable],
     ) -> Result<(), DbError> {
+        // Live, this one call is the bulk of a joining device's snapshot
+        // install, and none of its steps is obviously the one: the checks are
+        // local and small, the coverage rows number one per stream, and the
+        // baseline capture reports its own breakdown below. They are named so
+        // the next run says which.
+        let mut timings =
+            coven_foundation::stage_timing::StageTimings::start("Store snapshot install");
         let conn = self.transaction;
         let root = coven_protocol::store_commit::StoreRootRef {
             store_root_id: install.store_root.value.descriptor.store_root_id(),
@@ -53,22 +60,29 @@ impl StoreTransaction<'_, '_> {
             &install.store_root.value.descriptor.founder_recovery,
         )
         .map_err(DbError::from)?;
-        validate_snapshot_object_owners_on(conn, &root, &install.snapshot.meta)?;
-        install_store_root_authority_on(conn, &root, &install.store_root.bytes)?;
-        install_store_founder_state_on(
-            conn,
-            &root,
-            &founder_reference,
-            &install.founder.value,
-            &install.founder.bytes,
-            &genesis,
-        )?;
-        crate::set_protocol_state_on(
-            conn,
-            coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
-            &install.store_root.value.descriptor.founder_pubkey,
-        )?;
-        install.membership.install_on(conn)?;
+        timings.mark("validate the snapshot owners", || {
+            validate_snapshot_object_owners_on(conn, &root, &install.snapshot.meta)
+        })?;
+        timings.mark("install the root and founder", || {
+            install_store_root_authority_on(conn, &root, &install.store_root.bytes)?;
+            install_store_founder_state_on(
+                conn,
+                &root,
+                &founder_reference,
+                &install.founder.value,
+                &install.founder.bytes,
+                &genesis,
+            )?;
+            crate::set_protocol_state_on(
+                conn,
+                coven_protocol::membership::OWNER_PUBKEY_STATE_KEY,
+                &install.store_root.value.descriptor.founder_pubkey,
+            )
+        })?;
+        timings.mark("install the membership", || {
+            install.membership.install_on(conn)
+        })?;
+        let coverage_started = coven_foundation::clock::Stopwatch::start();
         conn.execute("DELETE FROM snapshot_coverage", [])
             .map_err(DbError::from)?;
         for (stream_id, reference) in install.snapshot.meta.coverage.clone().into_refs() {
@@ -86,13 +100,20 @@ impl StoreTransaction<'_, '_> {
             )
             .map_err(DbError::from)?;
         }
+        timings.record("record the coverage", coverage_started.elapsed());
+        let baseline_started = coven_foundation::clock::Stopwatch::start();
         install_snapshot_replay_baseline_on(
             crate::store::store_session::StoreRecords::new(self.transaction, self.store_dir),
             schema_version,
             routing_hash,
             install.authority.clone(),
         )?;
-        self.install_selected_snapshot_circles(install, &root, synced_tables)
+        timings.record("capture the replay baseline", baseline_started.elapsed());
+        let circles_started = coven_foundation::clock::Stopwatch::start();
+        let outcome = self.install_selected_snapshot_circles(install, &root, synced_tables);
+        timings.record("install the circles", circles_started.elapsed());
+        timings.report();
+        outcome
     }
 
     fn install_selected_snapshot_circles(
